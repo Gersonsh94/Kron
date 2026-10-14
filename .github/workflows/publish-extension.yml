@@ -14,27 +14,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        # with:
-        #   submodules: recursive
+
+      - name: Mostrar contenido del repo (debug)
+        run: ls -la
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      - name: Show repository contents (Diagnostics)
-        run: |
-          echo "PWD: $(pwd)"
-          ls -la
-
       - name: Install dependencies and vsce
-        run: |
-          if [ ! -d "kron-lang" ]; then
-            echo "Error: directory 'kron-lang' not found. Check repo structure."
-            exit 1
-          fi
-          npm install -g @vscode/vsce
+        working-directory: kron-vscode/kron-lang
+        run: npm install -g @vscode/vsce
 
       - name: Publish to VS Code Marketplace
-        working-directory: kron-lang
+        working-directory: kron-vscode/kron-lang
         run: vsce publish -p ${{ secrets.VSCE_TOKEN }}
