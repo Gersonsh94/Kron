@@ -1,0 +1,139 @@
+{
+  "Program": {
+    "prefix": "kron",
+    "description": "A complete Kron program",
+    "body": [
+      "kron_program",
+      "kron_domain ${1:name};",
+      "kron_imports",
+      "kron_definitions",
+      "",
+      "fn main() {",
+      "\t$0",
+      "\treturn 0;",
+      "}"
+    ]
+  },
+  "Module": {
+    "prefix": "module",
+    "description": "A module to import, without main",
+    "body": [
+      "kron_program",
+      "kron_domain ${1:name};",
+      "kron_imports",
+      "kron_definitions",
+      "",
+      "// This file has no main: it is a module.",
+      "",
+      "$0"
+    ]
+  },
+  "Import": {
+    "prefix": "import",
+    "description": "Import a module",
+    "body": [
+      "acquire_domain \"${1:std_str}.kr\";"
+    ]
+  },
+  "Function": {
+    "prefix": "fn",
+    "description": "Function",
+    "body": [
+      "fn ${1:name}(${2:x}: ${3:i64}) -> ${4:i64} {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "Variable": {
+    "prefix": "var",
+    "description": "Variable",
+    "body": [
+      "var ${1:name}: ${2:i64} = ${3:0};"
+    ]
+  },
+  "If": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "If else": {
+    "prefix": "ifelse",
+    "body": [
+      "if ${1:condition} {",
+      "\t$2",
+      "} else {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "While": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "For": {
+    "prefix": "for",
+    "body": [
+      "for var ${1:i}: ${2:i64} = ${3:0}; ${1:i} < ${4:n}; ${1:i} = ${1:i} + 1 {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "\t${2:field}: ${3:i64};",
+      "}"
+    ]
+  },
+  "Fail": {
+    "prefix": "fail",
+    "description": "Fail with a cause and a hint",
+    "body": [
+      "fail \"${1:cause}\" hint \"${2:what to do}\";"
+    ]
+  },
+  "Check failure": {
+    "prefix": "failed",
+    "body": [
+      "if failed() {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "Raw block": {
+    "prefix": "raw",
+    "description": "Direct memory access",
+    "body": [
+      "raw {",
+      "\t$0",
+      "}"
+    ]
+  },
+  "Thread": {
+    "prefix": "thread",
+    "description": "Start a thread and wait for it",
+    "body": [
+      "var ${1:h}: i64 = thread_start(&${2:worker}, ${3:arg});",
+      "$0",
+      "thread_wait(${1:h});"
+    ]
+  },
+  "Channel receive loop": {
+    "prefix": "recv",
+    "description": "Receive until the channel closes",
+    "body": [
+      "var ${1:got}: [i64; 1];",
+      "while chan_recv(${2:c}, ${1:got}) == 1 {",
+      "\t$0",
+      "}"
+    ]
+  }
+}

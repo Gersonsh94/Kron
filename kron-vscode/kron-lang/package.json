@@ -1,0 +1,125 @@
+{
+  "name": "kron-lang",
+  "displayName": "Kron",
+  "description": "Kron language support: highlighting, build and run, errors in the editor, completion, go to definition, hover help and outline.",
+  "version": "0.3.1",
+  "publisher": "gerson",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kron",
+        "aliases": [
+          "Kron",
+          "kron"
+        ],
+        "extensions": [
+          ".kr"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/kr-light.svg",
+          "dark": "./icons/kr-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kron",
+        "scopeName": "source.kron",
+        "path": "./syntaxes/kron.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "kron",
+        "path": "./snippets/kron.json"
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "kron",
+        "owner": "kron",
+        "fileLocation": [
+          "autoDetect",
+          "${fileDirname}"
+        ],
+        "pattern": {
+          "regexp": "^(.+\\.kr):(\\d+):(\\d+):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "kron.build",
+        "title": "Kron: Build",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "kron.run",
+        "title": "Kron: Build and Run",
+        "icon": "$(play)"
+      },
+      {
+        "command": "kron.check",
+        "title": "Kron: Check for Errors"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kron.run",
+        "key": "f5",
+        "when": "editorLangId == kron"
+      },
+      {
+        "command": "kron.build",
+        "key": "ctrl+alt+b",
+        "when": "editorLangId == kron"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "kron.run",
+          "when": "editorLangId == kron",
+          "group": "navigation@1"
+        },
+        {
+          "command": "kron.build",
+          "when": "editorLangId == kron",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kron",
+      "properties": {
+        "kron.compilerPath": {
+          "type": "string",
+          "default": "C:\\Users\\Gerson\\Kron-compiler\\kronc.exe",
+          "description": "Path to kronc.exe. Used when the open folder has no kronc.exe of its own."
+        },
+        "kron.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compile in the background on every save and underline the errors."
+        }
+      }
+    }
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:kron"
+  ],
+  "icon": "icon.png"
+}

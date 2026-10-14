@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Kron: build",
+      "type": "shell",
+      "command": "C:\\Users\\Gerson\\jupiter-compiler\\kc.bat",
+      "args": ["${file}"],
+      "options": { "cwd": "${fileDirname}" },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "clear": true },
+      "problemMatcher": "$kron"
+    },
+    {
+      "label": "Kron: build and run",
+      "type": "shell",
+      "command": "${fileDirname}\\${fileBasenameNoExtension}.exe",
+      "options": { "cwd": "${fileDirname}" },
+      "dependsOn": "Kron: build",
+      "presentation": { "reveal": "always" },
+      "problemMatcher": []
+    }
+  ]
+}
