@@ -1,0 +1,30 @@
+name: Publicar Extensión Kron
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'kron-lang/**'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+      
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Instalar dependencias y vsce
+        run: |
+          cd kron-lang
+          npm install -g @vscode/vsce
+          
+      - name: Publicar en el Marketplace
+        run: |
+          cd kron-lang
+          vsce publish -p ${{ secrets.VSCE_TOKEN }}
