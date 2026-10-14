@@ -1,4 +1,4 @@
-name: Publicar Extension Kron
+name: Publish Kron Extension
 
 on:
   push:
@@ -12,20 +12,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar el codigo
+      - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Instalar Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          
-      - name: Instalar dependencias y vsce
+
+      - name: Repository contents diagnostics
         run: |
-          cd kron-lang
-          npm install -g @vscode/vsce
+          pwd
+          ls -la
           
-      - name: Publicar en el Marketplace
-        run: |
-          cd kron-lang
-          vsce publish -p ${{ secrets.VSCE_TOKEN }}
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+          
+      - name: Publish to VS Code Marketplace
+        working-directory: ./kron-lang
+        run: vsce publish -p ${{ secrets.VSCE_TOKEN }}
