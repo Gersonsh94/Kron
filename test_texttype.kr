@@ -1,0 +1,60 @@
+kron_program
+kron_domain test_texttype;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: the built-in type text
+//
+// A text variable prints as its words, compares with == by its bytes, and
+// joins with +. Declared from "...", it is a text of its own that text_add
+// can grow. Functions, parameters, struct fields and globals can be texts;
+// 'var x = f()' takes the type from what f returns.
+// =========================================================================
+
+struct Person {
+    name: text;
+    age: i64;
+}
+
+var greeting: text = "hi";
+var count: i64 = 2 * 21;
+
+fn greet(who: text) -> text {
+    return "Hello, " + who + "!";
+}
+
+fn main() {
+    var t: text = "hello";
+    print(t);                                  // hello
+    text_add(t, " world");
+    print(t);                                  // hello world
+    print(t == "hello world");                 // 1
+    print(t != "hello world");                 // 0
+    print("hello world" == t);                 // 1
+    var u = text_upper(t);
+    print(u);                                  // HELLO WORLD
+    print(u == t);                             // 0
+    print(greet("Gerson"));                    // Hello, Gerson!
+    print(greet("Ana") + " Age " + 31 + " / " + 2.5);
+    if t == "hello world" {
+        print(1);
+    } else {
+        print(0);
+    }
+    var p: Person;
+    p.name = "Zoe";
+    p.age = 9;
+    print(p.name + " is " + p.age);            // Zoe is 9
+    text_add(greeting, " there");
+    print(greeting);                           // hi there
+    print(count);                              // 42
+    var parts = text_split("a,b,c", ",");
+    print(parts);                              // ["a", "b", "c"]
+    print(parts[1] == "b");                    // 1
+    var none: text;
+    print(text_len(none));                     // 0: a text never set is empty
+    print(failed());                           // 0
+    return 0;
+}

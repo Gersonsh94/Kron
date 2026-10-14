@@ -1,0 +1,12 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_arrsz_bad.kr:21:19: array smaller than the parameter it is passed to 'a'
+    print(sum_all(a));
+                  ^
+  hint: the function indexes as far as its parameter declares; pass an array at least that big

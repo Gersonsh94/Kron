@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_cache;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var buf: [int64; 4];
+    var p: ptr<int64> = &buf;
+    var a: int64 = prefetch p;
+    var b: int64 = invcache p;
+    // The cache operators yield the address unchanged, so both must equal p.
+    // Printing the address itself would not be stable across runs.
+    print(a == p);
+    print(b == p);
+    print(a == b);
+    return 0;
+}

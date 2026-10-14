@@ -1,0 +1,17 @@
+hello
+hello world
+1
+0
+1
+HELLO WORLD
+0
+Hello, Gerson!
+Hello, Ana! Age 31 / 2.5
+1
+Zoe is 9
+hi there
+42
+["a", "b", "c"]
+1
+0
+0

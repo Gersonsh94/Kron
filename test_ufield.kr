@@ -1,0 +1,54 @@
+kron_program
+kron_domain test_ufield;
+kron_imports
+kron_definitions
+
+// Struct fields and function returns of unsigned type.
+//
+// Until now the sign only travelled with local variables, globals
+// and array elements. A u64 field, or a function returning u64,
+// was compared and divided AS SIGNED, so any value above
+// 2^63 came out wrong without a warning.
+//
+// Expected output:
+//   1    a u64 field with bit 63 set compares as large
+//   4611686018427387904   divided by two
+//   1    the same, returned by a function
+//   4611686018427387904
+//   1    logical shift on a field, not arithmetic
+
+struct Entry {
+    value: u64;
+    mark: i64;
+}
+
+fn large() -> u64 {
+    return 9223372036854775808;
+}
+
+fn main() {
+    var e: Entry;
+    var g: u64;
+
+    e.value = 9223372036854775808;
+    e.mark = 1;
+
+    if e.value > 1 {
+        print(1);
+    } else {
+        print(0);
+    }
+    print(e.value / 2);
+
+    g = large();
+    if large() > 1 {
+        print(1);
+    } else {
+        print(0);
+    }
+    print(large() / 2);
+
+    print(e.value >> 63);
+
+    return 0;
+}

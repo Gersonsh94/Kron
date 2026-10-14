@@ -1,0 +1,9 @@
+0
+1
+fail: arena out of space
+hint: raise size_bytes
+  at reserve (test_fail.kr:28)
+  called from main (test_fail.kr:37)
+0
+4096
+0

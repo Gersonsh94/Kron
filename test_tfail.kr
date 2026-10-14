@@ -1,0 +1,102 @@
+kron_program
+kron_domain test_tfail;
+kron_imports
+acquire_domain "std_chan.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: the failure state is per thread
+//
+// Two threads fail on purpose 200,000 times each and check failed() after
+// every call; two more never fail and check it too, all at the same time.
+// When the fail flag was one global shared by every thread, the clean
+// threads saw other threads' failures and the failing ones found their flag
+// cleared by someone else: the count of mismatches came out above zero. Now
+// each thread has its own, so it must be exactly zero.
+//
+// The threads report through a channel, not through globals.
+//
+// Expected output:
+//   0      no thread saw another thread's failure, none lost its own
+//   0      a fresh thread does not see main's failure
+//   1      main still sees its own
+//   0      and failed() cleared it
+//   9      thread_yield() returned
+// =========================================================================
+
+fn always_fails(x: i64) -> i64 {
+    if x >= 0 {
+        fail "on purpose" hint "this failure belongs to the thread that raised it";
+    }
+    return 1;
+}
+
+fn never_fails(x: i64) -> i64 {
+    return x + 1;
+}
+
+fn failer(c: i64) -> i64 {
+    var bad: i64 = 0;
+    var i: i64 = 0;
+    while i < 200000 {
+        always_fails(i);
+        if failed() == 0 {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    chan_send(c, bad);
+    return 0;
+}
+
+fn clean(c: i64) -> i64 {
+    var bad: i64 = 0;
+    var i: i64 = 0;
+    while i < 200000 {
+        never_fails(i);
+        if failed() != 0 {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    chan_send(c, bad);
+    return 0;
+}
+
+fn look_once(c: i64) -> i64 {
+    chan_send(c, failed());
+    return 0;
+}
+
+fn main() {
+    var got: [i64; 1];
+    var c: i64 = chan_new(8);
+    var h1: i64 = thread_start(&failer, c);
+    var h2: i64 = thread_start(&clean, c);
+    var h3: i64 = thread_start(&failer, c);
+    var h4: i64 = thread_start(&clean, c);
+    var total: i64 = 0;
+    var k: i64 = 0;
+    while k < 4 {
+        chan_recv(c, got);
+        total = total + got[0];
+        k = k + 1;
+    }
+    thread_wait(h1);
+    thread_wait(h2);
+    thread_wait(h3);
+    thread_wait(h4);
+    print(total);                        // 0
+
+    always_fails(1);                     // main fails, and does not check yet
+    var h5: i64 = thread_start(&look_once, c);
+    chan_recv(c, got);
+    thread_wait(h5);
+    print(got[0]);                       // 0
+    print(failed());                     // 1
+    print(failed());                     // 0
+
+    thread_yield();
+    print(9);                            // 9
+    return 0;
+}

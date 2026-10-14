@@ -1,0 +1,23 @@
+kron_program
+kron_domain test_diag4;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE: assigns to the result of a call.
+//
+// The parser accepts 'f(x) = 3' as an expression followed by '=', so the
+// error reaches the semantic pass, which has to say that is not a
+// valid target. That error used to keep no token and no line: it pointed
+// at the previous error, or at line zero, and called it 'undeclared name'.
+
+fn doubled(n: i64) -> i64 {
+    return n + n;
+}
+
+fn main() {
+    var x: i64;
+    x = 1;
+    doubled(x) = 3;
+    print(x);
+    return 0;
+}

@@ -1,0 +1,10 @@
+kron_program
+kron_domain test_arena_bad;
+kron_imports
+kron_definitions
+
+mmu BadMMU {
+    heap_arena_definition {
+        arena p1 base_address 0x1000 size_bytes 4096 growth_policy no_existe ;
+    }
+}

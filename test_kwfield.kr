@@ -1,0 +1,58 @@
+kron_program
+kron_domain test_kwfield;
+kron_imports
+kron_definitions
+
+// Keywords as field names.
+//
+// After a dot a word can only be a field name, so all of them are
+// allowed. 'x.len' used to work by accident and 'x.ptr' did not compile,
+// with no way to see it coming.
+//
+// The eight names below are RESERVED words of the language, and none
+// could be used as a field until now.
+//
+// Expected output:
+//   10   b.ptr
+//   20   b.in
+//   30   b.loop
+//   40   b.from
+//   50   b.module
+//   60   b.import
+//   70   b.call
+//   80   b.const
+
+struct Block {
+    ptr: i64;
+    in: i64;
+    loop: i64;
+    from: i64;
+    module: i64;
+    import: i64;
+    call: i64;
+    const: i64;
+}
+
+fn main() {
+    var b: Block;
+
+    b.ptr = 10;
+    b.in = 20;
+    b.loop = 30;
+    b.from = 40;
+    b.module = 50;
+    b.import = 60;
+    b.call = 70;
+    b.const = 80;
+
+    print(b.ptr);
+    print(b.in);
+    print(b.loop);
+    print(b.from);
+    print(b.module);
+    print(b.import);
+    print(b.call);
+    print(b.const);
+
+    return 0;
+}

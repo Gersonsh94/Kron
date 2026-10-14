@@ -1,0 +1,724 @@
+// ============================================================================
+// KRON GRAMMAR DEFINITION (.krg)
+// Kron's own notation. No external toolchain required.
+//
+// Everything here is implemented in the compiler. Nothing carries a
+// NOT IMPLEMENTED mark any more.
+//
+// How a failure propagates is decided and built: see failStatement below.
+// acquire_domain chains: a module brings in what it imports itself, each
+// one once, looked for next to the program first.
+// ============================================================================
+
+kron_grammar Kron version 4.0.0;
+
+// ============================================================================
+// 01. MODULE STRUCTURE
+// ============================================================================
+
+compilationUnit
+    : 'kron_program' moduleDeclaration 
+      'kron_imports' importDeclaration* 
+      'kron_definitions' topLevelDefinition* 
+      EOF
+    ;
+
+moduleDeclaration
+    : 'kron_domain' domainPath ( 'epoch' EPOCH_LITERAL )? ';'
+    ;
+
+importDeclaration
+    : 'acquire_domain' domainPath ( 'aliased' IDENTIFIER )? ';'
+    ;
+
+domainPath
+    : IDENTIFIER ( '::' IDENTIFIER )*
+    ;
+
+topLevelDefinition
+    : structDeclaration
+    | enumDeclaration
+    | functionDeclaration
+    | variableDeclaration
+    | constantDeclaration
+    | kernelBootSequence
+    | memoryManagementUnit
+    | interruptHandler
+    | schedulerDomain
+    | syscallTable
+    | instructionSet
+    | configBlock
+    ;
+
+// ============================================================================
+// 02. TYPE SYSTEM
+// ============================================================================
+
+// One spelling per type. The compiler still accepts the older names --
+// 'int32' for i32, 'real64' for f64, 'hardware_bit' for bool, and
+// 'register64' for u64, 'utf8_stream' for stream, a second word for
+// void -- but they are
+// aliases for the very same token, not distinct types, and this document
+// stops listing them. u64 alone had five names.
+type
+    : 'i8' | 'i16' | 'i32' | 'i64'
+    | 'u8' | 'u16' | 'u32' | 'u64'
+    | 'f32' | 'f64'
+    | 'bool' | 'void' | 'stream'
+    | 'ptr' '<' type '>'
+    | '[' type ';' INTEGER_LITERAL ']'   // fixed-size array; the element
+                                         // may itself be an array, giving
+                                         // [[f32; 16]; 16]
+    | IDENTIFIER                        // a struct or enum declared in this module
+    | 'ArenaAllocationToken' '<' IDENTIFIER '>'
+    ;
+
+
+// ============================================================================
+// 03. EXPRESSIONS
+// ============================================================================
+
+expression
+    : binaryLogicalOrExpression
+    ;
+
+binaryLogicalOrExpression
+    : binaryLogicalAndExpression ( '||' binaryLogicalAndExpression )*
+    ;
+
+binaryLogicalAndExpression
+    : bitwiseEqualityExpression ( '&&' bitwiseEqualityExpression )*
+    ;
+
+bitwiseEqualityExpression
+    : relationalComparisonExpression ( ( '==' | '!=' ) relationalComparisonExpression )*
+    ;
+
+relationalComparisonExpression
+    : shiftExpression ( ( '<' | '>' | '<=' | '>=' ) shiftExpression )*
+    ;
+
+shiftExpression
+    : additiveExpression ( ( '<<' | '>>' | '>>>' | 'rotl' | 'rotr' ) additiveExpression )*
+    ;
+
+additiveExpression
+    : multiplicativeExpression ( ( '+' | '-' ) multiplicativeExpression )*
+    ;
+
+multiplicativeExpression
+    : castExpression ( ( '*' | '/' | '%' ) castExpression )*
+    ;
+
+// Conversion. Binds tighter than any binary operator and looser than the
+// unary ones, so that
+//
+//     -x as f32        is    (-x) as f32
+//     a + b as f32     is    a + (b as f32)
+//
+// Scalars and pointers only; it does not reinterpret structs.
+castExpression
+    : unaryExpression ( 'as' type )*
+    ;
+
+// Cache control is not an operator. 'cache_flush' and
+// 'prefetch' act on an address and return nothing, so they belong
+// with the other intrinsics, not in the precedence ladder.
+unaryExpression
+    : '&' IDENTIFIER                    // address of a variable
+    | '*' unaryExpression               // read the pointed-to memory
+    | ( '!' | '-' | '~' )? primaryExpression
+    ;
+
+// The trailing '(' argumentList? ')' covers both a plain call and a method
+// call:
+//
+//     vec3_length(v)      // plain call
+//     v.length()          // method call: v is passed as 'self'
+//     p.x                 // member access, no call
+//     grid[i]             // element access
+//
+// The call form was missing from this document entirely, although the
+// compiler has supported calls since the first version and the standard
+// library is built out of them.
+primaryExpression
+    : IDENTIFIER ( '[' expression ']' )? ( '.' IDENTIFIER )* ( '(' argumentList? ')' )?
+    | literal
+    | intrinsicExpression
+    | failedExpression
+    | threadStartExpression
+    | cpuCountExpression
+    | vec2LoadExpression
+    | vec2BinaryExpression
+    | loadfileExpression
+    | structLiteral
+    | arrayLiteral
+    | sizeofExpression
+    | indirectCall
+    | syscallExpression
+    | '(' expression ')'
+    ;
+
+// Reads from memory, ports and input. They yield a value, so they belong in
+// an expression and never stand alone as a statement.
+intrinsicExpression
+    : ( 'peek' | 'peek8' | 'peek16' | 'peek32' ) '(' expression ')'
+    | 'inb' '(' expression ')'
+    | 'trunc' '(' expression ')'
+    | 'readkey' '(' ')'
+    | 'readmouse' '(' ')'
+    | 'mousex' '(' ')'
+    | 'mousey' '(' ')'
+    ;
+
+argumentList
+    : expression ( ',' expression )*
+    ;
+
+// A call through a pointer held in a variable. This is what makes a dispatch
+// table possible.
+indirectCall
+    : 'call' expression '(' argumentList? ')'
+    ;
+
+syscallExpression
+    : 'syscall' '(' argumentList? ')'
+    ;
+
+// A struct literal names the type and gives the fields either in order or
+// by name. The two forms cannot be mixed: the first initialiser decides
+// which one the whole literal uses.
+//
+// Not allowed where a '{' would be ambiguous with the brace of a block --
+// the condition of an if, a while, or a for. Wrap it in parentheses there.
+//
+//     var v: Vec3 = Vec3{1.0, 2.0, 3.0};
+//     var w: Vec3 = Vec3{x: 1.0, z: 3.0};   // omitted fields keep whatever
+//                                           // was in the slot: the frame is
+//                                           // not cleared
+//
+// With the type name in front there is no ambiguity against a block: a block
+// is never preceded by an identifier in expression position.
+structLiteral
+    : IDENTIFIER '{' ( fieldInit ( ',' fieldInit )* ','? )? '}'
+    ;
+
+fieldInit
+    : ( IDENTIFIER ':' )? expression
+    ;
+
+// The elements are written into the slots directly, element k at
+// base - k*8. Extra elements are dropped; a short list leaves the rest of
+// the array as it was, since the frame is not cleared.
+arrayLiteral
+    : '[' ( expression ( ',' expression )* ','? )? ']'
+    ;
+
+// Size of a type in bytes, resolved at compile time: a scalar by its width,
+// a struct by its packed size, an array type by the product.
+sizeofExpression
+    : 'sizeof' '(' type ')'
+    ;
+
+// 'stream' is a built-in struct of two fields:
+//
+//     struct stream { bytes: u64; len: u64; }
+//
+// A string is therefore an address and a count, not a bare pointer. The
+// bytes still carry a trailing zero for the sake of system calls, but the
+// length is what the language uses. Initialising from a literal fills both
+// fields, and the count is taken with escapes already resolved, so "a\nb"
+// measures three.
+//
+// The address field is called 'bytes' and not 'ptr' because 'ptr' is a
+// keyword of the language -- the one in ptr<T>.
+
+// A subscripted 2-D array is stored flat, row by row, so m[i][j] is
+// m[i * columns + j]. Two dimensions only: a third would need a second
+// stride. There is no bounds check.
+indexExpression
+    : IDENTIFIER '[' expression ']' ( '[' expression ']' )?
+    ;
+
+// failed() -> 1 when the last call left a failure behind, and clears it.
+failedExpression
+    : 'failed' '(' ')'
+    ;
+
+// ===========================================================================
+// THREADS
+//
+// The engine work that needed them: hashing independent pieces at once,
+// scanning a large table in parts, and serving more than one connection.
+// Without them a program is one core no matter how many the machine has.
+//
+//     var h: i64;
+//     h = thread_start(&work, 7);   -- one argument; the return is discarded,
+//     thread_wait(h);                  a thread has nobody to return to
+//
+// Locks are NUMBERED, not objects: there are no opaque types to hold one.
+// Sixteen of them, each padded to its own cache line so two threads taking
+// different locks do not fight over the same line. A number out of range
+// folds to zero rather than writing elsewhere -- sharing lock 0 by mistake
+// is easier to notice than corrupting memory.
+//
+//     lock_init(0);
+//     lock_take(0);
+//     counter = counter + 1;
+//     lock_give(0);
+//
+// cpu_count() reports how many cores there are, so nobody has to guess.
+// ===========================================================================
+threadStartExpression
+    : 'thread_start' '(' expression ',' expression ')'
+    ;
+
+cpuCountExpression
+    : 'cpu_count' '(' ')'
+    ;
+
+threadWaitStatement
+    : 'thread_wait' '(' expression ')'
+    ;
+
+lockStatement
+    : ( 'lock_init' | 'lock_take' | 'lock_give' ) '(' expression ')'
+    ;
+
+// ===========================================================================
+// SIMD
+//
+// TWO f64 per instruction, not four f32. Kron does all floating point in
+// double precision, so the packed family that matches is 'pd': an addps over
+// a pair of doubles would read them as four floats and return rubbish.
+//
+// They compose only by NESTING. A pair of doubles lives in an xmm register
+// and fits in no scalar type, so the result of one feeds the next without
+// ever landing in a variable:
+//
+//     vec2_store(&c[0], vec2_mul(vec2_load(&a[0]), vec2_load(&b[0])));
+//
+// Four f32 would need f32 to be a real type in the code generator -- today
+// everything is stored as a double -- and the element width of an array to
+// travel the way a pointer's already does.
+// ===========================================================================
+vec2LoadExpression
+    : 'vec2_load' '(' expression ')'
+    ;
+
+vec2BinaryExpression
+    : ( 'vec2_add' | 'vec2_sub' | 'vec2_mul' ) '(' expression ',' expression ')'
+    ;
+
+vec2StoreStatement
+    : 'vec2_store' '(' expression ',' expression ')'
+    ;
+
+literal
+    : 'null'
+    | INTEGER_LITERAL
+    | FLOAT_LITERAL
+    | STRING_LITERAL
+    | HEX_LITERAL
+    | BINARY_LITERAL
+    | BOOLEAN_LITERAL
+    ;
+
+// ============================================================================
+// 04. STATEMENTS, CONTROL FLOW AND MEMORY
+// ============================================================================
+
+block
+    : '{' ( statement )* '}'
+    ;
+
+statement
+    : variableDeclaration ';'
+    | constantDeclaration ';'
+    | assignmentStatement ';'
+    | controlFlowStatement
+    | returnStatement ';'
+    | continueStatement ';'
+    | breakStatement ';'
+    | intrinsicStatement ';'
+    | asmBlock
+    | printStatement ';'
+    | dynamicAllocationStatement ';'
+    | failStatement ';'
+    | printFailStatement ';'
+    | threadWaitStatement ';'
+    | lockStatement ';'
+    | vec2StoreStatement ';'
+    | expression ';'
+    ;
+
+// HOW A FAILURE TRAVELS
+//
+//     fn open(name: stream) -> i64 {
+//         if name.len == 0 {
+//             fail "empty file name"
+//                  hint "pass a name, or check the caller";
+//         }
+//         return handle;
+//     }
+//
+//     h = open(name);
+//     if failed() {
+//         print_fail();
+//         return 1;
+//     }
+//
+// 'fail' records the cause and the hint and returns from the function at
+// once, leaving zero. There is no stack unwinding and no runtime behind it,
+// so it is usable from an interrupt handler, where returning to a caller is
+// not an option and unwinding is meaningless.
+//
+// A failure does NOT propagate on its own. Every call would otherwise have
+// two ways out, which is exactly what a systems language cannot afford. The
+// caller asks, and asking clears the state, so a failure is read once and
+// cannot be read twice by accident.
+//
+// The state lives in the hosted preamble only: a bare-metal target has no
+// console for print_fail to write to.
+failStatement
+    : 'fail' STRING_LITERAL ( 'hint' STRING_LITERAL )?
+    ;
+
+printFailStatement
+    : 'print_fail' '(' ')'
+    ;
+
+// The initialiser is optional: 'var v: Vec3;' is how a local struct is
+// declared, and it is the oldest test the compiler has.
+//
+// HOW ARGUMENTS TRAVEL
+//
+//   scalars   by value
+//   structs   by value -- the prologue copies the fields in, so the callee
+//             cannot write back to the caller's variable
+//   arrays    by REFERENCE -- the caller passes the address and the callee
+//             indexes through it, so a write to v[i] is visible outside
+//
+// The first six arguments travel in registers; from the seventh on they go
+// on the stack, in declaration order. Sixteen is the cap.
+//
+// The split is deliberate: copying a [f64; 1024] on every call would be
+// absurd, while copying a Vec3 is three moves and buys the caller safety.
+// C and Go draw the same line.
+variableDeclaration
+    : 'var' IDENTIFIER ( ':' type )? ( '=' expression )?
+    ;
+
+constantDeclaration
+    : 'const' IDENTIFIER ( ':' type )? '=' expression
+    ;
+
+// The target is a full expression, not just a name: 'p.x = 1.0' and
+// 'grid[i] = v' are valid assignments and the parser builds them that way.
+// The compound form 'x += e' is rewritten as 'x = x + e'.
+assignmentStatement
+    : primaryExpression ( '=' | '+=' | '-=' | '*=' | '/=' | '^=' ) expression
+    ;
+
+returnStatement
+    : 'return' expression?
+    ;
+
+continueStatement
+    : 'continue'
+    ;
+
+breakStatement
+    : 'break'
+    ;
+
+printStatement
+    : 'print' '(' expression ')'
+    | 'printc' '(' expression ')'
+    ;
+
+// Writes to memory and ports. Statement position only: they yield no value
+// and cannot appear inside an expression.
+intrinsicStatement
+    : ( 'poke' | 'poke8' | 'poke16' | 'poke32' ) '(' expression ',' expression ')'
+    | 'outb' '(' expression ',' expression ')'
+    | 'savefile' '(' expression ',' expression ',' expression ')'
+    | 'beep' '(' expression ')'
+    ;
+
+// Inline assembly. Each string is one instruction.
+asmBlock
+    : 'asm' '{' ( STRING_LITERAL ';' )* '}'
+    ;
+
+dynamicAllocationStatement
+    : 'new' type ( '[' expression ']' )?
+    | 'delete' IDENTIFIER
+    ;
+
+controlFlowStatement
+    : ifStatement
+    | whileStatement
+    | forStatement
+    | loopStatement
+    | switchStatement
+    ;
+
+ifStatement
+    : 'if' expression block ( 'else' ( ifStatement | block ) )?
+    ;
+
+whileStatement
+    : 'while' expression block
+    ;
+
+// C-style but without parentheses. The compiler rewrites it as a block with
+// a while inside.
+forStatement
+    : 'for' statement ';' expression ';' assignmentStatement block
+    ;
+
+// A loop with no condition. 'break' is the way out.
+loopStatement
+    : 'loop' block
+    ;
+
+switchStatement
+    : 'switch' IDENTIFIER '{' ( 'case' expression ':' block )+ ( 'default' ':' block )? '}'
+    ;
+
+// A function name is either a plain identifier or a method receiver:
+//
+//     fn length(v: Vec3) -> real64 { ... }        // plain function
+//     fn Vec3.length(self) -> real64 { ... }      // method on Vec3
+//
+// The receiver form names the type the method belongs to. Methods are
+// emitted under a mangled symbol, Vec3_length, so two types may carry
+// methods of the same name.
+//
+// The ring context clause was written as mandatory, but no program has ever
+// supplied one and the compiler has never had the keywords. It is gone.
+//
+// The return type accepts '->' or ':'. Both spellings are accepted by the
+// parser and both appear in existing sources.
+functionDeclaration
+    : 'fn' visibility? functionName '(' functionParameterList? ')' ( ( '->' | ':' ) type )? block
+    ;
+
+functionName
+    : IDENTIFIER
+    | IDENTIFIER '.' IDENTIFIER
+    ;
+
+functionParameterList
+    : functionParameter ( ',' functionParameter )*
+    ;
+
+// The type annotation is optional; the parser has always accepted a bare
+// name. That is what carries the receiver of a method: the first parameter
+// of a method declared with the receiver form must be named 'self' and takes
+// no annotation, since its type is the receiver named before the dot.
+//
+//     fn Vec3.length(self) -> real64 { ... }
+//
+// 'self' is not a reserved word. It is an ordinary identifier, and outside a
+// method it names an ordinary parameter.
+//
+// A struct passed as a parameter is passed BY VALUE: the callee receives a
+// copy and cannot write through it to the caller's variable. That applies to
+// 'self' as well, so a method reads its receiver but does not modify it.
+functionParameter
+    : IDENTIFIER ( ':' type )?
+    ;
+
+// ============================================================================
+// 05. STRUCTS, ENUMS AND VISIBILITY
+// ============================================================================
+
+structDeclaration
+    : 'struct' IDENTIFIER '{' ( fieldDefinition ';' )* '}'
+    ;
+
+// Members number from zero unless given a value, and an explicit value moves
+// the counter so the ones after it follow on. A member is written
+// Name.Member and resolves to a compile-time integer, so the order in which
+// enums are declared does not matter.
+enumDeclaration
+    : 'enum' IDENTIFIER '{' enumVariantDefinition ( ',' enumVariantDefinition )* ','? '}'
+    ;
+
+enumVariantDefinition
+    : IDENTIFIER ( '=' expression )?
+    ;
+
+fieldDefinition
+    : visibility? IDENTIFIER ':' type ( '=' expression )?
+    ;
+
+visibility
+    : 'public' | 'private' | 'export'
+    ;
+
+// ============================================================================
+// 06. KERNEL BOOT AND MEMORY
+// ============================================================================
+
+// WARNING: this section runs AHEAD of the compiler. The short names below
+// are not accepted yet; the parser still expects the long ones.
+//
+// The worst case is the four values of 'growth'. The parser tells them apart
+// by the LENGTH of the identifier -- fixed_static is 12 characters,
+// linear_page_stride 18, doubling_exponential 20, lazy_on_demand_commit 21 --
+// without comparing the text even once. That is why any twelve-letter word
+// is accepted as fixed_static today. Shortening them means fixing that
+// first.
+
+kernelBootSequence
+    : 'boot' IDENTIFIER '{' 
+        'cpu_state' '{' ( 'register' IDENTIFIER 'set' HEX_LITERAL ';' )+ '}'
+        'page_map' '{' ( 'entry' HEX_LITERAL 'flags' PAGE_FLAGS ';' )+ '}'
+        'load_kernel' '(' STRING_LITERAL ')' ';'
+      '}'
+    ;
+
+memoryManagementUnit
+    : 'mmu' IDENTIFIER '{' 
+        'page_tables' '{' ( 'level' INTEGER_LITERAL 'entries' INTEGER_LITERAL ';' )+ '}'
+        'caching' '{' ( 'range' HEX_LITERAL 'policy' ( 'write_back' | 'write_through' ) ';' )+ '}'
+        'pool' IDENTIFIER '{' ( dynamicAllocationStrategy )+ '}'
+        'arenas' '{' ( 'arena' IDENTIFIER 'base' HEX_LITERAL 'size_bytes' INTEGER_LITERAL 'growth' ARENA_GROWTH_POLICY ';' )+ '}'
+        'numa' '{' ( 'node' INTEGER_LITERAL 'cpu_mask' HEX_LITERAL 'bandwidth_gbps' INTEGER_LITERAL ';' )+ '}'
+        'on_page_fault' '(' 'error_code' IDENTIFIER ')' block
+        'on_out_of_memory' block
+        'gc_policy' '=' MMU_GC_POLICY ';'
+      '}'
+    ;
+
+dynamicAllocationStrategy
+    : 'allocator' '=' ( 'buddy' | 'slab' | 'bump' | 'free_list' | 'predictive' ) ';'
+    | 'compaction_trigger' '=' FLOAT_LITERAL ';'
+    | 'min_granularity' '=' INTEGER_LITERAL ';'
+    | 'on_alloc' '(' 'size_bytes' IDENTIFIER ')' block
+    | 'on_free' '(' 'pointer' IDENTIFIER ')' block
+    ;
+
+ARENA_GROWTH_POLICY
+    : 'fixed' | 'doubling' | 'linear' | 'lazy'
+    ;
+
+MMU_GC_POLICY
+    : 'manual' | 'refcount' | 'mark_sweep' | 'generational'
+    ;
+
+PAGE_FLAGS
+    : 'rw_kernel' | 'ro_user' | 'no_execute' | 'uncached'
+    ;
+
+// ============================================================================
+// 07. INTERRUPTS, SCHEDULER, SYSCALLS AND ISA
+// ============================================================================
+
+// These four are NOT configuration blocks: each has its own routine in the
+// parser, its own AST node, and a body that compiles to real x86. The ISR
+// captures its statements as a block; the scheduler compiles 'switching';
+// the service table carries one handler per service.
+//
+// The compiler uses these short names too. It used to want
+// interrupt_service_routine, scheduler_domain and syscall_table; those were
+// shortened when the language was renamed, and there are no aliases.
+
+interruptHandler
+    : 'isr' IDENTIFIER ( 'vector' HEX_LITERAL )? block
+    ;
+
+schedulerDomain
+    : 'scheduler' IDENTIFIER ( 'policy' IDENTIFIER )? '{'
+        ( IDENTIFIER '=' ( literal | IDENTIFIER ) ';' )*
+        'switching' block
+      '}'
+    ;
+
+syscallTable
+    : 'syscalls' IDENTIFIER '{'
+        'vector' '=' HEX_LITERAL ';'
+        ( 'service' INTEGER_LITERAL IDENTIFIER block )+
+        ( 'on_invalid' block )?
+      '}'
+    ;
+
+instructionSet
+    : 'isa' IDENTIFIER '{'
+        'opcode_set' '{' ( IDENTIFIER '=' HEX_LITERAL ';' )* '}'
+      '}'
+    ;
+
+// ============================================================================
+// 08. DECLARATIVE CONFIGURATION BLOCKS
+// ============================================================================
+
+// One rule replaces the twenty-seven block keywords the language used to carry
+// -- sixteen words that named nothing: quantum_circuit, photonic_tensor_core,
+// neural_network, gpu_shader_pipeline and the rest. They all reached the same
+// routine in the parser and emitted the same tables:
+//
+//     __cfg_<name>_count   the number of pairs
+//     __cfg_<name>_keys    the property names
+//     __cfg_<name>_texts   each value as text
+//     __cfg_<name>_nums    each value as a number, 0 when it is not one
+//
+// Not one line of code told them apart. A block that earns its own semantics
+// -- validation, code generation, tests, the way heap_arena_definition and
+// mmu have them -- gets its own keyword then, and not before.
+
+// CAREFUL: this rule is tied to no keyword today. After the forty-one
+// comparisons in the top-level dispatch, ANY word that does not match opens
+// a generic block, and the instance name is optional. The twenty-seven
+// reserved words are merely the ones the lexer happens to know; a made-up
+// word works just as well.
+//
+// The intent is to close this down to a single word, 'config', so that
+// nothing else opens a block in silence.
+
+configBlock
+    : IDENTIFIER IDENTIFIER? '{' ( configProperty ';' )* '}'
+    ;
+
+// The body tolerates nesting: a value may be another block, which is
+// consumed without being captured.
+configProperty
+    : IDENTIFIER '=' ( literal | IDENTIFIER )
+    | IDENTIFIER '{' ( configProperty ';' )* '}'
+    ;
+
+// ============================================================================
+// 09. LEXICAL TOKENS
+// ============================================================================
+
+// The lexer also reserves 'in', 'from', 'module' and 'import'. None of them
+// is used: the parser compares them nowhere. They are spoken for and free,
+// with no possible collision against anything that exists.
+
+INTEGER_LITERAL : [0-9]+ ;
+FLOAT_LITERAL   : [0-9]+ '.' [0-9]+ ;
+HEX_LITERAL     : '0x' [a-fA-F0-9]+ ;
+BINARY_LITERAL  : '0b' [01]+ ;
+EPOCH_LITERAL     : [0-9]+ '.' [0-9]+ '.' [0-9]+ ;
+BOOLEAN_LITERAL : 'true' | 'false' ;
+STRING_LITERAL  : '"' (~['"\\\r\n'] | '\\' .)* '"' ;
+
+IDENTIFIER               : [a-zA-Z_] [a-zA-Z0-9_]* ;
+
+WS                       : [ \t\r\n]+ skip ;
+LINE_COMMENT             : '//' ~[\r\n]* skip ;
+BLOCK_COMMENT            : '/*' .*? '*/' skip ;// loadfile(name, buffer, capacity) -> bytes read, or 0 when the file will
+// not open. The counterpart of savefile, which could only write: without it
+// the language could produce data but never consume any -- no training set,
+// no configuration file, nothing.
+//
+// An EXPRESSION, not a statement: savefile has nothing to report, this does.
+// A missing file returns zero rather than aborting, so the caller decides.
+loadfileExpression
+    : 'loadfile' '(' expression ',' expression ',' expression ')'
+    ;
+
+

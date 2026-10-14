@@ -1,0 +1,123 @@
+kron_program
+kron_domain test_packed;
+kron_imports
+kron_definitions
+
+// Arrays keep each element at its own width: [u8; N] one byte apiece,
+// [i16; N] two, [i32; N] and [f32; N] four. &a[i] then is a real byte
+// buffer, which savefile, loadfile and the system calls can take as is.
+//
+// Expected output, one value a line:
+//   255 0 44              u8 wraps to its width; [u8; 3] = [255, 256, 300]
+//   -1 127 -128           i8 keeps its sign
+//   65535 -2 -32768       u16, i16
+//   4294967295 -5         u32, i32
+//   1.500000 0.100000     f32 holds 1.5 exactly, 0.1 to single precision
+//   3 8 12 16 4           sizeof([u8;3]) [i64;1] [i32;3] [f32;4] [bool;4]
+//   72 105 33 0           a byte buffer written through &buf[0], read back
+//   3                     bytes loadfile read
+//   7 9                   a global [u8; N] and &g[2]
+//   11 12 13              a [u8; N] parameter
+//   6                     a 2-D [u8; 2][3]: m[1][2]
+//   1 0                   [bool; 4]
+//   0 1                   out of range on a [u8; 16]: 0, and failed() is 1
+
+var gb: [u8; 16];
+var gs: [i16; 4];
+
+fn sum3(v: [u8; 3]) -> i64 {
+    return v[0] + v[1] + v[2];
+}
+
+fn bump(v: [u8; 3]) -> i64 {
+    v[0] = v[0] + 1;
+    v[1] = v[1] + 1;
+    v[2] = v[2] + 1;
+    return 0;
+}
+
+fn get_at(i: i64) -> i64 {
+    return gb[i];
+}
+
+fn main() {
+    var a: [u8; 3] = [255, 256, 300];
+    print(a[0]);
+    print(a[1]);
+    print(a[2]);
+
+    var b: [i8; 3];
+    b[0] = 255;
+    b[1] = 127;
+    b[2] = 128;
+    print(b[0]);
+    print(b[1]);
+    print(b[2]);
+
+    var c: [u16; 2];
+    var d: [i16; 2];
+    c[0] = 65535;
+    d[0] = 65534;
+    d[1] = 32768;
+    print(c[0]);
+    print(d[0]);
+    print(d[1]);
+
+    var e: [u32; 2];
+    var f: [i32; 2];
+    e[1] = 0 - 1;
+    f[0] = 0 - 5;
+    print(e[1]);
+    print(f[0]);
+
+    var x: [f32; 4] = [1.5, 0.1, 2.0, 3.0];
+    print(x[0]);
+    print(x[1]);
+
+    print(sizeof([u8; 3]));
+    print(sizeof([i64; 1]));
+    print(sizeof([i32; 3]));
+    print(sizeof([f32; 4]));
+    print(sizeof([bool; 4]));
+
+    var buf: [u8; 8];
+    buf[0] = 72;
+    buf[1] = 105;
+    buf[2] = 33;
+    savefile(&buf[0], 3, "test_packed.tmp");
+    var back: [u8; 8];
+    var n: i64 = loadfile("test_packed.tmp", &back[0], 8);
+    print(back[0]);
+    print(back[1]);
+    print(back[2]);
+    print(back[3]);
+    print(n);
+
+    gb[2] = 7;
+    print(gb[2]);
+    raw {
+        var p: i64 = &gb[2];
+        poke8(p + 1, 9);
+    }
+    print(gb[3]);
+
+    var t: [u8; 3] = [10, 11, 12];
+    bump(t);
+    print(t[0]);
+    print(t[1]);
+    print(t[2]);
+
+    var m: [[u8; 3]; 2];
+    m[1][2] = 6;
+    print(m[1][2]);
+
+    var flags: [bool; 4];
+    flags[1] = true;
+    print(flags[1]);
+    print(flags[2]);
+
+    var y: i64 = get_at(16);
+    print(y);
+    print(failed());
+    return 0;
+}

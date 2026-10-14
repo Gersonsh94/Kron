@@ -1,0 +1,26 @@
+kron_program
+kron_domain test_chain;
+kron_imports
+acquire_domain "chain_b.kr";
+acquire_domain "chain_a.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: chained imports
+//
+// test_chain imports chain_b, which in turn imports chain_a. It also imports
+// chain_a directly. Checks three things about the expander:
+//
+//   - chains:     chain_a comes in even though only chain_b asks for it
+//   - orders:     chain_a goes before chain_b, which uses it
+//   - no repeats: chain_a appears once; pasted twice,
+//                 chain_seven would be defined twice and would not assemble
+//
+// Expected output: 42, 7.
+// =========================================================================
+
+fn main() {
+    print(chain_fortytwo());
+    print(chain_seven());
+    return 0;
+}

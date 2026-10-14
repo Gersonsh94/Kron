@@ -1,0 +1,37 @@
+kron_program
+kron_domain test_array;
+kron_imports
+kron_definitions
+
+fn main() {
+    // --- integer array ---
+    var nums: [i64; 5];
+    nums[0] = 10;
+    nums[1] = 20;
+    nums[2] = 30;
+    nums[3] = 40;
+    nums[4] = 50;
+
+    print(nums[2]);        // 30
+
+    // sum with a for loop = 150
+    var total: i64 = 0;
+    for var i: i64 = 0; i < 5; i = i + 1 {
+        total = total + nums[i];
+    }
+    print(total);          // 150
+
+    // --- float array (vertex coordinates!) ---
+    var xs: [real64; 3];
+    xs[0] = 1.5;
+    xs[1] = 2.5;
+    xs[2] = 3.0;
+
+    print(xs[0]);          // 1.5
+    print(xs[1]);          // 2.5
+
+    var fsum: real64 = xs[0] + xs[1] + xs[2];
+    print(fsum);           // 7.0
+
+    return 0;
+}

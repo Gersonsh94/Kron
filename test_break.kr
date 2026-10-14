@@ -1,0 +1,68 @@
+kron_program
+kron_domain test_break;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: break and continue
+//
+// For a long time the code generator emitted neither of them:
+// AST_BREAK and AST_CONTINUE went straight to .skip and loops ran on. The
+// bounds check uncovered it, in test_fp2 and in std_str.
+//
+// Expected output: 4, 25, 27, 6, 3, 5.
+// =========================================================================
+
+fn main() {
+    // break in a while
+    var i: i64 = 0;
+    while i < 10 {
+        if i == 4 { break; }
+        i = i + 1;
+    }
+    print(i);                        // 4
+
+    // continue in a while: adds the odd numbers up to 9
+    var s: i64 = 0;
+    i = 0;
+    while i < 10 {
+        i = i + 1;
+        if i % 2 == 0 { continue; }
+        s = s + i;
+    }
+    print(s);                        // 25
+
+    // continue in a for: the step has to keep running, or the
+    // loop never ends
+    var t: i64 = 0;
+    for var k: i64 = 0; k < 10; k = k + 1 {
+        if k % 3 == 0 { continue; }
+        t = t + k;
+    }
+    print(t);                        // 27  (1+2+4+5+7+8)
+
+    // break in an inner loop: leaves only the inner one
+    var count: i64 = 0;
+    var a: i64 = 0;
+    while a < 3 {
+        var b: i64 = 0;
+        while b < 10 {
+            if b == 2 { break; }
+            count = count + 1;
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    print(count);                    // 6
+    print(a);                        // 3
+
+    // break in a loop with no condition
+    var n: i64 = 0;
+    loop {
+        n = n + 1;
+        if n >= 5 { break; }
+    }
+    print(n);                        // 5
+
+    return 0;
+}

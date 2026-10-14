@@ -1,0 +1,476 @@
+kron_program
+kron_domain std_heap;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- the memory under texts, lists, maps and files.
+//
+// Programs do not call this module: std_text, std_list, std_map, std_file
+// and std_os do. It gives them two things.
+//
+// 1. An allocator. Memory comes from the system in 1 MB pieces (VirtualAlloc
+//    on Windows, mmap on Linux) and is handed out in blocks of 16 bytes to
+//    1 MB, by powers of two, each with a 16-byte header; freed blocks wait
+//    in a list per size. Anything bigger is its own mapping, returned to the
+//    system when freed. Memory handed out is always zeroed.
+//
+// 2. Handles. A text, a list or a map reaches the program as a handle: one
+//    i64 holding a slot number, the slot's generation and bit 62 set. Bit 62
+//    is never set in an address, so a handle can never be mistaken for a
+//    string literal, and every use is checked:
+//      - the slot exists and holds the kind of thing asked for
+//      - its generation still matches: once freed, a handle fails forever,
+//        even after the slot is reused
+//    The program never sees an address it could misuse.
+//
+// Threads: every public function of the library takes lock 16 for the time
+// it works and gives it back before it returns or fails. Locks 16 to 31
+// belong to the library; programs use 0 to 7, channels 8 to 15.
+//
+// Internal functions (hp_*, ob_*) run with the lock held and never fail:
+// they leave a code in hp_err, which the public function reads, releases the
+// lock, and turns into a failure with heap_fail().
+// =========================================================================
+
+const HP_LOCK: i64 = 16;
+const HP_TAG: i64 = 4611686018427387904;     // bit 62: a handle, not an address
+const HP_MAGIC: i64 = 5427057734453002571;   // a block in use
+const HP_LARGE: i64 = 5427057734453002572;   // a block in use, its own mapping
+const HP_FREED: i64 = 5427057734453002573;   // a block in a free list
+const HP_CHUNK: i64 = 1048576;
+
+// kinds of object
+const OB_TEXT: i64 = 1;
+const OB_LIST: i64 = 2;
+const OB_MAP: i64 = 3;
+const OB_FILE: i64 = 4;
+
+shared var hp_free: [i64; 17];       // free list per size class, 16 B .. 1 MB
+shared var hp_cur: i64;              // next free byte of the current piece
+shared var hp_end: i64;
+shared var hp_valloc: i64;           // Windows: VirtualAlloc, VirtualFree
+shared var hp_vfree: i64;
+shared var hp_err: i64;              // what went wrong, read under the lock
+shared var hp_ignore: i64;
+
+shared var tv_p: i64;                // tv_view: where the bytes are
+shared var tv_n: i64;                //          and how many
+shared var tv_empty: i64;            // the empty text: a zero
+
+shared var ob_ptr: i64;              // per slot: the object's block
+shared var ob_meta: i64;             // per slot: generation << 8 | kind
+shared var ob_cap: i64;
+shared var ob_count: i64;
+shared var ob_freehead: i64;         // first free slot + 1, 0 when none
+
+// ------------------------------------------------------------ the system ---
+
+fn hp_os_alloc(bytes: i64) -> i64 {
+    var p: i64 = 0;
+    raw {
+        if target_os() == 2 {
+            p = syscall(9, 0, bytes, 3, 34, 0 - 1, 0);
+            if p < 0 {
+                p = 0;
+            }
+        } else {
+            if hp_valloc == 0 {
+                var k: i64 = dll_load("kernel32.dll");
+                hp_valloc = dll_proc(k, "VirtualAlloc");
+                hp_vfree = dll_proc(k, "VirtualFree");
+            }
+            p = call hp_valloc(0, bytes, 12288, 4);
+        }
+    }
+    return p;
+}
+
+fn hp_os_free(p: i64, bytes: i64) -> i64 {
+    raw {
+        if target_os() == 2 {
+            hp_ignore = syscall(11, p, bytes);
+        } else {
+            hp_ignore = call hp_vfree(p, 0, 32768);
+        }
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------- blocks ---
+
+fn hp_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i + 8 <= n {
+            poke(dst + i, peek(src + i));
+            i = i + 8;
+        }
+        while i < n {
+            poke8(dst + i, peek8(src + i));
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+fn hp_zero(dst: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i + 8 <= n {
+            poke(dst + i, 0);
+            i = i + 8;
+        }
+        while i < n {
+            poke8(dst + i, 0);
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+// the size class of a block of `need` bytes, header included
+fn hp_class(need: i64) -> i64 {
+    var k: i64 = 0;
+    var size: i64 = 16;
+    while size < need {
+        size = size * 2;
+        k = k + 1;
+    }
+    return k;
+}
+
+// a zeroed block of n bytes; 0 and hp_err when the system has no more
+fn hp_alloc(n: i64) -> i64 {
+    if n < 0 {
+        hp_err = 1;
+        return 0;
+    }
+    var need: i64 = n + 16;
+    var p: i64 = 0;
+    if need > HP_CHUNK {
+        var bytes: i64 = (need + 4095) / 4096 * 4096;
+        p = hp_os_alloc(bytes);
+        if p == 0 {
+            hp_err = 2;
+            return 0;
+        }
+        raw {
+            poke(p, bytes);
+            poke(p + 8, HP_LARGE);
+        }
+        return p + 16;
+    }
+    var k: i64 = hp_class(need);
+    var size: i64 = 16 << k;
+    p = hp_free[k];
+    if p != 0 {
+        raw {
+            hp_free[k] = peek(p + 16);
+            poke(p + 8, HP_MAGIC);
+        }
+        hp_zero(p + 16, size - 16);
+        return p + 16;
+    }
+    if hp_cur + size > hp_end {
+        var piece: i64 = hp_os_alloc(HP_CHUNK);
+        if piece == 0 {
+            hp_err = 2;
+            return 0;
+        }
+        hp_cur = piece;
+        hp_end = piece + HP_CHUNK;
+    }
+    p = hp_cur;
+    hp_cur = hp_cur + size;
+    raw {
+        poke(p, k);
+        poke(p + 8, HP_MAGIC);
+    }
+    return p + 16;
+}
+
+// what a block can hold
+fn hp_room(q: i64) -> i64 {
+    var head: i64 = 0;
+    var kind: i64 = 0;
+    raw {
+        head = peek(q - 16);
+        kind = peek(q - 8);
+    }
+    if kind == HP_LARGE {
+        return head - 16;
+    }
+    return (16 << head) - 16;
+}
+
+fn hp_release(q: i64) -> i64 {
+    if q == 0 {
+        return 0;
+    }
+    var p: i64 = q - 16;
+    var head: i64 = 0;
+    var kind: i64 = 0;
+    raw {
+        head = peek(p);
+        kind = peek(p + 8);
+    }
+    if kind == HP_LARGE {
+        hp_os_free(p, head);
+        return 0;
+    }
+    if kind != HP_MAGIC {
+        return 0;                          // freed twice, or not ours: ignored
+    }
+    raw {
+        poke(p + 8, HP_FREED);
+        poke(p + 16, hp_free[head]);
+        hp_free[head] = p;
+    }
+    return 0;
+}
+
+// the block made big enough for n bytes, moved if it has to be
+fn hp_grow(q: i64, n: i64) -> i64 {
+    if q == 0 {
+        return hp_alloc(n);
+    }
+    var room: i64 = hp_room(q);
+    if n <= room {
+        return q;
+    }
+    var bigger: i64 = room * 2;
+    if bigger < n {
+        bigger = n;
+    }
+    var r: i64 = hp_alloc(bigger);
+    if r == 0 {
+        return 0;
+    }
+    hp_copy(r, q, room);
+    hp_release(q);
+    return r;
+}
+
+// -------------------------------------------------------------- handles ---
+
+fn ob_new(kind: i64, p: i64) -> i64 {
+    var i: i64 = 0;
+    if ob_freehead != 0 {
+        i = ob_freehead - 1;
+        raw { ob_freehead = peek(ob_ptr + i * 8); }
+    } else {
+        if ob_count >= ob_cap {
+            var cap: i64 = ob_cap * 2;
+            if cap < 1024 {
+                cap = 1024;
+            }
+            var np: i64 = hp_grow(ob_ptr, cap * 8);
+            if np == 0 {
+                return 0;
+            }
+            ob_ptr = np;
+            var nm: i64 = hp_grow(ob_meta, cap * 8);
+            if nm == 0 {
+                return 0;
+            }
+            ob_meta = nm;
+            ob_cap = cap;
+        }
+        i = ob_count;
+        ob_count = ob_count + 1;
+    }
+    var gen: i64 = 0;
+    raw {
+        gen = (peek(ob_meta + i * 8) >> 8) & 1073741823;
+        poke(ob_ptr + i * 8, p);
+        poke(ob_meta + i * 8, (gen << 8) | kind);
+    }
+    return HP_TAG | (gen << 32) | i;
+}
+
+// 1 when x is a handle (bit 62 set, bit 63 clear), not an address
+fn ob_is(x: i64) -> i64 {
+    if x < 0 {
+        return 0;
+    }
+    if (x & HP_TAG) == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the slot of a live handle of this kind, or -1 with hp_err
+fn ob_slot(h: i64, kind: i64) -> i64 {
+    if ob_is(h) == 0 {
+        hp_err = 3;
+        return -1;
+    }
+    var i: i64 = h & 4294967295;
+    var gen: i64 = (h >> 32) & 1073741823;
+    if i >= ob_count {
+        hp_err = 3;
+        return -1;
+    }
+    var meta: i64 = 0;
+    raw { meta = peek(ob_meta + i * 8); }
+    if ((meta >> 8) & 1073741823) != gen {
+        hp_err = 4;
+        return -1;
+    }
+    if (meta & 255) != kind {
+        if (meta & 255) == 0 {
+            hp_err = 4;
+        } else {
+            hp_err = 3;
+        }
+        return -1;
+    }
+    return i;
+}
+
+// the block behind a handle, or 0 with hp_err
+fn ob_get(h: i64, kind: i64) -> i64 {
+    var i: i64 = ob_slot(h, kind);
+    if i < 0 {
+        return 0;
+    }
+    var p: i64 = 0;
+    raw { p = peek(ob_ptr + i * 8); }
+    return p;
+}
+
+// after the block moved
+fn ob_put(h: i64, p: i64) -> i64 {
+    var i: i64 = h & 4294967295;
+    raw { poke(ob_ptr + i * 8, p); }
+    return 0;
+}
+
+// the handle stops working; its block is the caller's to release
+fn ob_drop(h: i64) -> i64 {
+    var i: i64 = h & 4294967295;
+    raw {
+        var meta: i64 = peek(ob_meta + i * 8);
+        var gen: i64 = ((meta >> 8) + 1) & 1073741823;
+        poke(ob_meta + i * 8, gen << 8);
+        poke(ob_ptr + i * 8, ob_freehead);
+    }
+    ob_freehead = i + 1;
+    return 0;
+}
+
+// ---------------------------------------------------------- text values ---
+// A text block is [length][bytes...][0]. Wherever the library takes a text it
+// takes a text handle, a string literal, or 0 for the empty text.
+
+// tv_p and tv_n for x; 0 with hp_err when x is none of those
+fn tv_view(x: i64) -> i64 {
+    if x == 0 {
+        raw { tv_p = &tv_empty; }
+        tv_n = 0;
+        return 1;
+    }
+    if ob_is(x) {
+        var q: i64 = ob_get(x, OB_TEXT);
+        if q == 0 {
+            return 0;
+        }
+        raw { tv_n = peek(q); }
+        tv_p = q + 8;
+        return 1;
+    }
+    // a literal lives at a real address: a small number, or anything past
+    // the 47 bits of user space, is a mistake rather than a string
+    if x < 65536 {
+        hp_err = 3;
+        return 0;
+    }
+    if x >= 140737488355328 {
+        hp_err = 3;
+        return 0;
+    }
+    var n: i64 = 0;
+    raw {
+        while peek8(x + n) != 0 {
+            n = n + 1;
+        }
+    }
+    tv_p = x;
+    tv_n = n;
+    return 1;
+}
+
+// byte order, then length: -1, 0 or 1
+fn tv_compare(a: i64, b: i64) -> i64 {
+    if tv_view(a) == 0 {
+        return 0;
+    }
+    var pa: i64 = tv_p;
+    var na: i64 = tv_n;
+    if tv_view(b) == 0 {
+        return 0;
+    }
+    var pb: i64 = tv_p;
+    var nb: i64 = tv_n;
+    var i: i64 = 0;
+    var r: i64 = 0;
+    raw {
+        while i < na {
+            if i >= nb {
+                r = 1;
+                i = na;
+            } else {
+                var ca: i64 = peek8(pa + i);
+                var cb: i64 = peek8(pb + i);
+                if ca < cb {
+                    r = -1;
+                    i = na;
+                } else if ca > cb {
+                    r = 1;
+                    i = na;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    if r == 0 {
+        if na < nb {
+            r = -1;
+        }
+    }
+    return r;
+}
+
+// ------------------------------------------------------------- failures ---
+
+// the code an internal function left, cleared; read under the lock
+fn hp_take_err() -> i64 {
+    var e: i64 = hp_err;
+    hp_err = 0;
+    return e;
+}
+
+// a failure for every code the library uses; returns 0, like any fail
+fn heap_fail(e: i64) -> i64 {
+    switch e {
+        case 1: { fail "negative size" hint "sizes and lengths start at 0"; }
+        case 2: { fail "out of memory" hint "the system refused more memory: free texts, lists and maps you no longer need"; }
+        case 3: { fail "not the kind of value this function takes" hint "pass a text, list or map made by this library, or a string literal where a text is asked for"; }
+        case 4: { fail "used after it was freed" hint "a text, list, map or file is gone after text_free, list_free, map_free or file_close"; }
+        case 5: { fail "index out of range" hint "the index has to go from 0 to the length minus one"; }
+        case 6: { fail "key not found" hint "check with map_has first, or use map_get_or"; }
+        case 7: { fail "not a number" hint "digits with an optional sign, point and exponent: -12, 3.5, 1e6"; }
+        case 8: { fail "the file could not be opened" hint "check the path, and that the file exists and can be read"; }
+        case 9: { fail "the file could not be written" hint "check that the folder exists and the file is not read-only"; }
+        case 10: { fail "the list is empty" hint "check list_len first"; }
+        case 11: { fail "the folder could not be read" hint "check the path and that it is a folder"; }
+        case 12: { fail "the program could not be run" hint "check its name and that it is on the PATH"; }
+        case 13: { fail "the file could not be deleted or renamed" hint "check the path and that nothing has it open"; }
+        case 14: { fail "the folder could not be made" hint "check that its parent exists and the name is free"; }
+        case 15: { fail "not set" hint "the environment variable does not exist: check with env_has"; }
+        case 16: { fail "the file is closed or was opened for something else" hint "open it with \"r\" to read, \"w\" or \"a\" to write, \"rw\" for both"; }
+        case 17: { fail "the picture could not be read" hint "PNG, or BMP of 24 or 32 bits; the file may be damaged"; }
+    }
+    return 0;
+}

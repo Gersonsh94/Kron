@@ -1,0 +1,13 @@
+kron_program
+kron_domain test_syscall_bad;
+kron_imports
+kron_definitions
+
+// NEGATIVE TEST: syscall(...) reaches the kernel directly, so like dll_load
+// it belongs inside raw { }. The compiler must reject this program.
+
+fn main() {
+    var r: i64 = syscall(39);
+    print(r);
+    return 0;
+}

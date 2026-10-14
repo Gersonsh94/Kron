@@ -1,0 +1,23 @@
+kron_program
+kron_domain test_arrsz_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: array smaller than the parameter
+//
+// sum_all() indexes as far as its parameter declares, 10 elements. Passing it
+// an array of 3 would let it read 7 slots that are not its own, so it is
+// rejected at compile time, with the name of the array and a hint.
+// =========================================================================
+
+fn sum_all(v: [i64; 10]) -> i64 {
+    return v[0];
+}
+
+fn main() {
+    var a: [i64; 3];
+    a[0] = 1;
+    print(sum_all(a));
+    return 0;
+}

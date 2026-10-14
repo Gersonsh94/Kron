@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_mmu2;
+kron_imports
+kron_definitions
+
+mmu MainMMU {
+    page_table_hierarchy {
+        level 4 entries 512 ;
+    }
+    cache_policy {
+        range 0xFFFF800000000000 policy write_back ;
+        range 0x00000000000B8000 policy write_through ;
+    }
+    heap_arena_definition {
+        arena kernel_pool base_address 0xFFFF800000000000 size_bytes 16777216 growth_policy fixed_static ;
+    }
+    numa_node_affinity {
+        node 0 cpu_mask 0x0F local_bandwidth_gbps 128 ;
+        node 1 cpu_mask 0xF0 local_bandwidth_gbps 96 ;
+    }
+    garbage_collection_policy = manual_only ;
+}

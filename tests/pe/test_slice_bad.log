@@ -1,0 +1,9 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...
+ERROR: slice<...> uses std_arena.kr, which is not imported
+  hint: add  acquire_domain "std_arena.kr";  to the header

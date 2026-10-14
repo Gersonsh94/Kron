@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_bool;
+kron_imports
+kron_definitions
+
+fn main() {
+    var a: bool;
+    var b: bool;
+    a = true;
+    b = false;
+    print(a && b);
+    print(a || b);
+    print(!a);
+    print(a ^ b);
+    print(~0);
+    return 0;
+}

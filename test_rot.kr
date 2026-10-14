@@ -1,0 +1,11 @@
+kron_program
+kron_domain test_rot;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var a: int64 = 1;
+    print(a rotr 1);
+    print(a rotl 4);
+    return 0;
+}

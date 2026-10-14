@@ -1,0 +1,53 @@
+kron_program
+kron_domain test_size;
+kron_imports
+kron_definitions
+
+// sizeof(T) and the array literal.
+//
+// sizeof is resolved at compile time: scalars by their width, a struct by
+// its packed size, and an array type by multiplying by its count.
+//
+// The literal [1, 2, 3] writes the elements straight into the slots,
+// like the struct literal. Extra ones are dropped; if there are too few, the
+// rest of the array stays as it was.
+//
+// Expected output:
+//   1     sizeof(u8)
+//   2     sizeof(i16)
+//   4     sizeof(f32)
+//   8     sizeof(i64)
+//   24    sizeof(Vec3), three reals
+//   64    sizeof([i64; 8])
+//   10    v[0] from the literal
+//   20    v[1]
+//   30    v[2]
+//   60    sum of the three
+//   2.500000  literal of reals
+
+struct Vec3 {
+    x: f64;
+    y: f64;
+    z: f64;
+}
+
+fn main() {
+    var v: [i64; 4] = [10, 20, 30, 40];
+    var f: [f64; 2] = [1.5, 2.5];
+
+    print(sizeof(u8));        // 1
+    print(sizeof(i16));       // 2
+    print(sizeof(f32));       // 4
+    print(sizeof(i64));       // 8
+    print(sizeof(Vec3));      // 24
+    print(sizeof([i64; 8]));  // 64
+
+    print(v[0]);              // 10
+    print(v[1]);              // 20
+    print(v[2]);              // 30
+    print(v[0] + v[1] + v[2]);// 60
+
+    print(f[1]);              // 2.500000
+
+    return 0;
+}

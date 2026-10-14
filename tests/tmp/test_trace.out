@@ -1,0 +1,24 @@
+fail: index out of range
+hint: the index has to go from 0 to the array size minus one
+  at leaf (test_trace.kr:19)
+  called from middle (test_trace.kr:23)
+  called from main (test_trace.kr:48)
+fail: the bottom
+hint: four levels down
+  at depth (test_trace.kr:29)
+  called from depth (test_trace.kr:31)
+  called from depth (test_trace.kr:31)
+  called from depth (test_trace.kr:31)
+  called from main (test_trace.kr:50)
+fail: the file could not be opened
+hint: check the path, and that the file exists and can be read
+  at file_lines (std_file.kr:363)
+  called from main (test_trace.kr:52)
+fail: in a thread
+  at in_thread (test_trace.kr:36)
+  called from worker (test_trace.kr:42)
+fail: index out of range
+hint: the index has to go from 0 to the array size minus one
+  at leaf (test_trace.kr:19)
+  called from middle (test_trace.kr:23)
+  called from main (test_trace.kr:56)

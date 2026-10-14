@@ -1,0 +1,18 @@
+kron_program
+kron_domain test_aw_bad;
+kron_imports
+kron_definitions
+
+// NEGATIVE TEST: must NOT compile.
+// A [u8; 4] keeps its elements one byte apart; the parameter reads eight
+// bytes per element. The compiler refuses the call.
+
+fn total(v: [i64; 4]) -> i64 {
+    return v[0] + v[1] + v[2] + v[3];
+}
+
+fn main() {
+    var b: [u8; 4] = [1, 2, 3, 4];
+    print(total(b));
+    return 0;
+}

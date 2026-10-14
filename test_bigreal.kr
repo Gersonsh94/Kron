@@ -1,0 +1,48 @@
+kron_program
+kron_domain test_bigreal;
+kron_imports
+kron_definitions
+
+// print of reals at every size. Six decimals as always; from 9e12 up the
+// whole part and the fraction are taken apart before converting (the old
+// x * 1e6 overflowed and printed 9223372036854.775808 for anything bigger);
+// past 2^63 the value is written as d.dddddde+N; inf and nan by name.
+//
+// Expected output:
+//   2.500000
+//   -0.500000
+//   0.000000
+//   123456789012345.000000
+//   -98765432109876544.000000     the nearest double to -98765432109876543
+//   9999999999999.998047          the nearest double to 9999999999999.999
+//   1.000000e+30
+//   inf
+//   -inf
+//   nan
+
+fn main() {
+    print(2.5);
+    print(-0.5);
+    print(0.0);
+    print(123456789012345.0);
+    print(-98765432109876543.0);
+    print(9999999999999.999);
+    var big: f64 = 1.0;
+    var i: i64 = 0;
+    while i < 30 {
+        big = big * 10.0;
+        i = i + 1;
+    }
+    print(big);
+    var inf: f64 = big;
+    i = 0;
+    while i < 30 {
+        inf = inf * inf;
+        i = i + 1;
+    }
+    print(inf);
+    print(0.0 - inf);
+    var nan: f64 = inf - inf;
+    print(nan);
+    return 0;
+}

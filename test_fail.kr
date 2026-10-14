@@ -1,0 +1,48 @@
+kron_program
+kron_domain test_fail;
+kron_imports
+kron_definitions
+
+// Failure propagation.
+//
+//   fail "cause" hint "what to do";
+//
+// The function returns at once with zero, leaving the cause and the hint
+// recorded. No stack unwinding and no runtime, so it works inside
+// an interrupt handler.
+//
+// The caller asks with failed(), which also DISARMS the state: a failure
+// is read once and cannot be read twice by accident.
+//
+// Expected output:
+//   0                       a failed allocation returns zero
+//   1                       failed() confirms it
+//   arena out of space      the cause
+//   raise size_bytes        the hint
+//   0                       failed() is already disarmed
+//   4096                    an allocation that fits
+//   0                       and raises no failure
+
+fn reserve(available: i64, requested: i64) -> i64 {
+    if available < requested {
+        fail "arena out of space"
+             hint "raise size_bytes";
+    }
+    return requested;
+}
+
+fn main() {
+    var p: i64;
+
+    p = reserve(100, 4096);
+    print(p);              // 0
+    print(failed());       // 1
+    print_fail();          // both strings
+    print(failed());       // 0  -- already disarmed
+
+    p = reserve(99999, 4096);
+    print(p);              // 4096
+    print(failed());       // 0
+
+    return 0;
+}

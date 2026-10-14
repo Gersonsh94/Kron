@@ -1,0 +1,152 @@
+kron_program
+kron_domain std_vec3;
+kron_imports
+kron_definitions
+
+// ============================================================================
+// Kron standard library — 3D vectors and camera maths.
+//
+// Design note: a Kron function returns a single value, so an operation that
+// yields a vector is offered one component at a time (vec3_cross_x, _y, _z).
+// That keeps every function inside the six-parameter limit and avoids needing
+// out-parameters or a scratch buffer.
+//
+// Requires std_math.kr.
+// ============================================================================
+
+// ------------------------------------------------------------- magnitude ---
+
+fn vec3_length(x: real64, y: real64, z: real64) -> real64 {
+    return fsqrt(x * x + y * y + z * z);
+}
+
+// Squared length: cheaper when you only need to compare distances.
+fn vec3_length2(x: real64, y: real64, z: real64) -> real64 {
+    return x * x + y * y + z * z;
+}
+
+fn vec3_distance(ax: real64, ay: real64, az: real64, bx: real64, by: real64, bz: real64) -> real64 {
+    var dx: real64 = bx - ax;
+    var dy: real64 = by - ay;
+    var dz: real64 = bz - az;
+    return fsqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// ----------------------------------------------------------------- products ---
+
+fn vec3_dot(ax: real64, ay: real64, az: real64, bx: real64, by: real64, bz: real64) -> real64 {
+    return ax * bx + ay * by + az * bz;
+}
+
+// Cross product, one component at a time.
+//   cross.x = ay*bz - az*by
+fn vec3_cross_x(ay: real64, az: real64, by: real64, bz: real64) -> real64 {
+    return ay * bz - az * by;
+}
+
+//   cross.y = az*bx - ax*bz
+fn vec3_cross_y(az: real64, ax: real64, bz: real64, bx: real64) -> real64 {
+    return az * bx - ax * bz;
+}
+
+//   cross.z = ax*by - ay*bx
+fn vec3_cross_z(ax: real64, ay: real64, bx: real64, by: real64) -> real64 {
+    return ax * by - ay * bx;
+}
+
+// ------------------------------------------------------------ normalise ---
+
+// Each component of the unit vector. Returns 0 for a zero-length vector.
+fn vec3_norm_x(x: real64, y: real64, z: real64) -> real64 {
+    var l: real64 = vec3_length(x, y, z);
+    if l == 0.0 {
+        return 0.0;
+    }
+    return x / l;
+}
+
+fn vec3_norm_y(x: real64, y: real64, z: real64) -> real64 {
+    var l: real64 = vec3_length(x, y, z);
+    if l == 0.0 {
+        return 0.0;
+    }
+    return y / l;
+}
+
+fn vec3_norm_z(x: real64, y: real64, z: real64) -> real64 {
+    var l: real64 = vec3_length(x, y, z);
+    if l == 0.0 {
+        return 0.0;
+    }
+    return z / l;
+}
+
+// -------------------------------------------------------------- rotation ---
+// Rotations take the angle in radians and return the component that changes.
+// Applying a rotation means updating both affected components from the old
+// values, so read them into temporaries first:
+//     var nx: real64 = rot_y_x(x, z, a);
+//     var nz: real64 = rot_y_z(x, z, a);
+//     x = nx;  z = nz;
+
+// Around the Y axis: x' = x*cos + z*sin ; z' = z*cos - x*sin
+fn rot_y_x(x: real64, z: real64, angle: real64) -> real64 {
+    return x * fcos(angle) + z * fsin(angle);
+}
+
+fn rot_y_z(x: real64, z: real64, angle: real64) -> real64 {
+    return z * fcos(angle) - x * fsin(angle);
+}
+
+// Around the X axis: y' = y*cos - z*sin ; z' = y*sin + z*cos
+fn rot_x_y(y: real64, z: real64, angle: real64) -> real64 {
+    return y * fcos(angle) - z * fsin(angle);
+}
+
+fn rot_x_z(y: real64, z: real64, angle: real64) -> real64 {
+    return y * fsin(angle) + z * fcos(angle);
+}
+
+// Around the Z axis: x' = x*cos - y*sin ; y' = x*sin + y*cos
+fn rot_z_x(x: real64, y: real64, angle: real64) -> real64 {
+    return x * fcos(angle) - y * fsin(angle);
+}
+
+fn rot_z_y(x: real64, y: real64, angle: real64) -> real64 {
+    return x * fsin(angle) + y * fcos(angle);
+}
+
+// ------------------------------------------------------------ projection ---
+// Perspective projection onto a screen of the given half-size, with the camera
+// sitting `dist` units back along -Z. Returns pixel coordinates as reals; use
+// trunc() to index a framebuffer.
+
+fn proj_x(x: real64, z: real64, dist: real64, scale: real64, cx: real64) -> real64 {
+    var d: real64 = z + dist;
+    if d == 0.0 {
+        return cx;
+    }
+    return cx + x * scale / d;
+}
+
+fn proj_y(y: real64, z: real64, dist: real64, scale: real64, cy: real64) -> real64 {
+    var d: real64 = z + dist;
+    if d == 0.0 {
+        return cy;
+    }
+    return cy - y * scale / d;
+}
+
+// Depth of a point as seen by that camera: larger means further away.
+fn proj_depth(z: real64, dist: real64) -> real64 {
+    return z + dist;
+}
+
+// ------------------------------------------------------------- rasterising ---
+
+// Signed area of the triangle formed by the edge (dx,dy) and the offset
+// (ox,oy). The sign tells which side of the edge a point lies on, which is
+// what barycentric triangle filling needs.
+fn edge_cross(dx: real64, dy: real64, ox: real64, oy: real64) -> real64 {
+    return dx * oy - dy * ox;
+}

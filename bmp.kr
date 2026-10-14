@@ -1,0 +1,133 @@
+kron_program
+kron_domain bmp;
+kron_imports
+kron_definitions
+
+// ============================================================
+// KRON 3D -> BMP : render the cube to a real image file
+// Builds a complete 24-bit BMP (header + pixels) in memory
+// and writes it to out.bmp with savefile().
+// Image: 112 x 88, row = 336 bytes (already 4-aligned).
+// ============================================================
+
+fn main() {
+    raw {
+        // buffer: 54 header + 336*88 pixels = 29622 bytes -> 3703 slots
+        var buf: [i64; 3703];
+        var base: i64 = &buf;
+
+        // ---------- BMP header (54 bytes) ----------
+        poke8(base + 0, 66);              // 'B'
+        poke8(base + 1, 77);              // 'M'
+        poke32(base + 2, 29622);          // file size
+        poke32(base + 6, 0);
+        poke32(base + 10, 54);            // pixel data offset
+        poke32(base + 14, 40);            // info header size
+        poke32(base + 18, 112);           // width
+        poke32(base + 22, 88);            // height (bottom-up)
+        poke16(base + 26, 1);             // planes
+        poke16(base + 28, 24);            // bits per pixel
+        poke32(base + 30, 0);             // no compression
+        poke32(base + 34, 29568);         // pixel data size
+        poke32(base + 38, 2835);          // x pixels/meter
+        poke32(base + 42, 2835);          // y pixels/meter
+        poke32(base + 46, 0);
+        poke32(base + 50, 0);
+
+        // ---------- background: dark blue gradient ----------
+        var pix: i64 = base + 54;
+        for var gy: i64 = 0; gy < 88; gy = gy + 1 {
+            for var gx: i64 = 0; gx < 112; gx = gx + 1 {
+                var po: i64 = pix + gy * 336 + gx * 3;
+                poke8(po + 0, 40 + gy / 3);   // B
+                poke8(po + 1, 12);            // G
+                poke8(po + 2, 10);            // R
+            }
+        }
+
+        // ---------- cube vertices ----------
+        var vx: [real64; 8];
+        var vy: [real64; 8];
+        var vz: [real64; 8];
+        vx[0] = 0.0 - 1.0; vy[0] = 0.0 - 1.0; vz[0] = 0.0 - 1.0;
+        vx[1] = 1.0;       vy[1] = 0.0 - 1.0; vz[1] = 0.0 - 1.0;
+        vx[2] = 1.0;       vy[2] = 1.0;       vz[2] = 0.0 - 1.0;
+        vx[3] = 0.0 - 1.0; vy[3] = 1.0;       vz[3] = 0.0 - 1.0;
+        vx[4] = 0.0 - 1.0; vy[4] = 0.0 - 1.0; vz[4] = 1.0;
+        vx[5] = 1.0;       vy[5] = 0.0 - 1.0; vz[5] = 1.0;
+        vx[6] = 1.0;       vy[6] = 1.0;       vz[6] = 1.0;
+        vx[7] = 0.0 - 1.0; vy[7] = 1.0;       vz[7] = 1.0;
+
+        var ea: [i64; 12];
+        var eb: [i64; 12];
+        ea[0] = 0;  eb[0] = 1;
+        ea[1] = 1;  eb[1] = 5;
+        ea[2] = 5;  eb[2] = 4;
+        ea[3] = 4;  eb[3] = 0;
+        ea[4] = 3;  eb[4] = 2;
+        ea[5] = 2;  eb[5] = 6;
+        ea[6] = 6;  eb[6] = 7;
+        ea[7] = 7;  eb[7] = 3;
+        ea[8] = 0;  eb[8] = 3;
+        ea[9] = 1;  eb[9] = 2;
+        ea[10] = 5; eb[10] = 6;
+        ea[11] = 4; eb[11] = 7;
+
+        // tilt around X (~20 deg)
+        var c2: real64 = 0.94;
+        var s2: real64 = 0.342;
+        for var ti: i64 = 0; ti < 8; ti = ti + 1 {
+            var ty: real64 = vy[ti] * c2 - vz[ti] * s2;
+            var tz: real64 = vy[ti] * s2 + vz[ti] * c2;
+            vy[ti] = ty;
+            vz[ti] = tz;
+        }
+
+        // turn around Y (~30 deg)
+        var c: real64 = 0.866;
+        var s: real64 = 0.5;
+        for var ri: i64 = 0; ri < 8; ri = ri + 1 {
+            var rx: real64 = vx[ri] * c + vz[ri] * s;
+            var rz: real64 = vz[ri] * c - vx[ri] * s;
+            vx[ri] = rx;
+            vz[ri] = rz;
+        }
+
+        // ---------- draw edges: amber lines, 120 samples each ----------
+        for var e: i64 = 0; e < 12; e = e + 1 {
+            var a: i64 = ea[e];
+            var b: i64 = eb[e];
+            var x0: real64 = vx[a];
+            var y0: real64 = vy[a];
+            var z0: real64 = vz[a];
+            var x1: real64 = vx[b];
+            var y1: real64 = vy[b];
+            var z1: real64 = vz[b];
+
+            for var t: i64 = 0; t < 120; t = t + 1 {
+                var ft: real64 = t / 119.0;
+                var x: real64 = x0 + (x1 - x0) * ft;
+                var y: real64 = y0 + (y1 - y0) * ft;
+                var z: real64 = z0 + (z1 - z0) * ft;
+
+                var d: real64 = z + 4.0;
+                var px: i64 = trunc(56.0 + x * 56.0 / d);
+                var py: i64 = trunc(44.0 - y * 44.0 / d);
+
+                if px >= 0 && px < 112 && py >= 0 && py < 88 {
+                    // BMP is bottom-up: file row = 87 - py
+                    var fo: i64 = pix + (87 - py) * 336 + px * 3;
+                    poke8(fo + 0, 0);     // B
+                    poke8(fo + 1, 200);   // G
+                    poke8(fo + 2, 255);   // R  -> amber
+                }
+            }
+        }
+
+        // ---------- write out.bmp ----------
+        savefile(base, 29622, "out.bmp");
+        print(29622);   // confirm: bytes written
+
+        return 0;
+    }
+}

@@ -1,0 +1,32 @@
+kron_program
+kron_domain test_fp2;
+kron_imports
+kron_definitions
+
+fn op_add(a: int32, b: int32) {
+    return a + b;
+}
+
+fn op_sub(a: int32, b: int32) {
+    return a - b;
+}
+
+fn op_mul(a: int32, b: int32) {
+    return a * b;
+}
+
+fn main() {
+    var ops: [int64; 3];
+    ops[0] = &op_add;
+    ops[1] = &op_sub;
+    ops[2] = &op_mul;
+
+    var i: int32 = 0;
+    loop {
+        if i >= 3 { break; }
+        var f: int64 = ops[i];
+        print(call f(10, 4));
+        i = i + 1;
+    }
+    return 0;
+}

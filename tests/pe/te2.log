@@ -1,0 +1,9 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...te2.kr:9:23: expected ';', found an identifier
+        return 0.0 - 1.0e308;
+                      ^^^^

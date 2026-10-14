@@ -1,0 +1,7 @@
+========================================
+  JUPITER COMPILER v1.0 - SOBERANO
+  100% ASM x86-64  Sin dependencias
+========================================
+[1/6] Leyendo archivo... OK
+[2/6] Lexer... OK
+[3/6] Parser...ERROR: Parser fallo. Token=1 Posicion=14 Linea=8  (se encontro: identificador)

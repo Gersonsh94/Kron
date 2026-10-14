@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_bounds2;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: a failure nobody checks does not vanish
+//
+// main steps out of the array without checking failed(). The program used to
+// end silently; now __main_exit prints the failure on the way out.
+//
+// Expected output: 1, then the fail with its hint. The 2 is never printed.
+// =========================================================================
+
+fn main() {
+    var v: [i64; 2];
+    var i: i64 = 5;
+    print(1);
+    v[i] = 7;          // out of range: main leaves here
+    print(2);          // never reached
+    return 0;
+}

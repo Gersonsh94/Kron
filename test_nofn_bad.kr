@@ -1,0 +1,12 @@
+kron_program
+kron_domain test_nofn_bad;
+kron_imports
+kron_definitions
+
+// A call to a function that exists nowhere is refused, by name.
+
+fn main() {
+    var x: i64 = nothere(5);
+    print(x);
+    return 0;
+}

@@ -1,0 +1,32 @@
+kron_program
+kron_domain test_fparam;
+kron_imports
+kron_definitions
+
+// float parameters in functions
+
+fn add2(x: real64, y: real64) -> real64 {
+    return x + y;
+}
+
+fn scale(v: real64, k: real64) -> real64 {
+    return v * k;
+}
+
+// mixed int + float params (ABI: int in rcx/rdx, float in xmm by position)
+fn mix(n: i64, f: real64) -> real64 {
+    return f * 2.0;
+}
+
+// the 3D staple: dot product of two 3-vectors passed as params
+fn dot3(ax: real64, ay: real64, az: real64, bx: real64) -> real64 {
+    return ax * bx + ay + az;
+}
+
+fn main() {
+    print(add2(3.5, 2.0));      // 5.5
+    print(scale(4.0, 2.5));     // 10.0
+    print(mix(7, 3.0));         // 6.0
+    print(dot3(1.0, 2.0, 3.0, 4.0)); // 1*4 + 2 + 3 = 9.0
+    return 0;
+}

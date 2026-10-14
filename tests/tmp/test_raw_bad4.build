@@ -1,0 +1,12 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_raw_bad4.kr:17:18: only allowed inside raw: '*'
+    var v: i64 = *p;
+                 ^
+  hint: put it inside raw { ... }: memory by address (peek, poke, *p) and the system (dll_load, dll_proc, syscall) are reached only there

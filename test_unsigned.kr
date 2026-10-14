@@ -1,0 +1,106 @@
+kron_program
+kron_domain test_unsigned;
+kron_imports
+kron_definitions
+
+// Checks whether u64 and u32 really have UNSIGNED semantics, or are
+// i64 and i32 under another name.
+//
+// Each check prints 1 if the compiler gets it right and 0 if it treats the value
+// as signed. Correct output: eight ones.
+//
+//   1  u64 comparison above 2^63           (jb/ja rather than jl/jg)
+//   2  u64 division                         (div rather than idiv)
+//   3  u64 right shift                      (shr rather than sar)
+//   4  u32 comparison above 2^31
+//   5  u32 division
+//   6  u32 right shift
+//   7  u8 is not sign-extended
+//   8  u16 is not sign-extended
+//
+// A zero at 1 means every value above 2^63 compares wrong.
+// A zero at 3 means the shift drags the sign bit along.
+
+fn main() {
+    var big: u64;
+    var one: u64;
+    var r: u64;
+    var b32: u32;
+    var o32: u32;
+    var r32: u32;
+    var s8: u8;
+    var s16: u16;
+
+    // --- 1. unsigned comparison in 64 bits --------------------------------
+    // 0x8000000000000000 is 2^63. Unsigned it is huge; signed it is negative.
+    big = 9223372036854775808;
+    one = 1;
+    if big > one {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 2. unsigned division in 64 bits -----------------------------------
+    // 2^63 / 2 = 2^62 = 4611686018427387904. idiv gives something else.
+    r = big / 2;
+    if r == 4611686018427387904 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 3. unsigned right shift ---------------------------------------------
+    // shr brings zeros in at the top; sar drags the sign bit.
+    r = big >> 1;
+    if r == 4611686018427387904 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 4. unsigned comparison in 32 bits --------------------------------
+    b32 = 2147483648;
+    o32 = 1;
+    if b32 > o32 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 5. unsigned division in 32 bits -----------------------------------
+    r32 = b32 / 2;
+    if r32 == 1073741824 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 6. right shift in 32 bits ----------------------------------------
+    r32 = b32 >> 1;
+    if r32 == 1073741824 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 7. u8 without sign extension -------------------------------------
+    // 200 has the high bit set. With movsx it would come out as -56.
+    s8 = 200;
+    if s8 > 100 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // --- 8. u16 without sign extension ------------------------------------
+    // 40000 has the high bit set. With movsx it would come out as -25536.
+    s16 = 40000;
+    if s16 > 100 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    return 0;
+}

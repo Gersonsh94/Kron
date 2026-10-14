@@ -1,0 +1,17 @@
+kron_program
+kron_domain tr1;
+kron_imports
+kron_definitions
+
+fn main() {
+    var a: i64 = 12345;
+    var b: i64 = a << 13;
+    var c: i64 = b >> 7;
+    var d: i64 = a ^ c;
+    var e: i64 = a & 255;
+    print(b);
+    print(c);
+    print(d);
+    print(e);
+    return 0;
+}

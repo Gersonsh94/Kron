@@ -1,0 +1,244 @@
+kron_program
+kron_domain std_math;
+kron_imports
+kron_definitions
+
+// ============================================================================
+// Kron standard library — floating point math.
+//
+// Written in Kron itself. Uses only what the language provides: real64
+// arithmetic, float comparisons, loops, and functions with float parameters.
+//
+// Language constraints respected here:
+//   - no unary minus on literals (write 0.0 - x)
+//   - at most 6 parameters per function
+//   - no sqrt/sin/cos builtins, so they are computed numerically
+// ============================================================================
+
+// ------------------------------------------------------------- constants ---
+
+fn m_pi() -> real64 {
+    return 3.14159265358979323846;
+}
+
+fn m_tau() -> real64 {
+    return 6.28318530717958647692;
+}
+
+fn m_half_pi() -> real64 {
+    return 1.57079632679489661923;
+}
+
+// ------------------------------------------------------------ basic ops ---
+
+// Absolute value.
+fn fabs(x: real64) -> real64 {
+    if x < 0.0 {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+fn fmin(a: real64, b: real64) -> real64 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn fmax(a: real64, b: real64) -> real64 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn fclamp(x: real64, low: real64, high: real64) -> real64 {
+    if x < low {
+        return low;
+    }
+    if x > high {
+        return high;
+    }
+    return x;
+}
+
+// Sign: -1.0, 0.0 or 1.0
+fn fsign(x: real64) -> real64 {
+    if x > 0.0 {
+        return 1.0;
+    }
+    if x < 0.0 {
+        return 0.0 - 1.0;
+    }
+    return 0.0;
+}
+
+// --------------------------------------------------------------- rounding ---
+
+// Largest integer value not greater than x.
+fn ffloor(x: real64) -> real64 {
+    var t: i64 = trunc(x);
+    var r: real64 = t;
+    if r > x {
+        r = r - 1.0;
+    }
+    return r;
+}
+
+// Smallest integer value not less than x.
+fn fceil(x: real64) -> real64 {
+    var t: i64 = trunc(x);
+    var r: real64 = t;
+    if r < x {
+        r = r + 1.0;
+    }
+    return r;
+}
+
+// Round to nearest, halves away from zero.
+fn fround(x: real64) -> real64 {
+    if x < 0.0 {
+        return 0.0 - ffloor(0.5 - x);
+    }
+    return ffloor(x + 0.5);
+}
+
+// Remainder of x / y, same sign as x.
+fn fmod(x: real64, y: real64) -> real64 {
+    if y == 0.0 {
+        return 0.0;
+    }
+    var q: real64 = x / y;
+    var n: real64 = 0.0;
+    if q < 0.0 {
+        n = fceil(q);
+    }
+    if q >= 0.0 {
+        n = ffloor(q);
+    }
+    return x - n * y;
+}
+
+// ------------------------------------------------------------------ roots ---
+
+// Square root by Newton-Raphson: g <- (g + x/g) / 2
+// Converges quadratically once g is near the root; the halving phase gets
+// there from any positive starting point.
+fn fsqrt(x: real64) -> real64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    // A first guess from the bits: halving the exponent lands within a few
+    // percent of the root, so six Newton steps reach full precision where
+    // forty were needed from x itself.
+    var t: [real64; 1];
+    t[0] = x;
+    raw {
+        var bits: i64 = peek(&t);
+        poke(&t, (bits >> 1) + 2305843009213693952 - 2251799813685248);
+    }
+    var g: real64 = t[0];
+    for var i: i64 = 0; i < 6; i = i + 1 {
+        g = (g + x / g) * 0.5;
+    }
+    return g;
+}
+
+// Length of a 2D vector.
+fn flen2(x: real64, y: real64) -> real64 {
+    return fsqrt(x * x + y * y);
+}
+
+// Length of a 3D vector.
+fn flen3(x: real64, y: real64, z: real64) -> real64 {
+    return fsqrt(x * x + y * y + z * z);
+}
+
+// ------------------------------------------------------------ trigonometry ---
+
+// Reduce an angle to [-PI, PI] so the Taylor series stays accurate.
+fn fwrap_angle(a: real64) -> real64 {
+    var r: real64 = fmod(a, 6.28318530717958647692);
+    if r > 3.14159265358979323846 {
+        r = r - 6.28318530717958647692;
+    }
+    if r < 0.0 - 3.14159265358979323846 {
+        r = r + 6.28318530717958647692;
+    }
+    return r;
+}
+
+// sin(x) = x - x^3/3! + x^5/5! - ... up to x^19/19!
+// Nine terms over the reduced range give about 5e-10 of absolute error.
+fn fsin(a: real64) -> real64 {
+    var x: real64 = fwrap_angle(a);
+    var x2: real64 = x * x;
+    var term: real64 = x;
+    var sum: real64 = x;
+
+    term = 0.0 - term * x2 / 6.0;             // /3!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 20.0;            // *3!/5!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 42.0;            // *5!/7!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 72.0;            // *7!/9!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 110.0;           // *9!/11!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 156.0;           // *11!/13!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 210.0;           // *13!/15!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 272.0;           // *15!/17!
+    sum = sum + term;
+    term = 0.0 - term * x2 / 342.0;           // *17!/19!
+    sum = sum + term;
+    return sum;
+}
+
+fn fcos(a: real64) -> real64 {
+    return fsin(a + 1.57079632679489661923);
+}
+
+fn ftan(a: real64) -> real64 {
+    var c: real64 = fcos(a);
+    if c == 0.0 {
+        return 0.0;
+    }
+    return fsin(a) / c;
+}
+
+// ----------------------------------------------------------------- powers ---
+
+// x raised to a non-negative integer power.
+fn fpowi(x: real64, n: i64) -> real64 {
+    var r: real64 = 1.0;
+    for var i: i64 = 0; i < n; i = i + 1 {
+        r = r * x;
+    }
+    return r;
+}
+
+// ------------------------------------------------------------- conversion ---
+
+fn deg_to_rad(d: real64) -> real64 {
+    return d * 0.01745329251994329577;
+}
+
+fn rad_to_deg(r: real64) -> real64 {
+    return r * 57.29577951308232087680;
+}
+
+// --------------------------------------------------------------- geometry ---
+
+// Linear interpolation: t = 0 gives a, t = 1 gives b.
+fn flerp(a: real64, b: real64, t: real64) -> real64 {
+    return a + (b - a) * t;
+}
+
+// Dot product of two 3D vectors needs 6 parameters, the language maximum.
+fn fdot3(ax: real64, ay: real64, az: real64, bx: real64, by: real64, bz: real64) -> real64 {
+    return ax * bx + ay * by + az * bz;
+}

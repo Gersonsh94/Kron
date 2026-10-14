@@ -1,0 +1,9 @@
+kron_program
+kron_domain bad_pgf;
+kron_imports
+kron_definitions
+
+mmu BadMMU {
+    on_page_fault ( error_code ) {
+    }
+}

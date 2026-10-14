@@ -1,0 +1,341 @@
+kron_program
+kron_domain std_net;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- TCP networking.
+//
+//   net_listen(port)                   a listening socket on every interface
+//   net_listen_on(a, b, c, d, port)    the same, on one address: 127, 0, 0, 1
+//   net_accept(server)                 waits for a client; returns its socket
+//   net_connect(a, b, c, d, port)      a socket connected to a.b.c.d:port
+//   net_send(sock, address, length)    bytes sent
+//   net_recv(sock, address, capacity)  bytes received; 0 when the other side
+//                                      closed the connection
+//   net_close(sock)
+//
+// Every function fails, with a cause and a hint, when the system refuses.
+//
+// One source for both systems. The net_sys_* layer at the top picks its
+// path with target_os(), a constant the compiler fills in:
+//   Windows: ws2_32.dll, loaded the first time it is needed with dll_load and
+//            dll_proc, so nothing is linked in.
+//   Linux:   the kernel's socket calls, through syscall(...). Nothing to load.
+// That layer is raw -- reaching the system is as delicate as memory by
+// address. Buffers are addresses, as in std_str: &buf of an array, or a
+// string literal.
+//
+// On Windows the first net_listen or net_connect loads the library: make one
+// before starting threads that use the network. The globals are shared
+// because threads use the network too; they are written once, by that call.
+// =========================================================================
+
+const NET_AF_INET: i64 = 2;
+const NET_SOCK_STREAM: i64 = 1;
+const NET_IPPROTO_TCP: i64 = 6;
+
+// Linux system call numbers (x86-64) and the two options used here
+const NET_SYS_CLOSE: i64 = 3;
+const NET_SYS_SOCKET: i64 = 41;
+const NET_SYS_CONNECT: i64 = 42;
+const NET_SYS_ACCEPT: i64 = 43;
+const NET_SYS_SENDTO: i64 = 44;
+const NET_SYS_RECVFROM: i64 = 45;
+const NET_SYS_BIND: i64 = 49;
+const NET_SYS_LISTEN: i64 = 50;
+const NET_SYS_SETSOCKOPT: i64 = 54;
+const NET_SOL_SOCKET: i64 = 1;
+const NET_SO_REUSEADDR: i64 = 2;
+const NET_MSG_NOSIGNAL: i64 = 16384;     // a closed peer is an error, not a signal that kills
+
+shared var net_ready: i64;
+shared var net_wsa: [i64; 64];          // WSADATA: 408 bytes
+shared var p_startup: i64;
+shared var p_socket: i64;
+shared var p_bind: i64;
+shared var p_listen: i64;
+shared var p_accept: i64;
+shared var p_connect: i64;
+shared var p_send: i64;
+shared var p_recv: i64;
+shared var p_close: i64;
+
+// Windows returns 32-bit ints in a 64-bit register, the high half undefined:
+// keep the low half, with its sign, so -1 is still -1.
+fn net_int(x: i64) -> i64 {
+    return (x << 32) >> 32;
+}
+
+// Linux returns -errno on failure; the layer below reports every failure
+// as -1, the way Windows does, so the functions above have one test.
+fn net_linux(x: i64) -> i64 {
+    if x < 0 {
+        return -1;
+    }
+    return x;
+}
+
+fn net_is_linux() -> i64 {
+    return target_os() == 2;
+}
+
+// A sockaddr_in in one i64: the family, the port in network byte order, and
+// the IPv4 address a.b.c.d. The second half of the structure is zero. The
+// layout is the same on Windows and Linux.
+fn net_addr(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    var ip: i64 = (a & 255) | ((b & 255) << 8) | ((c & 255) << 16) | ((d & 255) << 24);
+    return NET_AF_INET | (((port >> 8) & 255) << 16) | ((port & 255) << 24) | (ip << 32);
+}
+
+// Starts the network, once. On Windows: loads ws2_32.dll and calls
+// WSAStartup. On Linux there is nothing to start.
+fn net_init() -> i64 {
+    var lib: i64 = 0;
+    var r: i64 = 0;
+    if net_ready != 0 {
+        return 1;
+    }
+    if net_is_linux() {
+        net_ready = 1;
+        return 1;
+    }
+    raw {
+        lib = dll_load("ws2_32.dll");
+    }
+    if lib == 0 {
+        fail "cannot load ws2_32.dll" hint "networking needs Windows sockets";
+    }
+    raw {
+        p_startup = dll_proc(lib, "WSAStartup");
+        p_socket = dll_proc(lib, "socket");
+        p_bind = dll_proc(lib, "bind");
+        p_listen = dll_proc(lib, "listen");
+        p_accept = dll_proc(lib, "accept");
+        p_connect = dll_proc(lib, "connect");
+        p_send = dll_proc(lib, "send");
+        p_recv = dll_proc(lib, "recv");
+        p_close = dll_proc(lib, "closesocket");
+        r = call p_startup(514, &net_wsa);
+    }
+    r = net_int(r);
+    if r != 0 {
+        fail "the network could not start" hint "WSAStartup refused: check that networking is available";
+    }
+    net_ready = 1;
+    return 1;
+}
+
+// ---- the system layer: every function returns -1 when the system refuses
+
+fn net_sys_socket() -> i64 {
+    var s: i64 = 0;
+    if net_is_linux() {
+        raw {
+            s = syscall(NET_SYS_SOCKET, NET_AF_INET, NET_SOCK_STREAM, NET_IPPROTO_TCP);
+        }
+        return net_linux(s);
+    }
+    raw {
+        s = call p_socket(NET_AF_INET, NET_SOCK_STREAM, NET_IPPROTO_TCP);
+    }
+    return s;
+}
+
+// bind; on Linux SO_REUSEADDR first, so a server can be started again on the
+// same port right after it stopped, instead of waiting for TIME_WAIT
+fn net_sys_bind(s: i64, addr: i64) -> i64 {
+    var r: i64 = 0;
+    var one: [i64; 1];
+    one[0] = 1;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_SETSOCKOPT, s, NET_SOL_SOCKET, NET_SO_REUSEADDR, &one, 4);
+            r = syscall(NET_SYS_BIND, s, addr, 16);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_bind(s, addr, 16);
+    }
+    return net_int(r);
+}
+
+fn net_sys_listen(s: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_LISTEN, s, 16);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_listen(s, 16);
+    }
+    return net_int(r);
+}
+
+fn net_sys_accept(s: i64) -> i64 {
+    var c: i64 = 0;
+    if net_is_linux() {
+        raw {
+            c = syscall(NET_SYS_ACCEPT, s, 0, 0);
+        }
+        return net_linux(c);
+    }
+    raw {
+        c = call p_accept(s, 0, 0);
+    }
+    return c;
+}
+
+fn net_sys_connect(s: i64, addr: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_CONNECT, s, addr, 16);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_connect(s, addr, 16);
+    }
+    return net_int(r);
+}
+
+fn net_sys_send(s: i64, address: i64, length: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_SENDTO, s, address, length, NET_MSG_NOSIGNAL, 0, 0);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_send(s, address, length, 0);
+    }
+    return net_int(r);
+}
+
+fn net_sys_recv(s: i64, address: i64, capacity: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_RECVFROM, s, address, capacity, 0, 0, 0);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_recv(s, address, capacity, 0);
+    }
+    return net_int(r);
+}
+
+fn net_sys_close(s: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_CLOSE, s);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_close(s);
+    }
+    return net_int(r);
+}
+
+// ---- the functions programs use
+
+// A listening TCP socket on a.b.c.d:port.
+fn net_listen_on(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    var s: i64 = 0;
+    var r: i64 = 0;
+    var addr: [i64; 2];
+    net_init();
+    if failed() {
+        fail "the network could not start" hint "WSAStartup refused: check that networking is available";
+    }
+    addr[0] = net_addr(a, b, c, d, port);
+    addr[1] = 0;
+    s = net_sys_socket();
+    if s == -1 {
+        fail "no socket available" hint "the system ran out of sockets";
+    }
+    r = net_sys_bind(s, &addr);
+    if r != 0 {
+        r = net_sys_close(s);
+        fail "cannot bind the port" hint "another program may be using it: choose another port";
+    }
+    r = net_sys_listen(s);
+    if r != 0 {
+        r = net_sys_close(s);
+        fail "cannot listen on the port" hint "check the port and the address";
+    }
+    return s;
+}
+
+// A listening TCP socket on every interface of this machine.
+fn net_listen(port: i64) -> i64 {
+    var s: i64 = net_listen_on(0, 0, 0, 0, port);
+    if failed() {
+        fail "cannot listen on the port" hint "another program may be using it: choose another port";
+    }
+    return s;
+}
+
+// Waits for a client on a listening socket; returns the client's socket.
+fn net_accept(server: i64) -> i64 {
+    var c: i64 = net_sys_accept(server);
+    if c == -1 {
+        fail "accept failed" hint "the listening socket may be closed";
+    }
+    return c;
+}
+
+// A TCP socket connected to a.b.c.d:port.
+fn net_connect(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    var s: i64 = 0;
+    var r: i64 = 0;
+    var addr: [i64; 2];
+    net_init();
+    if failed() {
+        fail "the network could not start" hint "WSAStartup refused: check that networking is available";
+    }
+    addr[0] = net_addr(a, b, c, d, port);
+    addr[1] = 0;
+    s = net_sys_socket();
+    if s == -1 {
+        fail "no socket available" hint "the system ran out of sockets";
+    }
+    r = net_sys_connect(s, &addr);
+    if r != 0 {
+        r = net_sys_close(s);
+        fail "cannot connect" hint "check the address and the port, and that the server is listening";
+    }
+    return s;
+}
+
+// Sends `length` bytes starting at `address`. Returns how many were sent.
+fn net_send(sock: i64, address: i64, length: i64) -> i64 {
+    var r: i64 = net_sys_send(sock, address, length);
+    if r < 0 {
+        fail "send failed" hint "the connection may be closed";
+    }
+    return r;
+}
+
+// Receives up to `capacity` bytes into `address`. Returns how many arrived;
+// 0 means the other side closed the connection.
+fn net_recv(sock: i64, address: i64, capacity: i64) -> i64 {
+    var r: i64 = net_sys_recv(sock, address, capacity);
+    if r < 0 {
+        fail "receive failed" hint "the connection may be closed";
+    }
+    return r;
+}
+
+// Closes a socket.
+fn net_close(sock: i64) -> i64 {
+    return net_sys_close(sock);
+}

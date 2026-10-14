@@ -1,0 +1,14 @@
+kron_program
+kron_domain use_mod;
+kron_imports
+acquire_domain "mod_bad.kr";
+kron_definitions
+
+// This file is CORRECT. The error lives inside mod_bad.kr, on its line
+// 15. Before the line map, the diagnostic would have given a number from the
+// expanded text, which matches no real file.
+
+fn main() {
+    print(mod_sum(10));
+    return 0;
+}

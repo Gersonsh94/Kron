@@ -1,0 +1,13 @@
+kron_program
+kron_domain test_global;
+kron_imports
+kron_definitions
+
+// minimal: does a file-scope global get registered?
+var g: [i64; 10];
+
+fn main() {
+    g[0] = 5;
+    print(g[0]);
+    return 0;
+}

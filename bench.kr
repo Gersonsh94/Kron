@@ -1,0 +1,85 @@
+kron_program
+kron_domain bench;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KRON - BENCHMARK
+//
+// The same work twice: fifty million additions in Kron and in a
+// hand-written asm block. The ratio of the two times is the answer.
+//
+// Each loop has its own function. The register allocator leaves any
+// function with inline asm untouched, so if both loops shared one, the
+// Kron loop would not benefit and the measurement would say
+// nothing.
+//
+// The limit is copied to a local variable. Parameters were once kept out
+// of registers -- the prologue stored them as text and the analysis left
+// them out -- and the loop would have read 'n' from memory on every turn.
+//
+// Output: counter frequency, Kron time, asm time, how many times slower
+// Kron is (in percent), and the sum, to confirm both did the same
+// work: 1249999975000000.
+//
+// Before the register allocator the ratio was 389.
+// =========================================================================
+
+fn kron_sum(n: i64) -> i64 {
+    var s: i64;
+    var i: i64;
+    var lim: i64;
+    lim = n;
+    s = 0;
+    i = 0;
+    while i < lim {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn asm_sum() -> i64 {
+    // the hand-written loop: three registers, no memory touched
+    asm {
+        "xor rax, rax"
+        "xor rcx, rcx"
+        "mov rdx, 50000000"
+        ".bloop:"
+        "add rax, rcx"
+        "inc rcx"
+        "cmp rcx, rdx"
+        "jl .bloop"
+    }
+    return 0;
+}
+
+fn main() {
+    var t0: i64;
+    var t1: i64;
+    var t2: i64;
+    var sum_all: i64;
+    var kron_t: i64;
+    var asm_t: i64;
+
+    print(ticks_per_sec());
+
+    t0 = ticks();
+    sum_all = kron_sum(50000000);
+    t1 = ticks();
+    asm_sum();
+    t2 = ticks();
+
+    kron_t = t1 - t0;
+    asm_t = t2 - t1;
+    print(kron_t);
+    print(asm_t);
+    if asm_t > 0 {
+        print((kron_t * 100) / asm_t);
+    } else {
+        print(0);
+    }
+    print(sum_all);
+
+    return 0;
+}

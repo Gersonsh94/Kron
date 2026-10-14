@@ -1,0 +1,60 @@
+kron_program
+kron_domain test_load;
+kron_imports
+kron_definitions
+
+// loadfile(name, buffer, capacity) -> bytes read, or 0 if it cannot be opened.
+// savefile(buffer, length, name) writes; loadfile reads it back.
+//
+// The companion of savefile, which could only write. Without it the language
+// could produce data but never consume it, so there was no way to
+// load a training set or read a configuration file.
+//
+// The test writes five bytes and reads them back, which is the whole round
+// trip. The bytes go in with poke8 on an i64 buffer, as they had to before
+// arrays were packed; test_packed does the same through a [u8; N].
+//
+// This test used to call savefile("hello.bin", &buf[0], 5), the wrong order.
+// On Windows nothing was written and nothing printed, and the empty output
+// was captured as the reference, so the test passed while testing nothing.
+//
+// Expected output:
+//   5     bytes written and read back
+//   72    'H'
+//   111   'o'
+//   108   'l'
+//   97    'a'
+//   33    '!'
+//   0     a file that does not exist returns zero, it does not crash
+
+fn main() {
+    var buf: [i64; 8];
+    var output: [i64; 8];
+    var n: i64;
+
+    raw {
+        var bp: i64 = &buf;
+        var op: i64 = &output;
+
+        poke8(bp + 0, 72);    // H
+        poke8(bp + 1, 111);   // o
+        poke8(bp + 2, 108);   // l
+        poke8(bp + 3, 97);    // a
+        poke8(bp + 4, 33);    // !
+
+        savefile(bp, 5, "hello.bin");
+        n = loadfile("hello.bin", op, 64);
+
+        print(n);                // 5
+        print(peek8(op + 0));    // 72
+        print(peek8(op + 1));    // 111
+        print(peek8(op + 2));    // 108
+        print(peek8(op + 3));    // 97
+        print(peek8(op + 4));    // 33
+
+        // a missing file must not abort
+        n = loadfile("never_exists.bin", op, 64);
+        print(n);                // 0
+    }
+    return 0;
+}

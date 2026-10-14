@@ -1,0 +1,53 @@
+kron_program
+kron_domain test_gmap;
+kron_imports
+kron_definitions
+
+// Does a file-scope real64 global, assigned inside main, read back correctly
+// from another function? scatter.kr depends on exactly this.
+
+var g_lo: real64;
+var g_hi: real64;
+var g_iw: i64;
+
+fn show_lo() -> real64 {
+    return g_lo;
+}
+
+fn show_hi() -> real64 {
+    return g_hi;
+}
+
+fn show_iw() -> i64 {
+    return g_iw;
+}
+
+fn span() -> real64 {
+    return g_hi - g_lo;
+}
+
+// the same shape map_x uses: normalise, scale by an integer global, offset
+fn mapped(v: real64) -> i64 {
+    var s: real64 = g_hi - g_lo;
+    var w: real64 = g_iw;
+    var t: real64 = (v - g_lo) / s;
+    var off: real64 = t * w;
+    return 30 + off;
+}
+
+fn main() {
+    g_lo = 0.5;
+    g_hi = 8.5;
+    g_iw = 195;
+
+    print(show_lo());     // 0.5
+    print(show_hi());     // 8.5
+    print(show_iw());     // 195
+    print(span());        // 8.0
+
+    print(mapped(0.5));   // 30
+    print(mapped(4.5));   // 127
+    print(mapped(8.5));   // 225
+
+    return 0;
+}

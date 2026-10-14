@@ -1,0 +1,37 @@
+kron_program
+kron_domain test_struct;
+kron_imports
+kron_definitions
+
+struct Vec3 {
+    x: real64;
+    y: real64;
+    z: real64;
+}
+
+fn main() {
+    var v: Vec3;
+    v.x = 1.0;
+    v.y = 2.0;
+    v.z = 3.0;
+
+    // read the fields back
+    print(v.x);      // 1.0
+    print(v.y);      // 2.0
+    print(v.z);      // 3.0
+
+    // dot product v.v (squared magnitude) = 1+4+9 = 14
+    var magsq: real64 = v.x * v.x + v.y * v.y + v.z * v.z;
+    print(magsq);    // 14.0
+
+    // second vector and dot product
+    var w: Vec3;
+    w.x = 4.0;
+    w.y = 5.0;
+    w.z = 6.0;
+
+    var dot: real64 = v.x * w.x + v.y * w.y + v.z * w.z;
+    print(dot);      // 32.0
+
+    return 0;
+}

@@ -1,0 +1,92 @@
+kron_program
+kron_domain test_collections;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: list<T> and map<T>
+//
+// l[i] and m[k] read and write; print shows the whole collection; a list or
+// map declared without a value starts empty, and [a, b] makes a list.
+// for x in l walks a list; continue moves on to the next element.
+// =========================================================================
+
+var log: list<text>;
+
+fn note(what: text) -> i64 {
+    list_add(log, what);
+    return list_len(log);
+}
+
+fn sum(xs: list<i64>) -> i64 {
+    var s: i64 = 0;
+    for x in xs {
+        s = s + x;
+    }
+    return s;
+}
+
+fn main() {
+    var nums: list<i64> = [3, 1, 2];
+    print(nums);                               // [3, 1, 2]
+    nums[0] = 7;
+    print(nums[0] + nums[1]);                  // 8
+    list_add(nums, 10);
+    print(nums);                               // [7, 1, 2, 10]
+    print(sum(nums));                          // 20
+    list_sort(nums);
+    print(nums);                               // [1, 2, 7, 10]
+    print(nums[9]);                            // 0, out of range
+    print(failed());                           // 1
+
+    var names: list<text>;
+    list_add(names, "ana");
+    list_add(names, text("bob"));
+    list_add(names, "eva");
+    print(names);                              // ["ana", "bob", "eva"]
+    for n in names {
+        if n == "bob" {
+            continue;
+        }
+        print(n + "!");
+    }
+
+    var xs: list<f64> = [1.5, 2.25];
+    list_add_real(xs, 0.25);
+    print(xs);                                 // [1.5, 2.25, 0.25]
+    var total: f64 = 0.0;
+    for x in xs {
+        total = total + x;
+    }
+    print(total);                              // 4.000000
+    xs[2] = 10.0;
+    print(xs[2] + 1.0);                        // 11.000000
+
+    var ages: map<i64>;
+    ages["ana"] = 31;
+    ages["bob"] = 40;
+    ages["ana"] = 32;
+    print(ages["ana"]);                        // 32
+    print(ages);                               // {"ana": 32, "bob": 40}
+    print(map_len(ages));                      // 2
+    print(ages["zed"]);                        // 0, not there
+    print(failed());                           // 1
+
+    var heights: map<f64>;
+    heights["ana"] = 1.62;
+    print(heights);                            // {"ana": 1.62}
+    var who: map<text>;
+    who["boss"] = "eva";
+    print(who["boss"]);                        // eva
+    print(who);                                // {"boss": "eva"}
+
+    note("one");
+    print(note("two"));                        // 2
+    print(log);                                // ["one", "two"]
+    var keys = map_keys(ages);
+    for k in keys {
+        print(k);
+    }
+    return 0;
+}

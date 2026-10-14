@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_hint;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE, to see the hint.
+//
+// 'total' is declared; line 15 writes 'totl'. The compiler should
+// point at the position AND suggest the right name, because they are a
+// single edit apart.
+
+fn main() {
+    var total: i64;
+    total = 10;
+    print(totl);
+    return 0;
+}

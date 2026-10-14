@@ -1,0 +1,68 @@
+kron_program
+kron_domain test_sparam;
+kron_imports
+kron_definitions
+
+// A struct passed as a parameter, reading fields that are NOT the first one.
+//
+// The parser used to discard the type token of a parameter, so codegen never
+// learned that 'p' had a struct type. Every 'p.y' and 'p.z' resolved to the
+// base slot with no field offset -- that is, to p.x -- and the program
+// compiled without a word of complaint.
+//
+// Expected output:
+//   1.0
+//   2.0
+//   3.0
+//   14.0
+//   32.0
+
+struct Vec3 {
+    x: real64;
+    y: real64;
+    z: real64;
+}
+
+fn get_x(p: Vec3) -> real64 {
+    return p.x;
+}
+
+fn get_y(p: Vec3) -> real64 {
+    return p.y;
+}
+
+fn get_z(p: Vec3) -> real64 {
+    return p.z;
+}
+
+// squared magnitude: exercises all three fields of one parameter
+fn length2(p: Vec3) -> real64 {
+    return p.x * p.x + p.y * p.y + p.z * p.z;
+}
+
+// two struct parameters at once: the second must not read the first
+fn dot(a: Vec3, b: Vec3) -> real64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn main() {
+    var v: Vec3;
+    v.x = 1.0;
+    v.y = 2.0;
+    v.z = 3.0;
+
+    print(get_x(v));     // 1.0
+    print(get_y(v));     // 2.0   -- reads p.x while the bug is present
+    print(get_z(v));     // 3.0   -- reads p.x while the bug is present
+
+    print(length2(v));   // 14.0  -- comes out 3.0 while the bug is present
+
+    var w: Vec3;
+    w.x = 4.0;
+    w.y = 5.0;
+    w.z = 6.0;
+
+    print(dot(v, w));    // 32.0
+
+    return 0;
+}

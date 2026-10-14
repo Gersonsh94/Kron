@@ -1,0 +1,9 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...te3.kr:7:23: expected ';', found an identifier
+    var a: real64 = 1.0e308;
+                      ^^^^

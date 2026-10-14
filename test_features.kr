@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_features;
+kron_imports
+kron_definitions
+
+fn main() {
+    var sum_all: int32 = 0;
+    for var i: int32 = 0; i < 10; i = i + 1 {
+        sum_all = sum_all + i;
+    }
+    print(sum_all);        // 45
+
+    print(17 % 5);      // 2
+    print(1 << 4);      // 16
+    print(256 >> 2);    // 64
+
+    var a: int32 = 5;
+    if a <= 5 { print(100); }   // 100
+    if a >= 5 { print(200); }   // 200
+
+    return 0;
+}

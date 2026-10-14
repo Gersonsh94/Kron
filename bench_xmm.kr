@@ -1,0 +1,44 @@
+kron_program
+kron_domain bench_xmm;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KRON - BENCHMARK: many reals at once
+//
+// A particle under a spring with drag, integrated ten million times. Nine
+// reals stay live through the loop: with xmm6..xmm15 for locals they all
+// live in registers, where with two the rest went to memory every step.
+// =========================================================================
+
+fn simulate(steps: i64) -> f64 {
+    var x: f64 = 1.0;
+    var y: f64 = 0.0;
+    var z: f64 = 0.5;
+    var vx: f64 = 0.0;
+    var vy: f64 = 1.0;
+    var vz: f64 = 0.0;
+    var k: f64 = 0.001;
+    var drag: f64 = 0.9999;
+    var dt: f64 = 0.01;
+    var i: i64 = 0;
+    while i < steps {
+        vx = (vx - k * x) * drag;
+        vy = (vy - k * y) * drag;
+        vz = (vz - k * z) * drag;
+        x = x + vx * dt;
+        y = y + vy * dt;
+        z = z + vz * dt;
+        i = i + 1;
+    }
+    return x + y + z;
+}
+
+fn main() {
+    var t0: i64 = ticks();
+    var r: f64 = simulate(10000000);
+    var t1: i64 = ticks();
+    print(r);
+    print((t1 - t0) * 1000 / ticks_per_sec());
+    return 0;
+}

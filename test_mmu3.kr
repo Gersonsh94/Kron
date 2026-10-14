@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_mmu3;
+kron_imports
+kron_definitions
+
+mmu KernelMMU {
+    page_table_hierarchy {
+        level 4 entries 512 ;
+    }
+    cache_policy {
+        range 0xFFFF800000000000 policy write_back ;
+    }
+    on_page_fault ( error_code ec ) {
+        var addr: int64 = ec;
+        addr += 4096;
+    }
+    on_out_of_memory_pressure {
+        var freed: int64 = 0;
+        freed = freed + 1;
+    }
+    garbage_collection_policy = mark_sweep_deferred ;
+}

@@ -1,0 +1,2 @@
+NO ENSAMBLA  test_boot2.asm:532:  mov cr4, rax
+NO ENSAMBLA  test_slit.asm:554:  mov qword [rbp-56], 10

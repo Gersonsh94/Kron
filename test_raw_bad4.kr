@@ -1,0 +1,20 @@
+kron_program
+kron_domain test_raw_bad4;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: *p outside raw
+//
+// Dereferencing reads memory by address, just like peek: it has to go
+// inside raw { }. Pointer arithmetic does not, because it only computes a
+// number. It has to be rejected, pointing at the '*'.
+// =========================================================================
+
+fn main() {
+    var x: i64 = 5;
+    var p: i64 = &x;
+    var v: i64 = *p;
+    print(v);
+    return 0;
+}

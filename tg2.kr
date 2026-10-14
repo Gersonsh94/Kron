@@ -1,0 +1,15 @@
+kron_program
+kron_domain tg2;
+kron_imports
+kron_definitions
+
+var a: real64 = 7.25;
+var b: real64;
+fn get_a() -> real64 { return a; }
+fn main() {
+    print(a);
+    print(get_a());
+    b = 3.5;
+    print(b);
+    return 0;
+}

@@ -1,0 +1,46 @@
+kron_program
+kron_domain test_bounds3;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: arrays passed as parameters
+//
+// Inside a function, every index is checked against the size its
+// parameter DECLARES. For that to be safe, the compiler refuses to pass a
+// smaller array (test_arrsz_bad checks that); an equal or larger one is fine.
+//
+// It also checks that forwarding an array parameter to another function works:
+// it used to pass the address of the slot that holds the pointer, not of the
+// array, and the receiving function read garbage.
+//
+// Expected output: 4, 0, 0, 1, 33.
+// =========================================================================
+
+fn last(v: [i64; 4], i: i64) -> i64 {
+    return v[i];
+}
+
+fn forward(v: [i64; 4], i: i64) -> i64 {
+    return last(v, i);
+}
+
+fn main() {
+    var a: [i64; 4];
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    a[3] = 4;
+
+    print(forward(a, 3));      // 4    forwarded two levels, arrives intact
+    print(failed());            // 0
+
+    print(forward(a, 4));      // 0    outside the parameter: fail inside
+    print(failed());            // 1
+
+    var b: [i64; 8];
+    b[3] = 33;
+    print(last(b, 3));        // 33   an array larger than the parameter is fine
+
+    return 0;
+}

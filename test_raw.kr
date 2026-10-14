@@ -1,0 +1,37 @@
+kron_program
+kron_domain test_raw;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: raw blocks
+//
+// peek and poke inside raw { }: no error. Checks that a variable
+// declared inside raw gets its slot on the stack, that raw can be nested,
+// and that the code carries on normally after the block.
+//
+// It has to compile, and the expected output is:
+// 65, 66, 131.
+// =========================================================================
+
+var buf: [i64; 4];
+
+fn main() {
+    var p: i64 = &buf;
+    raw {
+        poke8(p, 65);
+        poke8(p + 1, 66);
+        var c: i64 = peek8(p);
+        print(c);                        // 65
+        raw {
+            var d: i64 = peek8(p + 1);
+            print(d);                    // 66
+        }
+    }
+    var total: i64 = 0;
+    raw {
+        total = peek8(p) + peek8(p + 1);
+    }
+    print(total);                        // 131
+    return 0;
+}

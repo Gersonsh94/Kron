@@ -1,0 +1,268 @@
+Comparing files TESTS\DIFFGEN\cube3d.good.asm and TESTS\DIFFGEN\CUBE3D.BAD.ASM
+***** TESTS\DIFFGEN\cube3d.good.asm
+    ret
+m_pi:
+    push rbp
+***** TESTS\DIFFGEN\CUBE3D.BAD.ASM
+    ret
+section .data
+__mod_0_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+section .data
+__mod_1_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+section .bss
+__g_buf: resq 3757
+section .text
+section .bss
+__g_zb: resq 10000
+section .text
+section .bss
+__g_vx: resq 8
+section .text
+section .bss
+__g_vy: resq 8
+section .text
+section .bss
+__g_vz: resq 8
+section .text
+section .bss
+__g_sx: resq 8
+section .text
+section .bss
+__g_sy: resq 8
+section .text
+section .bss
+__g_sz: resq 8
+section .text
+section .bss
+__g_t0: resq 12
+section .text
+section .bss
+__g_t1: resq 12
+section .text
+section .bss
+__g_t2: resq 12
+section .text
+section .bss
+__g_tr: resq 12
+section .text
+section .bss
+__g_tg: resq 12
+section .text
+section .bss
+__g_tb: resq 12
+section .text
+write_bmp_header:
+    push rbp
+*****
+
+Resync Failed.  Files are too different.
+***** TESTS\DIFFGEN\cube3d.good.asm
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt1: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt1]
+    jmp .__ret_0
+.__ret_0:
+    mov rsp, rbp
+    pop rbp
+    ret
+m_tau:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt3: dq 6.28318530717958647692
+section .text
+    movsd xmm0, [rel .flt3]
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+    pop rbp
+    ret
+m_half_pi:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt5: dq 1.57079632679489661923
+section .text
+    movsd xmm0, [rel .flt5]
+    jmp .__ret_4
+.__ret_4:
+    mov rsp, rbp
+    pop rbp
+    ret
+fabs:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt9: dq 0.0
+section .text
+    movsd xmm0, [rel .flt9]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L7
+section .data
+.flt10: dq 0.0
+section .text
+    movsd xmm0, [rel .flt10]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_6
+    jmp .L8
+.L7:
+.L8:
+    movsd xmm0, [rbp-8]
+    jmp .__ret_6
+.__ret_6:
+    mov rsp, rbp
+    pop rbp
+    ret
+fmin:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L12
+    movsd xmm0, [rbp-8]
+    jmp .__ret_11
+    jmp .L13
+.L12:
+***** TESTS\DIFFGEN\CUBE3D.BAD.ASM
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 66
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 77
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 2
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 30054
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 6
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 10
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 54
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 14
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 40
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 18
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 100
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 22
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 100
+    mov rcx, rax
+    pop rdx
+    mov [rdx], ecx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 26
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 1
+    mov rcx, rax
+*****
+

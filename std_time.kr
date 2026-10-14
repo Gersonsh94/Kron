@@ -1,0 +1,410 @@
+kron_program
+kron_domain std_time;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- dates and time.
+//
+//     var now: i64 = time_local(time_now());
+//     say(time_text(now));                     // 2026-10-12 09:41:07
+//     print(time_year(now));
+//
+//   time_now()                     seconds since 1970-01-01 00:00 UTC
+//   time_ms()                      the same in milliseconds
+//   time_clock()                   milliseconds from a fixed point, for
+//                                  measuring how long something takes; it
+//                                  never goes back when the clock is set
+//   time_sleep(ms)                 wait
+//   time_local(t)                  t moved to the computer's time zone, so
+//                                  the functions below show local time
+//   time_offset(t)                 seconds the time zone is ahead of UTC
+//   time_year(t)  time_month(t)  time_day(t)
+//   time_hour(t)  time_minute(t)  time_second(t)
+//   time_weekday(t)                0 Sunday .. 6 Saturday
+//   time_yearday(t)                1 .. 366
+//   time_make(year, month, day, hour, minute, second)   back to seconds
+//   time_text(t)                   "YYYY-MM-DD HH:MM:SS", a new text
+//   time_date_text(t)              "YYYY-MM-DD", a new text
+//
+// Seconds count from 1970 in UTC; time_local only adds the zone's offset,
+// so the parts of time_local(t) are the local date and hour. On Linux the
+// zone is read from /etc/localtime.
+// =========================================================================
+
+shared var tm_ready: i64;
+shared var tm_sysft: i64;            // Windows: GetSystemTimeAsFileTime
+shared var tm_sleepf: i64;
+shared var tm_tzf: i64;
+shared var tm_word: [i64; 2];
+shared var tm_tz: [i64; 22];         // TIME_ZONE_INFORMATION: 172 bytes
+shared var tm_zone: i64;             // Linux: /etc/localtime, read once
+shared var tm_zone_n: i64;
+shared var tm_zone_tried: i64;
+shared var tm_ignore: i64;
+
+fn tm_linux() -> i64 {
+    return target_os() == 2;
+}
+
+fn tm_load() -> i64 {
+    if tm_ready {
+        return 1;
+    }
+    raw {
+        var k: i64 = dll_load("kernel32.dll");
+        tm_sysft = dll_proc(k, "GetSystemTimeAsFileTime");
+        tm_sleepf = dll_proc(k, "Sleep");
+        tm_tzf = dll_proc(k, "GetTimeZoneInformation");
+    }
+    tm_ready = 1;
+    return 1;
+}
+
+// 100-nanosecond steps since 1970 on Windows; nanoseconds on Linux
+fn time_ms() -> i64 {
+    var ms: i64 = 0;
+    raw {
+        if tm_linux() {
+            var ts: [i64; 2];
+            tm_ignore = syscall(228, 0, &ts);
+            ms = ts[0] * 1000 + ts[1] / 1000000;
+        } else {
+            tm_load();
+            tm_ignore = call tm_sysft(&tm_word);
+            ms = (peek(&tm_word) - 116444736000000000) / 10000;
+        }
+    }
+    return ms;
+}
+
+fn time_now() -> i64 {
+    var ms: i64 = time_ms();
+    if ms < 0 {
+        return (ms - 999) / 1000;
+    }
+    return ms / 1000;
+}
+
+fn time_clock() -> i64 {
+    var t: i64 = ticks();
+    var per: i64 = ticks_per_sec();
+    if per >= 1000 {
+        return t / (per / 1000);
+    }
+    return t * 1000 / per;
+}
+
+fn time_sleep(ms: i64) -> i64 {
+    if ms <= 0 {
+        return 0;
+    }
+    raw {
+        if tm_linux() {
+            var ts: [i64; 2];
+            ts[0] = ms / 1000;
+            ts[1] = (ms % 1000) * 1000000;
+            tm_ignore = syscall(35, &ts, 0);
+        } else {
+            tm_load();
+            tm_ignore = call tm_sleepf(ms);
+        }
+    }
+    return ms;
+}
+
+// ------------------------------------------------------- the calendar ---
+// Days and dates by Howard Hinnant's algorithms: exact for every year,
+// negative ones included.
+
+fn tm_floor_div(a: i64, b: i64) -> i64 {
+    var q: i64 = a / b;
+    if (a % b) != 0 {
+        if (a < 0) != (b < 0) {
+            q = q - 1;
+        }
+    }
+    return q;
+}
+
+fn tm_days(t: i64) -> i64 {
+    return tm_floor_div(t, 86400);
+}
+
+// year, month and day of a day count, into tm_ymd
+shared var tm_ymd: [i64; 3];
+
+fn tm_civil(days: i64) -> i64 {
+    var z: i64 = days + 719468;
+    var era: i64 = tm_floor_div(z, 146097);
+    var doe: i64 = z - era * 146097;
+    var yoe: i64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    var y: i64 = yoe + era * 400;
+    var doy: i64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    var mp: i64 = (5 * doy + 2) / 153;
+    var d: i64 = doy - (153 * mp + 2) / 5 + 1;
+    var m: i64 = mp + 3;
+    if mp >= 10 {
+        m = mp - 9;
+    }
+    if m <= 2 {
+        y = y + 1;
+    }
+    tm_ymd[0] = y;
+    tm_ymd[1] = m;
+    tm_ymd[2] = d;
+    return y;
+}
+
+fn tm_days_from(y0: i64, m: i64, d: i64) -> i64 {
+    var y: i64 = y0;
+    if m <= 2 {
+        y = y - 1;
+    }
+    var era: i64 = tm_floor_div(y, 400);
+    var yoe: i64 = y - era * 400;
+    var mm: i64 = m - 3;
+    if m <= 2 {
+        mm = m + 9;
+    }
+    var doy: i64 = (153 * mm + 2) / 5 + d - 1;
+    var doe: i64 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn time_year(t: i64) -> i64 {
+    return tm_civil(tm_days(t));
+}
+
+fn time_month(t: i64) -> i64 {
+    tm_civil(tm_days(t));
+    return tm_ymd[1];
+}
+
+fn time_day(t: i64) -> i64 {
+    tm_civil(tm_days(t));
+    return tm_ymd[2];
+}
+
+fn time_hour(t: i64) -> i64 {
+    return (t - tm_days(t) * 86400) / 3600;
+}
+
+fn time_minute(t: i64) -> i64 {
+    return ((t - tm_days(t) * 86400) / 60) % 60;
+}
+
+fn time_second(t: i64) -> i64 {
+    return (t - tm_days(t) * 86400) % 60;
+}
+
+fn time_weekday(t: i64) -> i64 {
+    // 1970-01-01 was a Thursday
+    var w: i64 = (tm_days(t) + 4) % 7;
+    if w < 0 {
+        w = w + 7;
+    }
+    return w;
+}
+
+fn time_yearday(t: i64) -> i64 {
+    var days: i64 = tm_days(t);
+    var y: i64 = tm_civil(days);
+    return days - tm_days_from(y, 1, 1) + 1;
+}
+
+fn time_make(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    return tm_days_from(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+// ------------------------------------------------------- time zones ---
+
+// a big-endian number of n bytes at p, signed
+fn tm_be(p: i64, n: i64) -> i64 {
+    var v: i64 = 0;
+    raw {
+        var i: i64 = 0;
+        while i < n {
+            v = (v << 8) | peek8(p + i);
+            i = i + 1;
+        }
+    }
+    if n == 4 {
+        v = (v << 32) >> 32;
+    }
+    return v;
+}
+
+// Linux: the offset in /etc/localtime (TZif) for the moment t
+fn tm_zone_offset(t: i64) -> i64 {
+    if tm_zone_tried == 0 {
+        tm_zone_tried = 1;
+        lock_take(HP_LOCK);
+        var h: i64 = fl_zone_read();
+        tm_ignore = hp_take_err();
+        if h != 0 {
+            var q: i64 = ob_get(h, OB_TEXT);
+            raw { tm_zone_n = peek(q); }
+            tm_zone = q + 8;
+        }
+        lock_give(HP_LOCK);
+    }
+    var p: i64 = tm_zone;
+    var n: i64 = tm_zone_n;
+    if p == 0 || n < 44 {
+        return 0;
+    }
+    var ver: i64 = 0;
+    raw { ver = peek8(p + 4); }
+    var size: i64 = 4;
+    // past the first block when there is a second one with 64-bit times
+    if ver >= 50 {
+        var timecnt: i64 = tm_be(p + 32, 4);
+        var typecnt: i64 = tm_be(p + 36, 4);
+        var charcnt: i64 = tm_be(p + 40, 4);
+        var leapcnt: i64 = tm_be(p + 28, 4);
+        var isstd: i64 = tm_be(p + 24, 4);
+        var isut: i64 = tm_be(p + 20, 4);
+        var skip: i64 = 44 + timecnt * 5 + typecnt * 6 + charcnt + leapcnt * 8 + isstd + isut;
+        if skip + 44 <= n {
+            p = p + skip;
+            n = n - skip;
+            size = 8;
+        }
+    }
+    var tc: i64 = tm_be(p + 32, 4);
+    var ty: i64 = tm_be(p + 36, 4);
+    var times: i64 = p + 44;
+    var idx: i64 = times + tc * size;
+    var info: i64 = idx + tc;
+    if info + ty * 6 > p + n || ty == 0 {
+        return 0;
+    }
+    var k: i64 = -1;
+    var i: i64 = 0;
+    while i < tc {
+        if tm_be(times + i * size, size) <= t {
+            k = i;
+        } else {
+            i = tc;
+        }
+        i = i + 1;
+    }
+    var kind: i64 = 0;
+    if k >= 0 {
+        raw { kind = peek8(idx + k); }
+    }
+    if kind >= ty {
+        return 0;
+    }
+    return tm_be(info + kind * 6, 4);
+}
+
+fn fl_zone_read() -> i64 {
+    var fd: i64 = -1;
+    raw { fd = syscall(2, "/etc/localtime", 0, 0); }
+    if fd < 0 {
+        return 0;
+    }
+    var h: i64 = tx_new(4096);
+    var got: i64 = 0;
+    var going: i64 = 1;
+    while going && h != 0 {
+        var q: i64 = tx_room(h, got + 4096);
+        if q == 0 {
+            going = 0;
+        } else {
+            var r: i64 = 0;
+            raw { r = syscall(0, fd, q + 8 + got, 4096); }
+            if r <= 0 {
+                going = 0;
+            } else {
+                got = got + r;
+                raw { poke(q, got); }
+            }
+        }
+    }
+    raw { tm_ignore = syscall(3, fd); }
+    return h;
+}
+
+fn time_offset(t: i64) -> i64 {
+    if tm_linux() {
+        return tm_zone_offset(t);
+    }
+    tm_load();
+    var state: i64 = 0;
+    raw {
+        state = call tm_tzf(&tm_tz);
+        state = state & 4294967295;
+    }
+    var bias: i64 = 0;
+    raw {
+        var b: i64 = &tm_tz;
+        bias = peek32(b);
+        if state == 2 {
+            bias = bias + peek32(b + 168);
+        } else {
+            bias = bias + peek32(b + 84);
+        }
+    }
+    bias = (bias << 32) >> 32;
+    return 0 - bias * 60;
+}
+
+fn time_local(t: i64) -> i64 {
+    return t + time_offset(t);
+}
+
+// --------------------------------------------------------------- text ---
+
+fn tm_two(h: i64, v: i64) -> i64 {
+    if v < 10 {
+        tx_add_bytes(h, "0", 1);
+    }
+    return tx_add_int(h, v);
+}
+
+fn tm_date_into(h: i64, t: i64) -> i64 {
+    tm_civil(tm_days(t));
+    var y: i64 = tm_ymd[0];
+    if y >= 0 && y < 1000 {
+        tx_add_bytes(h, "0", 1);
+        if y < 100 {
+            tx_add_bytes(h, "0", 1);
+        }
+        if y < 10 {
+            tx_add_bytes(h, "0", 1);
+        }
+    }
+    tx_add_int(h, y);
+    tx_add_bytes(h, "-", 1);
+    tm_two(h, tm_ymd[1]);
+    tx_add_bytes(h, "-", 1);
+    return tm_two(h, tm_ymd[2]);
+}
+
+fn time_text(t: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(20);
+    if h != 0 {
+        tm_date_into(h, t);
+        tx_add_bytes(h, " ", 1);
+        tm_two(h, time_hour(t));
+        tx_add_bytes(h, ":", 1);
+        tm_two(h, time_minute(t));
+        tx_add_bytes(h, ":", 1);
+        tm_two(h, time_second(t));
+    }
+    return text_end(h);
+}
+
+fn time_date_text(t: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(12);
+    if h != 0 {
+        tm_date_into(h, t);
+    }
+    return text_end(h);
+}

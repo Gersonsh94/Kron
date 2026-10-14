@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_rawtypes;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var a: register8 = 200;
+    var b: register32 = 70000;
+    var p: physical_ptr = 4096;
+    print(a);
+    print(b);
+    print(p);
+    return 0;
+}

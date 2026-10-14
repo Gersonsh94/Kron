@@ -1,0 +1,12 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+mod_bad.kr:15:12: undeclared name 'accumlated'
+    return accumlated;
+           ^^^^^^^^^^
+  hint: did you mean 'accumulated'?

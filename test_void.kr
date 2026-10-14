@@ -1,0 +1,34 @@
+kron_program
+kron_domain test_void;
+kron_imports
+kron_definitions
+
+// Checks that the new canonical spellings -- 'void' and 'stream' -- reach
+// the same token as 'void' and 'utf8_stream'.
+//
+// 'ptr<void>' is left out ON PURPOSE: par_type_width gives it no width,
+// so parse_type rejects it. The same happens to 'ptr<void>' and it
+// predates these aliases. Still to decide whether it is rejected with a
+// clear message or accepted with width 1.
+//
+// Expected output:
+//   7
+//   9
+
+fn take_ptr(p: ptr<u8>) -> i64 {
+    return 7;
+}
+
+fn main() {
+    var s: stream;
+    var q: ptr<u8>;
+    var n: i64;
+
+    n = take_ptr(q);
+    print(n);           // 7
+
+    n = 9;
+    print(n);           // 9
+
+    return 0;
+}

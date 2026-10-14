@@ -1,0 +1,272 @@
+kron_program
+kron_domain calculator;
+kron_imports
+acquire_domain "std_ui.kr";
+kron_definitions
+
+// A calculator: buttons and the keyboard (digits, + - * / . enter, escape).
+// Windows:  kronc calculator.kr --window      Linux / WSL:  kronc calculator.kr --target=linux
+
+var entry: [i64; 4];         // what is being typed, up to 16 characters
+var shown: [i64; 4];         // what the display shows
+var acc: f64;                // the result so far
+var op: i64;                 // the pending operation: '+' '-' '*' '/' or 0
+var fresh: i64;              // the next digit starts a new number
+var error: i64;
+
+fn entry_len() -> i64 {
+    var n: i64 = 0;
+    raw {
+        while peek8(&entry + n) != 0 {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn clear_entry() -> i64 {
+    raw { poke8(&entry, 0); }
+    return 0;
+}
+
+fn type_char(c: i64) -> i64 {
+    if fresh {
+        clear_entry();
+        fresh = 0;
+    }
+    var n: i64 = entry_len();
+    if n >= 15 { return 0; }
+    if c == 46 {
+        // one point only
+        var i: i64 = 0;
+        while i < n {
+            var d: i64 = 0;
+            raw { d = peek8(&entry + i); }
+            if d == 46 { return 0; }
+            i = i + 1;
+        }
+    }
+    raw {
+        poke8(&entry + n, c);
+        poke8(&entry + n + 1, 0);
+    }
+    return 1;
+}
+
+// the entry as a real: digits, at most one point
+fn entry_value() -> f64 {
+    var v: f64 = 0.0;
+    var scale: f64 = 1.0;
+    var after: i64 = 0;
+    var i: i64 = 0;
+    var n: i64 = entry_len();
+    while i < n {
+        var c: i64 = 0;
+        raw { c = peek8(&entry + i); }
+        if c == 46 {
+            after = 1;
+        } else {
+            var digit: f64 = (c - 48) as f64;
+            if after {
+                scale = scale / 10.0;
+                v = v + digit * scale;
+            } else {
+                v = v * 10.0 + digit;
+            }
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn apply() -> i64 {
+    var b: f64 = entry_value_signed();
+    if op == 0 {
+        acc = b;
+    } else if op == 43 {
+        acc = acc + b;
+    } else if op == 45 {
+        acc = acc - b;
+    } else if op == 42 {
+        acc = acc * b;
+    } else if op == 47 {
+        if b == 0.0 {
+            error = 1;
+        } else {
+            acc = acc / b;
+        }
+    }
+    ui_real_text(&entry, acc, 8);
+    fresh = 1;
+    return 0;
+}
+
+fn operation(c: i64) -> i64 {
+    if fresh == 0 {
+        apply();
+    }
+    op = c;
+    fresh = 1;
+    return 0;
+}
+
+fn equals() -> i64 {
+    apply();
+    op = 0;
+    return 0;
+}
+
+fn reset() -> i64 {
+    clear_entry();
+    acc = 0.0;
+    op = 0;
+    fresh = 0;
+    error = 0;
+    return 0;
+}
+
+// one key of the grid: a button and the character that also presses it
+fn key(x: i64, y: i64, label: i64, c: i64, kind: i64) -> i64 {
+    var fill: i64 = 0x2A2E39;               // digits
+    var fg: i64 = 0xF2F3F7;
+    if kind == 1 {
+        fill = 0x3A3F4E;                    // clear and the like
+    }
+    if kind == 2 {
+        fill = 0x5B5BD6;                    // operations
+    }
+    if kind == 3 {
+        fill = 0xF59E0B;                    // equals
+        fg = 0x1A1206;
+    }
+    var hit: i64 = ui_button_color(x, y, 64, 56, label, fill, fg);
+    if ui_typed(c) { hit = 1; }
+    if hit == 0 { return 0; }
+    if error { reset(); }
+    if c >= 48 {
+        if c <= 57 { type_char(c); }
+    }
+    if c == 46 { type_char(c); }
+    if c == 43 { operation(c); }
+    if c == 45 { operation(c); }
+    if c == 42 { operation(c); }
+    if c == 47 { operation(c); }
+    if c == 61 { equals(); }
+    if c == 126 {
+        // change the sign of what is shown
+        ui_real_text(&entry, 0.0 - entry_value_signed(), 8);
+    }
+    if c == 37 {
+        ui_real_text(&entry, entry_value_signed() / 100.0, 8);
+    }
+    return 1;
+}
+
+// the entry with its sign: results can be negative
+fn entry_value_signed() -> f64 {
+    var c: i64 = 0;
+    raw { c = peek8(&entry); }
+    if c == 45 {
+        raw {
+            var i: i64 = 0;
+            while peek8(&entry + i + 1) != 0 {
+                poke8(&entry + i, peek8(&entry + i + 1));
+                i = i + 1;
+            }
+            poke8(&entry + i, 0);
+        }
+        var v: f64 = entry_value();
+        return 0.0 - v;
+    }
+    return entry_value();
+}
+
+fn main() {
+    if window_open(320, 520, "Kron - calculator") == 0 {
+        print_fail();
+        return 1;
+    }
+    ui_dark(1);
+    reset();
+    while window_show() {
+        ui_begin();
+        // the display: the pending operation small, the number large
+        raw {
+            var src: i64 = &entry;
+            if error {
+                src = "Error";
+            } else if entry_len() == 0 {
+                src = "0";
+            }
+            var i: i64 = 0;
+            while peek8(src + i) != 0 {
+                poke8(&shown + i, peek8(src + i));
+                i = i + 1;
+            }
+            poke8(&shown + i, 0);
+        }
+        var w: i64 = ui_font_width(2, &shown);
+        ui_text_big(296 - w, 96, &shown, 0xFFFFFF, 2);
+        if op != 0 {
+            // what is pending, small, above: "1234 ×"
+            var n: i64 = ui_real_text(&shown, acc, 8);
+            raw {
+                var o: i64 = &shown;
+                poke8(o + n, 32);
+                var sym: i64 = "+";
+                if op == 45 { sym = "-"; }
+                if op == 42 { sym = "×"; }
+                if op == 47 { sym = "÷"; }
+                var i: i64 = 0;
+                while peek8(sym + i) != 0 {
+                    poke8(o + n + 1 + i, peek8(sym + i));
+                    i = i + 1;
+                }
+                poke8(o + n + 1 + i, 0);
+            }
+            var ow: i64 = ui_font_width(1, &shown);
+            ui_font_text(296 - ow, 60, 1, &shown, 0x9AA1B2);
+        }
+        // the keys
+        if key(16, 168, "AC", 99, 1) { reset(); }
+        if ui_typed(67) { reset(); }
+        key(88, 168, "±", 126, 1);
+        key(160, 168, "%", 37, 1);
+        key(232, 168, "÷", 47, 2);
+        key(16, 236, "7", 55, 0);
+        key(88, 236, "8", 56, 0);
+        key(160, 236, "9", 57, 0);
+        key(232, 236, "×", 42, 2);
+        key(16, 304, "4", 52, 0);
+        key(88, 304, "5", 53, 0);
+        key(160, 304, "6", 54, 0);
+        key(232, 304, "-", 45, 2);
+        key(16, 372, "1", 49, 0);
+        key(88, 372, "2", 50, 0);
+        key(160, 372, "3", 51, 0);
+        key(232, 372, "+", 43, 2);
+        key(16, 440, "0", 48, 0);
+        key(88, 440, ".", 46, 0);
+        if ui_button_color(160, 440, 136, 56, "=", 0xF59E0B, 0x1A1206) {
+            equals();
+        }
+        if ui_key(27) {
+            reset();
+        }
+        if ui_key(13) {
+            equals();
+        }
+        if ui_typed(61) {
+            equals();
+        }
+        if ui_key(8) {
+            var n: i64 = entry_len();
+            if n > 0 {
+                raw { poke8(&entry + n - 1, 0); }
+            }
+        }
+        ui_end();
+        window_sleep(16);
+    }
+    return 0;
+}

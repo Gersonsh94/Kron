@@ -1,0 +1,76 @@
+kron_program
+kron_domain make_host;
+kron_imports
+acquire_domain "std_text.kr";
+acquire_domain "std_file.kr";
+kron_definitions
+
+// =========================================================================
+// make_host: web/kron_web.js -> include/web_host.inc
+//
+// The compiler carries the host of the web target inside itself and writes
+// it as kron_web.js beside every NAME.wasm, so the two always match. This
+// turns the script into the bytes the compiler includes. After changing
+// web/kron_web.js, from the folder of the compiler:
+//
+//   kronc web\make_host.kr -o make_host.exe
+//   make_host.exe
+//
+// then build the compiler again. Carriage returns are left out, so the
+// result is the same whatever line endings the script has.
+// =========================================================================
+
+fn main() {
+    var js = file_read_all("web/kron_web.js");
+    var n: i64 = text_len(js);
+    if n == 0 {
+        print("make_host: cannot read web/kron_web.js");
+        return;
+    }
+    var size: i64 = 0;
+    var i: i64 = 0;
+    while i < n {
+        if text_at(js, i) != 13 {
+            size = size + 1;
+        }
+        i = i + 1;
+    }
+    var out: text = "; web_host.inc -- the host of the web target, from web/kron_web.js.";
+    text_add_char(out, 13);
+    text_add_char(out, 10);
+    text_add(out, "; Written by web/make_host.kr: change the script and run it, not this.");
+    text_add_char(out, 13);
+    text_add_char(out, 10);
+    text_add(out, "section .data");
+    text_add_char(out, 13);
+    text_add_char(out, 10);
+    text_add(out, "web_host_js_size dq ");
+    text_add_int(out, size);
+    text_add_char(out, 13);
+    text_add_char(out, 10);
+    text_add(out, "web_host_js:");
+    var col: i64 = 0;
+    i = 0;
+    while i < n {
+        var c: i64 = text_at(js, i);
+        if c != 13 {
+            if col == 0 {
+                text_add_char(out, 13);
+                text_add_char(out, 10);
+                text_add(out, "    db ");
+            } else {
+                text_add(out, ",");
+            }
+            text_add_int(out, c);
+            col = col + 1;
+            if col == 24 {
+                col = 0;
+            }
+        }
+        i = i + 1;
+    }
+    text_add_char(out, 13);
+    text_add_char(out, 10);
+    file_write_all("include/web_host.inc", out);
+    print("make_host: include/web_host.inc, " + size + " bytes");
+}

@@ -1,0 +1,898 @@
+kron_program
+kron_domain std_file;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- files and folders.
+//
+//     file_write_all("notes.txt", "first line\n");
+//     file_append("notes.txt", "second line\n");
+//     var all: i64 = file_read_all("notes.txt");     // a text
+//     var lines: i64 = file_lines("notes.txt");       // a list of texts
+//
+// Whole files
+//   file_read_all(path)            the file as a new text
+//   file_lines(path)               its lines as a list of new texts
+//   file_write_all(path, x)        the file made, or emptied, with x in it
+//   file_append(path, x)           x added at the end; the file is made if
+//                                  it does not exist
+// Files kept open
+//   file_open(path, mode)          "r" read, "w" write from empty, "a" add
+//                                  at the end, "rw" read and write
+//   file_read(f, n)                up to n bytes as a new text, from where
+//                                  the last read or write stopped
+//   file_read_line(f)              the next line, without its line end; at
+//                                  the end of the file file_at_end(f) is 1
+//   file_write(f, x)               x written there
+//   file_read_at(f, pos, address, n)    raw bytes into a buffer (&buf[0] of
+//   file_write_at(f, pos, address, n)   a [u8; N]): what a database needs
+//   file_seek(f, pos)  file_pos(f)  file_size(f)  file_at_end(f)
+//   file_close(f)
+// Names
+//   file_exists(path)  file_length(path)  file_delete(path)
+//   file_rename(old_path, new_path)
+//   dir_exists(path)  dir_make(path)  dir_remove(path)
+//   dir_list(path)                 the names in a folder, a list of texts
+//
+// Paths are texts or string literals. Every function fails, with a cause
+// and a hint, when the system refuses; it then returns 0.
+// =========================================================================
+
+const FL_READ: i64 = 1;
+const FL_WRITE: i64 = 2;
+const FL_APPEND: i64 = 4;
+
+shared var fl_ready: i64;
+shared var fl_create: i64;           // Windows procedures, loaded once
+shared var fl_readf: i64;
+shared var fl_writef: i64;
+shared var fl_closef: i64;
+shared var fl_seekf: i64;
+shared var fl_sizef: i64;
+shared var fl_deletef: i64;
+shared var fl_movef: i64;
+shared var fl_mkdirf: i64;
+shared var fl_rmdirf: i64;
+shared var fl_attrf: i64;
+shared var fl_findfirst: i64;
+shared var fl_findnext: i64;
+shared var fl_findclose: i64;
+shared var fl_word: [i64; 2];        // a count or a size the system writes back
+shared var fl_find: [i64; 48];       // WIN32_FIND_DATAA: 320 bytes
+shared var fl_ignore: i64;
+
+fn fl_linux() -> i64 {
+    return target_os() == 2;
+}
+
+fn fl_load() -> i64 {
+    if fl_ready {
+        return 1;
+    }
+    raw {
+        var k: i64 = dll_load("kernel32.dll");
+        fl_create = dll_proc(k, "CreateFileA");
+        fl_readf = dll_proc(k, "ReadFile");
+        fl_writef = dll_proc(k, "WriteFile");
+        fl_closef = dll_proc(k, "CloseHandle");
+        fl_seekf = dll_proc(k, "SetFilePointerEx");
+        fl_sizef = dll_proc(k, "GetFileSizeEx");
+        fl_deletef = dll_proc(k, "DeleteFileA");
+        fl_movef = dll_proc(k, "MoveFileExA");
+        fl_mkdirf = dll_proc(k, "CreateDirectoryA");
+        fl_rmdirf = dll_proc(k, "RemoveDirectoryA");
+        fl_attrf = dll_proc(k, "GetFileAttributesA");
+        fl_findfirst = dll_proc(k, "FindFirstFileA");
+        fl_findnext = dll_proc(k, "FindNextFileA");
+        fl_findclose = dll_proc(k, "FindClose");
+    }
+    fl_ready = 1;
+    return 1;
+}
+
+// A BOOL or DWORD from Windows: only the low 32 bits are defined.
+fn fl_low(x: i64) -> i64 {
+    return x & 4294967295;
+}
+
+// ------------------------------------------------- the system, raw ---
+// The lock is held. Handles and descriptors are -1 when the call failed.
+
+// mode: FL_READ / FL_WRITE / FL_APPEND, plus 8 = empty it first
+fn fl_os_open(path: i64, mode: i64) -> i64 {
+    var fd: i64 = -1;
+    raw {
+        if fl_linux() {
+            var flags: i64 = 0;
+            if (mode & FL_WRITE) != 0 {
+                flags = 66;                    // O_RDWR | O_CREAT
+                if (mode & FL_READ) == 0 {
+                    flags = 65;                // O_WRONLY | O_CREAT
+                }
+                if (mode & 8) != 0 {
+                    flags = flags | 512;       // O_TRUNC
+                }
+            }
+            fd = syscall(2, path, flags, 420);
+            if fd < 0 {
+                fd = -1;
+            }
+        } else {
+            fl_load();
+            var access: i64 = 2147483648;      // GENERIC_READ
+            var how: i64 = 3;                  // OPEN_EXISTING
+            if (mode & FL_WRITE) != 0 {
+                access = 1073741824;           // GENERIC_WRITE
+                if (mode & FL_READ) != 0 {
+                    access = 3221225472;
+                }
+                how = 4;                       // OPEN_ALWAYS
+                if (mode & 8) != 0 {
+                    how = 2;                   // CREATE_ALWAYS
+                }
+            }
+            fd = call fl_create(path, access, 7, 0, how, 128, 0);
+        }
+    }
+    return fd;
+}
+
+fn fl_os_close(fd: i64) -> i64 {
+    raw {
+        if fl_linux() {
+            fl_ignore = syscall(3, fd);
+        } else {
+            fl_ignore = call fl_closef(fd);
+        }
+    }
+    return 0;
+}
+
+// bytes read at pos (pos < 0: where the file stands), -1 on error
+fn fl_os_read(fd: i64, pos: i64, p: i64, n: i64) -> i64 {
+    var r: i64 = -1;
+    raw {
+        if fl_linux() {
+            if pos >= 0 {
+                r = syscall(17, fd, p, n, pos);
+            } else {
+                r = syscall(0, fd, p, n);
+            }
+            if r < 0 {
+                r = -1;
+            }
+        } else {
+            var ok: i64 = 1;
+            if pos >= 0 {
+                ok = fl_low(call fl_seekf(fd, pos, 0, 0));
+            }
+            if ok != 0 {
+                poke(&fl_word, 0);
+                ok = fl_low(call fl_readf(fd, p, n, &fl_word, 0));
+                if ok != 0 {
+                    r = peek32(&fl_word);
+                }
+            }
+        }
+    }
+    return r;
+}
+
+// bytes written at pos (pos < 0: at the end), -1 on error
+fn fl_os_write(fd: i64, pos: i64, p: i64, n: i64) -> i64 {
+    var r: i64 = -1;
+    raw {
+        if fl_linux() {
+            if pos >= 0 {
+                r = syscall(18, fd, p, n, pos);
+            } else {
+                fl_ignore = syscall(8, fd, 0, 2);
+                r = syscall(1, fd, p, n);
+            }
+            if r < 0 {
+                r = -1;
+            }
+        } else {
+            var ok: i64 = 0;
+            if pos >= 0 {
+                ok = fl_low(call fl_seekf(fd, pos, 0, 0));
+            } else {
+                ok = fl_low(call fl_seekf(fd, 0, 0, 2));
+            }
+            if ok != 0 {
+                poke(&fl_word, 0);
+                ok = fl_low(call fl_writef(fd, p, n, &fl_word, 0));
+                if ok != 0 {
+                    r = peek32(&fl_word);
+                }
+            }
+        }
+    }
+    return r;
+}
+
+fn fl_os_size(fd: i64) -> i64 {
+    var r: i64 = -1;
+    raw {
+        if fl_linux() {
+            r = syscall(8, fd, 0, 2);
+            if r < 0 {
+                r = -1;
+            }
+        } else {
+            if fl_low(call fl_sizef(fd, &fl_word)) != 0 {
+                r = peek(&fl_word);
+            }
+        }
+    }
+    return r;
+}
+
+// all of n bytes written at pos, in pieces if the system takes less
+fn fl_write_all(fd: i64, pos: i64, p: i64, n: i64) -> i64 {
+    var done: i64 = 0;
+    while done < n {
+        var at: i64 = pos;
+        if pos >= 0 {
+            at = pos + done;
+        }
+        var piece: i64 = n - done;
+        if piece > 1073741824 {
+            piece = 1073741824;
+        }
+        var r: i64 = fl_os_write(fd, at, p + done, piece);
+        if r <= 0 {
+            return -1;
+        }
+        done = done + r;
+    }
+    return done;
+}
+
+// the whole file as a new text, or 0 with hp_err
+fn fl_read_all(path: i64) -> i64 {
+    if tv_view(path) == 0 {
+        return 0;
+    }
+    var fd: i64 = fl_os_open(tv_p, FL_READ);
+    if fd == -1 {
+        hp_err = 8;
+        return 0;
+    }
+    var size: i64 = fl_os_size(fd);
+    if size < 0 {
+        size = 0;
+    }
+    var h: i64 = tx_new(size);
+    if h == 0 {
+        fl_os_close(fd);
+        return 0;
+    }
+    var q: i64 = ob_get(h, OB_TEXT);
+    var got: i64 = 0;
+    var going: i64 = 1;
+    while going {
+        if got >= size {
+            // the file may have grown: room for more
+            q = tx_room(h, got + 65536);
+            if q == 0 {
+                fl_os_close(fd);
+                return 0;
+            }
+            size = got + 65536;
+        }
+        var r: i64 = fl_os_read(fd, got, q + 8 + got, size - got);
+        if r <= 0 {
+            going = 0;
+        } else {
+            got = got + r;
+        }
+    }
+    fl_os_close(fd);
+    raw {
+        poke(q, got);
+        poke8(q + 8 + got, 0);
+    }
+    return h;
+}
+
+// x written to path: 8 = from empty, FL_APPEND = at the end
+fn fl_put(path: i64, x: i64, how: i64) -> i64 {
+    if tv_view(path) == 0 {
+        return 0;
+    }
+    var fd: i64 = fl_os_open(tv_p, FL_WRITE | how);
+    if fd == -1 {
+        hp_err = 9;
+        return 0;
+    }
+    if tv_view(x) == 0 {
+        fl_os_close(fd);
+        return 0;
+    }
+    var r: i64 = fl_write_all(fd, -1, tv_p, tv_n);
+    fl_os_close(fd);
+    if r < 0 {
+        hp_err = 9;
+        return 0;
+    }
+    return r;
+}
+
+// a file kept open: block [descriptor][mode][position][at end]
+fn fl_obj(f: i64) -> i64 {
+    return ob_get(f, OB_FILE);
+}
+
+fn fl_field(q: i64, k: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek(q + k * 8); }
+    return v;
+}
+
+fn fl_set(q: i64, k: i64, v: i64) -> i64 {
+    raw { poke(q + k * 8, v); }
+    return v;
+}
+
+// the descriptor of an open file allowed `need`, or -1 with hp_err
+fn fl_fd(f: i64, need: i64) -> i64 {
+    var q: i64 = fl_obj(f);
+    if q == 0 {
+        return -1;
+    }
+    if (fl_field(q, 1) & need) == 0 {
+        hp_err = 16;
+        return -1;
+    }
+    return fl_field(q, 0);
+}
+
+// ---------------------------------------------------------- the calls ---
+
+fn file_read_all(path: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(fl_read_all(path));
+}
+
+fn file_lines(path: i64) -> list<text> {
+    var t: i64 = file_read_all(path);
+    if failed() {
+        fail "the file could not be opened" hint "check the path, and that the file exists and can be read";
+    }
+    var l: i64 = text_lines(t);
+    text_free(t);
+    return l;
+}
+
+fn file_write_all(path: i64, x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(fl_put(path, x, 8));
+}
+
+fn file_append(path: i64, x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(fl_put(path, x, FL_APPEND));
+}
+
+fn file_open(path: i64, mode: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var how: i64 = 0;
+    var r: i64 = 0;
+    if text_same_u(mode, "r") {
+        how = FL_READ;
+    } else if text_same_u(mode, "w") {
+        how = FL_WRITE | 8;
+    } else if text_same_u(mode, "a") {
+        how = FL_WRITE | FL_APPEND;
+    } else if text_same_u(mode, "rw") {
+        how = FL_READ | FL_WRITE;
+    } else {
+        hp_err = 16;
+    }
+    if hp_err == 0 {
+        if tv_view(path) {
+            var fd: i64 = fl_os_open(tv_p, how);
+            if fd == -1 {
+                hp_err = 8;
+                if (how & FL_WRITE) != 0 {
+                    hp_err = 9;
+                }
+            } else {
+                var q: i64 = hp_alloc(32);
+                if q != 0 {
+                    fl_set(q, 0, fd);
+                    fl_set(q, 1, how);
+                    if (how & FL_APPEND) != 0 {
+                        fl_set(q, 2, fl_os_size(fd));
+                    }
+                    r = ob_new(OB_FILE, q);
+                }
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn text_same_u(a: i64, b: i64) -> i64 {
+    if tv_compare(a, b) == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn file_close(f: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = fl_obj(f);
+    if q != 0 {
+        fl_os_close(fl_field(q, 0));
+        ob_drop(f);
+        hp_release(q);
+    }
+    return text_end(0);
+}
+
+fn file_read(f: i64, n: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = 0;
+    var fd: i64 = fl_fd(f, FL_READ);
+    if fd != -1 {
+        var q: i64 = fl_obj(f);
+        var want: i64 = n;
+        if want < 0 {
+            want = 0;
+        }
+        h = tx_new(want);
+        if h != 0 {
+            var tq: i64 = ob_get(h, OB_TEXT);
+            var r: i64 = fl_os_read(fd, fl_field(q, 2), tq + 8, want);
+            if r < 0 {
+                hp_err = 8;
+                r = 0;
+            }
+            if r < want {
+                fl_set(q, 3, 1);
+            }
+            raw {
+                poke(tq, r);
+                poke8(tq + 8 + r, 0);
+            }
+            fl_set(q, 2, fl_field(q, 2) + r);
+        }
+    }
+    return text_end(h);
+}
+
+fn file_read_line(f: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = 0;
+    var fd: i64 = fl_fd(f, FL_READ);
+    if fd != -1 {
+        var q: i64 = fl_obj(f);
+        h = tx_new(80);
+        var chunk: [i64; 64];          // 512 bytes at a time
+        var going: i64 = 1;
+        while going && h != 0 {
+            var pos: i64 = fl_field(q, 2);
+            var r: i64 = fl_os_read(fd, pos, &chunk, 512);
+            if r <= 0 {
+                fl_set(q, 3, 1);
+                going = 0;
+            } else {
+                var k: i64 = 0;
+                var stop: i64 = r;
+                raw {
+                    var cp: i64 = &chunk;
+                    while k < r {
+                        if peek8(cp + k) == 10 {
+                            stop = k;
+                            k = r;
+                        }
+                        k = k + 1;
+                    }
+                }
+                tx_add_bytes(h, &chunk, stop);
+                if stop < r {
+                    fl_set(q, 2, pos + stop + 1);
+                    going = 0;
+                } else {
+                    fl_set(q, 2, pos + r);
+                }
+            }
+        }
+        // a line ending in \r\n keeps neither
+        if h != 0 {
+            var tq: i64 = ob_get(h, OB_TEXT);
+            raw {
+                var len: i64 = peek(tq);
+                if len > 0 {
+                    if peek8(tq + 8 + len - 1) == 13 {
+                        poke(tq, len - 1);
+                        poke8(tq + 8 + len - 1, 0);
+                    }
+                }
+            }
+        }
+    }
+    return text_end(h);
+}
+
+fn file_write(f: i64, x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    var fd: i64 = fl_fd(f, FL_WRITE);
+    if fd != -1 {
+        var q: i64 = fl_obj(f);
+        if tv_view(x) {
+            r = fl_write_all(fd, fl_field(q, 2), tv_p, tv_n);
+            if r < 0 {
+                hp_err = 9;
+                r = 0;
+            } else {
+                fl_set(q, 2, fl_field(q, 2) + r);
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn file_read_at(f: i64, pos: i64, address: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    var fd: i64 = fl_fd(f, FL_READ);
+    if fd != -1 {
+        if pos < 0 || n < 0 {
+            hp_err = 5;
+        } else {
+            r = fl_os_read(fd, pos, address, n);
+            if r < 0 {
+                hp_err = 8;
+                r = 0;
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn file_write_at(f: i64, pos: i64, address: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    var fd: i64 = fl_fd(f, FL_WRITE);
+    if fd != -1 {
+        if pos < 0 || n < 0 {
+            hp_err = 5;
+        } else {
+            r = fl_write_all(fd, pos, address, n);
+            if r < 0 {
+                hp_err = 9;
+                r = 0;
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn file_seek(f: i64, pos: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = fl_obj(f);
+    if q != 0 {
+        if pos < 0 {
+            hp_err = 5;
+        } else {
+            fl_set(q, 2, pos);
+            fl_set(q, 3, 0);
+        }
+    }
+    return text_end(pos);
+}
+
+fn file_pos(f: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = fl_obj(f);
+    var p: i64 = 0;
+    if q != 0 {
+        p = fl_field(q, 2);
+    }
+    return text_end(p);
+}
+
+fn file_size(f: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = fl_obj(f);
+    var n: i64 = 0;
+    if q != 0 {
+        n = fl_os_size(fl_field(q, 0));
+        if n < 0 {
+            n = 0;
+        }
+    }
+    return text_end(n);
+}
+
+fn file_at_end(f: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = fl_obj(f);
+    var e: i64 = 0;
+    if q != 0 {
+        e = fl_field(q, 3);
+        if e == 0 {
+            var size: i64 = fl_os_size(fl_field(q, 0));
+            if fl_field(q, 2) >= size {
+                e = 1;
+            }
+        }
+    }
+    return text_end(e);
+}
+
+fn file_exists(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tv_view(path) {
+        var fd: i64 = fl_os_open(tv_p, FL_READ);
+        if fd != -1 {
+            fl_os_close(fd);
+            r = 1;
+            // Linux opens a folder for reading too; a folder is not a file
+            if fl_linux() {
+                if fl_list(path, 1) {
+                    r = 0;
+                }
+                hp_err = 0;
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn file_length(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tv_view(path) {
+        var fd: i64 = fl_os_open(tv_p, FL_READ);
+        if fd == -1 {
+            hp_err = 8;
+        } else {
+            r = fl_os_size(fd);
+            fl_os_close(fd);
+        }
+    }
+    return text_end(r);
+}
+
+fn file_delete(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var ok: i64 = 0;
+    if tv_view(path) {
+        raw {
+            if fl_linux() {
+                if syscall(87, tv_p) == 0 {
+                    ok = 1;
+                }
+            } else {
+                fl_load();
+                ok = fl_low(call fl_deletef(tv_p));
+            }
+        }
+        if ok == 0 {
+            hp_err = 13;
+        }
+    }
+    return text_end(ok);
+}
+
+fn file_rename(old_path: i64, new_path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var ok: i64 = 0;
+    if tv_view(old_path) {
+        var a: i64 = tv_p;
+        if tv_view(new_path) {
+            raw {
+                if fl_linux() {
+                    if syscall(82, a, tv_p) == 0 {
+                        ok = 1;
+                    }
+                } else {
+                    fl_load();
+                    ok = fl_low(call fl_movef(a, tv_p, 1));
+                }
+            }
+            if ok == 0 {
+                hp_err = 13;
+            }
+        }
+    }
+    return text_end(ok);
+}
+
+fn dir_make(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var ok: i64 = 0;
+    if tv_view(path) {
+        raw {
+            if fl_linux() {
+                if syscall(83, tv_p, 493) == 0 {
+                    ok = 1;
+                }
+            } else {
+                fl_load();
+                ok = fl_low(call fl_mkdirf(tv_p, 0));
+            }
+        }
+        if ok == 0 {
+            hp_err = 14;
+        }
+    }
+    return text_end(ok);
+}
+
+fn dir_remove(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var ok: i64 = 0;
+    if tv_view(path) {
+        raw {
+            if fl_linux() {
+                if syscall(84, tv_p) == 0 {
+                    ok = 1;
+                }
+            } else {
+                fl_load();
+                ok = fl_low(call fl_rmdirf(tv_p));
+            }
+        }
+        if ok == 0 {
+            hp_err = 13;
+        }
+    }
+    return text_end(ok);
+}
+
+// the names in a folder as a list of new texts, or 0 with hp_err;
+// with `probe` set it only answers whether the path is a folder
+fn fl_list(path: i64, probe: i64) -> i64 {
+    if tv_view(path) == 0 {
+        return 0;
+    }
+    var l: i64 = 0;
+    if probe == 0 {
+        l = li_new(16);
+        if l == 0 {
+            return 0;
+        }
+    }
+    var is_dir: i64 = 0;
+    if fl_linux() {
+        var fd: i64 = fl_os_open(tv_p, FL_READ);
+        if fd == -1 {
+            hp_err = 11;
+            return 0;
+        }
+        var buf: i64 = hp_alloc(32768);
+        if buf == 0 {
+            fl_os_close(fd);
+            return 0;
+        }
+        var going: i64 = 1;
+        while going {
+            var n: i64 = 0;
+            raw { n = syscall(217, fd, buf, 32768); }
+            if n < 0 {
+                going = 0;               // not a folder
+            } else if n == 0 {
+                is_dir = 1;
+                going = 0;
+            } else {
+                is_dir = 1;
+                var at: i64 = 0;
+                while at < n {
+                    var reclen: i64 = 0;
+                    var name: i64 = buf + at + 19;
+                    raw { reclen = peek16(buf + at + 16); }
+                    if probe == 0 {
+                        if tx_skip_dots(name) == 0 {
+                            li_add(l, tx_copy(name));
+                        }
+                    }
+                    at = at + reclen;
+                }
+                if probe {
+                    going = 0;
+                }
+            }
+        }
+        hp_release(buf);
+        fl_os_close(fd);
+    } else {
+        fl_load();
+        // the pattern: the folder, a separator, and *
+        var pat: i64 = tx_new(tv_n + 3);
+        if pat == 0 {
+            return 0;
+        }
+        tx_add(pat, path);
+        var pq: i64 = ob_get(pat, OB_TEXT);
+        var plen: i64 = 0;
+        raw { plen = peek(pq); }
+        var last: i64 = 0;
+        if plen > 0 {
+            raw { last = peek8(pq + 8 + plen - 1); }
+        }
+        if last != 92 && last != 47 {
+            tx_add(pat, "\\");
+        }
+        tx_add(pat, "*");
+        pq = ob_get(pat, OB_TEXT);
+        var fh: i64 = -1;
+        raw { fh = call fl_findfirst(pq + 8, &fl_find); }
+        ob_drop(pat);
+        hp_release(pq);
+        if fh == -1 {
+            hp_err = 11;
+            return 0;
+        }
+        is_dir = 1;
+        var more: i64 = 1;
+        while more && probe == 0 {
+            var fname: i64 = 0;
+            raw { fname = &fl_find + 44; }
+            if tx_skip_dots(fname) == 0 {
+                li_add(l, tx_copy(fname));
+            }
+            raw { more = fl_low(call fl_findnext(fh, &fl_find)); }
+        }
+        raw { fl_ignore = call fl_findclose(fh); }
+    }
+    if probe {
+        return is_dir;
+    }
+    if is_dir == 0 {
+        hp_err = 11;
+        return 0;
+    }
+    return l;
+}
+
+// 1 for "." and ".."
+fn tx_skip_dots(name: i64) -> i64 {
+    var a: i64 = 0;
+    var b: i64 = 0;
+    var c: i64 = 0;
+    raw {
+        a = peek8(name);
+        if a != 0 {
+            b = peek8(name + 1);
+            if b != 0 {
+                c = peek8(name + 2);
+            }
+        }
+    }
+    if a == 46 {
+        if b == 0 {
+            return 1;
+        }
+        if b == 46 {
+            if c == 0 {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn dir_list(path: i64) -> list<text> {
+    lock_take(HP_LOCK);
+    var l: i64 = fl_list(path, 0);
+    if l != 0 {
+        li_sort(l, 1);
+    }
+    return text_end(l);
+}
+
+fn dir_exists(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = fl_list(path, 1);
+    hp_err = 0;
+    return text_end(r);
+}

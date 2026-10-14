@@ -1,0 +1,62 @@
+kron_program
+kron_domain test_bits;
+kron_imports
+kron_definitions
+
+// The three bitwise operators. Until now the parser did not have them: the
+// lexer emitted TOK_PIPE and nobody read it, so a language meant for
+// kernels could not build a page table entry out of flags.
+//
+// Expected output:
+//   12    a & b
+//   61    a | b
+//   49    a ^ b
+//   0     60 & 3
+//   7     flags combined with |
+//   6     clear a bit with & ~
+//   3     precedence: & binds tighter than |
+//   0     precedence: & binds LOOSER than == (a & 12 == 12 is a & 1)
+//   12    60 & 12 grouped in a variable
+//   1     take one bit of a u64 entry with bit 63 set
+//   99    take the low 12 bits of that same entry
+
+fn main() {
+    var a: i64;
+    var b: i64;
+    var flags: i64;
+    var entry: u64;
+
+    a = 60;             // 0011 1100
+    b = 13;             // 0000 1101
+
+    print(a & b);       // 12
+    print(a | b);       // 61
+    print(a ^ b);       // 49
+    print(a & 3);       // 0
+
+    // combining flags, which is what it is really for
+    flags = 1 | 2 | 4;
+    print(flags);       // 7
+
+    // clear the low bit
+    print(flags & ~1);  // 6
+
+    // precedence: '&' binds tighter than '|'
+    print(1 | 2 & 2);   // 3
+
+    // precedence: '&' binds LOOSER than '==', as in C, so
+    // 'a & 12 == 12' is 'a & (12 == 12)' = 60 & 1 = 0
+    print(a & 12 == 12);   // 0
+
+    // with the grouping made explicit in a variable, 60 & 12 = 12
+    flags = a & 12;
+    print(flags);          // 12
+
+    // an entry with bit 63 set: this is where the unsigned shift and the
+    // mask meet
+    entry = 9223372036854775907;
+    print(entry >> 1 & 1);   // 1
+    print(entry & 4095);     // 99
+
+    return 0;
+}

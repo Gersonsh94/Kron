@@ -1,0 +1,12 @@
+kron_program
+kron_domain chain_a;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// chain_a -- base of the import chain of test_chain. Imports nothing.
+// =========================================================================
+
+fn chain_seven() -> i64 {
+    return 7;
+}

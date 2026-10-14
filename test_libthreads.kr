@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_libthreads;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// The library from several threads at once: every call takes the library's
+// lock, so four threads adding to one list and one map lose nothing.
+//
+// Expected output:
+//   4000      values in the list
+//   4000      keys in the map
+//   1         a key one of the threads set
+
+shared var all: i64;
+shared var seen: i64;
+
+fn worker(id: i64) -> i64 {
+    var i: i64 = 0;
+    while i < 1000 {
+        var t: i64 = text("w");
+        text_add_int(t, id);
+        text_add(t, "-");
+        text_add_int(t, i);
+        list_add(all, t);
+        map_set(seen, t, i);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    all = list_new();
+    seen = map_new();
+    var a: i64 = thread_start(&worker, 1);
+    var b: i64 = thread_start(&worker, 2);
+    var c: i64 = thread_start(&worker, 3);
+    var d: i64 = thread_start(&worker, 4);
+    thread_wait(a);
+    thread_wait(b);
+    thread_wait(c);
+    thread_wait(d);
+    print(list_len(all));
+    print(map_len(seen));
+    print(map_has(seen, "w3-999"));
+    return 0;
+}

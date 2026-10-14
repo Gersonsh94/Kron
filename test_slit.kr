@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_slit;
+kron_imports
+kron_definitions
+
+// Initialising a 'stream' from a literal: both fields are filled
+// at once, the address of the bytes and the count.
+//
+//     var s: stream = "hula";     s.bytes -> address,  s.len -> 4
+//
+// The length is counted with escapes ALREADY resolved, so "a\nb" is 3
+// and not 4.
+//
+// Expected output:
+//   4      "hula"
+//   104    its first byte, the h
+//   97     its last byte, the a
+//   0      the terminator is still there, for system calls
+//   0      empty string
+//   3      "a\nb": escapes count as one byte
+//   10     the middle byte is a newline
+//   10     "hula dance", with a space
+//   4      the first string has not moved
+
+fn main() {
+    raw {
+        var s: stream = "hula";
+        var v: stream = "";
+        var e: stream = "a\nb";
+        var m: stream = "hula dance";
+
+        print(s.len);                    // 4
+        print(peek8(s.bytes));           // 104
+        print(peek8(s.bytes + 3));       // 97
+        print(peek8(s.bytes + 4));       // 0
+
+        print(v.len);                    // 0
+
+        print(e.len);                    // 3
+        print(peek8(e.bytes + 1));       // 10
+
+        print(m.len);                    // 10
+        print(s.len);                    // 4
+
+        return 0;
+    }
+}

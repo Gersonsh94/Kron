@@ -1,0 +1,20 @@
+kron_program
+kron_domain tr3;
+kron_imports
+kron_definitions
+
+fn big() -> i64 {
+    return 4294967296;
+}
+fn main() {
+    var a: i64 = 4294967296;
+    var b: real64 = a;
+    print(a);
+    print(b);
+    var c: real64 = big();
+    print(c);
+    var d: i64 = 1083814273;
+    var e: real64 = d;
+    print(e);
+    return 0;
+}

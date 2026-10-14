@@ -1,0 +1,11 @@
+kron_program
+kron_domain test_list_bad;
+kron_imports
+kron_definitions
+
+// list<T> without std_list.kr: refused, with the import to add.
+
+fn main() {
+    var l: list<i64>;
+    return 0;
+}

@@ -1,0 +1,30 @@
+kron_program
+kron_domain test_shared_bad2;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: a thread reaches a plain global through a call
+//
+// worker touches no global itself, but it calls bump, which does. The
+// compiler follows the calls from every function passed to thread_start,
+// so it has to be rejected, pointing at 'hits' inside bump.
+// =========================================================================
+
+var hits: i64;
+
+fn bump(n: i64) -> i64 {
+    hits = hits + n;
+    return hits;
+}
+
+fn worker(n: i64) -> i64 {
+    return bump(n);
+}
+
+fn main() {
+    var h: i64 = thread_start(&worker, 1);
+    thread_wait(h);
+    print(hits);
+    return 0;
+}

@@ -1,0 +1,58 @@
+kron_program
+kron_domain test_trace;
+kron_imports
+acquire_domain "std_file.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: failure traces
+//
+// print_fail names the function and the line where the failure happened,
+// then every function that led there, each with the line of its call.
+// A failure inside the library names the library's line and then the
+// program's own lines, so the reader sees which of their calls it was.
+// =========================================================================
+
+var g: [i64; 4];
+
+fn leaf(i: i64) -> i64 {
+    return g[i];
+}
+
+fn middle(i: i64) -> i64 {
+    var x: i64 = leaf(i);
+    return x + 1;
+}
+
+fn depth(n: i64) -> i64 {
+    if n == 0 {
+        fail "the bottom" hint "four levels down";
+    }
+    return depth(n - 1);
+}
+
+fn in_thread(x: i64) -> i64 {
+    if x > 1 {
+        fail "in a thread";
+    }
+    return 0;
+}
+
+fn worker(x: i64) -> i64 {
+    in_thread(x);
+    print_fail();
+    return 0;
+}
+
+fn main() {
+    middle(7);
+    print_fail();
+    depth(3);
+    print_fail();
+    var lines: i64 = file_lines("no_such_file.txt");
+    print_fail();
+    var t: i64 = thread_start(worker, 5);
+    thread_wait(t);
+    middle(9);
+    return 0;
+}

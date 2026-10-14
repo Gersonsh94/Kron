@@ -1,0 +1,61 @@
+kron_program
+kron_domain test_exp;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_exp.kr";
+kron_definitions
+
+// Test for std_exp.kr
+// Every line prints a value with its expected result beside it.
+
+
+fn main() {
+    // --- exponential ---
+    print(fexp(0.0));         // 1.000000
+    print(fexp(1.0));         // 2.718282
+    print(fexp(2.0));         // 7.389056
+    print(fexp(0.5));         // 1.648721
+    print(fexp(0.0 - 1.0));   // 0.367879
+    print(fexp(10.0));        // 22026.465795
+
+    // --- logarithm ---
+    print(fln(1.0));          // 0.000000
+    print(fln(m_e()));        // 1.000000
+    print(fln(10.0));         // 2.302585
+    print(fln(0.5));          // -0.693147
+    print(fln(100.0));        // 4.605170
+
+    // exp and ln undo each other
+    print(fln(fexp(3.7)));    // 3.700000
+    print(fexp(fln(5.5)));    // 5.500000
+
+    // --- other bases ---
+    print(flog10(1000.0));    // 3.000000
+    print(flog2(1024.0));     // 10.000000
+
+    // --- general power ---
+    print(fpow(2.0, 10.0));   // 1024.000000
+    print(fpow(9.0, 0.5));    // 3.000000
+    print(fpow(2.0, 0.5));    // 1.414214
+
+    // --- activation functions ---
+    print(sigmoid(0.0));      // 0.500000
+    print(sigmoid(2.0));      // 0.880797
+    print(sigmoid(0.0 - 2.0));// 0.119203
+    print(sigmoid_d(0.5));    // 0.250000
+
+    print(ftanh(0.0));        // 0.000000
+    print(ftanh(1.0));        // 0.761594
+    print(tanh_d(0.0));       // 1.000000
+
+    print(relu(3.0));         // 3.000000
+    print(relu(0.0 - 3.0));   // 0.000000
+    print(relu_d(3.0));       // 1.000000
+
+    // --- loss functions ---
+    print(cross_entropy(1.0, 0.9));   // 0.105361
+    print(cross_entropy(0.0, 0.1));   // 0.105361
+    print(squared_error(3.0, 5.0));   // 4.000000
+
+    return 0;
+}

@@ -1,0 +1,11 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_arena_zero.kr:7:0: arena declared with zero size 
+    arena z base_address 0x1000 size_bytes 0 growth_policy fixed_static ;
+^

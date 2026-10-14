@@ -1,0 +1,206 @@
+kron_program
+kron_domain solidcube_anim;
+kron_imports
+kron_definitions
+
+// ============================================================
+// KRON 3D - SOLID cube ANIMATION: renders 8 frames of the
+// cube rotating, each saved as f0.bmp .. f7.bmp.
+// Solid faces + z-buffer, pure Kron software rendering.
+// Image: 100 x 100, row = 300 bytes.
+// ============================================================
+
+// large arrays live in .bss (file-scope globals), not the stack
+var buf: [i64; 3757];
+var zb: [real64; 10000];
+var namebuf: [i64; 4];
+
+fn cross(dx: real64, dy: real64, ox: real64, oy: real64) -> real64 {
+    return dx * oy - dy * ox;
+}
+
+// cube vertices (global so all helpers can reach them)
+var vx: [real64; 8];
+var vy: [real64; 8];
+var vz: [real64; 8];
+var sx: [real64; 8];
+var sy: [real64; 8];
+var sz: [real64; 8];
+
+// triangle table (global)
+var t0: [i64; 12];
+var t1: [i64; 12];
+var t2: [i64; 12];
+var tr: [i64; 12];
+var tg: [i64; 12];
+var tb: [i64; 12];
+
+fn main() {
+    raw {
+        var base: i64 = &buf;
+        var pix: i64 = base + 54;
+        var np: i64 = &namebuf;
+
+        // ---- BMP header (written once; reused each frame) ----
+        poke8(base + 0, 66);
+        poke8(base + 1, 77);
+        poke32(base + 2, 30054);
+        poke32(base + 6, 0);
+        poke32(base + 10, 54);
+        poke32(base + 14, 40);
+        poke32(base + 18, 100);
+        poke32(base + 22, 100);
+        poke16(base + 26, 1);
+        poke16(base + 28, 24);
+        poke32(base + 30, 0);
+        poke32(base + 34, 30000);
+        poke32(base + 38, 2835);
+        poke32(base + 42, 2835);
+        poke32(base + 46, 0);
+        poke32(base + 50, 0);
+
+        // ---- cube geometry ----
+        vx[0] = 0.0 - 1.0; vy[0] = 0.0 - 1.0; vz[0] = 0.0 - 1.0;
+        vx[1] = 1.0;       vy[1] = 0.0 - 1.0; vz[1] = 0.0 - 1.0;
+        vx[2] = 1.0;       vy[2] = 1.0;       vz[2] = 0.0 - 1.0;
+        vx[3] = 0.0 - 1.0; vy[3] = 1.0;       vz[3] = 0.0 - 1.0;
+        vx[4] = 0.0 - 1.0; vy[4] = 0.0 - 1.0; vz[4] = 1.0;
+        vx[5] = 1.0;       vy[5] = 0.0 - 1.0; vz[5] = 1.0;
+        vx[6] = 1.0;       vy[6] = 1.0;       vz[6] = 1.0;
+        vx[7] = 0.0 - 1.0; vy[7] = 1.0;       vz[7] = 1.0;
+
+        t0[0]=0; t1[0]=1; t2[0]=2;   tr[0]=230; tg[0]=60;  tb[0]=60;
+        t0[1]=0; t1[1]=2; t2[1]=3;   tr[1]=230; tg[1]=60;  tb[1]=60;
+        t0[2]=5; t1[2]=4; t2[2]=7;   tr[2]=60;  tg[2]=200; tb[2]=80;
+        t0[3]=5; t1[3]=7; t2[3]=6;   tr[3]=60;  tg[3]=200; tb[3]=80;
+        t0[4]=4; t1[4]=0; t2[4]=3;   tr[4]=70;  tg[4]=110; tb[4]=240;
+        t0[5]=4; t1[5]=3; t2[5]=7;   tr[5]=70;  tg[5]=110; tb[5]=240;
+        t0[6]=1; t1[6]=5; t2[6]=6;   tr[6]=240; tg[6]=210; tb[6]=70;
+        t0[7]=1; t1[7]=6; t2[7]=2;   tr[7]=240; tg[7]=210; tb[7]=70;
+        t0[8]=3; t1[8]=2; t2[8]=6;   tr[8]=210; tg[8]=80;  tb[8]=210;
+        t0[9]=3; t1[9]=6; t2[9]=7;   tr[9]=210; tg[9]=80;  tb[9]=210;
+        t0[10]=4; t1[10]=5; t2[10]=1; tr[10]=70; tg[10]=210; tb[10]=210;
+        t0[11]=4; t1[11]=1; t2[11]=0; tr[11]=70; tg[11]=210; tb[11]=210;
+
+        // initial tilt around X (~30 deg), once
+        var c2: real64 = 0.85;
+        var s2: real64 = 0.527;
+        for var i: i64 = 0; i < 8; i = i + 1 {
+            var ny: real64 = vy[i] * c2 - vz[i] * s2;
+            var nz: real64 = vy[i] * s2 + vz[i] * c2;
+            vy[i] = ny;
+            vz[i] = nz;
+        }
+
+        // per-frame Y rotation (~18 deg)
+        var c: real64 = 0.951;
+        var s: real64 = 0.309;
+
+        // =================== FRAME LOOP ===================
+        for var frame: i64 = 0; frame < 8; frame = frame + 1 {
+
+            // rotate cube around Y by one step
+            for var i: i64 = 0; i < 8; i = i + 1 {
+                var nx: real64 = vx[i] * c + vz[i] * s;
+                var nz: real64 = vz[i] * c - vx[i] * s;
+                vx[i] = nx;
+                vz[i] = nz;
+            }
+
+            // project
+            for var i: i64 = 0; i < 8; i = i + 1 {
+                var d: real64 = vz[i] + 4.0;
+                sx[i] = 50.0 + vx[i] * 90.0 / d;
+                sy[i] = 50.0 - vy[i] * 90.0 / d;
+                sz[i] = d;
+            }
+
+            // clear framebuffer + z-buffer
+            for var cy: i64 = 0; cy < 100; cy = cy + 1 {
+                for var cx: i64 = 0; cx < 100; cx = cx + 1 {
+                    var co: i64 = pix + cy * 300 + cx * 3;
+                    poke8(co + 0, 40);
+                    poke8(co + 1, 15);
+                    poke8(co + 2, 12);
+                    zb[cy * 100 + cx] = 1000000000.0;
+                }
+            }
+
+            // rasterize 12 triangles with z-buffer
+            for var t: i64 = 0; t < 12; t = t + 1 {
+                var i0: i64 = t0[t];
+                var i1: i64 = t1[t];
+                var i2: i64 = t2[t];
+
+                var ax: real64 = sx[i0];
+                var ay: real64 = sy[i0];
+                var az: real64 = sz[i0];
+                var bx: real64 = sx[i1];
+                var by: real64 = sy[i1];
+                var bz: real64 = sz[i1];
+                var gx: real64 = sx[i2];
+                var gy: real64 = sy[i2];
+                var gz: real64 = sz[i2];
+
+                var abx: real64 = bx - ax;
+                var aby: real64 = by - ay;
+                var bcx: real64 = gx - bx;
+                var bcy: real64 = gy - by;
+                var cax: real64 = ax - gx;
+                var cay: real64 = ay - gy;
+                var acx: real64 = gx - ax;
+                var acy: real64 = gy - ay;
+                var area: real64 = cross(abx, aby, acx, acy);
+
+                var absa: real64 = area;
+                if absa < 0.0 { absa = 0.0 - absa; }
+                if absa > 0.5 {
+                    for var y: i64 = 0; y < 100; y = y + 1 {
+                        for var x: i64 = 0; x < 100; x = x + 1 {
+                            var fx: real64 = x;
+                            var fy: real64 = y;
+                            var w0: real64 = cross(abx, aby, fx - ax, fy - ay);
+                            var w1: real64 = cross(bcx, bcy, fx - bx, fy - by);
+                            var w2: real64 = cross(cax, cay, fx - gx, fy - gy);
+                            var inside: i64 = 0;
+                            if area > 0.0 {
+                                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 { inside = 1; }
+                            }
+                            if area < 0.0 {
+                                if w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0 { inside = 1; }
+                            }
+                            if inside == 1 {
+                                var l0: real64 = w0 / area;
+                                var l1: real64 = w1 / area;
+                                var l2: real64 = w2 / area;
+                                var depth: real64 = l0 * az + l1 * bz + l2 * gz;
+                                var zi: i64 = y * 100 + x;
+                                if depth < zb[zi] {
+                                    zb[zi] = depth;
+                                    var fo: i64 = pix + (99 - y) * 300 + x * 3;
+                                    poke8(fo + 0, tb[t]);
+                                    poke8(fo + 1, tg[t]);
+                                    poke8(fo + 2, tr[t]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // build filename "f<frame>.bmp"
+            poke8(np + 0, 102);              // 'f'
+            poke8(np + 1, 48 + frame);       // digit
+            poke8(np + 2, 46);               // '.'
+            poke8(np + 3, 98);               // 'b'
+            poke8(np + 4, 109);              // 'm'
+            poke8(np + 5, 112);              // 'p'
+            poke8(np + 6, 0);
+
+            savefile(base, 30054, np);
+            print(frame);
+        }
+
+        return 0;
+    }
+}

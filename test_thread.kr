@@ -1,0 +1,95 @@
+kron_program
+kron_domain test_thread;
+kron_imports
+kron_definitions
+
+// Threads. The engine needs them in three places: hashing Merkle leaves in
+// parallel, scanning one tenant's records, and serving more than one
+// connection at a time.
+//
+//   thread_start(&fn, arg)   start, passing one argument; returns a handle
+//   thread_wait(h)           block until that thread finishes
+//   lock_init(n)             locks are numbered: there are no opaque types
+//   lock_take(n) / lock_give(n)
+//   cpu_count()              how many cores, so nobody has to guess
+//
+// Expected output:
+//   1        cpu_count is at least one
+//   1        CreateThread returned a handle
+//   1        the thread ran and set the flag
+//   4000000  four threads adding a million each, under one lock
+//   1        the counter is exact: without the lock it would not be
+
+// Both are written by threads, so both are declared shared: code that runs
+// in a thread may only touch shared globals. counter is guarded by a lock;
+// flag is written once and read after thread_wait.
+shared var flag: i64;
+shared var counter: i64;
+
+fn worker(arg: i64) -> i64 {
+    flag = arg;
+    return 0;
+}
+
+fn adder(arg: i64) -> i64 {
+    var i: i64;
+    i = 0;
+    while i < 1000000 {
+        lock_take(0);
+        counter = counter + 1;
+        lock_give(0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    var h: i64;
+    var h1: i64;
+    var h2: i64;
+    var h3: i64;
+    var h4: i64;
+    var n: i64;
+
+    n = cpu_count();
+    if n >= 1 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    // one thread, one flag
+    flag = 0;
+    h = thread_start(&worker, 1);
+    // A zero handle means CreateThread refused: the problem would be in the
+    // arguments. A large number means the thread was created and the problem
+    // is that worker never reaches its body.
+    if h == 0 {
+        print(0);
+    } else {
+        print(1);
+    }
+    thread_wait(h);
+    print(flag);                 // 1
+
+    // four threads sharing a counter under one lock
+    lock_init(0);
+    counter = 0;
+    h1 = thread_start(&adder, 0);
+    h2 = thread_start(&adder, 0);
+    h3 = thread_start(&adder, 0);
+    h4 = thread_start(&adder, 0);
+    thread_wait(h1);
+    thread_wait(h2);
+    thread_wait(h3);
+    thread_wait(h4);
+    print(counter);              // 4000000
+
+    if counter == 4000000 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    return 0;
+}

@@ -1,0 +1,51 @@
+kron_program
+kron_domain tp1;
+kron_imports
+kron_definitions
+
+// Can a function take a pointer and read through it? peek and poke without
+// a suffix already move eight bytes, so no new builtin is needed for i64.
+
+fn sum_all(p: ptr<i64>, n: i64) -> i64 {
+    raw {
+        var s: i64 = 0;
+        for var i: i64 = 0; i < n; i = i + 1 {
+            s = s + peek(p + i);
+        }
+        return s;
+    }
+}
+
+fn first(p: ptr<i64>) -> i64 {
+    raw {
+        return peek(p);
+    }
+}
+
+fn write_at(p: ptr<i64>, v: i64) {
+    raw {
+        poke(p, v);
+        return 0;
+    }
+}
+
+fn main() {
+    raw {
+        var buf: [i64; 4];
+        buf[0] = 10;
+        buf[1] = 20;
+        buf[2] = 30;
+        buf[3] = 40;
+
+        var p: ptr<i64>;
+        p = &buf;
+
+        print(peek(p));          // 10   -- reading through a pointer
+        print(first(p));       // 10   -- pointer as a parameter
+        print(sum_all(p, 4));       // 100  -- pointer arithmetic inside a function
+        write_at(p + 1, 99);
+        print(buf[1]);           // 99   -- writing through a passed pointer
+
+        return 0;
+    }
+}

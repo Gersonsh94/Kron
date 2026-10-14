@@ -1,0 +1,14 @@
+20
+0
+0
+1
+0
+1
+1
+0
+99
+0
+fail: index out of range
+hint: the index has to go from 0 to the array size minus one
+  at write_global (test_bounds.kr:28)
+  called from main (test_bounds.kr:46)

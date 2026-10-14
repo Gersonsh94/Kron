@@ -1,0 +1,9 @@
+kron_program
+kron_domain test_arenatok_bad2;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var h: ArenaAllocationToken uint64 = 0;
+    return 0;
+}

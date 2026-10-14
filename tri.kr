@@ -1,0 +1,108 @@
+kron_program
+kron_domain tri;
+kron_imports
+kron_definitions
+
+// ============================================================
+// KRON - single filled triangle (barycentric raster)
+// edge() rewritten to use <=4 params (compiler passes 4 in regs).
+// Image: 120 x 100, row = 360 bytes.
+// ============================================================
+
+// edge function with the first vertex fixed at the origin of the edge:
+// caller passes edge direction (dx,dy) and point offset (ox,oy).
+// returns dx*oy - dy*ox  (cross product sign)
+fn cross(dx: real64, dy: real64, ox: real64, oy: real64) -> real64 {
+    return dx * oy - dy * ox;
+}
+
+fn main() {
+    raw {
+        var buf: [i64; 4507];
+        var base: i64 = &buf;
+
+        poke8(base + 0, 66);
+        poke8(base + 1, 77);
+        poke32(base + 2, 36054);
+        poke32(base + 6, 0);
+        poke32(base + 10, 54);
+        poke32(base + 14, 40);
+        poke32(base + 18, 120);
+        poke32(base + 22, 100);
+        poke16(base + 26, 1);
+        poke16(base + 28, 24);
+        poke32(base + 30, 0);
+        poke32(base + 34, 36000);
+        poke32(base + 38, 2835);
+        poke32(base + 42, 2835);
+        poke32(base + 46, 0);
+        poke32(base + 50, 0);
+
+        var pix: i64 = base + 54;
+
+        for var gy: i64 = 0; gy < 100; gy = gy + 1 {
+            for var gx: i64 = 0; gx < 120; gx = gx + 1 {
+                var bo: i64 = pix + gy * 360 + gx * 3;
+                poke8(bo + 0, 30);
+                poke8(bo + 1, 30);
+                poke8(bo + 2, 30);
+            }
+        }
+
+        // triangle vertices
+        var ax: real64 = 20.0;
+        var ay: real64 = 15.0;
+        var bx: real64 = 100.0;
+        var by: real64 = 40.0;
+        var cx: real64 = 45.0;
+        var cy: real64 = 85.0;
+
+        // edge directions (constant per triangle)
+        var abx: real64 = bx - ax;
+        var aby: real64 = by - ay;
+        var bcx: real64 = cx - bx;
+        var bcy: real64 = cy - by;
+        var cax: real64 = ax - cx;
+        var cay: real64 = ay - cy;
+
+        // orientation: cross of AB and AC
+        var acx: real64 = cx - ax;
+        var acy: real64 = cy - ay;
+        var area: real64 = cross(abx, aby, acx, acy);
+
+        for var y: i64 = 15; y < 86; y = y + 1 {
+            for var x: i64 = 20; x < 101; x = x + 1 {
+                var fx: real64 = x;
+                var fy: real64 = y;
+
+                // w0 = cross(AB, AP), w1 = cross(BC, BP), w2 = cross(CA, CP)
+                var w0: real64 = cross(abx, aby, fx - ax, fy - ay);
+                var w1: real64 = cross(bcx, bcy, fx - bx, fy - by);
+                var w2: real64 = cross(cax, cay, fx - cx, fy - cy);
+
+                var inside: i64 = 0;
+                if area > 0.0 {
+                    if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                        inside = 1;
+                    }
+                }
+                if area < 0.0 {
+                    if w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0 {
+                        inside = 1;
+                    }
+                }
+
+                if inside == 1 {
+                    var fo: i64 = pix + (99 - y) * 360 + x * 3;
+                    poke8(fo + 0, 80);
+                    poke8(fo + 1, 220);
+                    poke8(fo + 2, 255);
+                }
+            }
+        }
+
+        savefile(base, 36054, "out.bmp");
+        print(36054);
+        return 0;
+    }
+}

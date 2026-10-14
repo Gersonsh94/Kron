@@ -1,0 +1,13 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic... OK
+[5/6] Codegen... OK
+[6/6] Linking... OK
+Written: tests\pe\test_logic.exe
+
+Compilation successful!

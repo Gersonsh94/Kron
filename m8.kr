@@ -1,0 +1,8 @@
+kron_program
+kron_domain m8;
+kron_imports
+kron_definitions
+
+fn two(n: float64) {
+    return 2;
+}

@@ -1,0 +1,6 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file...ERROR: acquire_domain: cannot find the module 'missing_module.kr'
+  hint: the file has to be in the program's folder, with its .kr extension

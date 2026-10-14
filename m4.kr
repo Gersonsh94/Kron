@@ -1,0 +1,11 @@
+kron_program
+kron_domain m4;
+kron_imports
+kron_definitions
+
+fn two(n: int32) {
+    return n * 3;
+}
+fn main() {
+    print(two(4));
+}

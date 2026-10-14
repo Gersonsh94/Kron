@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_arena;
+kron_imports
+kron_definitions
+
+mmu MainMMU {
+    page_table_hierarchy {
+        level 4 entries 512 ;
+    }
+    heap_arena_definition {
+        arena kernel_pool base_address 0xFFFF800000000000 size_bytes 16777216 growth_policy fixed_static ;
+        arena user_pool   base_address 0x0000700000000000 size_bytes 67108864 growth_policy doubling_exponential ;
+    }
+}

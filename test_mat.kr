@@ -1,0 +1,59 @@
+kron_program
+kron_domain test_mat;
+kron_imports
+kron_definitions
+
+// Two-dimensional arrays. They are stored flat, row by row, so
+// [[i64; 4]; 3] is 12 elements and m[i][j] becomes m[i*4 + j].
+//
+// Expected output:
+//   1      m[0][0]
+//   2      m[0][1]
+//   5      m[1][0]
+//   12     m[2][3], the last one
+//   1      the first one has not moved
+//   78     sum of all twelve
+//   4      corner of a matrix of reals, read as an integer
+//   2.500000  a real cell
+
+fn main() {
+    var m: [[i64; 4]; 3];
+    var f: [[f64; 2]; 2];
+    var i: i64;
+    var j: i64;
+    var t: i64;
+
+    // fill with 1..12, row by row
+    t = 1;
+    for i = 0; i < 3; i = i + 1 {
+        for j = 0; j < 4; j = j + 1 {
+            m[i][j] = t;
+            t = t + 1;
+        }
+    }
+
+    print(m[0][0]);        // 1
+    print(m[0][1]);        // 2
+    print(m[1][0]);        // 5
+    print(m[2][3]);        // 12
+    print(m[0][0]);        // 1
+
+    // add them all
+    t = 0;
+    for i = 0; i < 3; i = i + 1 {
+        for j = 0; j < 4; j = j + 1 {
+            t = t + m[i][j];
+        }
+    }
+    print(t);              // 78
+
+    // matrix of reals
+    f[0][0] = 1.5;
+    f[0][1] = 2.5;
+    f[1][0] = 3.5;
+    f[1][1] = 4.5;
+    print(trunc(f[1][1])); // 4
+    print(f[0][1]);        // 2.500000
+
+    return 0;
+}

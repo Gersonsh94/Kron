@@ -1,0 +1,26 @@
+kron_program
+kron_domain test_gfloat;
+kron_imports
+kron_definitions
+
+// isolate: writing a float into a GLOBAL float array by index
+var gz: [real64; 100];
+
+fn main() {
+    print(1);
+    gz[0] = 3.5;          // global float array write
+    print(2);
+    gz[50] = 7.25;        // write at computed offset
+    print(3);
+    var r: real64 = gz[50];  // read it back
+    print(r);             // 7.25
+    print(4);
+
+    // now with a computed index (like the z-buffer)
+    for var i: i64 = 0; i < 100; i = i + 1 {
+        gz[i] = 1000000000.0;
+    }
+    print(5);
+    print(gz[99]);        // 1000000000.0
+    return 0;
+}

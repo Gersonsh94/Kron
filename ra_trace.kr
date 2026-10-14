@@ -1,0 +1,39 @@
+kron_program
+kron_domain ra_trace;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Register allocation -- phase 2 check.
+//
+// Compiled with RA_TRACE set, the .asm carries the liveness analysis as
+// comments. This function is small enough to work out by hand:
+//
+//   s and i are candidates: only read and written as plain locals.
+//   n is a parameter; its prologue spill names [rbp-N] in raw text, so it is
+//   seen, and excluded.
+//
+//   entry        defines s and i before using them      in = {}
+//   loop head    reads i (n is excluded)                in = {s, i}
+//   loop body    reads s and i, writes both             in = {s, i}
+//   exit         reads s                                in = {s}
+//
+// Expected output when run: 45
+// =========================================================================
+
+fn sum(n: i64) -> i64 {
+    var s: i64;
+    var i: i64;
+    s = 0;
+    i = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    print(sum(10));
+    return 0;
+}

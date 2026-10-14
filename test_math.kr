@@ -1,0 +1,48 @@
+kron_program
+kron_domain test_math;
+kron_imports
+acquire_domain "std_math.kr";
+kron_definitions
+
+// Test for std_math.kr
+// Each line prints a value whose expected result is written beside it.
+
+
+fn main() {
+    // --- basic ---
+    print(fabs(0.0 - 3.5));        // 3.5
+    print(fmin(2.0, 7.0));         // 2.0
+    print(fmax(2.0, 7.0));         // 7.0
+    print(fclamp(9.0, 0.0, 5.0));  // 5.0
+    print(fsign(0.0 - 2.0));       // -1.0
+
+    // --- rounding ---
+    print(ffloor(3.7));            // 3.0
+    print(ffloor(0.0 - 3.2));      // -4.0
+    print(fceil(3.2));             // 4.0
+    print(fround(2.5));            // 3.0
+    print(fmod(7.0, 3.0));         // 1.0
+
+    // --- roots ---
+    print(fsqrt(16.0));            // 4.0
+    print(fsqrt(2.0));             // 1.414214
+    print(flen2(3.0, 4.0));        // 5.0
+    print(flen3(1.0, 2.0, 2.0));   // 3.0
+
+    // --- trigonometry ---
+    print(fsin(0.0));              // 0.0
+    print(fsin(1.57079632679));    // 1.0
+    print(fcos(0.0));              // 1.0
+    print(fcos(3.14159265359));    // -1.0
+
+    // --- powers and conversion ---
+    print(fpowi(2.0, 10));         // 1024.0
+    print(deg_to_rad(180.0));      // 3.141593
+    print(rad_to_deg(3.14159265359)); // 180.0
+
+    // --- geometry ---
+    print(flerp(10.0, 20.0, 0.25)); // 12.5
+    print(fdot3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)); // 32.0
+
+    return 0;
+}

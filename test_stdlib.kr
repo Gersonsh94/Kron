@@ -1,0 +1,70 @@
+kron_program
+kron_domain test_stdlib;
+kron_imports
+acquire_domain "std_mem.kr";
+acquire_domain "std_str.kr";
+kron_definitions
+
+// Test for std_mem.kr and std_str.kr
+// Every line prints a value with its expected result beside it.
+
+
+var buf: [i64; 32];
+var buf2: [i64; 32];
+
+fn main() {
+    raw {
+        var a: i64 = &buf;
+        var b: i64 = &buf2;
+
+        // --- memory ---
+        mem_set(a, 65, 5);              // "AAAAA"
+        poke8(a + 5, 0);
+        print(str_length(a));           // 5
+        print(peek8(a));                // 65
+
+        mem_zero(a, 8);
+        print(peek8(a));                // 0
+
+        mem_copy(a, "hello", 6);
+        print(str_length(a));           // 5
+        str_print_line(a);              // hello
+
+        print(mem_compare("abc", "abc", 3));   // 0
+        print(mem_compare("abd", "abc", 3));   // 1
+
+        var h: i64 = "hello";           // one literal, used twice
+        print(mem_find_byte(h, 108, 5) - h);   // 2
+
+        // --- strings ---
+        print(str_length("Science"));   // 7
+        print(str_compare("abc", "abc"));   // 0
+        print(str_equals("abc", "abd"));    // 0
+        print(str_starts_with("Science", "Sci"));  // 1
+        print(str_starts_with("Science", "xyz"));  // 0
+
+        str_copy(a, "Hello, ");
+        str_concat(a, "world");
+        str_print_line(a);              // Hello, world
+        print(str_length(a));           // 12
+
+        var abc: i64 = "abcdef";
+        print(str_find_byte(abc, 100) - abc);   // 3
+
+        // --- conversion ---
+        print(str_from_int(b, 12345));  // 5
+        str_print_line(b);              // 12345
+        str_from_int(b, 0 - 987);
+        str_print_line(b);              // -987
+
+        print(str_to_int("4321"));      // 4321
+        print(str_to_int("-77"));       // -77
+        print(str_to_int("12ab"));      // 12
+
+        // --- round trip ---
+        str_from_int(b, 60000);
+        print(str_to_int(b));           // 60000
+
+        return 0;
+    }
+}

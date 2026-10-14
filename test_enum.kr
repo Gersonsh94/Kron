@@ -1,0 +1,67 @@
+kron_program
+kron_domain test_enum;
+kron_imports
+kron_definitions
+
+// Enums. The members are compile-time integer constants,
+// written as Name.Member.
+//
+// They count from zero unless given a value, and an explicit value
+// moves the counter so the following ones carry on from there.
+//
+// 'State' is declared AFTER it is used: enums are registered in the
+// pre-pass, like structs.
+//
+// Expected output:
+//   0    Color.Red
+//   1    Color.Green
+//   2    Color.Blue
+//   4    Flag.Four, explicit value
+//   5    Flag.Five, carries on from the explicit one
+//   9    Flag.Nine, another explicit one
+//   1    State.Ready, declared further down
+//   3    sum in an expression
+//   1    comparison
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+enum Flag {
+    Four = 4,
+    Five,
+    Nine = 9
+}
+
+fn main() {
+    var x: i64;
+
+    print(Color.Red);        // 0
+    print(Color.Green);      // 1
+    print(Color.Blue);       // 2
+
+    print(Flag.Four);      // 4
+    print(Flag.Five);       // 5
+    print(Flag.Nine);       // 9
+
+    print(State.Ready);     // 1
+
+    x = Color.Green + Flag.Four - Color.Blue;
+    print(x);                // 3
+
+    if Color.Blue > Color.Red {
+        print(1);            // 1
+    } else {
+        print(0);
+    }
+
+    return 0;
+}
+
+enum State {
+    Stopped,
+    Ready,
+    Running
+}

@@ -1,0 +1,2134 @@
+Comparing files TESTS\DIFFGEN\test_vec3.good.asm and TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    ret
+m_pi:
+    push rbp
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    ret
+section .data
+__mod_0_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+section .data
+__mod_1_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+main:
+    push rbp
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt1: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt1]
+    jmp .__ret_0
+.__ret_0:
+    mov rsp, rbp
+    pop rbp
+    ret
+m_tau:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt3: dq 6.28318530717958647692
+section .text
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    mov rbp, rsp
+    sub rsp, 48
+section .data
+.flt3: dq 3.0
+section .text
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd xmm0, [rel .flt3]
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+    pop rbp
+    ret
+m_half_pi:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.flt5: dq 1.57079632679489661923
+section .text
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd xmm0, [rel .flt3]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt4: dq 4.0
+section .text
+    movsd xmm0, [rel .flt4]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt5: dq 0.0
+section .text
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd xmm0, [rel .flt5]
+    jmp .__ret_4
+.__ret_4:
+    mov rsp, rbp
+    pop rbp
+    ret
+fabs:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd xmm0, [rel .flt5]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+section .data
+.flt9: dq 0.0
+section .text
+    movsd xmm0, [rel .flt9]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L7
+section .data
+.flt10: dq 0.0
+section .text
+    movsd xmm0, [rel .flt10]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt6: dq 1.0
+section .text
+    movsd xmm0, [rel .flt6]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt7: dq 2.0
+section .text
+    movsd xmm0, [rel .flt7]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt8: dq 2.0
+section .text
+    movsd xmm0, [rel .flt8]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_6
+    jmp .L8
+.L7:
+.L8:
+    movsd xmm0, [rbp-8]
+    jmp .__ret_6
+.__ret_6:
+    mov rsp, rbp
+    pop rbp
+    ret
+fmin:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt9: dq 1.0
+section .text
+    movsd xmm0, [rel .flt9]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt10: dq 2.0
+section .text
+    movsd xmm0, [rel .flt10]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt11: dq 2.0
+section .text
+    movsd xmm0, [rel .flt11]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L12
+    movsd xmm0, [rbp-8]
+    jmp .__ret_11
+    jmp .L13
+.L12:
+.L13:
+    movsd xmm0, [rbp-16]
+    jmp .__ret_11
+.__ret_11:
+    mov rsp, rbp
+    pop rbp
+    ret
+fmax:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_length2
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt12: dq 0.0
+section .text
+    movsd xmm0, [rel .flt12]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L15
+    movsd xmm0, [rbp-8]
+    jmp .__ret_14
+    jmp .L16
+.L15:
+.L16:
+    movsd xmm0, [rbp-16]
+    jmp .__ret_14
+.__ret_14:
+    mov rsp, rbp
+    pop rbp
+    ret
+fclamp:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd [rbp-24], xmm2
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt13: dq 0.0
+section .text
+    movsd xmm0, [rel .flt13]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L18
+    movsd xmm0, [rbp-16]
+    jmp .__ret_17
+    jmp .L19
+.L18:
+.L19:
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt14: dq 0.0
+section .text
+    movsd xmm0, [rel .flt14]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L20
+    movsd xmm0, [rbp-24]
+    jmp .__ret_17
+    jmp .L21
+.L20:
+.L21:
+    movsd xmm0, [rbp-8]
+    jmp .__ret_17
+.__ret_17:
+    mov rsp, rbp
+    pop rbp
+    ret
+fsign:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt15: dq 3.0
+section .text
+    movsd xmm0, [rel .flt15]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt25: dq 0.0
+section .text
+    movsd xmm0, [rel .flt25]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L23
+section .data
+.flt26: dq 1.0
+section .text
+    movsd xmm0, [rel .flt26]
+    jmp .__ret_22
+    jmp .L24
+.L23:
+.L24:
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt16: dq 4.0
+section .text
+    movsd xmm0, [rel .flt16]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt29: dq 0.0
+section .text
+    movsd xmm0, [rel .flt29]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L27
+section .data
+.flt30: dq 0.0
+section .text
+    movsd xmm0, [rel .flt30]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt17: dq 0.0
+section .text
+    movsd xmm0, [rel .flt17]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+section .data
+.flt31: dq 1.0
+section .text
+    movsd xmm0, [rel .flt31]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm5, [rsp]
+    add rsp, 8
+    movsd xmm4, [rsp]
+    add rsp, 8
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_22
+    jmp .L28
+.L27:
+.L28:
+section .data
+.flt32: dq 0.0
+section .text
+    movsd xmm0, [rel .flt32]
+    jmp .__ret_22
+.__ret_22:
+    mov rsp, rbp
+    pop rbp
+    ret
+ffloor:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    cvttsd2si rax, xmm0
+    mov [rbp-16], rax
+    mov rax, [rbp-16]
+    cvtsi2sd xmm0, rax
+    movsd [rbp-24], xmm0
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_distance
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt18: dq 1.0
+section .text
+    movsd xmm0, [rel .flt18]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L34
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt19: dq 2.0
+section .text
+    movsd xmm0, [rel .flt19]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt36: dq 1.0
+section .text
+    movsd xmm0, [rel .flt36]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-24], xmm0
+    jmp .L35
+.L34:
+.L35:
+    movsd xmm0, [rbp-24]
+    jmp .__ret_33
+.__ret_33:
+    mov rsp, rbp
+    pop rbp
+    ret
+fceil:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    cvttsd2si rax, xmm0
+    mov [rbp-16], rax
+    mov rax, [rbp-16]
+    cvtsi2sd xmm0, rax
+    movsd [rbp-24], xmm0
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt20: dq 3.0
+section .text
+    movsd xmm0, [rel .flt20]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L38
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt21: dq 4.0
+section .text
+    movsd xmm0, [rel .flt21]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt40: dq 1.0
+section .text
+    movsd xmm0, [rel .flt40]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt22: dq 5.0
+section .text
+    movsd xmm0, [rel .flt22]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt23: dq 6.0
+section .text
+    movsd xmm0, [rel .flt23]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm5, [rsp]
+    add rsp, 8
+    movsd xmm4, [rsp]
+    add rsp, 8
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-24], xmm0
+    jmp .L39
+.L38:
+.L39:
+    movsd xmm0, [rbp-24]
+    jmp .__ret_37
+.__ret_37:
+    mov rsp, rbp
+    pop rbp
+    ret
+fround:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_dot
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt24: dq 0.0
+section .text
+    movsd xmm0, [rel .flt24]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt44: dq 0.0
+section .text
+    movsd xmm0, [rel .flt44]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L42
+section .data
+.flt45: dq 0.0
+section .text
+    movsd xmm0, [rel .flt45]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt25: dq 0.0
+section .text
+    movsd xmm0, [rel .flt25]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt46: dq 0.5
+section .text
+    movsd xmm0, [rel .flt46]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt26: dq 1.0
+section .text
+    movsd xmm0, [rel .flt26]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt27: dq 0.0
+section .text
+    movsd xmm0, [rel .flt27]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    sub rsp, 32
+    call ffloor
+    add rsp, 32
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_41
+    jmp .L43
+.L42:
+.L43:
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    sub rsp, 32
+    call vec3_cross_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt28: dq 0.0
+section .text
+    movsd xmm0, [rel .flt28]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt47: dq 0.5
+section .text
+    movsd xmm0, [rel .flt47]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt29: dq 1.0
+section .text
+    movsd xmm0, [rel .flt29]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call ffloor
+    add rsp, 32
+    jmp .__ret_41
+.__ret_41:
+    mov rsp, rbp
+    pop rbp
+    ret
+fmod:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt30: dq 0.0
+section .text
+    movsd xmm0, [rel .flt30]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt51: dq 0.0
+section .text
+    movsd xmm0, [rel .flt51]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt31: dq 0.0
+section .text
+    movsd xmm0, [rel .flt31]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L49
+section .data
+.flt52: dq 0.0
+section .text
+    movsd xmm0, [rel .flt52]
+    jmp .__ret_48
+    jmp .L50
+.L49:
+.L50:
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_cross_y
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt32: dq 1.0
+section .text
+    movsd xmm0, [rel .flt32]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd [rbp-24], xmm0
+section .data
+.flt53: dq 0.0
+section .text
+    movsd xmm0, [rel .flt53]
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt33: dq 0.0
+section .text
+    movsd xmm0, [rel .flt33]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt56: dq 0.0
+section .text
+    movsd xmm0, [rel .flt56]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L54
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt34: dq 0.0
+section .text
+    movsd xmm0, [rel .flt34]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fceil
+    add rsp, 32
+    movsd [rbp-32], xmm0
+    jmp .L55
+.L54:
+.L55:
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt35: dq 1.0
+section .text
+    movsd xmm0, [rel .flt35]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+section .data
+.flt59: dq 0.0
+section .text
+    movsd xmm0, [rel .flt59]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setae al
+    movzx rax, al
+    test rax, rax
+    jz .L57
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_cross_z
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt36: dq 3.0
+section .text
+    movsd xmm0, [rel .flt36]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call ffloor
+    add rsp, 32
+    movsd [rbp-32], xmm0
+    jmp .L58
+.L57:
+.L58:
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt37: dq 4.0
+section .text
+    movsd xmm0, [rel .flt37]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt38: dq 0.0
+section .text
+    movsd xmm0, [rel .flt38]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_48
+.__ret_48:
+    mov rsp, rbp
+    pop rbp
+    ret
+fsqrt:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_norm_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt39: dq 3.0
+section .text
+    movsd xmm0, [rel .flt39]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt63: dq 0.0
+section .text
+    movsd xmm0, [rel .flt63]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt40: dq 4.0
+section .text
+    movsd xmm0, [rel .flt40]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt41: dq 0.0
+section .text
+    movsd xmm0, [rel .flt41]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setbe al
+    movzx rax, al
+    test rax, rax
+    jz .L61
+section .data
+.flt64: dq 0.0
+section .text
+    movsd xmm0, [rel .flt64]
+    jmp .__ret_60
+    jmp .L62
+.L61:
+.L62:
+    movsd xmm0, [rbp-8]
+    movsd [rbp-16], xmm0
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_norm_y
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt42: dq 3.0
+section .text
+    movsd xmm0, [rel .flt42]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt67: dq 1.0
+section .text
+    movsd xmm0, [rel .flt67]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt43: dq 4.0
+section .text
+    movsd xmm0, [rel .flt43]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt44: dq 0.0
+section .text
+    movsd xmm0, [rel .flt44]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L65
+section .data
+.flt68: dq 1.0
+section .text
+    movsd xmm0, [rel .flt68]
+    movsd [rbp-16], xmm0
+    jmp .L66
+.L65:
+.L66:
+    mov rax, 0
+    mov [rbp-24], rax
+.L69:
+    mov rax, [rbp-24]
+    push rax
+    mov rax, 40
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L70
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call vec3_norm_z
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt45: dq 1.57079632679489661923
+section .text
+    movsd xmm0, [rel .flt45]
+    movsd [rbp-8], xmm0
+section .data
+.flt46: dq 1.0
+section .text
+    movsd xmm0, [rel .flt46]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt47: dq 0.0
+section .text
+    movsd xmm0, [rel .flt47]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call rot_y_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt48: dq 1.0
+section .text
+    movsd xmm0, [rel .flt48]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt71: dq 0.5
+section .text
+    movsd xmm0, [rel .flt71]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt49: dq 0.0
+section .text
+    movsd xmm0, [rel .flt49]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd [rbp-16], xmm0
+    mov rax, [rbp-24]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-24], rax
+    jmp .L69
+.L70:
+    movsd xmm0, [rbp-16]
+    jmp .__ret_60
+.__ret_60:
+    mov rsp, rbp
+    pop rbp
+    ret
+flen2:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call rot_y_z
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt50: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt50]
+    movsd [rbp-16], xmm0
+section .data
+.flt51: dq 1.0
+section .text
+    movsd xmm0, [rel .flt51]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt52: dq 0.0
+section .text
+    movsd xmm0, [rel .flt52]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call rot_z_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt53: dq 1.0
+section .text
+    movsd xmm0, [rel .flt53]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt54: dq 0.0
+section .text
+    movsd xmm0, [rel .flt54]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    sub rsp, 32
+    call fsqrt
+    add rsp, 32
+    jmp .__ret_72
+.__ret_72:
+    mov rsp, rbp
+    pop rbp
+    ret
+flen3:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movsd [rbp-8], xmm0
+    movsd [rbp-16], xmm1
+    movsd [rbp-24], xmm2
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    sub rsp, 32
+    call rot_z_y
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt55: dq 0.0
+section .text
+    movsd xmm0, [rel .flt55]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-8]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt56: dq 0.0
+section .text
+    movsd xmm0, [rel .flt56]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt57: dq 4.0
+section .text
+    movsd xmm0, [rel .flt57]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt58: dq 90.0
+section .text
+    movsd xmm0, [rel .flt58]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt59: dq 50.0
+section .text
+    movsd xmm0, [rel .flt59]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm4, [rsp]
+    add rsp, 8
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call proj_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt60: dq 0.0
+section .text
+    movsd xmm0, [rel .flt60]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fsqrt
+    add rsp, 32
+    jmp .__ret_73
+.__ret_73:
+    mov rsp, rbp
+    pop rbp
+    ret
+fwrap_angle:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt61: dq 0.0
+section .text
+    movsd xmm0, [rel .flt61]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt75: dq 6.28318530717958647692
+section .text
+    movsd xmm0, [rel .flt75]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt62: dq 4.0
+section .text
+    movsd xmm0, [rel .flt62]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fmod
+    add rsp, 32
+    movsd [rbp-16], xmm0
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt63: dq 90.0
+section .text
+    movsd xmm0, [rel .flt63]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt78: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt78]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L76
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt64: dq 50.0
+section .text
+    movsd xmm0, [rel .flt64]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+section .data
+.flt79: dq 6.28318530717958647692
+section .text
+    movsd xmm0, [rel .flt79]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm4, [rsp]
+    add rsp, 8
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-16], xmm0
+    jmp .L77
+.L76:
+.L77:
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call proj_y
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt65: dq 1.0
+section .text
+    movsd xmm0, [rel .flt65]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt82: dq 0.0
+section .text
+    movsd xmm0, [rel .flt82]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt66: dq 0.0
+section .text
+    movsd xmm0, [rel .flt66]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt83: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt83]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L80
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt67: dq 4.0
+section .text
+    movsd xmm0, [rel .flt67]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt84: dq 6.28318530717958647692
+section .text
+    movsd xmm0, [rel .flt84]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt68: dq 90.0
+section .text
+    movsd xmm0, [rel .flt68]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt69: dq 50.0
+section .text
+    movsd xmm0, [rel .flt69]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm4, [rsp]
+    add rsp, 8
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-16], xmm0
+    jmp .L81
+.L80:
+.L81:
+    movsd xmm0, [rbp-16]
+    jmp .__ret_74
+.__ret_74:
+    mov rsp, rbp
+    pop rbp
+    ret
+fsin:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    movsd [rbp-8], xmm0
+    movsd xmm0, [rbp-8]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call proj_x
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt70: dq 2.0
+section .text
+    movsd xmm0, [rel .flt70]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fwrap_angle
+    add rsp, 32
+    movsd [rbp-16], xmm0
+    movsd xmm0, [rbp-16]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt71: dq 4.0
+section .text
+    movsd xmm0, [rel .flt71]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-16]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    mulsd xmm0, xmm1
+    movsd [rbp-24], xmm0
+    movsd xmm0, [rbp-16]
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-16]
+    movsd [rbp-40], xmm0
+section .data
+.flt86: dq 0.0
+section .text
+    movsd xmm0, [rel .flt86]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call proj_depth
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt72: dq 1.0
+section .text
+    movsd xmm0, [rel .flt72]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt73: dq 0.0
+section .text
+    movsd xmm0, [rel .flt73]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt74: dq 0.0
+section .text
+    movsd xmm0, [rel .flt74]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt87: dq 6.0
+section .text
+    movsd xmm0, [rel .flt87]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt75: dq 1.0
+section .text
+    movsd xmm0, [rel .flt75]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-40]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call edge_cross
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.flt76: dq 1.0
+section .text
+    movsd xmm0, [rel .flt76]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-40], xmm0
+section .data
+.flt88: dq 0.0
+section .text
+    movsd xmm0, [rel .flt88]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt77: dq 0.0
+section .text
+    movsd xmm0, [rel .flt77]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt78: dq 0.0
+section .text
+    movsd xmm0, [rel .flt78]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+section .data
+.flt79: dq 0.0
+section .text
+    movsd xmm0, [rel .flt79]
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+section .data
+.flt89: dq 20.0
+section .text
+    movsd xmm0, [rel .flt89]
+    movsd xmm1, xmm0
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+section .data
+.flt80: dq 1.0
+section .text
+    movsd xmm0, [rel .flt80]
+    movsd xmm1, xmm0
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-40]
+    sub rsp, 8
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+*****
+
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    movsd [rsp], xmm0
+    movsd xmm3, [rsp]
+    add rsp, 8
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+*****
+
+Resync Failed.  Files are too different.
+***** TESTS\DIFFGEN\test_vec3.good.asm
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-40], xmm0
+section .data
+.flt90: dq 0.0
+section .text
+    movsd xmm0, [rel .flt90]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt91: dq 42.0
+section .text
+    movsd xmm0, [rel .flt91]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-40]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-40], xmm0
+section .data
+.flt92: dq 0.0
+section .text
+    movsd xmm0, [rel .flt92]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt93: dq 72.0
+section .text
+    movsd xmm0, [rel .flt93]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    divsd xmm0, xmm1
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movsd [rbp-32], xmm0
+    movsd xmm0, [rbp-40]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movsd [rbp-40], xmm0
+section .data
+.flt94: dq 0.0
+section .text
+    movsd xmm0, [rel .flt94]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-32]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rbp-24]
+    movsd xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt95: dq 110.0
+section .text
+    movsd xmm0, [rel .flt95]
+    movsd xmm1, xmm0
+***** TESTS\DIFFGEN\TEST_VEC3.BAD.ASM
+    add rsp, 8
+    sub rsp, 32
+    call edge_cross
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, 0
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+    pop rbp
+    mov rcx, rax
+    sub rsp, 32
+    call ExitProcess
+*****
+

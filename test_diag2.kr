@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_diag2;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE, to see the semantic diagnostic.
+//
+// Line 14 uses 'total', which is not declared. The message should give
+// the file, line 14, column 9, the name in quotes, and
+// underline the five letters.
+
+fn main() {
+    var x: i64;
+    x = total + 1;
+    print(x);
+    return 0;
+}

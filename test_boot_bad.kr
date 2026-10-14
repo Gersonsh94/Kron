@@ -1,0 +1,10 @@
+kron_program
+kron_domain bad_boot;
+kron_imports
+kron_definitions
+
+boot Bad {
+    mmu_table_init {
+        entry 0x1000 flags no_existe ;
+    }
+}

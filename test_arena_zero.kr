@@ -1,0 +1,8 @@
+kron_program
+kron_domain test_arena_zero;
+kron_imports
+kron_definitions
+
+mmu M { heap_arena_definition {
+    arena z base_address 0x1000 size_bytes 0 growth_policy fixed_static ;
+} }

@@ -1,0 +1,10 @@
+kron_program
+kron_domain bad_pool;
+kron_imports
+kron_definitions
+
+mmu BadPool {
+    dynamic_allocation_pool H {
+        allocator_class = no_existe ;
+    }
+}

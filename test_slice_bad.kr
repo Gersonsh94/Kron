@@ -1,0 +1,18 @@
+kron_program
+kron_domain test_slice_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: slice without importing std_arena
+//
+// v[i] on a slice becomes a call to slice_get, which lives in
+// std_arena.kr. Without that import kasm would not notice the missing function: it
+// has to be rejected at compile time, saying which import is missing.
+// =========================================================================
+
+fn main() {
+    var v: slice<i64> = 0;
+    print(v[0]);
+    return 0;
+}

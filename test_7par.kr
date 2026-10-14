@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_7par;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE: seven parameters.
+//
+// Six is the full set of argument registers. The seventh was not passed
+// wrongly: it was not even evaluated, and the call did something other than
+// what it said, without a warning.
+
+fn seven(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return a + g;
+}
+
+fn main() {
+    print(seven(1, 2, 3, 4, 5, 6, 7));
+    return 0;
+}

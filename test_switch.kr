@@ -1,0 +1,27 @@
+kron_program
+kron_domain test_switch;
+kron_imports
+kron_definitions
+
+fn classify(n: int64) -> int64 {
+    switch n {
+        case 1: { return 100; }
+        case 2: { return 200; }
+        case 3: { return 300; }
+        default: { return 999; }
+    }
+    return -1;
+}
+
+fn main() -> int64 {
+    print(classify(1));
+    print(classify(2));
+    print(classify(3));
+    print(classify(7));
+    var k: int64 = 2;
+    switch k {
+        case 1: { print(11); }
+        case 2: { print(22); }
+    }
+    return 0;
+}

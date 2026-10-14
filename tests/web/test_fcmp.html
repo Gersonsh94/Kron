@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>test_fcmp</title>
+<style>
+body { margin: 0; background: #1e1e1e; color: #d4d4d4; font: 14px monospace; }
+canvas { display: none; outline: none; margin: 8px; }
+pre { margin: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<canvas id="kron"></canvas>
+<pre id="out"></pre>
+<script src="kron_web.js"></script>
+<script>KronWeb.start({ wasm: "test_fcmp.wasm", canvas: "#kron", console: "#out" });</script>
+</body>
+</html>

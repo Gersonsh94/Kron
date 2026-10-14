@@ -1,0 +1,296 @@
+kron_program
+kron_domain std_stats;
+kron_imports
+kron_definitions
+
+// std_stats.kr -- descriptive statistics and least-squares fitting.
+//
+// Values are loaded into a module-level buffer with st_push, then queried.
+// That shape exists because a function cannot yet take a ptr<real64>; once it
+// can, every routine here becomes a thin wrapper over an array parameter.
+//
+// Paired routines (covariance, correlation, regression) read a second buffer
+// filled with st_push_y, so x[i] and y[i] line up by index.
+
+
+var st_x: [real64; 1024];
+var st_y: [real64; 1024];
+var st_n: i64;
+var st_ny: i64;
+var st_sorted: [real64; 1024];
+
+// ---------------------------------------------------------------- loading --
+
+fn st_clear() {
+    st_n = 0;
+    st_ny = 0;
+    return 0;
+}
+
+fn st_push(v: real64) {
+    if st_n < 1024 {
+        st_x[st_n] = v;
+        st_n = st_n + 1;
+    }
+    return 0;
+}
+
+fn st_push_y(v: real64) {
+    if st_ny < 1024 {
+        st_y[st_ny] = v;
+        st_ny = st_ny + 1;
+    }
+    return 0;
+}
+
+fn st_count() -> i64 {
+    return st_n;
+}
+
+fn st_get(i: i64) -> real64 {
+    return st_x[i];
+}
+
+// ------------------------------------------------------------- extremes ----
+
+fn st_min() -> real64 {
+    var m: real64 = st_x[0];
+    for var i: i64 = 1; i < st_n; i = i + 1 {
+        if st_x[i] < m {
+            m = st_x[i];
+        }
+    }
+    return m;
+}
+
+fn st_max() -> real64 {
+    var m: real64 = st_x[0];
+    for var i: i64 = 1; i < st_n; i = i + 1 {
+        if st_x[i] > m {
+            m = st_x[i];
+        }
+    }
+    return m;
+}
+
+fn st_range() -> real64 {
+    return st_max() - st_min();
+}
+
+// ------------------------------------------------------------- averages ----
+
+fn st_sum() -> real64 {
+    var s: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        s = s + st_x[i];
+    }
+    return s;
+}
+
+fn st_mean() -> real64 {
+    var d: real64 = 0.0;
+    d = st_n;
+    return st_sum() / d;
+}
+
+// Population variance: divides by n. Use st_var_sample for the n-1 form that
+// estimates a variance from a sample rather than describing the data itself.
+fn st_var() -> real64 {
+    var mu: real64 = st_mean();
+    var acc: real64 = 0.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        d = st_x[i] - mu;
+        acc = acc + d * d;
+    }
+    d = st_n;
+    return acc / d;
+}
+
+fn st_var_sample() -> real64 {
+    var mu: real64 = st_mean();
+    var acc: real64 = 0.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        d = st_x[i] - mu;
+        acc = acc + d * d;
+    }
+    d = st_n - 1;
+    return acc / d;
+}
+
+fn st_stddev() -> real64 {
+    return fsqrt(st_var());
+}
+
+fn st_stddev_sample() -> real64 {
+    return fsqrt(st_var_sample());
+}
+
+// --------------------------------------------------------------- ordering --
+
+// Insertion sort into st_sorted, leaving st_x untouched so the caller can keep
+// querying the data in its original order afterwards.
+fn st_sort() {
+    var v: real64 = 0.0;
+    var j: i64 = 0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        st_sorted[i] = st_x[i];
+    }
+    for var i: i64 = 1; i < st_n; i = i + 1 {
+        v = st_sorted[i];
+        j = i - 1;
+        while j >= 0 && st_sorted[j] > v {
+            st_sorted[j + 1] = st_sorted[j];
+            j = j - 1;
+        }
+        st_sorted[j + 1] = v;
+    }
+    return 0;
+}
+
+fn st_sorted_at(i: i64) -> real64 {
+    return st_sorted[i];
+}
+
+fn st_median() -> real64 {
+    var mid: i64 = 0;
+    var a: real64 = 0.0;
+    var b: real64 = 0.0;
+    st_sort();
+    mid = st_n / 2;
+    if st_n % 2 == 1 {
+        return st_sorted[mid];
+    }
+    a = st_sorted[mid - 1];
+    b = st_sorted[mid];
+    return (a + b) / 2.0;
+}
+
+// Percentile by linear interpolation between the two neighbouring ranks,
+// which is what numpy.percentile does by default.
+fn st_percentile(p: real64) -> real64 {
+    var pos: real64 = 0.0;
+    var lo: i64 = 0;
+    var frac: real64 = 0.0;
+    var d: real64 = 0.0;
+    st_sort();
+    d = st_n - 1;
+    pos = (p / 100.0) * d;
+    lo = ffloor(pos);
+    if lo >= st_n - 1 {
+        return st_sorted[st_n - 1];
+    }
+    d = lo;
+    frac = pos - d;
+    return st_sorted[lo] + frac * (st_sorted[lo + 1] - st_sorted[lo]);
+}
+
+fn st_q1() -> real64 {
+    return st_percentile(25.0);
+}
+
+fn st_q3() -> real64 {
+    return st_percentile(75.0);
+}
+
+fn st_iqr() -> real64 {
+    return st_q3() - st_q1();
+}
+
+// The most frequent value. Ties resolve to the smallest such value, since the
+// scan walks the sorted copy from the bottom.
+fn st_mode() -> real64 {
+    var best: real64 = 0.0;
+    var best_run: i64 = 0;
+    var run: i64 = 1;
+    st_sort();
+    best = st_sorted[0];
+    for var i: i64 = 1; i < st_n; i = i + 1 {
+        if st_sorted[i] == st_sorted[i - 1] {
+            run = run + 1;
+        } else {
+            run = 1;
+        }
+        if run > best_run {
+            best_run = run;
+            best = st_sorted[i - 1];
+        }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- paired ----
+
+fn st_mean_y() -> real64 {
+    var s: real64 = 0.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 0; i < st_ny; i = i + 1 {
+        s = s + st_y[i];
+    }
+    d = st_ny;
+    return s / d;
+}
+
+fn st_covar() -> real64 {
+    var mx: real64 = st_mean();
+    var my: real64 = st_mean_y();
+    var acc: real64 = 0.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        acc = acc + (st_x[i] - mx) * (st_y[i] - my);
+    }
+    d = st_n;
+    return acc / d;
+}
+
+fn st_corr() -> real64 {
+    var mx: real64 = st_mean();
+    var my: real64 = st_mean_y();
+    var sxy: real64 = 0.0;
+    var sxx: real64 = 0.0;
+    var syy: real64 = 0.0;
+    var dx: real64 = 0.0;
+    var dy: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        dx = st_x[i] - mx;
+        dy = st_y[i] - my;
+        sxy = sxy + dx * dy;
+        sxx = sxx + dx * dx;
+        syy = syy + dy * dy;
+    }
+    return sxy / fsqrt(sxx * syy);
+}
+
+// ----------------------------------------------------------- linear fit ----
+
+// Least squares: slope = sum((x-mx)(y-my)) / sum((x-mx)^2)
+fn linreg_slope() -> real64 {
+    var mx: real64 = st_mean();
+    var my: real64 = st_mean_y();
+    var num: real64 = 0.0;
+    var den: real64 = 0.0;
+    var dx: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        dx = st_x[i] - mx;
+        num = num + dx * (st_y[i] - my);
+        den = den + dx * dx;
+    }
+    return num / den;
+}
+
+fn linreg_intercept() -> real64 {
+    return st_mean_y() - linreg_slope() * st_mean();
+}
+
+fn linreg_predict(x: real64) -> real64 {
+    return linreg_intercept() + linreg_slope() * x;
+}
+
+// Coefficient of determination: the share of the variance in y that the fitted
+// line accounts for. For a straight-line fit this is simply the square of the
+// correlation coefficient.
+fn linreg_r2() -> real64 {
+    var r: real64 = st_corr();
+    return r * r;
+}

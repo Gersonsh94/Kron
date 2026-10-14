@@ -1,0 +1,491 @@
+kron_program
+kron_domain std_str;
+kron_imports
+kron_definitions
+
+// ============================================================================
+// Kron standard library — strings.
+//
+// A string is the address of a NUL-terminated run of bytes, which is exactly
+// what a string literal evaluates to:  var s: i64 = "hello";
+//
+// Callers own all storage. Functions that write take a destination buffer and
+// never allocate: size it for the result plus its terminating zero.
+//
+// Every function that reads or writes bytes directly keeps its body inside
+// raw { ... }: this is the one place in the library that touches memory by
+// address, and programs that only call it get no warning.
+//
+// Characters are passed as their byte value: str_split_get(a, s, 44, 1)
+// splits on ',' (44). Functions that answer yes or no return 1 or 0; those
+// that look for a position return -1 (or address 0) when there is none.
+// ============================================================================
+
+// Number of bytes before the terminating zero.
+fn str_length(s: i64) -> i64 {
+    raw {
+        var n: i64 = 0;
+        while peek8(s + n) != 0 {
+            n = n + 1;
+        }
+        return n;
+    }
+}
+
+// Copy src (including its terminator) into dst. Returns dst.
+fn str_copy(dst: i64, src: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var c: i64 = peek8(src);
+        while c != 0 {
+            poke8(dst + i, c);
+            i = i + 1;
+            c = peek8(src + i);
+        }
+        poke8(dst + i, 0);
+        return dst;
+    }
+}
+
+// Append src to the end of dst. Returns dst.
+fn str_concat(dst: i64, src: i64) -> i64 {
+    var end: i64 = dst + str_length(dst);
+    str_copy(end, src);
+    return dst;
+}
+
+// Lexicographic comparison. 0 when equal, negative when a < b, positive when
+// a > b.
+fn str_compare(a: i64, b: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        while 1 == 1 {
+            var ca: i64 = peek8(a + i);
+            var cb: i64 = peek8(b + i);
+            if ca != cb {
+                return ca - cb;
+            }
+            if ca == 0 {
+                return 0;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+}
+
+// 1 when the two strings are identical, 0 otherwise.
+fn str_equals(a: i64, b: i64) -> i64 {
+    if str_compare(a, b) == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// Address of the first occurrence of a byte, or 0 when absent.
+fn str_find_byte(s: i64, target: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            if c == target {
+                return s + i;
+            }
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return 0;
+    }
+}
+
+// 1 when `s` starts with `prefix`.
+fn str_starts_with(s: i64, prefix: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var p: i64 = peek8(prefix);
+        while p != 0 {
+            if peek8(s + i) != p {
+                return 0;
+            }
+            i = i + 1;
+            p = peek8(prefix + i);
+        }
+        return 1;
+    }
+}
+
+// Reverse `len` bytes in place starting at s. Returns s.
+fn str_reverse(s: i64, len: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var j: i64 = len - 1;
+        while i < j {
+            var t: i64 = peek8(s + i);
+            poke8(s + i, peek8(s + j));
+            poke8(s + j, t);
+            i = i + 1;
+            j = j - 1;
+        }
+        return s;
+    }
+}
+
+// ------------------------------------------------------------ conversion ---
+
+// Write the decimal form of n into dst (NUL terminated).
+// Returns the number of characters written, not counting the terminator.
+fn str_from_int(dst: i64, n: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var v: i64 = n;
+        var neg: i64 = 0;
+
+        if v < 0 {
+            neg = 1;
+            v = 0 - v;
+        }
+        if v == 0 {
+            poke8(dst, 48);
+            poke8(dst + 1, 0);
+            return 1;
+        }
+        while v > 0 {
+            poke8(dst + i, 48 + v % 10);
+            v = v / 10;
+            i = i + 1;
+        }
+        if neg == 1 {
+            poke8(dst + i, 45);
+            i = i + 1;
+        }
+        poke8(dst + i, 0);
+        str_reverse(dst, i);
+        return i;
+    }
+}
+
+// Parse a decimal integer, with an optional leading '-'. Stops at the first
+// character that is not a digit.
+fn str_to_int(s: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var sign: i64 = 1;
+        var v: i64 = 0;
+
+        if peek8(s) == 45 {
+            sign = 0 - 1;
+            i = 1;
+        }
+        var c: i64 = peek8(s + i);
+        while c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return v * sign;
+    }
+}
+
+// --------------------------------------------------------------- printing ---
+
+// Print a string followed by a newline.
+fn str_print_line(s: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            printc(c);
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        printc(10);
+        return i;
+    }
+}
+
+// -------------------------------------------------------------- characters ---
+
+// 1 for a space, a tab, a newline or a carriage return.
+fn char_is_space(c: i64) -> i64 {
+    if c == 32 { return 1; }
+    if c == 9 { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    return 0;
+}
+
+// 1 for '0' through '9'.
+fn char_is_digit(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return 1; }
+    return 0;
+}
+
+// 1 for 'A' through 'Z' and 'a' through 'z'. ASCII only.
+fn char_is_alpha(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { return 1; }
+    if c >= 97 && c <= 122 { return 1; }
+    return 0;
+}
+
+// The upper-case form of an ASCII letter; anything else comes back as it was.
+fn char_upper(c: i64) -> i64 {
+    if c >= 97 && c <= 122 { return c - 32; }
+    return c;
+}
+
+// The lower-case form of an ASCII letter; anything else comes back as it was.
+fn char_lower(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { return c + 32; }
+    return c;
+}
+
+// --------------------------------------------------------------- searching ---
+
+// 1 when `s` ends with `suffix`.
+fn str_ends_with(s: i64, suffix: i64) -> i64 {
+    raw {
+        var ls: i64 = str_length(s);
+        var lx: i64 = str_length(suffix);
+        var i: i64 = 0;
+        if lx > ls { return 0; }
+        while i < lx {
+            if peek8(s + ls - lx + i) != peek8(suffix + i) { return 0; }
+            i = i + 1;
+        }
+        return 1;
+    }
+}
+
+// Position of the first occurrence of `sub` in `s`, or -1. An empty `sub`
+// is found at 0.
+fn str_index_of(s: i64, sub: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        while peek8(s + i) != 0 {
+            if str_starts_with(s + i, sub) == 1 { return i; }
+            i = i + 1;
+        }
+        if peek8(sub) == 0 { return 0; }
+        return 0 - 1;
+    }
+}
+
+// Address of the first occurrence of `sub` in `s`, or 0.
+fn str_find(s: i64, sub: i64) -> i64 {
+    var i: i64 = str_index_of(s, sub);
+    if i < 0 { return 0; }
+    return s + i;
+}
+
+// 1 when `sub` occurs anywhere in `s`.
+fn str_contains(s: i64, sub: i64) -> i64 {
+    if str_index_of(s, sub) < 0 { return 0; }
+    return 1;
+}
+
+// How many times `sub` occurs in `s`, without overlapping: "aaaa" holds
+// "aa" twice. An empty `sub` counts as zero.
+fn str_count(s: i64, sub: i64) -> i64 {
+    raw {
+        var n: i64 = str_length(sub);
+        var count: i64 = 0;
+        var i: i64 = 0;
+        if n == 0 { return 0; }
+        while peek8(s + i) != 0 {
+            if str_starts_with(s + i, sub) == 1 {
+                count = count + 1;
+                i = i + n;
+            } else {
+                i = i + 1;
+            }
+        }
+        return count;
+    }
+}
+
+// Address of the last occurrence of a byte, or 0 when absent.
+fn str_find_last_byte(s: i64, target: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var found: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            if c == target { found = s + i; }
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return found;
+    }
+}
+
+// 1 when the two strings are equal ignoring the case of ASCII letters.
+fn str_equals_nocase(a: i64, b: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        while 1 == 1 {
+            var ca: i64 = char_lower(peek8(a + i));
+            var cb: i64 = char_lower(peek8(b + i));
+            if ca != cb { return 0; }
+            if ca == 0 { return 1; }
+            i = i + 1;
+        }
+        return 0;
+    }
+}
+
+// ------------------------------------------------------ cutting and splitting ---
+
+// Copy up to `count` bytes of `src`, starting at position `start`, into dst
+// and terminate it. A start past the end gives an empty string; a negative
+// start counts as 0. Returns how many bytes were copied.
+fn str_slice(dst: i64, src: i64, start: i64, count: i64) -> i64 {
+    raw {
+        var len: i64 = str_length(src);
+        var n: i64 = 0;
+        var i: i64 = start;
+        if i < 0 { i = 0; }
+        while n < count && i < len {
+            poke8(dst + n, peek8(src + i));
+            n = n + 1;
+            i = i + 1;
+        }
+        poke8(dst + n, 0);
+        return n;
+    }
+}
+
+// How many fields `src` has when cut at every `sep` byte. An empty string
+// is one empty field; "a,,b" is three.
+fn str_split_count(src: i64, sep: i64) -> i64 {
+    raw {
+        var n: i64 = 1;
+        var i: i64 = 0;
+        var c: i64 = peek8(src);
+        while c != 0 {
+            if c == sep { n = n + 1; }
+            i = i + 1;
+            c = peek8(src + i);
+        }
+        return n;
+    }
+}
+
+// Copy field number `index` (from 0) of `src`, cut at `sep`, into dst.
+// Returns its length, or -1 -- with dst left empty -- when there is no such
+// field. With no dynamic memory there is no list to hand back: ask for each
+// field in turn, up to str_split_count.
+fn str_split_get(dst: i64, src: i64, sep: i64, index: i64) -> i64 {
+    raw {
+        var field: i64 = 0;
+        var i: i64 = 0;
+        var n: i64 = 0;
+        var c: i64 = peek8(src);
+        while 1 == 1 {
+            var ends: i64 = 0;
+            if c == sep { ends = 1; }
+            if c == 0 { ends = 1; }
+            if ends == 1 {
+                if field == index {
+                    poke8(dst + n, 0);
+                    return n;
+                }
+                if c == 0 {
+                    poke8(dst, 0);
+                    return 0 - 1;
+                }
+                field = field + 1;
+            } else {
+                if field == index {
+                    poke8(dst + n, c);
+                    n = n + 1;
+                }
+            }
+            i = i + 1;
+            c = peek8(src + i);
+        }
+        return 0 - 1;
+    }
+}
+
+// ---------------------------------------------------- cleaning and changing ---
+
+// Copy `src` into dst without the blanks at either end -- spaces, tabs,
+// newlines, carriage returns. Returns the length of what is left.
+fn str_trim(dst: i64, src: i64) -> i64 {
+    raw {
+        var start: i64 = 0;
+        var end: i64 = str_length(src);
+        // two separate tests, not one with &&: if && evaluates both sides, the
+        // second loop would read the byte before src once end reaches 0
+        while start < end {
+            if char_is_space(peek8(src + start)) == 0 { break; }
+            start = start + 1;
+        }
+        while end > start {
+            if char_is_space(peek8(src + end - 1)) == 0 { break; }
+            end = end - 1;
+        }
+        return str_slice(dst, src, start, end - start);
+    }
+}
+
+// Turn every ASCII letter of `s` to upper case, in place. Returns s.
+fn str_upper(s: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            poke8(s + i, char_upper(c));
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return s;
+    }
+}
+
+// Turn every ASCII letter of `s` to lower case, in place. Returns s.
+fn str_lower(s: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            poke8(s + i, char_lower(c));
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return s;
+    }
+}
+
+// Replace every `old_c` byte of `s` with `new_c`, in place. (Not `from`
+// and `to`: `from` is a keyword.) Returns how many
+// were replaced.
+fn str_replace_byte(s: i64, old_c: i64, new_c: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        var n: i64 = 0;
+        var c: i64 = peek8(s);
+        while c != 0 {
+            if c == old_c {
+                poke8(s + i, new_c);
+                n = n + 1;
+            }
+            i = i + 1;
+            c = peek8(s + i);
+        }
+        return n;
+    }
+}
+
+// Write `count` copies of byte `c` into dst and terminate it. Returns dst.
+fn str_fill(dst: i64, c: i64, count: i64) -> i64 {
+    raw {
+        var i: i64 = 0;
+        while i < count {
+            poke8(dst + i, c);
+            i = i + 1;
+        }
+        poke8(dst + i, 0);
+        return dst;
+    }
+}

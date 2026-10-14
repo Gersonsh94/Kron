@@ -1,0 +1,4 @@
+1
+fail: index out of range
+hint: the index has to go from 0 to the array size minus one
+  at main (test_bounds2.kr:19)

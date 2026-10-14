@@ -1,0 +1,18 @@
+kron_program
+kron_domain test_raw_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: poke outside raw
+//
+// It has to be rejected, with the position of the poke8 and the hint to
+// put it inside raw { }.
+// =========================================================================
+
+fn main() {
+    var x: i64 = 0;
+    var p: i64 = &x;
+    poke8(p, 7);
+    return 0;
+}

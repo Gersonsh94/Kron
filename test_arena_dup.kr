@@ -1,0 +1,9 @@
+kron_program
+kron_domain test_arena_dup;
+kron_imports
+kron_definitions
+
+mmu M { heap_arena_definition {
+    arena p base_address 0x1000 size_bytes 4096 growth_policy fixed_static ;
+    arena p base_address 0x9000 size_bytes 4096 growth_policy fixed_static ;
+} }

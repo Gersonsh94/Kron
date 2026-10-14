@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_gfloat2;
+kron_imports
+kron_definitions
+
+var p: real64;
+var q: real64;
+fn main() {
+    p = 1.5;
+    q = 2.5;
+    print(p);
+    print(q);
+    return 0;
+}

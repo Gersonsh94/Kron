@@ -1,0 +1,49 @@
+kron_program
+kron_domain bench_f;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KRON - FLOAT BENCHMARK
+//
+// Fifty million additions in f64. Compiled twice -- with the seed and with
+// the new compiler -- and the times compared: that shows what each step
+// gains without needing a hand-written loop.
+//
+// The sum is exact in double precision: every partial sum is an integer below
+// 2^53. It is 1249999975000000, but it is printed divided by a million:
+// __print_float multiplies by 10^6 to get six decimals and converts to a
+// 64-bit integer, so any value above about 9.2e12 overflows and prints
+// 9223372036854.775808. It has to print 1249999975.000000.
+// =========================================================================
+
+fn kron_fsum(n: i64) -> f64 {
+    var s: f64;
+    var x: f64;
+    var one: f64;
+    var i: i64;
+    var lim: i64;
+    lim = n;
+    s = 0.0;
+    x = 0.0;
+    one = 1.0;
+    i = 0;
+    while i < lim {
+        s = s + x;
+        x = x + one;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    var t0: i64;
+    var t1: i64;
+    var r: f64;
+    t0 = ticks();
+    r = kron_fsum(50000000);
+    t1 = ticks();
+    print(t1 - t0);
+    print(r / 1000000.0);
+    return 0;
+}

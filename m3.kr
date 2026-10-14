@@ -1,0 +1,8 @@
+kron_program
+kron_domain m3;
+kron_imports
+kron_definitions
+
+fn main() {
+    print(7);
+}

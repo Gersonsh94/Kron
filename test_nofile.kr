@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_nofile;
+kron_imports
+acquire_domain "missing_module.kr";
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: import of a file that does not exist
+//
+// It has to be rejected with the name of the module. The import used to be
+// ignored without a word, and the program failed further on with an error
+// that had nothing to do with the cause.
+// =========================================================================
+
+fn main() {
+    return 0;
+}

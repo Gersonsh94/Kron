@@ -1,0 +1,74 @@
+kron_program
+kron_domain test_text;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// std_text: texts that grow, string literals taken wherever a text is read,
+// numbers to text and back, splitting and joining. No raw anywhere.
+
+fn main() {
+    var name: i64 = text("Gerson");
+    var msg: i64 = text("Hello, ");
+    text_add(msg, name);
+    text_add(msg, "! You are ");
+    text_add_int(msg, 31);
+    say(msg);                                     // Hello, Gerson! You are 31
+    print(text_len(msg));                         // 25
+    print(text_find(msg, "You"));                 // 15
+    print(text_same(name, "Gerson"));             // 1
+    print(text_compare("apple", "apricot"));      // -1
+    var parts: i64 = text_split("a,b,,c", ",");
+    print(list_len(parts));                       // 4
+    say(text_join(parts, " | "));                 // a | b |  | c
+    say(text_upper("abc xyz"));                   // ABC XYZ
+    say(text_trim("   spaced out \n"));           // spaced out
+    say(text_replace("one two two three", "two", "2"));
+    print(text_to_int("-1234"));                  // -1234
+    print(text_to_real("3.25e2"));                // 325.000000
+    say(text_from_real(3.14159, 3));              // 3.142
+    say(text_from_real(-0.5, 2));                 // -0.50
+    say(text_from_int(-9223372036854775807 - 1));
+
+    // a text added to itself ten times: 1024 bytes
+    var w: i64 = text("x");
+    var i: i64 = 0;
+    while i < 10 {
+        text_add(w, w);
+        i = i + 1;
+    }
+    print(text_len(w));                           // 1024
+    text_free(w);
+    print(text_len(w));                           // 0: freed
+    print(failed());                              // 1
+    print(text_to_int("12a"));                    // 0: not a number
+    print(failed());                              // 1
+    print(text_at("abc", 5));                     // 0: out of range
+    print(failed());                              // 1
+    print(text_len(42));                          // 0: a number is no text
+    print(failed());                              // 1
+
+    var s: i64 = text_split("pear apple fig banana", " ");
+    text_sort(s);
+    say(text_join(s, ","));                       // apple,banana,fig,pear
+    var lines: i64 = text_lines("first\r\nsecond\nthird\n");
+    print(list_len(lines));                       // 3
+    say(list_get(lines, 1));                      // second
+    say(text_part("abcdef", 2, 3));               // cde
+    print(text_count("banana", "an"));            // 2
+    print(text_starts("banana", "ban"));          // 1
+    print(text_ends("banana", "nana"));           // 1
+    print(text_contains("banana", "nab"));        // 0
+    var u: i64 = text_new();
+    text_add_char(u, 241);
+    text_add_char(u, 8364);
+    say(u);                                       // two characters, five bytes
+    print(text_len(u));                           // 5
+    print(text_is_int(" 77 "));                   // 1
+    print(text_is_real("1.5.2"));                 // 0
+    print(text_at("A", 0));                       // 65
+    var r: i64 = text_repeat("ab", 3);
+    text_set_at(r, 0, 90);
+    say(r);                                       // Zbabab
+    return 0;
+}

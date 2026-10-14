@@ -1,0 +1,158 @@
+kron_program
+kron_domain std_random;
+kron_imports
+kron_definitions
+
+// std_random.kr -- pseudorandom numbers.
+//
+// A linear congruential generator, not the xorshift one would normally
+// reach for: the language has no bitwise and/or/xor yet, only shifts, so
+// the mixing has to come from multiplication. The constants are the ones
+// from Numerical Recipes, and the intermediate product stays well inside a
+// signed 64-bit integer.
+//
+// Good enough to shuffle data, initialise weights and generate test
+// samples. Not good enough for cryptography, and not claimed to be.
+
+
+var rnd_state: i64;
+var rnd_have_spare: i64;   // Box-Muller produces two normals at a time
+var rnd_spare: real64;
+
+fn rnd_modulus() -> i64 {
+    return 4294967296;          // 2^32
+}
+
+fn rnd_seed(s: i64) {
+    rnd_state = s;
+    if rnd_state < 0 {
+        rnd_state = 0 - rnd_state;
+    }
+    rnd_state = rnd_state % rnd_modulus();
+    rnd_have_spare = 0;
+    return 0;
+}
+
+// Raw step: returns the next state, in [0, 2^32).
+fn rnd_next() -> i64 {
+    rnd_state = (1664525 * rnd_state + 1013904223) % rnd_modulus();
+    return rnd_state;
+}
+
+// ------------------------------------------------------------ uniform ----
+
+// Real in [0, 1).
+fn rnd_uniform() -> real64 {
+    var v: real64 = rnd_next();
+    var m: real64 = rnd_modulus();
+    return v / m;
+}
+
+// Real in [lo, hi).
+fn rnd_range(lo: real64, hi: real64) -> real64 {
+    return lo + rnd_uniform() * (hi - lo);
+}
+
+// Integer in [0, n). Returns 0 when n is not positive.
+fn rnd_int(n: i64) -> i64 {
+    if n <= 0 {
+        return 0;
+    }
+    return rnd_next() % n;
+}
+
+// Integer in [lo, hi], both ends included.
+fn rnd_int_range(lo: i64, hi: i64) -> i64 {
+    if hi <= lo {
+        return lo;
+    }
+    return lo + rnd_int(hi - lo + 1);
+}
+
+// A coin that lands heads with probability p.
+fn rnd_bool(p: real64) -> i64 {
+    if rnd_uniform() < p {
+        return 1;
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------- normal ----
+
+// Box-Muller: two uniforms in, two independent normals out. The second is
+// kept for the next call rather than thrown away.
+fn rnd_normal(mu: real64, sigma: real64) -> real64 {
+    if rnd_have_spare == 1 {
+        rnd_have_spare = 0;
+        return mu + sigma * rnd_spare;
+    }
+    var u1: real64 = rnd_uniform();
+    var u2: real64 = rnd_uniform();
+    // guard the log against an exact zero
+    if u1 < 0.0000000001 {
+        u1 = 0.0000000001;
+    }
+    var r: real64 = fsqrt(0.0 - 2.0 * fln(u1));
+    var theta: real64 = m_tau() * u2;
+    rnd_spare = r * fsin(theta);
+    rnd_have_spare = 1;
+    return mu + sigma * r * fcos(theta);
+}
+
+// Standard normal, mean 0 and unit spread.
+fn rnd_gauss() -> real64 {
+    return rnd_normal(0.0, 1.0);
+}
+
+// ------------------------------------------------- filling the buffers ----
+
+// Replace the x column with n uniform samples from [lo, hi).
+fn rnd_fill_x(n: i64, lo: real64, hi: real64) {
+    st_n = 0;
+    for var i: i64 = 0; i < n; i = i + 1 {
+        st_push(rnd_range(lo, hi));
+    }
+    return 0;
+}
+
+// Replace the y column with n uniform samples from [lo, hi).
+fn rnd_fill_y(n: i64, lo: real64, hi: real64) {
+    st_ny = 0;
+    for var i: i64 = 0; i < n; i = i + 1 {
+        st_push_y(rnd_range(lo, hi));
+    }
+    return 0;
+}
+
+// Build a noisy straight line: y = slope*x + intercept + noise. Handy for
+// checking that a regression recovers the coefficients it was given.
+fn rnd_fill_linear(n: i64, slope: real64, intercept: real64, noise: real64) {
+    var x: real64 = 0.0;
+    var nf: real64 = n;
+    st_clear();
+    for var i: i64 = 0; i < n; i = i + 1 {
+        x = i;
+        st_push(x);
+        st_push_y(slope * x + intercept + rnd_normal(0.0, noise));
+    }
+    return 0;
+}
+
+// Fisher-Yates over both columns at once, so x[i] keeps its own y[i].
+// Walking downwards means each position is chosen from the part not yet
+// settled, which is what makes every ordering equally likely.
+fn rnd_shuffle() {
+    var j: i64 = 0;
+    var tx: real64 = 0.0;
+    var ty: real64 = 0.0;
+    for var i: i64 = st_n - 1; i > 0; i = i - 1 {
+        j = rnd_int(i + 1);
+        tx = st_x[i];
+        st_x[i] = st_x[j];
+        st_x[j] = tx;
+        ty = st_y[i];
+        st_y[i] = st_y[j];
+        st_y[j] = ty;
+    }
+    return 0;
+}

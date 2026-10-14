@@ -1,0 +1,22 @@
+kron_program
+kron_domain tm1;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_stats.kr";
+kron_definitions
+
+fn direct_sum() -> real64 {
+    var s: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        s = s + st_x[i];
+    }
+    return s;
+}
+fn main() {
+    st_clear();
+    st_push(1.0);
+    st_push(2.0);
+    st_push(3.0);
+    print(direct_sum());   // 6.0
+    return 0;
+}

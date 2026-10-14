@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_fneg;
+kron_imports
+kron_definitions
+
+// Unary minus on reals. It used to take the integer path: the bits of the
+// double were negated as an integer and converted, and a literal was not
+// even loaded, so print(-1.5) printed -1.000000.
+//
+// Expected output:
+//   -1.500000    a literal
+//   -2.250000    a local initialised from a literal
+//   2.250000     minus a negative local
+//   -4.000000    a field
+//   -0.500000    an array element
+//   3.500000     inside an expression: 1.0 - (-2.5)
+//   1            a comparison with a negated value
+//   -2           converted to an integer afterwards
+//   -7           integers still negate as integers
+
+struct P {
+    x: f64;
+    y: f64;
+}
+
+fn main() {
+    var y: f64 = -2.25;
+    var p: P;
+    var a: [f64; 2];
+    var n: i64 = 7;
+    p.x = 4.0;
+    a[1] = 0.5;
+    print(-1.5);
+    print(y);
+    print(-y);
+    print(-p.x);
+    print(-a[1]);
+    print(1.0 - (-2.5));
+    if -y > 2.0 {
+        print(1);
+    } else {
+        print(0);
+    }
+    print(-y as i64 - 4);
+    print(-n);
+    return 0;
+}

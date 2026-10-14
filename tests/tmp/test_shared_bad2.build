@@ -1,0 +1,13 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic... OK
+[5/6] Codegen...
+test_shared_bad2.kr:17:12: global used by code that runs in a thread 'hits'
+    hits = hits + n;
+           ^^^^
+  hint: declare it 'shared var' and guard it with a lock, or pass the value through a channel

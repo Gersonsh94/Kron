@@ -1,0 +1,16 @@
+kron_program
+kron_domain test_diag3;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE: indexes an array that does not exist.
+//
+// Line 13 uses 'data[0]', and 'data' is not declared. The message must
+// say 'undeclared array', not 'undeclared name'.
+
+fn main() {
+    var x: i64;
+    x = data[0];
+    print(x);
+    return 0;
+}

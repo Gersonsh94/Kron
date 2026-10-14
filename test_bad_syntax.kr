@@ -1,0 +1,9 @@
+kron_program
+kron_domain mal;
+kron_imports
+kron_definitions
+
+fn main() {
+    print(noexiste);
+    return 0;
+}

@@ -1,0 +1,11 @@
+kron_program
+kron_domain test_trunc;
+kron_imports
+kron_definitions
+
+fn main() {
+    print(trunc(3.7));        // 3
+    print(trunc(10.0 / 3.0)); // 3
+    print(trunc(2.0 * 2.5));  // 5
+    return 0;
+}

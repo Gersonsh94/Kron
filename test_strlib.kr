@@ -1,0 +1,63 @@
+kron_program
+kron_domain test_strlib;
+kron_imports
+acquire_domain "std_str.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: std_str
+//
+// One call per new function, with what it has to print on the right.
+// Characters go by their value: 44 is ',', 32 the space, 95 '_'.
+// =========================================================================
+
+var buf1: [i64; 32];
+var buf2: [i64; 32];
+
+fn main() {
+    var a: i64 = &buf1;
+    var b: i64 = &buf2;
+
+    // --- search ---
+    print(str_index_of("good world", "world"));      // 5
+    print(str_index_of("good world", "xyz"));        // -1
+    print(str_contains("kron", "ro"));               // 1
+    print(str_count("a,b,,c", ","));                 // 3
+    print(str_count("aaaa", "aa"));                  // 2
+    print(str_ends_with("program.kr", ".kr"));       // 1
+    print(str_ends_with("program.kr", ".asm"));      // 0
+    print(str_equals_nocase("KrOn", "kron"));        // 1
+
+    // --- cut and split ---
+    str_slice(a, "ganimedes", 0, 4);
+    str_print_line(a);                               // gani
+    str_slice(a, "ganimedes", 4, 100);
+    str_print_line(a);                               // medes
+    print(str_split_count("one,two,three", 44));      // 3
+    str_split_get(a, "one,two,three", 44, 1);
+    str_print_line(a);                               // two
+    str_split_get(a, "one,two,three", 44, 2);
+    str_print_line(a);                               // three
+    print(str_split_get(a, "one,two,three", 44, 5));  // -1
+
+    // --- clean and change ---
+    str_trim(a, "   hello   ");
+    str_print_line(a);                               // hello
+    print(str_trim(a, "     "));                     // 0
+    str_copy(b, "Kron Rapid");
+    str_upper(b);
+    str_print_line(b);                               // KRON RAPID
+    str_lower(b);
+    str_print_line(b);                               // kron rapid
+    print(str_replace_byte(b, 32, 95));              // 1
+    str_print_line(b);                               // kron_rapid
+    str_fill(a, 42, 5);
+    str_print_line(a);                               // *****
+
+    // --- characters ---
+    print(char_is_digit(55));                        // 1
+    print(char_is_alpha(55));                        // 0
+    print(char_upper(107));                          // 75
+
+    return 0;
+}

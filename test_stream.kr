@@ -1,0 +1,64 @@
+kron_program
+kron_domain test_stream;
+kron_imports
+kron_definitions
+
+// 'stream' is a predefined struct of two fields:
+//
+//     struct stream { bytes: u64; len: u64; }
+//
+// A string becomes an address+length pair, and everything that already exists
+// for structs -- two slots in the frame, field access, pass by value --
+// works on it with no new machinery.
+//
+// This stage does NOT include initialising from a literal; that comes separately.
+// Here the fields are filled by hand, which is exactly what has to be tested.
+//
+// Expected output:
+//   5      s.len
+//   1000   s.bytes
+//   3      t.len, another string
+//   5      s.len is still intact: the two are independent
+//   1000   s.bytes is still intact
+//   5      the length reaches a function, passed by value
+//   1000   and so does the address
+//   5      the callee could not touch the caller's
+
+fn length_of(x: stream) -> i64 {
+    return x.len;
+}
+
+fn address_of(x: stream) -> i64 {
+    return x.bytes;
+}
+
+// writes to its copy: the caller must not see it
+fn corrupt(x: stream) -> i64 {
+    x.len = 99;
+    return 0;
+}
+
+fn main() {
+    var s: stream;
+    var t: stream;
+    var n: i64;
+
+    s.bytes = 1000;
+    s.len = 5;
+    print(s.len);          // 5
+    print(s.bytes);          // 1000
+
+    t.bytes = 2000;
+    t.len = 3;
+    print(t.len);          // 3
+
+    print(s.len);          // 5
+    print(s.bytes);          // 1000
+
+    print(length_of(s));    // 5
+    print(address_of(s));   // 1000
+
+    n = corrupt(s);
+    print(s.len);          // 5
+    return 0;
+}

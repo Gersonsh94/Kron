@@ -1,0 +1,20 @@
+kron_program
+kron_domain test_pool;
+kron_imports
+kron_definitions
+
+mmu PoolMMU {
+    dynamic_allocation_pool KernelHeap {
+        allocator_class = buddy_system_binary ;
+        fragmentation_compaction_trigger = 0.75 ;
+        minimum_allocation_granularity_bytes = 64 ;
+        on_allocation_request ( size_bytes n ) {
+            var total: int64 = n;
+            total += 16;
+        }
+        on_deallocation_request ( pointer_handle p ) {
+            var q: int64 = p;
+        }
+    }
+    garbage_collection_policy = reference_counted ;
+}

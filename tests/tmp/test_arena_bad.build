@@ -1,0 +1,9 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_arena_bad.kr:8:62: expected an identifier, found an identifier
+        arena p1 base_address 0x1000 size_bytes 4096 growth_policy no_existe ;
+                                                             ^^^^^^^^^

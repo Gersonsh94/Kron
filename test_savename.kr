@@ -1,0 +1,32 @@
+kron_program
+kron_domain test_savename;
+kron_imports
+kron_definitions
+
+// test: savefile with a custom filename built in memory
+var namebuf: [i64; 4];   // holds "test.txt\0"
+
+fn main() {
+    raw {
+        var np: i64 = &namebuf;
+        // "hi.txt" = 104,105,46,116,120,116,0
+        poke8(np + 0, 104);  // h
+        poke8(np + 1, 105);  // i
+        poke8(np + 2, 46);   // .
+        poke8(np + 3, 116);  // t
+        poke8(np + 4, 120);  // x
+        poke8(np + 5, 116);  // t
+        poke8(np + 6, 0);
+
+        // data buffer: "OK\n"
+        var data: [i64; 2];
+        var dp: i64 = &data;
+        poke8(dp + 0, 79);   // O
+        poke8(dp + 1, 75);   // K
+        poke8(dp + 2, 10);   // \n
+
+        savefile(dp, 3, np);   // write "OK\n" to hi.txt
+        print(1);
+        return 0;
+    }
+}

@@ -1,0 +1,46 @@
+kron_program
+kron_domain window_demo;
+kron_imports
+acquire_domain "std_window.kr";
+kron_definitions
+
+// Opens a window, draws a gradient and two squares, then reacts to the
+// keyboard and the mouse until it is closed or escape is pressed.
+fn main() {
+    if window_open(320, 240, "Kron window") == 0 {
+        print_fail();
+        return 1;
+    }
+    var frames: i64 = 0;
+    var keys: i64 = 0;
+    var running: i64 = 1;
+    while running {
+        var y: i64 = 0;
+        while y < 240 {
+            window_rect(0, y, 320, 1, rgb(0, y, 255 - y));
+            y = y + 1;
+        }
+        window_rect(20, 20, 40, 40, rgb(255, 0, 0));
+        window_rect(window_mouse_x() - 4, window_mouse_y() - 4, 8, 8, rgb(255, 255, 0));
+        if window_mouse_down() {
+            window_rect(260, 20, 40, 40, rgb(0, 255, 0));
+        }
+        if window_show() == 0 {
+            running = 0;
+        }
+        var k: i64 = window_key();
+        while k != 0 {
+            print(k);
+            keys = keys + 1;
+            if k == 27 {
+                window_close();
+                running = 0;
+            }
+            k = window_key();
+        }
+        frames = frames + 1;
+        window_sleep(16);
+    }
+    print(frames > 0);
+    return 0;
+}

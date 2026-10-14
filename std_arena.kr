@@ -1,0 +1,181 @@
+kron_program
+kron_domain std_arena;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- arenas and slices.
+//
+// Dynamic memory without addresses in the caller's hands. An arena is a
+// block taken from a fixed pool; a slice is a run of i64 carved out of an
+// arena, used only through slice_get / slice_set, which check two things on
+// every access:
+//
+//   - the index is inside the slice            -> otherwise fail
+//   - the arena has not been freed since then  -> otherwise fail
+//
+// arena_free does not give the memory back: it marks the arena empty and
+// bumps its generation. Every slice made before carries the old generation,
+// so using it is a fail, never a read of memory that now belongs to
+// something else. That is the whole point: no dangling slice can do harm.
+//
+// A slice is one i64 with three fields:
+//     bits  0..31   offset of its header inside the pool, in i64 units
+//     bits 32..39   which arena (0..255)
+//     bits 40..62   the arena's generation when the slice was made
+// The header, just before the data, holds the length.
+//
+// This is step 1: plain functions. Step 2 is the compiler side -- the type
+// slice<i64> and v[i] -- which will lower to these same checks.
+// =========================================================================
+
+const AR_MAX: i64 = 256;            // arenas at the same time
+const AR_POOL: i64 = 8388608;       // i64 words in the pool: 64 MB
+
+var ar_pool: [i64; 8388608];        // all arena memory, in .bss
+var ar_base: [i64; 256];            // where each arena starts, in words
+var ar_cap: [i64; 256];             // its size, in words
+var ar_used: [i64; 256];            // how much of it is handed out
+var ar_gen: [i64; 256];             // bumped by every arena_free
+var ar_live: [i64; 256];            // 1 while the arena exists
+var ar_top: i64;                    // first word of the pool not given out
+
+// ------------------------------------------------------------------ arenas ---
+
+// A new arena of `words` i64. Returns its number, or fails when there is no
+// room in the pool or no free arena slot.
+fn arena_new(words: i64) -> i64 {
+    var a: i64 = 0;
+    if words <= 0 {
+        fail "arena of zero or negative size" hint "ask for at least one word";
+    }
+    while a < AR_MAX {
+        if ar_live[a] == 0 {
+            if ar_top + words > AR_POOL {
+                fail "no room left for the arena" hint "the pool holds 64 MB in total";
+            }
+            ar_base[a] = ar_top;
+            ar_cap[a] = words;
+            ar_used[a] = 0;
+            ar_live[a] = 1;
+            ar_top = ar_top + words;
+            return a;
+        }
+        a = a + 1;
+    }
+    fail "no free arenas left" hint "there are 256 at once; free one with arena_free";
+}
+
+// Empty the arena. Every slice made from it becomes unusable: touching one
+// is a fail. The memory stays with the arena, ready for new slices.
+fn arena_free(a: i64) -> i64 {
+    if a < 0 {
+        fail "no such arena" hint "use the number arena_new returned";
+    }
+    if a >= AR_MAX {
+        fail "no such arena" hint "use the number arena_new returned";
+    }
+    ar_used[a] = 0;
+    ar_gen[a] = ar_gen[a] + 1;
+    return 0;
+}
+
+// Words still free in the arena.
+fn arena_room(a: i64) -> i64 {
+    return ar_cap[a] - ar_used[a];
+}
+
+// ------------------------------------------------------------------ slices ---
+
+// A slice of `n` i64, zeroed, carved from arena `a`. Fails if it does not fit.
+fn arena_slice(a: i64, n: i64) -> i64 {
+    if a < 0 {
+        fail "no such arena" hint "use the number arena_new returned";
+    }
+    if a >= AR_MAX {
+        fail "no such arena" hint "use the number arena_new returned";
+    }
+    if n < 0 {
+        fail "slice of negative size" hint "the size has to be 0 or more";
+    }
+    if ar_used[a] + n + 1 > ar_cap[a] {
+        fail "does not fit in the arena" hint "make the arena bigger or free slices with arena_free";
+    }
+    var head: i64 = ar_base[a] + ar_used[a];
+    ar_pool[head] = n;
+    var i: i64 = 0;
+    while i < n {
+        ar_pool[head + 1 + i] = 0;
+        i = i + 1;
+    }
+    ar_used[a] = ar_used[a] + n + 1;
+    return head + (a << 32) + (ar_gen[a] << 40);
+}
+
+// Every slice function checks, before touching anything, that the arena has
+// not been freed since the slice was made. The check is written out in each
+// one on purpose: a shared helper would have to report back through failed(),
+// and failed() consumes the flag -- a fail the caller left unchecked earlier
+// would be taken for this one.
+
+// How many elements the slice holds.
+fn slice_len(s: i64) -> i64 {
+    var a: i64 = (s >> 32) & 255;
+    if (s >> 40) != ar_gen[a] {
+        fail "slice of an arena already freed" hint "do not use a slice after arena_free";
+    }
+    return ar_pool[s & 4294967295];
+}
+
+// Element i of the slice.
+fn slice_get(s: i64, i: i64) -> i64 {
+    var a: i64 = (s >> 32) & 255;
+    if (s >> 40) != ar_gen[a] {
+        fail "slice of an arena already freed" hint "do not use a slice after arena_free";
+    }
+    var head: i64 = s & 4294967295;
+    if i < 0 {
+        fail "index outside the slice" hint "the index has to go from 0 to slice_len minus one";
+    }
+    if i >= ar_pool[head] {
+        fail "index outside the slice" hint "the index has to go from 0 to slice_len minus one";
+    }
+    return ar_pool[head + 1 + i];
+}
+
+// slice<f64>: the same slots, holding the bits of a real.
+fn slice_get_real(s: i64, i: i64) -> f64 {
+    var bits: i64 = slice_get(s, i);
+    var x: f64 = 0.0;
+    raw {
+        poke(&x, bits);
+    }
+    return x;
+}
+
+fn slice_set_real(s: i64, i: i64, x: f64) -> f64 {
+    var bits: i64 = 0;
+    var v: f64 = x;
+    raw {
+        bits = peek(&v);
+    }
+    slice_set(s, i, bits);
+    return x;
+}
+
+// Set element i of the slice to v.
+fn slice_set(s: i64, i: i64, v: i64) -> i64 {
+    var a: i64 = (s >> 32) & 255;
+    if (s >> 40) != ar_gen[a] {
+        fail "slice of an arena already freed" hint "do not use a slice after arena_free";
+    }
+    var head: i64 = s & 4294967295;
+    if i < 0 {
+        fail "index outside the slice" hint "the index has to go from 0 to slice_len minus one";
+    }
+    if i >= ar_pool[head] {
+        fail "index outside the slice" hint "the index has to go from 0 to slice_len minus one";
+    }
+    ar_pool[head + 1 + i] = v;
+    return v;
+}

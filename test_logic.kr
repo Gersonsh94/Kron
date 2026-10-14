@@ -1,0 +1,45 @@
+kron_program
+kron_domain test_logic;
+kron_imports
+kron_definitions
+
+fn main() {
+    var a: int32 = 5;
+    var b: int32 = 10;
+
+    // && true: 5 > 0 && 10 > 0  -> 1
+    if a > 0 && b > 0 {
+        print(1);
+    }
+
+    // && false: 5 > 100 && 10 > 0  -> 0 (prints nothing)
+    if a > 100 && b > 0 {
+        print(999);
+    }
+
+    // || true from the first operand: 5 > 0 || 10 > 100 -> 1
+    if a > 0 || b > 100 {
+        print(2);
+    }
+
+    // || true from the second operand: 5 > 100 || 10 > 0 -> 1
+    if a > 100 || b > 0 {
+        print(3);
+    }
+
+    // || false: both false -> 0 (prints nothing)
+    if a > 100 || b > 100 {
+        print(888);
+    }
+
+    // combined with for: count how many i in 0..9 are even AND > 3
+    var tally: int32 = 0;
+    for var i: int32 = 0; i < 10; i = i + 1 {
+        if i % 2 == 0 && i > 3 {
+            tally = tally + 1;
+        }
+    }
+    print(tally);   // i = 4,6,8 -> 3
+
+    return 0;
+}

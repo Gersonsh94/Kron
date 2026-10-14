@@ -1,0 +1,12 @@
+kron_program
+kron_domain test_error;
+kron_imports
+kron_definitions
+
+// Deliberate syntax error on line 5 to test error reporting.
+fn main() {
+    var x: i64 = 10;
+    var y: i64 = 20
+    print(x + y);
+    return 0;
+}

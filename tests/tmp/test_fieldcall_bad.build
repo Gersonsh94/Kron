@@ -1,0 +1,9 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_fieldcall_bad.kr:24:16: a function kept in a field is called through a variable: var f = s.field; f(...)
+    print(o.run(21));
+               ^

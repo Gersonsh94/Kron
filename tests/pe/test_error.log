@@ -1,0 +1,9 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_error.kr:10:5: expected ';', found 'print'
+    print(x + y);
+    ^^^^^

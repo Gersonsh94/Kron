@@ -1,0 +1,201 @@
+kron_program
+kron_domain std_exp;
+kron_imports
+kron_definitions
+
+// std_exp.kr -- exponential, logarithm and the functions built on them.
+//
+// Everything here reduces the argument into a narrow range where a short
+// polynomial is accurate to near machine precision, then reassembles the
+// result. That is how libm does it too; the alternative -- feeding a raw
+// argument to a Taylor series -- loses all its digits away from zero.
+
+
+fn m_e() -> real64 {
+    return 2.71828182845904523536;
+}
+
+fn m_ln2() -> real64 {
+    return 0.69314718055994530942;
+}
+
+fn m_log2e() -> real64 {
+    return 1.44269504088896340736;
+}
+
+// The lexer has no exponent notation, so the largest doubles cannot be
+// written as literals. Reach infinity by squaring until the format gives up.
+fn m_inf() -> real64 {
+    var big: real64 = 1000000000.0;
+    big = big * big;        // 1e18
+    big = big * big;        // 1e36
+    big = big * big;        // 1e72
+    big = big * big;        // 1e144
+    big = big * big;        // 1e288
+    return big * big;       // overflows to +infinity
+}
+
+// ----------------------------------------------------------- exponential --
+
+// e^x, by writing x = k*ln2 + r with |r| <= ln2/2, evaluating e^r from its
+// Taylor series (which converges fast in that narrow band) and scaling the
+// result by 2^k.
+fn fexp(x: real64) -> real64 {
+    // Guard the extremes: doubles run out somewhere past |x| = 709.
+    if x > 709.0 {
+        return m_inf();
+    }
+    if x < 0.0 - 745.0 {
+        return 0.0;
+    }
+
+    var kf: real64 = fround(x * m_log2e());
+    var k: i64 = trunc(kf);
+    var r: real64 = x - kf * m_ln2();
+
+    // e^r = 1 + r + r^2/2! + ... ; eleven terms cover |r| <= 0.35 comfortably
+    var term: real64 = 1.0;
+    var sum: real64 = 1.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 1; i <= 11; i = i + 1 {
+        d = i;
+        term = term * r / d;
+        sum = sum + term;
+    }
+
+    // scale by 2^k: built from its bits when it is a normal double, which
+    // is every k that matters; the loops stay for the rest
+    if k >= -1022 && k <= 1023 {
+        var t: [real64; 1];
+        raw { poke(&t, (k + 1023) << 52); }
+        return sum * t[0];
+    }
+    if k >= 0 {
+        for var i: i64 = 0; i < k; i = i + 1 {
+            sum = sum * 2.0;
+        }
+    } else {
+        var n: i64 = 0 - k;
+        for var i: i64 = 0; i < n; i = i + 1 {
+            sum = sum * 0.5;
+        }
+    }
+    return sum;
+}
+
+// ------------------------------------------------------------ logarithm ---
+
+// ln(x), by pulling x into [sqrt(1/2), sqrt(2)] through repeated halving or
+// doubling, then using the atanh form:
+//     ln(m) = 2 * (z + z^3/3 + z^5/5 + ...)   where z = (m-1)/(m+1)
+// which converges far faster than the direct log series near 1.
+fn fln(x: real64) -> real64 {
+    if x <= 0.0 {
+        return 0.0 - m_inf();       // -infinity for zero, undefined below it
+    }
+
+    var m: real64 = x;
+    var k: i64 = 0;
+    while m > 1.41421356237309504880 {
+        m = m * 0.5;
+        k = k + 1;
+    }
+    while m < 0.70710678118654752440 {
+        m = m * 2.0;
+        k = k - 1;
+    }
+
+    var z: real64 = (m - 1.0) / (m + 1.0);
+    var z2: real64 = z * z;
+    var term: real64 = z;
+    var sum: real64 = z;
+    var d: real64 = 0.0;
+    // odd powers only: z^3/3, z^5/5, ... up to z^19/19
+    for var i: i64 = 1; i <= 9; i = i + 1 {
+        term = term * z2;
+        d = 2 * i + 1;
+        sum = sum + term / d;
+    }
+    sum = sum * 2.0;
+
+    var kf: real64 = k;
+    return sum + kf * m_ln2();
+}
+
+fn flog10(x: real64) -> real64 {
+    return fln(x) * 0.43429448190325182765;
+}
+
+fn flog2(x: real64) -> real64 {
+    return fln(x) * m_log2e();
+}
+
+// x^y for any real exponent, as e^(y * ln x). Integer exponents still go
+// through fpowi, which is exact and much cheaper.
+fn fpow(x: real64, y: real64) -> real64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    return fexp(y * fln(x));
+}
+
+// ------------------------------------------------------- machine learning --
+
+// The logistic curve, written so neither branch ever computes e^(large
+// positive): that would overflow before the division could rescue it.
+fn sigmoid(x: real64) -> real64 {
+    if x >= 0.0 {
+        var z: real64 = fexp(0.0 - x);
+        return 1.0 / (1.0 + z);
+    }
+    var e: real64 = fexp(x);
+    return e / (1.0 + e);
+}
+
+// Derivative of the sigmoid, in terms of its own output -- the form
+// backpropagation actually uses.
+fn sigmoid_d(y: real64) -> real64 {
+    return y * (1.0 - y);
+}
+
+fn ftanh(x: real64) -> real64 {
+    if x > 20.0 {
+        return 1.0;
+    }
+    if x < 0.0 - 20.0 {
+        return 0.0 - 1.0;
+    }
+    var e2: real64 = fexp(2.0 * x);
+    return (e2 - 1.0) / (e2 + 1.0);
+}
+
+fn tanh_d(y: real64) -> real64 {
+    return 1.0 - y * y;
+}
+
+fn relu(x: real64) -> real64 {
+    if x > 0.0 {
+        return x;
+    }
+    return 0.0;
+}
+
+fn relu_d(x: real64) -> real64 {
+    if x > 0.0 {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+// Binary cross-entropy for a single sample. The clamp keeps ln() away from
+// zero, where it would return -infinity and poison the running total.
+fn cross_entropy(y: real64, p: real64) -> real64 {
+    var q: real64 = fclamp(p, 0.0000000001, 0.9999999999);
+    return 0.0 - (y * fln(q) + (1.0 - y) * fln(1.0 - q));
+}
+
+// Mean squared error for a single sample.
+fn squared_error(y: real64, p: real64) -> real64 {
+    var d: real64 = y - p;
+    return d * d;
+}

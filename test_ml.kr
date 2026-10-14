@@ -1,0 +1,60 @@
+kron_program
+kron_domain test_ml;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_exp.kr";
+acquire_domain "std_stats.kr";
+acquire_domain "std_ml.kr";
+kron_definitions
+
+// Test for std_ml.kr -- train a logistic classifier and check the result.
+//
+// The data is deliberately separable: x from 1 to 8, label 0 below the
+// midpoint and 1 above it. A correct implementation should find a boundary
+// near 4.5 and classify every sample right.
+
+
+fn main() {
+    st_clear();
+    st_push(1.0);   st_push_y(0.0);
+    st_push(2.0);   st_push_y(0.0);
+    st_push(3.0);   st_push_y(0.0);
+    st_push(4.0);   st_push_y(0.0);
+    st_push(5.0);   st_push_y(1.0);
+    st_push(6.0);   st_push_y(1.0);
+    st_push(7.0);   st_push_y(1.0);
+    st_push(8.0);   st_push_y(1.0);
+
+    lr_init();
+    lr_set_rate(0.5);
+    lr_set_epochs(2000);
+
+    // untrained, every input sits exactly on the fence
+    print(lr_predict(3.0));      // 0.500000
+
+    lr_train();
+
+    print(lr_weight());          // 3.178659
+    print(lr_bias());            // -14.163909
+    print(lr_loss());            // 0.048999
+    print(lr_boundary());        // 4.455939
+
+    // confident on both sides
+    print(lr_predict(2.0));      // 0.000407
+    print(lr_predict(7.0));      // 0.999692
+
+    print(lr_classify(2.0));     // 0
+    print(lr_classify(7.0));     // 1
+
+    // --- evaluation ---
+    print(lr_evaluate());        // 1.000000  (accuracy)
+    print(cm_true_pos());        // 4
+    print(cm_true_neg());        // 4
+    print(cm_false_pos());       // 0
+    print(cm_false_neg());       // 0
+    print(lr_precision());       // 1.000000
+    print(lr_recall());          // 1.000000
+    print(lr_f1());              // 1.000000
+
+    return 0;
+}

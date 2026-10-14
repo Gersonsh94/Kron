@@ -1,0 +1,43 @@
+kron_program
+kron_domain test_fb;
+kron_imports
+kron_definitions
+
+// ASCII framebuffer test: draw into a buffer, then print it.
+// 20 wide x 10 tall. 35 = '#', 32 = ' ', 10 = newline.
+
+fn main() {
+    var fb: [i64; 200];
+
+    // clear: fill with spaces
+    for var i: i64 = 0; i < 200; i = i + 1 {
+        fb[i] = 32;
+    }
+
+    // draw a rectangle border
+    // top and bottom rows
+    for var x: i64 = 0; x < 20; x = x + 1 {
+        fb[x] = 35;              // row 0
+        fb[180 + x] = 35;        // row 9 (9*20)
+    }
+    // left and right columns
+    for var y: i64 = 0; y < 10; y = y + 1 {
+        fb[y * 20] = 35;         // col 0
+        fb[y * 20 + 19] = 35;    // col 19
+    }
+
+    // a diagonal line inside
+    for var d: i64 = 1; d < 9; d = d + 1 {
+        fb[d * 20 + d * 2] = 35;
+    }
+
+    // present: print the buffer row by row
+    for var row: i64 = 0; row < 10; row = row + 1 {
+        for var col: i64 = 0; col < 20; col = col + 1 {
+            printc(fb[row * 20 + col]);
+        }
+        printc(10);   // newline
+    }
+
+    return 0;
+}

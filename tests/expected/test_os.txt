@@ -1,0 +1,7 @@
+1
+0
+1
+3
+hello from the shell
+1
+1

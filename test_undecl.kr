@@ -1,0 +1,6 @@
+kron_program
+kron_domain test_undecl;
+kron_imports
+kron_definitions
+
+fn main() { print(xyz); return 0; }

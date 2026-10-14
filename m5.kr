@@ -1,0 +1,8 @@
+kron_program
+kron_domain m5;
+kron_imports
+kron_definitions
+
+fn two(n: int32) {
+    return 2;
+}

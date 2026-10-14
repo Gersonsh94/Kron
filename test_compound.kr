@@ -1,0 +1,16 @@
+kron_program
+kron_domain test_compound;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var a: int64 = 10;
+    a += 5;   print(a);
+    a -= 3;   print(a);
+    a *= 4;   print(a);
+    a /= 2;   print(a);
+    a ^= 15;  print(a);
+    var b: int64 = 7;
+    b = b - 2;  print(b);
+    return 0;
+}

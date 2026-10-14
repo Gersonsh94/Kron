@@ -1,0 +1,9 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_17par.kr:12:173: a function takes at most 16 parameters
+fn too_many(p01: i64, p02: i64, p03: i64, p04: i64, p05: i64, p06: i64, p07: i64, p08: i64, p09: i64, p10: i64, p11: i64, p12: i64, p13: i64, p14: i64, p15: i64, p16: i64, p17: i64) -> i64 {
+                                                                                                                                                                            ^^^

@@ -1,0 +1,38 @@
+kron_program
+kron_domain te2;
+kron_imports
+acquire_domain "std_math.kr";
+kron_definitions
+
+fn t2(x: real64) -> real64 {
+    if x <= 0.0 {
+        return 0.0 - 1.0e308;
+    }
+    var m: real64 = x;
+    var k: i64 = 0;
+    while m > 1.41421356237309504880 {
+        m = m * 0.5;
+        k = k + 1;
+    }
+    while m < 0.70710678118654752440 {
+        m = m * 2.0;
+        k = k - 1;
+    }
+    var z: real64 = (m - 1.0) / (m + 1.0);
+    var z2: real64 = z * z;
+    var term: real64 = z;
+    var sum: real64 = z;
+    var d: real64 = 0.0;
+    for var i: i64 = 1; i <= 9; i = i + 1 {
+        term = term * z2;
+        d = 2 * i + 1;
+        sum = sum + term / d;
+    }
+    sum = sum * 2.0;
+    var kf: real64 = k;
+    return sum + kf * 0.6931471805599453;
+}
+fn main() {
+    print(t2(10.0));
+    return 0;
+}

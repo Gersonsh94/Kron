@@ -1,0 +1,24 @@
+kron_program
+kron_domain test_raw_bad2;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: peek hidden in a call argument
+//
+// The semantic pass did not look at call arguments: it searched
+// AST.left, which is always empty. A peek inside an argument went
+// unseen. It has to be rejected.
+// =========================================================================
+
+fn doubled(n: i64) -> i64 {
+    return n * 2;
+}
+
+fn main() {
+    var x: i64 = 21;
+    var p: i64 = &x;
+    var v: i64 = doubled(peek8(p));
+    print(v);
+    return 0;
+}

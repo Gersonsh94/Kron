@@ -1,0 +1,57 @@
+kron_program
+kron_domain test_slitr;
+kron_imports
+kron_definitions
+
+// Struct literals, in both forms.
+//
+//   Vec3{1.0, 2.0, 3.0}      positional, in declaration order
+//   Vec3{x: 1.0, z: 3.0}     by name; the ones left out stay as they were
+//
+// The two forms do not mix: the first initialiser decides which one
+// the whole literal uses.
+//
+// Expected output:
+//   1.000000   a.x  positional
+//   2.000000   a.y
+//   3.000000   a.z
+//   7.000000   b.x  by name
+//   9.000000   b.z
+//   4.000000   c.x  assigned after declaring
+//   6.000000   c.z
+//   10         p.n  literal of integers
+//   20         p.m
+
+struct Vec3 {
+    x: f64;
+    y: f64;
+    z: f64;
+}
+
+struct Pair {
+    n: i64;
+    m: i64;
+}
+
+fn main() {
+    var a: Vec3 = Vec3{1.0, 2.0, 3.0};
+    var b: Vec3 = Vec3{x: 7.0, y: 8.0, z: 9.0};
+    var c: Vec3;
+    var p: Pair = Pair{10, 20};
+
+    print(a.x);      // 1.000000
+    print(a.y);      // 2.000000
+    print(a.z);      // 3.000000
+
+    print(b.x);      // 7.000000
+    print(b.z);      // 9.000000
+
+    c = Vec3{4.0, 5.0, 6.0};
+    print(c.x);      // 4.000000
+    print(c.z);      // 6.000000
+
+    print(p.n);      // 10
+    print(p.m);      // 20
+
+    return 0;
+}

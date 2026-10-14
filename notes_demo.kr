@@ -1,0 +1,212 @@
+kron_program
+kron_domain notes_demo;
+kron_imports
+acquire_domain "std_ui.kr";
+acquire_domain "std_time.kr";
+kron_definitions
+
+// A notes program: the notes are text files in the folder kron_notes, next
+// to the program. A menu bar, a list of notes, a title and a text to edit,
+// a dark mode, the clipboard. No raw anywhere.
+//
+// Windows:      kronc notes_demo.kr --window
+// Linux / WSL:  kronc notes_demo.kr --target=linux
+
+var names: i64;          // the notes, a list of texts
+var chosen: i64;         // which one is open, -1 none
+var title: i64;          // the open note's title, a text
+var body: i64;           // and its text
+var status: i64;         // the line at the bottom
+var dark: i64;
+var logo: i64;
+
+fn path_of(name: i64) -> i64 {
+    var p: i64 = text("kron_notes/");
+    text_add(p, name);
+    text_add(p, ".txt");
+    return p;
+}
+
+fn reload() -> i64 {
+    if names != 0 {
+        list_free(names);
+    }
+    names = list_new();
+    var files: i64 = dir_list("kron_notes");
+    if failed() {
+        return 0;
+    }
+    var i: i64 = 0;
+    while i < list_len(files) {
+        var f: i64 = list_get(files, i);
+        if text_ends(f, ".txt") {
+            list_add(names, text_part(f, 0, text_len(f) - 4));
+        }
+        text_free(f);
+        i = i + 1;
+    }
+    list_free(files);
+    return 1;
+}
+
+fn say_status(msg: i64) -> i64 {
+    text_clear(status);
+    text_add(status, msg);
+    return 0;
+}
+
+fn open_note(i: i64) -> i64 {
+    chosen = i;
+    text_clear(title);
+    text_add(title, list_get(names, i));
+    var p: i64 = path_of(title);
+    var content: i64 = file_read_all(p);
+    text_clear(body);
+    if failed() == 0 {
+        text_add(body, content);
+        text_free(content);
+    }
+    text_free(p);
+    say_status("Opened.");
+    return 0;
+}
+
+fn new_note() -> i64 {
+    chosen = -1;
+    text_clear(title);
+    text_add(title, "Untitled");
+    text_clear(body);
+    say_status("A new note: give it a title and save it.");
+    return 0;
+}
+
+fn save_note() -> i64 {
+    if text_len(title) == 0 {
+        say_status("A note needs a title.");
+        return 0;
+    }
+    var p: i64 = path_of(title);
+    file_write_all(p, body);
+    text_free(p);
+    if failed() {
+        say_status("It could not be saved.");
+        return 0;
+    }
+    reload();
+    var i: i64 = 0;
+    while i < list_len(names) {
+        if text_same(list_get(names, i), title) {
+            chosen = i;
+        }
+        i = i + 1;
+    }
+    var msg: i64 = text("Saved at ");
+    var now: i64 = time_local(time_now());
+    var hhmm: i64 = time_text(now);
+    text_add(msg, text_part(hhmm, 11, 8));
+    text_add(msg, ".");
+    say_status(msg);
+    text_free(msg);
+    text_free(hhmm);
+    return 1;
+}
+
+fn delete_note() -> i64 {
+    if chosen < 0 {
+        return 0;
+    }
+    var p: i64 = path_of(list_get(names, chosen));
+    file_delete(p);
+    text_free(p);
+    reload();
+    new_note();
+    say_status("Deleted.");
+    return 1;
+}
+
+fn main() {
+    if window_open(860, 560, "Kron Notes") == 0 {
+        print_fail();
+        return 1;
+    }
+    if dir_exists("kron_notes") == 0 {
+        dir_make("kron_notes");
+    }
+    title = text_new();
+    body = text_new();
+    status = text("Ready.");
+    reload();
+    chosen = -1;
+    if list_len(names) > 0 {
+        open_note(0);
+    } else {
+        new_note();
+    }
+    logo = image_load("logo/png/kron-icon-32.png");
+    if failed() {
+        logo = 0;
+    }
+    while window_show() {
+        ui_dark(dark);
+        ui_begin();
+
+        ui_menubar();
+        if ui_menu("File") {
+            if ui_menu_item("New note") { new_note(); }
+            if ui_menu_item("Save") { save_note(); }
+            if ui_menu_item("Delete") { delete_note(); }
+            ui_menu_line();
+            if ui_menu_item("Quit") { window_close(); }
+        }
+        if ui_menu("Edit") {
+            if ui_menu_item("Copy the text") {
+                ui_copy(body);
+                say_status("The text is on the clipboard.");
+            }
+            if ui_menu_item("Paste at the end") {
+                var pasted: i64 = ui_paste();
+                text_add(body, pasted);
+                text_free(pasted);
+            }
+        }
+        if ui_menu("View") {
+            if ui_menu_item("Light") { dark = 0; }
+            if ui_menu_item("Dark") { dark = 1; }
+        }
+
+        // the list of notes
+        if logo != 0 {
+            ui_image(20, 52, logo);
+        }
+        ui_bold(60, 58, "Notes");
+        var picked: i64 = ui_list(20, 92, 230, 400, names, chosen);
+        if picked != chosen && picked >= 0 {
+            open_note(picked);
+        }
+        if ui_button(20, 504, 110, 38, "New") {
+            new_note();
+        }
+        if ui_button_alt(140, 504, 110, 38, "Delete") {
+            delete_note();
+        }
+
+        // the open note
+        ui_card(272, 52, 568, 490, "");
+        ui_muted(292, 66, "Title");
+        if ui_edit(292, 88, 528, title, "A title") {
+            save_note();
+        }
+        ui_muted(292, 140, "Text");
+        ui_area(292, 162, 528, 300, body);
+        if ui_button(292, 480, 120, 40, "Save") {
+            save_note();
+        }
+        if ui_ctrl && ui_key(83) {
+            save_note();
+        }
+        ui_muted(430, 491, status);
+        ui_end();
+        window_sleep(16);
+    }
+    return 0;
+}

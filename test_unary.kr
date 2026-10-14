@@ -1,0 +1,13 @@
+kron_program
+kron_domain test_unary;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var a: int64 = 5;
+    print(-a);
+    print(~a);
+    print(!a);
+    print(!0);
+    return 0;
+}

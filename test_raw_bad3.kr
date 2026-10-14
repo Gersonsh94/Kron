@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_raw_bad3;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: peek hidden inside a conversion
+//
+// The semantic pass did not walk into 'as' conversions. It has to be
+// rejected.
+// =========================================================================
+
+fn main() {
+    var x: i64 = 5;
+    var p: i64 = &x;
+    var v: i32 = peek8(p) as i32;
+    print(v);
+    return 0;
+}

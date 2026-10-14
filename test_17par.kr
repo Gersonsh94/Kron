@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_17par;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE: seventeen parameters.
+//
+// Six travel in registers and the rest on the stack. The limit of sixteen is
+// arbitrary but finite, so that a runaway list is reported instead of
+// eating the frame.
+
+fn too_many(p01: i64, p02: i64, p03: i64, p04: i64, p05: i64, p06: i64, p07: i64, p08: i64, p09: i64, p10: i64, p11: i64, p12: i64, p13: i64, p14: i64, p15: i64, p16: i64, p17: i64) -> i64 {
+    return p01;
+}
+
+fn main() {
+    print(0);
+    return 0;
+}

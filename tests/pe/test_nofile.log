@@ -1,0 +1,6 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file...ERROR: acquire_domain: cannot find the module 'no_existe.kr'
+  hint: the file has to be in the program's folder, with its .kr extension

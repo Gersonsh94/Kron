@@ -1,0 +1,10 @@
+kron_program
+kron_domain bad_mmu;
+kron_imports
+kron_definitions
+
+mmu BadMMU {
+    cache_policy {
+        range 0x1000 policy no_existe ;
+    }
+}

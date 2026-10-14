@@ -1,0 +1,9 @@
+kron_program
+kron_domain test_arenatok;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var h: ArenaAllocationToken<kernel_pool> = 0;
+    return 0;
+}

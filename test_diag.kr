@@ -1,0 +1,16 @@
+kron_program
+kron_domain test_diag;
+kron_imports
+kron_definitions
+
+// File broken ON PURPOSE, to see the diagnostic.
+//
+// Line 13 has an assignment with no right-hand side. The message should
+// point at line 13, the column of the ';', and underline it.
+
+fn main() {
+    var a: i64;
+    a = ;
+    print(a);
+    return 0;
+}

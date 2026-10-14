@@ -1,0 +1,26 @@
+kron_program
+kron_domain test_fieldcall_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// BAD TEST: a function kept in a struct field, called as s.field(...)
+//
+// The call would go through s itself, not through the field. The compiler
+// refuses it and says how: var f = s.field; f(...).
+// =========================================================================
+
+struct Op {
+    run: fn(i64) -> i64;
+}
+
+fn twice(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn main() {
+    var o: Op;
+    o.run = twice;
+    print(o.run(21));
+    return 0;
+}

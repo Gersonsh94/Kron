@@ -1,0 +1,8 @@
+kron_program
+kron_domain m6;
+kron_imports
+kron_definitions
+
+fn two() {
+    return 2 * 3;
+}

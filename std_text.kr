@@ -1,0 +1,1188 @@
+kron_program
+kron_domain std_text;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- texts.
+//
+//     var name: i64 = text("Gerson");
+//     var msg: i64 = text("Hello, ");
+//     text_add(msg, name);
+//     text_add(msg, "! You are ");
+//     text_add_int(msg, 31);
+//     say(msg);                          // Hello, Gerson! You are 31
+//
+// A text grows as you add to it and frees its memory with text_free. Every
+// function that reads a text also takes a string literal ("..."), so
+// text_find(msg, "you") and text_same(name, "Gerson") need nothing more.
+// Lengths and positions count bytes; the text is UTF-8, as the source is.
+//
+// Making texts
+//   text(x)                        a new text with x's content
+//   text_new()                     an empty text
+//   text_from_int(n)  text_from_real(x, decimals)  text_char(code)
+//                                  decimals -1: as few as the value needs
+//   text_from_bytes(address, n)    from a byte buffer: &buf[0] of a [u8; N]
+// Adding to a text (each returns the same text)
+//   text_add(t, x)  text_add_int(t, n)  text_add_real(t, x, decimals)
+//   text_add_char(t, code)  text_clear(t)  text_set_at(t, i, byte)
+// Reading
+//   text_len(x)  text_at(x, i)  text_same(a, b)  text_compare(a, b)
+//   text_find(x, part)  text_find_after(x, part, i)  text_count(x, part)
+//   text_contains(x, part)  text_starts(x, part)  text_ends(x, part)
+//   text_to_int(x)  text_to_real(x)  text_is_int(x)  text_is_real(x)
+//   text_hash(x)
+// New texts from old ones
+//   text_part(x, i, n)  text_upper(x)  text_lower(x)  text_trim(x)
+//   text_replace(x, old_part, new_part)  text_repeat(x, n)
+// Lists of texts (std_list.kr)
+//   text_split(x, separator)       a list of new texts
+//   text_lines(x)                  split at line ends, \r\n or \n
+//   text_join(list, separator)     one new text
+//   text_sort(list)                a list of texts in byte order
+// Output
+//   say(x)                         x and a line end
+//   text_print(x)                  x alone
+//   text_cstr(x)                   the address of x's bytes, ending in 0,
+//                                  for raw code and system calls; it stays
+//                                  valid until the text changes
+// Freeing
+//   text_free(t)                   the text is gone; using it again fails
+//
+// A text is a handle (std_heap.kr). A position out of range, a freed text,
+// or a number where a text belongs fails with a cause and a hint, and the
+// function returns 0 -- the empty text, where a text was expected.
+// =========================================================================
+
+shared var tx_wout: i64;            // Windows: WriteFile, the console handle
+shared var tx_hout: i64;
+shared var tx_ready: i64;
+shared var tx_num: [i64; 8];        // digits of a number, built backwards
+shared var tx_ignore: i64;
+
+// --------------------------------------------------------- internals ---
+// The lock is held. Every text block is [length][bytes...][0].
+
+fn tx_new(cap: i64) -> i64 {
+    var q: i64 = hp_alloc(8 + cap + 1);
+    if q == 0 {
+        return 0;
+    }
+    var h: i64 = ob_new(OB_TEXT, q);
+    if h == 0 {
+        hp_release(q);
+    }
+    return h;
+}
+
+// the block of text h with room for n bytes and the final 0
+fn tx_room(h: i64, n: i64) -> i64 {
+    var q: i64 = ob_get(h, OB_TEXT);
+    if q == 0 {
+        return 0;
+    }
+    if hp_room(q) >= 8 + n + 1 {
+        return q;
+    }
+    var r: i64 = hp_grow(q, 8 + n + 1);
+    if r == 0 {
+        return 0;
+    }
+    ob_put(h, r);
+    return r;
+}
+
+// n bytes from src added to text h; src may lie inside h itself
+fn tx_add_bytes(h: i64, src: i64, n: i64) -> i64 {
+    var q: i64 = ob_get(h, OB_TEXT);
+    if q == 0 {
+        return 0;
+    }
+    var len: i64 = 0;
+    raw { len = peek(q); }
+    var inside: i64 = 0;
+    if src >= q {
+        if src < q + 8 + len + 1 {
+            inside = src - q;
+        }
+    }
+    q = tx_room(h, len + n);
+    if q == 0 {
+        return 0;
+    }
+    var from_at: i64 = src;
+    if inside != 0 {
+        from_at = q + inside;           // the block may have moved
+    }
+    hp_copy(q + 8 + len, from_at, n);
+    raw {
+        poke(q, len + n);
+        poke8(q + 8 + len + n, 0);
+    }
+    return h;
+}
+
+fn tx_add(h: i64, x: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    return tx_add_bytes(h, tv_p, tv_n);
+}
+
+fn tx_copy(x: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var n: i64 = tv_n;
+    var h: i64 = tx_new(n);
+    if h == 0 {
+        return 0;
+    }
+    tv_view(x);                         // the allocation cannot move a literal,
+    return tx_add_bytes(h, tv_p, n);    // but a text block is read afresh
+}
+
+fn tx_from_bytes(p: i64, n: i64) -> i64 {
+    var h: i64 = tx_new(n);
+    if h == 0 {
+        return 0;
+    }
+    return tx_add_bytes(h, p, n);
+}
+
+fn tx_add_char(h: i64, c: i64) -> i64 {
+    // one code point as UTF-8
+    var b: [i64; 1];
+    var n: i64 = 0;
+    raw {
+        var p: i64 = &b;
+        if c < 128 {
+            poke8(p, c);
+            n = 1;
+        } else if c < 2048 {
+            poke8(p, 192 | (c >> 6));
+            poke8(p + 1, 128 | (c & 63));
+            n = 2;
+        } else if c < 65536 {
+            poke8(p, 224 | (c >> 12));
+            poke8(p + 1, 128 | ((c >> 6) & 63));
+            poke8(p + 2, 128 | (c & 63));
+            n = 3;
+        } else {
+            poke8(p, 240 | (c >> 18));
+            poke8(p + 1, 128 | ((c >> 12) & 63));
+            poke8(p + 2, 128 | ((c >> 6) & 63));
+            poke8(p + 3, 128 | (c & 63));
+            n = 4;
+        }
+    }
+    return tx_add_bytes(h, &b, n);
+}
+
+fn tx_add_int(h: i64, value: i64) -> i64 {
+    var v: i64 = value;
+    var neg: i64 = 0;
+    var n: i64 = 0;
+    raw {
+        var d: i64 = &tx_num;
+        if v < 0 {
+            neg = 1;
+        }
+        // digit by digit from the end; works for the most negative value too
+        if v == 0 {
+            poke8(d + 31, 48);
+            n = 1;
+        }
+        while v != 0 {
+            var r: i64 = v % 10;
+            if r < 0 {
+                r = 0 - r;
+            }
+            poke8(d + 31 - n, 48 + r);
+            n = n + 1;
+            v = v / 10;
+        }
+        if neg {
+            poke8(d + 31 - n, 45);
+            n = n + 1;
+        }
+    }
+    return tx_add_bytes(h, &tx_num + 32 - n, n);
+}
+
+fn tx_add_real(h: i64, value: f64, decimals: i64) -> i64 {
+    var v: f64 = value;
+    var dec: i64 = decimals;
+    if dec < 0 {
+        dec = 0;
+    }
+    if dec > 15 {
+        dec = 15;
+    }
+    if tx_is_nan(v) {
+        return tx_add_bytes(h, "nan", 3);
+    }
+    if v < 0.0 {
+        if tx_add_bytes(h, "-", 1) == 0 {
+            return 0;
+        }
+        v = 0.0 - v;
+    }
+    if v > 9000000000000000000.0 {
+        // too large for the digits below: written as d.ddde+N
+        var e: i64 = 0;
+        while v >= 10.0 {
+            v = v / 10.0;
+            e = e + 1;
+            if e > 400 {
+                return tx_add_bytes(h, "inf", 3);
+            }
+        }
+        tx_add_real(h, v, dec);
+        tx_add_bytes(h, "e+", 2);
+        return tx_add_int(h, e);
+    }
+    var scale: f64 = 1.0;
+    var k: i64 = 0;
+    while k < dec {
+        scale = scale * 10.0;
+        k = k + 1;
+    }
+    var whole: i64 = v as i64;
+    var frac: f64 = (v - (whole as f64)) * scale + 0.5;
+    var f: i64 = frac as i64;
+    var limit: i64 = scale as i64;
+    if f >= limit {
+        whole = whole + 1;
+        f = f - limit;
+    }
+    if tx_add_int(h, whole) == 0 {
+        return 0;
+    }
+    if dec == 0 {
+        return h;
+    }
+    tx_add_bytes(h, ".", 1);
+    // the fraction with its leading zeros
+    var digits: i64 = 1;
+    var t: i64 = f;
+    while t >= 10 {
+        t = t / 10;
+        digits = digits + 1;
+    }
+    while digits < dec {
+        tx_add_bytes(h, "0", 1);
+        digits = digits + 1;
+    }
+    return tx_add_int(h, f);
+}
+
+// a NaN compares as nothing, so it is told by its bits
+fn tx_is_nan(v: f64) -> i64 {
+    var bits: i64 = 0;
+    raw {
+        li_real = v;
+        bits = peek(&li_real);
+    }
+    if (bits & 9218868437227405312) != 9218868437227405312 {
+        return 0;
+    }
+    if (bits & 4503599627370495) == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the first place `part` appears in x at or after i, or -1
+fn tx_find(x: i64, part: i64, i: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return -1;
+    }
+    var px: i64 = tv_p;
+    var nx: i64 = tv_n;
+    if tv_view(part) == 0 {
+        return -1;
+    }
+    var pp: i64 = tv_p;
+    var np: i64 = tv_n;
+    var k: i64 = i;
+    if k < 0 {
+        k = 0;
+    }
+    var found: i64 = -1;
+    raw {
+        while k + np <= nx {
+            var j: i64 = 0;
+            while j < np {
+                if peek8(px + k + j) != peek8(pp + j) {
+                    j = np + 1;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if j == np {
+                found = k;
+                k = nx;
+            }
+            k = k + 1;
+        }
+    }
+    return found;
+}
+
+fn tx_part(x: i64, i: i64, n: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var len: i64 = tv_n;
+    var a: i64 = i;
+    if a < 0 {
+        a = 0;
+    }
+    if a > len {
+        a = len;
+    }
+    var b: i64 = a + n;
+    if n < 0 {
+        b = a;
+    }
+    if b > len {
+        b = len;
+    }
+    var h: i64 = tx_new(b - a);
+    if h == 0 {
+        return 0;
+    }
+    tv_view(x);
+    return tx_add_bytes(h, tv_p + a, b - a);
+}
+
+// a list of the pieces of x between the separators
+fn tx_split(x: i64, sep: i64) -> i64 {
+    var l: i64 = li_new(8);
+    if l == 0 {
+        return 0;
+    }
+    if tv_view(sep) == 0 {
+        return 0;
+    }
+    var ns: i64 = tv_n;
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var len: i64 = tv_n;
+    var at: i64 = 0;
+    if ns == 0 {
+        // no separator: one piece per byte
+        while at < len {
+            li_add(l, tx_part(x, at, 1));
+            at = at + 1;
+        }
+        return l;
+    }
+    while at <= len {
+        var k: i64 = tx_find(x, sep, at);
+        if k < 0 {
+            k = len;
+        }
+        li_add(l, tx_part(x, at, k - at));
+        at = k + ns;
+        if k == len {
+            at = len + 1;
+        }
+    }
+    return l;
+}
+
+// the bytes of x to stdout
+fn tx_out(x: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var p: i64 = tv_p;
+    var n: i64 = tv_n;
+    raw {
+        if target_os() == 2 {
+            var done: i64 = 0;
+            while done < n {
+                var r: i64 = syscall(1, 1, p + done, n - done);
+                if r <= 0 {
+                    done = n;
+                } else {
+                    done = done + r;
+                }
+            }
+        } else {
+            if tx_ready == 0 {
+                var k: i64 = dll_load("kernel32.dll");
+                var gsh: i64 = dll_proc(k, "GetStdHandle");
+                var cp: i64 = dll_proc(k, "SetConsoleOutputCP");
+                tx_wout = dll_proc(k, "WriteFile");
+                tx_hout = call gsh(0 - 11);
+                tx_ignore = call cp(65001);      // UTF-8 on the console
+                tx_ready = 1;
+            }
+            if n > 0 {
+                tx_ignore = call tx_wout(tx_hout, p, n, &tx_num, 0);
+            }
+        }
+    }
+    return 1;
+}
+
+fn tx_byte_upper(c: i64) -> i64 {
+    if c >= 97 {
+        if c <= 122 {
+            return c - 32;
+        }
+    }
+    return c;
+}
+
+fn tx_byte_lower(c: i64) -> i64 {
+    if c >= 65 {
+        if c <= 90 {
+            return c + 32;
+        }
+    }
+    return c;
+}
+
+// mode 1 upper, 2 lower, 3 trim
+fn tx_map(x: i64, mode: i64) -> i64 {
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var n: i64 = tv_n;
+    var a: i64 = 0;
+    var b: i64 = n;
+    if mode == 3 {
+        var p: i64 = tv_p;
+        raw {
+            while a < b {
+                var c: i64 = peek8(p + a);
+                if c == 32 || c == 9 || c == 10 || c == 13 {
+                    a = a + 1;
+                } else {
+                    break;
+                }
+            }
+            while b > a {
+                var c2: i64 = peek8(p + b - 1);
+                if c2 == 32 || c2 == 9 || c2 == 10 || c2 == 13 {
+                    b = b - 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    var h: i64 = tx_new(b - a);
+    if h == 0 {
+        return 0;
+    }
+    tv_view(x);
+    tx_add_bytes(h, tv_p + a, b - a);
+    if mode == 3 {
+        return h;
+    }
+    var q: i64 = ob_get(h, OB_TEXT);
+    raw {
+        var i: i64 = 0;
+        while i < b - a {
+            var c3: i64 = peek8(q + 8 + i);
+            if mode == 1 {
+                poke8(q + 8 + i, tx_byte_upper(c3));
+            } else {
+                poke8(q + 8 + i, tx_byte_lower(c3));
+            }
+            i = i + 1;
+        }
+    }
+    return h;
+}
+
+// a number read from x: tx_ok 1 when x was all number
+shared var tx_ok: i64;
+shared var tx_real: f64;
+
+fn tx_parse(x: i64, want_real: i64) -> i64 {
+    tx_ok = 0;
+    tx_real = 0.0;
+    if tv_view(x) == 0 {
+        return 0;
+    }
+    var p: i64 = tv_p;
+    var n: i64 = tv_n;
+    var i: i64 = 0;
+    var neg: i64 = 0;
+    var v: i64 = 0;
+    var r: f64 = 0.0;
+    var digits: i64 = 0;
+    var c: i64 = 0;
+    raw {
+        while i < n {
+            c = peek8(p + i);
+            if c == 32 || c == 9 {
+                i = i + 1;
+            } else {
+                break;
+            }
+        }
+        if i < n {
+            c = peek8(p + i);
+            if c == 45 {
+                neg = 1;
+                i = i + 1;
+            } else if c == 43 {
+                i = i + 1;
+            }
+        }
+        while i < n {
+            c = peek8(p + i);
+            if c >= 48 && c <= 57 {
+                v = v * 10 + (c - 48);
+                r = r * 10.0 + ((c - 48) as f64);
+                digits = digits + 1;
+                i = i + 1;
+            } else {
+                break;
+            }
+        }
+        if want_real {
+            if i < n {
+                if peek8(p + i) == 46 {
+                    i = i + 1;
+                    var scale: f64 = 0.1;
+                    while i < n {
+                        c = peek8(p + i);
+                        if c >= 48 && c <= 57 {
+                            r = r + ((c - 48) as f64) * scale;
+                            scale = scale / 10.0;
+                            digits = digits + 1;
+                            i = i + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            if digits > 0 && i < n {
+                c = peek8(p + i);
+                if c == 101 || c == 69 {
+                    var j: i64 = i + 1;
+                    var eneg: i64 = 0;
+                    var e: i64 = 0;
+                    var ed: i64 = 0;
+                    if j < n {
+                        c = peek8(p + j);
+                        if c == 45 {
+                            eneg = 1;
+                            j = j + 1;
+                        } else if c == 43 {
+                            j = j + 1;
+                        }
+                    }
+                    while j < n {
+                        c = peek8(p + j);
+                        if c >= 48 && c <= 57 {
+                            if e < 10000 {
+                                e = e * 10 + (c - 48);
+                            }
+                            ed = ed + 1;
+                            j = j + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if ed > 0 {
+                        i = j;
+                        while e > 0 {
+                            if eneg {
+                                r = r / 10.0;
+                            } else {
+                                r = r * 10.0;
+                            }
+                            e = e - 1;
+                        }
+                    }
+                }
+            }
+        }
+        while i < n {
+            c = peek8(p + i);
+            if c == 32 || c == 9 || c == 10 || c == 13 {
+                i = i + 1;
+            } else {
+                break;
+            }
+        }
+    }
+    if digits > 0 {
+        if i == n {
+            tx_ok = 1;
+        }
+    }
+    if neg {
+        v = 0 - v;
+        r = 0.0 - r;
+    }
+    tx_real = r;
+    return v;
+}
+
+// ---------------------------------------------------------- the calls ---
+
+fn text_end(r: i64) -> i64 {
+    var e: i64 = hp_take_err();
+    lock_give(HP_LOCK);
+    if e != 0 {
+        return heap_fail(e);
+    }
+    return r;
+}
+
+fn text(x: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_copy(x));
+}
+
+fn text_new() -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_new(15));
+}
+
+fn text_free(t: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(t, OB_TEXT);
+    if q != 0 {
+        ob_drop(t);
+        hp_release(q);
+    }
+    return text_end(0);
+}
+
+fn text_from_int(n: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(20);
+    if h != 0 {
+        tx_add_int(h, n);
+    }
+    return text_end(h);
+}
+
+fn text_from_real(x: f64, decimals: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(24);
+    if h != 0 {
+        if decimals < 0 {
+            tx_add_real_short(h, x);
+        } else {
+            tx_add_real(h, x, decimals);
+        }
+    }
+    return text_end(h);
+}
+
+fn text_char(code: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(4);
+    if h != 0 {
+        tx_add_char(h, code);
+    }
+    return text_end(h);
+}
+
+fn text_from_bytes(address: i64, n: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = 0;
+    if n < 0 {
+        hp_err = 1;
+    } else {
+        h = tx_from_bytes(address, n);
+    }
+    return text_end(h);
+}
+
+fn text_add(t: i64, x: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_add(t, x));
+}
+
+fn text_add_int(t: i64, n: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_add_int(t, n));
+}
+
+fn text_add_real(t: i64, x: f64, decimals: i64) -> text {
+    lock_take(HP_LOCK);
+    if decimals < 0 {
+        return text_end(tx_add_real_short(t, x));
+    }
+    return text_end(tx_add_real(t, x, decimals));
+}
+
+fn text_add_char(t: i64, code: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_add_char(t, code));
+}
+
+fn text_clear(t: i64) -> text {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(t, OB_TEXT);
+    if q != 0 {
+        raw {
+            poke(q, 0);
+            poke8(q + 8, 0);
+        }
+    }
+    return text_end(t);
+}
+
+fn text_len(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var n: i64 = 0;
+    if tv_view(x) {
+        n = tv_n;
+    }
+    return text_end(n);
+}
+
+fn text_at(x: i64, i: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var c: i64 = 0;
+    if tv_view(x) {
+        if i < 0 || i >= tv_n {
+            hp_err = 5;
+        } else {
+            raw { c = peek8(tv_p + i); }
+        }
+    }
+    return text_end(c);
+}
+
+fn text_set_at(t: i64, i: i64, byte: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(t, OB_TEXT);
+    if q != 0 {
+        var n: i64 = 0;
+        raw { n = peek(q); }
+        if i < 0 || i >= n {
+            hp_err = 5;
+        } else {
+            raw { poke8(q + 8 + i, byte & 255); }
+        }
+    }
+    return text_end(t);
+}
+
+fn text_same(a: i64, b: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tv_compare(a, b) == 0 {
+        r = 1;
+    }
+    if hp_err != 0 {
+        r = 0;
+    }
+    return text_end(r);
+}
+
+fn text_compare(a: i64, b: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(tv_compare(a, b));
+}
+
+fn text_find(x: i64, part: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(tx_find(x, part, 0));
+}
+
+fn text_find_after(x: i64, part: i64, i: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(tx_find(x, part, i));
+}
+
+fn text_contains(x: i64, part: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tx_find(x, part, 0) >= 0 {
+        r = 1;
+    }
+    return text_end(r);
+}
+
+fn text_count(x: i64, part: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var count: i64 = 0;
+    var np: i64 = 0;
+    if tv_view(part) {
+        np = tv_n;
+    }
+    if np > 0 {
+        var at: i64 = tx_find(x, part, 0);
+        while at >= 0 {
+            count = count + 1;
+            at = tx_find(x, part, at + np);
+        }
+    }
+    return text_end(count);
+}
+
+fn text_starts(x: i64, part: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tv_view(part) {
+        var np: i64 = tv_n;
+        var pp: i64 = tv_p;
+        if tv_view(x) {
+            if np <= tv_n {
+                r = 1;
+                raw {
+                    var i: i64 = 0;
+                    while i < np {
+                        if peek8(tv_p + i) != peek8(pp + i) {
+                            r = 0;
+                            i = np;
+                        }
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn text_ends(x: i64, part: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if tv_view(part) {
+        var np: i64 = tv_n;
+        var pp: i64 = tv_p;
+        if tv_view(x) {
+            if np <= tv_n {
+                r = 1;
+                var base: i64 = tv_p + tv_n - np;
+                raw {
+                    var i: i64 = 0;
+                    while i < np {
+                        if peek8(base + i) != peek8(pp + i) {
+                            r = 0;
+                            i = np;
+                        }
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+    }
+    return text_end(r);
+}
+
+fn text_to_int(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var v: i64 = tx_parse(x, 0);
+    if hp_err == 0 {
+        if tx_ok == 0 {
+            hp_err = 7;
+            v = 0;
+        }
+    }
+    return text_end(v);
+}
+
+fn text_to_real(x: i64) -> f64 {
+    lock_take(HP_LOCK);
+    tx_parse(x, 1);
+    var r: f64 = tx_real;
+    if hp_err == 0 {
+        if tx_ok == 0 {
+            hp_err = 7;
+            r = 0.0;
+        }
+    }
+    var e: i64 = hp_take_err();
+    lock_give(HP_LOCK);
+    if e != 0 {
+        heap_fail(e);
+        return 0.0;
+    }
+    return r;
+}
+
+fn text_is_int(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    tx_parse(x, 0);
+    var r: i64 = tx_ok;
+    return text_end(r);
+}
+
+fn text_is_real(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    tx_parse(x, 1);
+    var r: i64 = tx_ok;
+    return text_end(r);
+}
+
+// FNV-1a over the bytes
+fn text_hash(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var hash: i64 = -3750763034362895579;
+    if tv_view(x) {
+        raw {
+            var i: i64 = 0;
+            while i < tv_n {
+                hash = (hash ^ peek8(tv_p + i)) * 1099511628211;
+                i = i + 1;
+            }
+        }
+    }
+    return text_end(hash);
+}
+
+fn text_part(x: i64, i: i64, n: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_part(x, i, n));
+}
+
+fn text_upper(x: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_map(x, 1));
+}
+
+fn text_lower(x: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_map(x, 2));
+}
+
+fn text_trim(x: i64) -> text {
+    lock_take(HP_LOCK);
+    return text_end(tx_map(x, 3));
+}
+
+fn text_replace(x: i64, old_part: i64, new_part: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(16);
+    var no: i64 = 0;
+    if h != 0 {
+        if tv_view(old_part) {
+            no = tv_n;
+        }
+    }
+    if h != 0 && hp_err == 0 {
+        if no == 0 {
+            tx_add(h, x);
+        } else {
+            var at: i64 = 0;
+            var len: i64 = 0;
+            if tv_view(x) {
+                len = tv_n;
+            }
+            while at <= len && hp_err == 0 {
+                var k: i64 = tx_find(x, old_part, at);
+                if k < 0 {
+                    tv_view(x);
+                    tx_add_bytes(h, tv_p + at, len - at);
+                    at = len + 1;
+                } else {
+                    tv_view(x);
+                    tx_add_bytes(h, tv_p + at, k - at);
+                    tx_add(h, new_part);
+                    at = k + no;
+                }
+            }
+        }
+    }
+    return text_end(h);
+}
+
+fn text_repeat(x: i64, n: i64) -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(16);
+    var i: i64 = 0;
+    while i < n && h != 0 && hp_err == 0 {
+        tx_add(h, x);
+        i = i + 1;
+    }
+    return text_end(h);
+}
+
+fn text_split(x: i64, separator: i64) -> list<text> {
+    lock_take(HP_LOCK);
+    return text_end(tx_split(x, separator));
+}
+
+fn text_lines(x: i64) -> list<text> {
+    lock_take(HP_LOCK);
+    var l: i64 = tx_split(x, "\n");
+    if l != 0 {
+        // a \r before each line end goes, and a last empty line too
+        var q: i64 = ob_get(l, OB_LIST);
+        var n: i64 = 0;
+        raw { n = peek(q); }
+        var i: i64 = 0;
+        while i < n {
+            var t: i64 = li_get(l, i);
+            var tq: i64 = ob_get(t, OB_TEXT);
+            raw {
+                var len: i64 = peek(tq);
+                if len > 0 {
+                    if peek8(tq + 8 + len - 1) == 13 {
+                        poke(tq, len - 1);
+                        poke8(tq + 8 + len - 1, 0);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if n > 0 {
+            var last: i64 = li_get(l, n - 1);
+            var lq: i64 = ob_get(last, OB_TEXT);
+            var ll: i64 = 0;
+            raw { ll = peek(lq); }
+            if ll == 0 {
+                ob_drop(last);
+                hp_release(lq);
+                raw { poke(q, n - 1); }
+            }
+        }
+    }
+    return text_end(l);
+}
+
+fn text_join(l: i64, separator: i64) -> text {
+    lock_take(HP_LOCK);
+    var n: i64 = li_len(l);
+    var h: i64 = 0;
+    if hp_err == 0 {
+        h = tx_new(16);
+        var i: i64 = 0;
+        while i < n && h != 0 && hp_err == 0 {
+            if i > 0 {
+                tx_add(h, separator);
+            }
+            tx_add(h, li_get(l, i));
+            i = i + 1;
+        }
+    }
+    return text_end(h);
+}
+
+fn text_sort(l: i64) -> list<text> {
+    lock_take(HP_LOCK);
+    return text_end(li_sort(l, 1));
+}
+
+fn say(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    tx_out(x);
+    tx_out("\n");
+    return text_end(0);
+}
+
+// ---------------------------------------------------- print(list) ---
+// What print does with a list<T>: [1, 2, 3], ["a", "b"], [2.5, 1.0].
+// tag says what the values are: 0 integers, 1 texts, 2 reals. A map<T> is
+// shown by map_show in std_map.kr, with the same pieces.
+
+// a real with the zeros after the point dropped: 2.5, not 2.500000
+fn tx_add_real_short(h: i64, x: f64) -> i64 {
+    tx_add_real(h, x, 6);
+    var q: i64 = ob_get(h, OB_TEXT);
+    if q == 0 {
+        return 0;
+    }
+    var len: i64 = 0;
+    raw { len = peek(q); }
+    var point: i64 = -1;
+    var i: i64 = 0;
+    while i < len {
+        var c: i64 = 0;
+        raw { c = peek8(q + 8 + i); }
+        if c == 46 {
+            point = i;
+        }
+        i = i + 1;
+    }
+    if point < 0 {
+        return h;
+    }
+    while len > point + 2 {
+        var last: i64 = 0;
+        raw { last = peek8(q + 8 + len - 1); }
+        if last != 48 {
+            break;
+        }
+        len = len - 1;
+    }
+    raw {
+        poke(q, len);
+        poke8(q + 8 + len, 0);
+    }
+    return h;
+}
+
+// a text made here and no longer needed; the lock is held
+fn tx_drop(h: i64) -> i64 {
+    var q: i64 = ob_get(h, OB_TEXT);
+    if q != 0 {
+        ob_drop(h);
+        hp_release(q);
+    }
+    return 0;
+}
+
+fn tx_show_value(h: i64, v: i64, tag: i64) -> i64 {
+    if tag == 1 {
+        tx_add_bytes(h, "\"", 1);
+        tx_add(h, v);
+        tx_add_bytes(h, "\"", 1);
+        return h;
+    }
+    if tag == 2 {
+        var x: f64 = 0.0;
+        raw {
+            poke(&li_real, v);
+            x = li_real;
+        }
+        return tx_add_real_short(h, x);
+    }
+    return tx_add_int(h, v);
+}
+
+fn list_show(l: i64, tag: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(64);
+    var n: i64 = li_len(l);
+    tx_add_bytes(h, "[", 1);
+    var i: i64 = 0;
+    while i < n {
+        if i > 0 {
+            tx_add_bytes(h, ", ", 2);
+        }
+        tx_show_value(h, li_get(l, i), tag);
+        i = i + 1;
+    }
+    tx_add_bytes(h, "]\n", 2);
+    tx_out(h);
+    tx_drop(h);
+    return text_end(0);
+}
+
+fn text_print(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    tx_out(x);
+    return text_end(0);
+}
+
+fn text_cstr(x: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var p: i64 = 0;
+    if tv_view(x) {
+        p = tv_p;
+    }
+    return text_end(p);
+}

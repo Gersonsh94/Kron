@@ -1,0 +1,1640 @@
+kron_program
+kron_domain std_window;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- a window to draw in.
+//
+// One window per program, with its own picture: the program draws into it
+// pixel by pixel and window_show puts it on the screen. Nothing to free,
+// no handles, no addresses in the caller's hands.
+//
+//   window_open(width, height, "title")   1, or a fail with the reason
+//   window_clear(color)                   the whole picture one color
+//   window_clip(x, y, w, h)               drawing stays inside this rectangle
+//   window_unclip()                       ... until this
+//   window_pixel(x, y, color)             one point; outside it is ignored
+//   window_rect(x, y, w, h, color)        a filled rectangle, clipped
+//   window_show()                         to the screen, and the keyboard
+//                                         and mouse read; 1 while the window
+//                                         is open, 0 once the user closed it
+//   window_key()                          the next key pressed, 0 when none
+//   window_char()                         the next character typed (with
+//                                         shift: 'a', 'A', '!', ...), as its
+//                                         Latin-1 code; 0 when none
+//   window_pixel_at(x, y)                 the color of a point of the picture
+//   window_mouse_x() / window_mouse_y()   where the pointer is
+//   window_mouse_down()                   1 while the left button is down
+//   window_mouse_pressed()                how many times it went down during
+//   window_mouse_released()               the last window_show, and up: a
+//                                         click shorter than a frame counts
+//   window_wheel()                        mouse wheel steps during the last
+//                                         window_show: up positive, down negative
+//   window_right_down()  window_right_pressed()   the right button
+//   window_ctrl()  window_shift()         1 while the key is held
+//   window_clip_set(address, n)           n bytes of UTF-8 text to the
+//                                         clipboard, for other programs too
+//   window_clip_get()                     the clipboard's text: the address
+//                                         of its bytes, ending in 0, valid
+//                                         until the next call (at most 64 KB)
+//   window_sleep(ms)                      wait, to pace a loop
+//   window_close()                        close it from the program
+//   rgb(r, g, b)                          a color from 0..255 each
+//
+// Keys: 'A'..'Z' and '0'..'9' are their letters' codes, space 32, enter 13,
+// escape 27, backspace 8, tab 9, left 37, up 38, right 39, down 40, delete
+// 46, home 36, end 35, page up 33, page down 34, F1..F12 112..123. The same
+// codes on Windows and on Linux. Characters follow the keyboard's own
+// layout on both, accents typed with dead keys included.
+//
+// A typical loop:
+//
+//     window_open(320, 240, "demo");
+//     while window_show() {
+//         window_clear(rgb(0, 0, 40));
+//         window_rect(window_mouse_x(), window_mouse_y(), 8, 8, rgb(255, 200, 0));
+//         if window_key() == 27 { window_close(); }
+//         window_sleep(16);
+//     }
+//
+// Windows: user32 and gdi32, reached with dll_load. Linux, x86-64 and ARM64:
+// the X11 protocol spoken over the display's socket with system calls -- no
+// library, works on a Linux desktop and in WSL (WSLg). The web (--target=web):
+// the page's <canvas>, through the calls from 1000 up that kron_web.js adds
+// to the Linux ones. The picture is at most 2 097 152 pixels (1920 x 1080
+// fits).
+// =========================================================================
+
+const WIN_MAX_PIXELS: i64 = 2097152;
+
+var win_fb: [i64; 1048576];          // the picture: 32 bits a pixel, 0x00RRGGBB
+var win_w: i64;
+var win_h: i64;
+var win_cx0: i64;                    // the clip rectangle, in pixels
+var win_cy0: i64;
+var win_cx1: i64;
+var win_cy1: i64;
+var win_open_now: i64;
+var win_mx: i64;
+var win_my: i64;
+var win_down: i64;
+var win_presses: i64;
+var win_releases: i64;
+var win_keys: [i64; 64];             // keys pressed, not yet read
+var win_khead: i64;
+var win_ktail: i64;
+var win_chars: [i64; 64];            // characters typed, not yet read
+var win_chead: i64;
+var win_ctail: i64;
+var w32_translate: i64;
+var win_scratch: [i64; 64];          // structures handed to the system
+var win_wheel: i64;
+var win_rdown: i64;
+var win_rpresses: i64;
+var win_mods: i64;                   // the modifier state of the last event (X11, web)
+var win_kmods: i64;                  // the modifiers held when the key window_key gave was pressed
+var win_clip: [i64; 8192];           // the clipboard's text, 64 KB
+var win_clip_n: i64;
+var w32_keystate: i64;
+var w32_clip_open: i64;
+var w32_clip_close: i64;
+var w32_clip_empty: i64;
+var w32_clip_get: i64;
+var w32_clip_set: i64;
+var w32_galloc: i64;
+var w32_glock: i64;
+var w32_gunlock: i64;
+var w32_to_wide: i64;
+var w32_from_wide: i64;
+var win_ignore: i64;                 // results nobody needs
+
+// Windows
+var win_hwnd: i64;
+var win_registered: i64;
+var w32_peek: i64;
+var w32_dispatch: i64;
+var w32_getdc: i64;
+var w32_releasedc: i64;
+var w32_iswindow: i64;
+var w32_destroy: i64;
+var w32_stretch: i64;
+var w32_sleep: i64;
+
+// Linux (X11)
+var x_sock: i64;
+var x_wid: i64;
+var x_gc: i64;
+var x_depth: i64;
+var x_maxreq: i64;
+var x_del_atom: i64;
+var x_buf: [i64; 8192];              // requests and replies, 64 KB
+var x_kmin: i64;                     // the keyboard map: keysyms per keycode
+var x_kper: i64;
+var x_kcount: i64;
+var x_ksyms: [i64; 1024];
+var x_dead: i64;                     // a dead key waiting for its letter
+var x_kmax: i64;
+var x_kmin_at_open: i64;
+var x_in_keymap: i64;
+var x_clip_atom: i64;
+var x_utf8_atom: i64;
+var x_targets_atom: i64;
+var x_prop_atom: i64;
+var x_own: i64;                      // this window holds the clipboard
+var x_sel_done: i64;
+var x_sel_prop: i64;
+
+// the web
+var web_state: i64;                  // 0 not asked yet, 1 macOS, 2 the web, 3 neither
+var web_ev: [i64; 8];                // one event from the page
+
+fn rgb(r: i64, g: i64, b: i64) -> i64 {
+    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
+fn win_is_linux() -> i64 {
+    if target_os() == 2 {
+        return 1;
+    }
+    return 0;
+}
+
+// macOS and the web run the Linux program; the layer under them answers
+// call 1100, which Linux does not have: 1 macOS, 2 the web
+fn win_under() -> i64 {
+    if web_state == 0 {
+        web_state = 3;
+        if win_is_linux() {
+            var r: i64 = 0;
+            raw { r = syscall(1100); }
+            if r == 1 { web_state = 1; }
+            if r == 2 { web_state = 2; }
+        }
+    }
+    if web_state == 3 { return 0; }
+    return web_state;
+}
+
+fn win_is_mac() -> i64 {
+    if win_under() == 1 { return 1; }
+    return 0;
+}
+
+// On the web the window is the page's canvas: kron_web.js draws it
+fn win_is_web() -> i64 {
+    if win_under() == 2 { return 1; }
+    return 0;
+}
+
+// ---- the picture ---------------------------------------------------------
+
+fn window_clip(x: i64, y: i64, w: i64, h: i64) -> i64 {
+    win_cx0 = x;
+    win_cy0 = y;
+    win_cx1 = x + w;
+    win_cy1 = y + h;
+    if win_cx0 < 0 { win_cx0 = 0; }
+    if win_cy0 < 0 { win_cy0 = 0; }
+    if win_cx1 > win_w { win_cx1 = win_w; }
+    if win_cy1 > win_h { win_cy1 = win_h; }
+    return 1;
+}
+
+fn window_unclip() -> i64 {
+    win_cx0 = 0;
+    win_cy0 = 0;
+    win_cx1 = win_w;
+    win_cy1 = win_h;
+    return 1;
+}
+
+fn window_pixel(x: i64, y: i64, color: i64) -> i64 {
+    if x < win_cx0 { return 0; }
+    if y < win_cy0 { return 0; }
+    if x >= win_cx1 { return 0; }
+    if y >= win_cy1 { return 0; }
+    raw {
+        poke32(&win_fb + (y * win_w + x) * 4, color);
+    }
+    return 1;
+}
+
+fn window_rect(x: i64, y: i64, w: i64, h: i64, color: i64) -> i64 {
+    var x0: i64 = x;
+    var y0: i64 = y;
+    var x1: i64 = x + w;
+    var y1: i64 = y + h;
+    if x0 < win_cx0 { x0 = win_cx0; }
+    if y0 < win_cy0 { y0 = win_cy0; }
+    if x1 > win_cx1 { x1 = win_cx1; }
+    if y1 > win_cy1 { y1 = win_cy1; }
+    var row: i64 = y0;
+    while row < y1 {
+        raw {
+            var p: i64 = &win_fb + (row * win_w + x0) * 4;
+            var e: i64 = &win_fb + (row * win_w + x1) * 4;
+            while p < e {
+                poke32(p, color);
+                p = p + 4;
+            }
+        }
+        row = row + 1;
+    }
+    return 1;
+}
+
+fn window_clear(color: i64) -> i64 {
+    return window_rect(0, 0, win_w, win_h, color);
+}
+
+// ---- input ---------------------------------------------------------------
+
+// Each key keeps the modifiers held when it went down: a quick Ctrl+C can
+// press and release both keys within one frame, and by the time the program
+// reads the C, Ctrl is up again.
+fn win_push_key(k: i64) -> i64 {
+    if k == 0 { return 0; }
+    var next: i64 = (win_ktail + 1) & 63;
+    if next == win_khead { return 0; }     // full: the oldest are kept
+    win_keys[win_ktail] = k | ((win_mods & 255) << 16);
+    win_ktail = next;
+    return 1;
+}
+
+fn win_push_char(c: i64) -> i64 {
+    // printable ASCII and Latin-1 (accented letters)
+    if c < 32 { return 0; }
+    if c > 255 { return 0; }
+    if c >= 127 {
+        if c < 160 { return 0; }
+    }
+    var next: i64 = (win_ctail + 1) & 63;
+    if next == win_chead { return 0; }
+    win_chars[win_ctail] = c;
+    win_ctail = next;
+    return 1;
+}
+
+fn window_char() -> i64 {
+    if win_chead == win_ctail { return 0; }
+    var c: i64 = win_chars[win_chead];
+    win_chead = (win_chead + 1) & 63;
+    return c;
+}
+
+fn window_pixel_at(x: i64, y: i64) -> i64 {
+    if x < 0 { return 0; }
+    if y < 0 { return 0; }
+    if x >= win_w { return 0; }
+    if y >= win_h { return 0; }
+    var c: i64 = 0;
+    raw {
+        c = peek32(&win_fb + (y * win_w + x) * 4);
+    }
+    return c;
+}
+
+fn window_width() -> i64 { return win_w; }
+fn window_height() -> i64 { return win_h; }
+
+fn window_key() -> i64 {
+    if win_khead == win_ktail { return 0; }
+    var k: i64 = win_keys[win_khead];
+    win_khead = (win_khead + 1) & 63;
+    win_kmods = (k >> 16) & 255;
+    return k & 65535;
+}
+
+fn window_mouse_x() -> i64 { return win_mx; }
+fn window_mouse_y() -> i64 { return win_my; }
+fn window_mouse_down() -> i64 { return win_down; }
+fn window_mouse_pressed() -> i64 { return win_presses; }
+fn window_mouse_released() -> i64 { return win_releases; }
+fn window_wheel() -> i64 { return win_wheel; }
+fn window_right_down() -> i64 { return win_rdown; }
+fn window_right_pressed() -> i64 { return win_rpresses; }
+
+fn window_ctrl() -> i64 {
+    if (win_kmods & 4) != 0 { return 1; }
+    if win_is_linux() {
+        if (win_mods & 4) != 0 { return 1; }
+        return 0;
+    }
+    var st: i64 = 0;
+    raw {
+        if w32_keystate != 0 {
+            st = call w32_keystate(17);
+        }
+    }
+    if (st & 32768) != 0 { return 1; }
+    return 0;
+}
+
+fn window_shift() -> i64 {
+    if (win_kmods & 1) != 0 { return 1; }
+    if win_is_linux() {
+        if (win_mods & 1) != 0 { return 1; }
+        return 0;
+    }
+    var st: i64 = 0;
+    raw {
+        if w32_keystate != 0 {
+            st = call w32_keystate(16);
+        }
+    }
+    if (st & 32768) != 0 { return 1; }
+    return 0;
+}
+
+fn window_clip_set(address: i64, n: i64) -> i64 {
+    var len: i64 = n;
+    if len > 65535 { len = 65535; }
+    if len < 0 { len = 0; }
+    raw {
+        var i: i64 = 0;
+        while i < len {
+            poke8(&win_clip + i, peek8(address + i));
+            i = i + 1;
+        }
+        poke8(&win_clip + len, 0);
+    }
+    win_clip_n = len;
+    if win_open_now == 0 { return len; }
+    if win_is_web() {
+        raw { win_ignore = syscall(1005, &win_clip, len); }
+    } else if win_is_linux() {
+        x_clip_own();
+    } else {
+        w32_clip_put();
+    }
+    return len;
+}
+
+fn window_clip_get() -> i64 {
+    if win_open_now != 0 {
+        if win_is_web() {
+            var n: i64 = 0;
+            raw { n = syscall(1006, &win_clip, 65535); }
+            if n >= 0 { win_clip_n = n; }
+        } else if win_is_linux() {
+            if x_own == 0 {
+                x_clip_fetch();
+            }
+        } else {
+            w32_clip_fetch();
+        }
+    }
+    raw { poke8(&win_clip + win_clip_n, 0); }
+    return &win_clip;
+}
+
+// ---- the public calls, one path per system -------------------------------
+
+fn window_open(width: i64, height: i64, title: i64) -> i64 {
+    if win_open_now != 0 {
+        fail "a window is already open" hint "close it with window_close first";
+    }
+    if width <= 0 {
+        fail "window of zero or negative size" hint "give a width and a height of at least 1";
+    }
+    if height <= 0 {
+        fail "window of zero or negative size" hint "give a width and a height of at least 1";
+    }
+    if width * height > WIN_MAX_PIXELS {
+        fail "window too large" hint "at most 2 097 152 pixels, 1920 x 1080 fits";
+    }
+    win_w = width;
+    win_h = height;
+    window_unclip();
+    win_khead = 0;
+    win_ktail = 0;
+    win_chead = 0;
+    win_ctail = 0;
+    win_down = 0;
+    window_clear(0);
+    var ok: i64 = 0;
+    if win_is_mac() {
+        fail "no windows on macOS yet" hint "build it with --target=web and open its page in a browser, or save pictures with std_image";
+    }
+    if win_is_web() {
+        ok = web_open(title);
+    } else if win_is_linux() {
+        ok = x_open(title);
+    } else {
+        ok = w32_open(title);
+    }
+    if ok == 0 {
+        return 0;                          // the failure is still there to read
+    }
+    win_open_now = 1;
+    return 1;
+}
+
+fn window_show() -> i64 {
+    if win_open_now == 0 { return 0; }
+    win_kmods = 0;
+    win_presses = 0;
+    win_releases = 0;
+    win_wheel = 0;
+    win_rpresses = 0;
+    if win_is_web() {
+        web_show();
+    } else if win_is_linux() {
+        x_show();
+    } else {
+        w32_show();
+    }
+    return win_open_now;
+}
+
+fn window_close() -> i64 {
+    if win_open_now == 0 { return 0; }
+    if win_is_web() {
+        raw { win_ignore = syscall(1007); }
+    } else if win_is_linux() {
+        x_close();
+    } else {
+        w32_close();
+    }
+    win_open_now = 0;
+    return 1;
+}
+
+fn window_sleep(ms: i64) -> i64 {
+    if ms <= 0 { return 0; }
+    raw {
+        if win_is_linux() {
+            var ts: i64 = &win_scratch;
+            poke(ts, ms / 1000);
+            poke(ts + 8, (ms % 1000) * 1000000);
+            win_ignore = syscall(35, ts, 0);
+        } else {
+            if w32_sleep != 0 {
+                win_ignore = call w32_sleep(ms);
+            }
+        }
+    }
+    return 1;
+}
+
+// =========================================================================
+// Windows
+// =========================================================================
+
+fn w32_open(title: i64) -> i64 {
+    raw {
+        var user32: i64 = dll_load("user32.dll");
+        var gdi32: i64 = dll_load("gdi32.dll");
+        var kernel32: i64 = dll_load("kernel32.dll");
+        if user32 == 0 {
+            fail "user32.dll could not be loaded" hint "this needs Windows";
+        }
+        var register: i64 = dll_proc(user32, "RegisterClassA");
+        var create: i64 = dll_proc(user32, "CreateWindowExA");
+        var defproc: i64 = dll_proc(user32, "DefWindowProcA");
+        var adjust: i64 = dll_proc(user32, "AdjustWindowRect");
+        var cursor: i64 = dll_proc(user32, "LoadCursorA");
+        var modh: i64 = dll_proc(kernel32, "GetModuleHandleA");
+        w32_peek = dll_proc(user32, "PeekMessageA");
+        w32_dispatch = dll_proc(user32, "DispatchMessageA");
+        w32_translate = dll_proc(user32, "TranslateMessage");
+        w32_getdc = dll_proc(user32, "GetDC");
+        w32_releasedc = dll_proc(user32, "ReleaseDC");
+        w32_iswindow = dll_proc(user32, "IsWindow");
+        w32_destroy = dll_proc(user32, "DestroyWindow");
+        w32_stretch = dll_proc(gdi32, "StretchDIBits");
+        w32_sleep = dll_proc(kernel32, "Sleep");
+        w32_keystate = dll_proc(user32, "GetKeyState");
+        w32_clip_open = dll_proc(user32, "OpenClipboard");
+        w32_clip_close = dll_proc(user32, "CloseClipboard");
+        w32_clip_empty = dll_proc(user32, "EmptyClipboard");
+        w32_clip_get = dll_proc(user32, "GetClipboardData");
+        w32_clip_set = dll_proc(user32, "SetClipboardData");
+        w32_galloc = dll_proc(kernel32, "GlobalAlloc");
+        w32_glock = dll_proc(kernel32, "GlobalLock");
+        w32_gunlock = dll_proc(kernel32, "GlobalUnlock");
+        w32_to_wide = dll_proc(kernel32, "MultiByteToWideChar");
+        w32_from_wide = dll_proc(kernel32, "WideCharToMultiByte");
+
+        var hinst: i64 = call modh(0);
+        // the window class: its messages go straight to DefWindowProcA, so
+        // there is no callback into Kron; the loop reads input as it passes
+        var wc: i64 = &win_scratch;
+        if win_registered == 0 {
+            var i: i64 = 0;
+            while i < 72 {
+                poke(wc + i, 0);
+                i = i + 8;
+            }
+            poke32(wc + 0, 3);                       // CS_HREDRAW | CS_VREDRAW
+            poke(wc + 8, defproc);
+            poke(wc + 24, hinst);
+            poke(wc + 40, call cursor(0, 32512));    // IDC_ARROW
+            poke(wc + 64, "KronWindow");
+            if call register(wc) == 0 {
+                fail "RegisterClassA failed" hint "the window class could not be made";
+            }
+            win_registered = 1;
+        }
+        // outer size from the inner one: borders and title bar around it
+        var style: i64 = 0x10CA0000;                 // visible, caption, menu, minimize
+        var rc: i64 = &win_scratch + 128;
+        poke32(rc + 0, 0);
+        poke32(rc + 4, 0);
+        poke32(rc + 8, win_w);
+        poke32(rc + 12, win_h);
+        win_ignore = call adjust(rc, style, 0);
+        var ow: i64 = w32_signed(peek32(rc + 8)) - w32_signed(peek32(rc + 0));
+        var oh: i64 = w32_signed(peek32(rc + 12)) - w32_signed(peek32(rc + 4));
+        win_hwnd = call create(0, "KronWindow", title, style, 0x80000000, 0x80000000, ow, oh, 0, 0, hinst, 0);
+        if win_hwnd == 0 {
+            fail "CreateWindowExA failed" hint "the window could not be made";
+        }
+    }
+    return 1;
+}
+
+fn w32_signed(v: i64) -> i64 {
+    if v >= 0x80000000 {
+        return v - 0x100000000;
+    }
+    return v;
+}
+
+fn w32_show() -> i64 {
+    raw {
+        // the picture
+        var bmi: i64 = &win_scratch + 256;
+        var i: i64 = 0;
+        while i < 48 {
+            poke(bmi + i, 0);
+            i = i + 8;
+        }
+        poke32(bmi + 0, 40);
+        poke32(bmi + 4, win_w);
+        poke32(bmi + 8, 0 - win_h);                  // negative: top row first
+        poke16(bmi + 12, 1);
+        poke16(bmi + 14, 32);
+        var dc: i64 = call w32_getdc(win_hwnd);
+        win_ignore = call w32_stretch(dc, 0, 0, win_w, win_h, 0, 0, win_w, win_h, &win_fb, bmi, 0, 0x00CC0020);
+        win_ignore = call w32_releasedc(win_hwnd, dc);
+        // the input
+        var msg: i64 = &win_scratch + 320;
+        while call w32_peek(msg, 0, 0, 0, 1) != 0 {
+            var m: i64 = peek32(msg + 8);
+            var wp: i64 = peek(msg + 16);
+            var lp: i64 = peek(msg + 24);
+            if m == 0x100 {
+                // the modifiers as they were for this message
+                win_mods = 0;
+                if (call w32_keystate(17) & 32768) != 0 { win_mods = win_mods | 4; }
+                if (call w32_keystate(16) & 32768) != 0 { win_mods = win_mods | 1; }
+                win_push_key(w32_key(wp & 255));
+            } else if m == 0x102 {
+                win_push_char(wp & 255);
+            } else if m == 0x200 {
+                win_mx = w32_signed16(lp & 0xFFFF);
+                win_my = w32_signed16((lp >> 16) & 0xFFFF);
+            } else if m == 0x201 {
+                win_down = 1;
+                win_presses = win_presses + 1;
+                win_mx = w32_signed16(lp & 0xFFFF);
+                win_my = w32_signed16((lp >> 16) & 0xFFFF);
+            } else if m == 0x202 {
+                win_down = 0;
+                win_releases = win_releases + 1;
+            } else if m == 0x204 {
+                win_rdown = 1;
+                win_rpresses = win_rpresses + 1;
+            } else if m == 0x205 {
+                win_rdown = 0;
+            } else if m == 0x20A {
+                // the wheel: 120 per notch, in the high half of wParam
+                win_wheel = win_wheel + w32_signed16((wp >> 16) & 0xFFFF) / 120;
+            }
+            // TranslateMessage turns key presses into characters (WM_CHAR),
+            // which come back through this same loop
+            win_ignore = call w32_translate(msg);
+            win_ignore = call w32_dispatch(msg);
+        }
+        // closing it goes through DefWindowProcA, which destroys the window
+        if call w32_iswindow(win_hwnd) == 0 {
+            win_open_now = 0;
+        }
+    }
+    return 1;
+}
+
+fn w32_signed16(v: i64) -> i64 {
+    if v >= 0x8000 {
+        return v - 0x10000;
+    }
+    return v;
+}
+
+// Windows' virtual keys already are the Kron codes for letters, digits,
+// space, enter, escape, backspace, tab and the arrows; the rest are dropped
+fn w32_key(vk: i64) -> i64 {
+    if vk >= 65 {
+        if vk <= 90 { return vk; }
+    }
+    if vk >= 48 {
+        if vk <= 57 { return vk; }
+    }
+    if vk >= 37 {
+        if vk <= 40 { return vk; }
+    }
+    if vk >= 33 {
+        if vk <= 36 { return vk; }            // page up, page down, end, home
+    }
+    if vk >= 112 {
+        if vk <= 123 { return vk; }           // F1..F12
+    }
+    if vk == 46 { return vk; }                // delete
+    if vk == 32 { return vk; }
+    if vk == 13 { return vk; }
+    if vk == 27 { return vk; }
+    if vk == 8 { return vk; }
+    if vk == 9 { return vk; }
+    return 0;
+}
+
+// The clipboard, as UTF-16 text (CF_UNICODETEXT), converted from and to
+// UTF-8 so it travels to and from other programs with its accents
+fn w32_clip_put() -> i64 {
+    raw {
+        if call w32_clip_open(win_hwnd) == 0 {
+            return 0;
+        }
+        win_ignore = call w32_clip_empty();
+        var wide: i64 = call w32_to_wide(65001, 0, &win_clip, win_clip_n, 0, 0);
+        wide = wide & 0xFFFFFFFF;
+        var g: i64 = call w32_galloc(2, wide * 2 + 2);
+        if g != 0 {
+            var p: i64 = call w32_glock(g);
+            if p != 0 {
+                win_ignore = call w32_to_wide(65001, 0, &win_clip, win_clip_n, p, wide);
+                poke16(p + wide * 2, 0);
+                win_ignore = call w32_gunlock(g);
+                win_ignore = call w32_clip_set(13, g);
+            }
+        }
+        win_ignore = call w32_clip_close();
+    }
+    return 1;
+}
+
+fn w32_clip_fetch() -> i64 {
+    raw {
+        if call w32_clip_open(win_hwnd) == 0 {
+            return 0;
+        }
+        var g: i64 = call w32_clip_get(13);
+        if g != 0 {
+            var p: i64 = call w32_glock(g);
+            if p != 0 {
+                var n: i64 = call w32_from_wide(65001, 0, p, 0 - 1, &win_clip, 65535, 0, 0);
+                n = n & 0xFFFFFFFF;
+                if n > 0 {
+                    win_clip_n = n - 1;          // the count includes the final 0
+                } else {
+                    win_clip_n = 0;
+                }
+                win_ignore = call w32_gunlock(g);
+            }
+        }
+        win_ignore = call w32_clip_close();
+    }
+    return 1;
+}
+
+fn w32_close() -> i64 {
+    raw {
+        if call w32_iswindow(win_hwnd) != 0 {
+            win_ignore = call w32_destroy(win_hwnd);
+        }
+    }
+    return 1;
+}
+
+// =========================================================================
+// Linux: the X11 protocol, little-endian, over the display's socket
+// =========================================================================
+
+fn x_put8(off: i64, v: i64) -> i64 {
+    raw { poke8(&x_buf + off, v); }
+    return 0;
+}
+fn x_put16(off: i64, v: i64) -> i64 {
+    raw { poke16(&x_buf + off, v); }
+    return 0;
+}
+fn x_put32(off: i64, v: i64) -> i64 {
+    raw { poke32(&x_buf + off, v); }
+    return 0;
+}
+fn x_get8(off: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek8(&x_buf + off); }
+    return v;
+}
+fn x_get16(off: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek16(&x_buf + off); }
+    return v;
+}
+fn x_get32(off: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek32(&x_buf + off); }
+    return v;
+}
+
+// every byte of a request out, however many writes it takes
+fn x_send(address: i64, length: i64) -> i64 {
+    var done: i64 = 0;
+    while done < length {
+        var r: i64 = 0;
+        raw { r = syscall(1, x_sock, address + done, length - done); }
+        if r <= 0 {
+            fail "the display connection broke" hint "the X server may have closed";
+        }
+        done = done + r;
+    }
+    return 1;
+}
+
+// exactly length bytes in, into x_buf at off
+fn x_recv(off: i64, length: i64) -> i64 {
+    var done: i64 = 0;
+    while done < length {
+        var r: i64 = 0;
+        raw { r = syscall(0, x_sock, &x_buf + off + done, length - done); }
+        if r <= 0 {
+            fail "the display connection broke" hint "the X server may have closed";
+        }
+        done = done + r;
+    }
+    return 1;
+}
+
+// a text of n bytes into x_buf at off; returns n
+fn x_put_text(off: i64, text: i64) -> i64 {
+    var n: i64 = 0;
+    raw {
+        while peek8(text + n) != 0 {
+            poke8(&x_buf + off + n, peek8(text + n));
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// InternAtom: the number the server gives a name
+fn x_atom(name: i64) -> i64 {
+    var n: i64 = x_put_text(8, name);
+    var units: i64 = 2 + (n + 3) / 4;
+    x_put8(0, 16);
+    x_put8(1, 0);
+    x_put16(2, units);
+    x_put16(4, n);
+    x_put16(6, 0);
+    x_send(&x_buf, units * 4);
+    // the reply: skip any event or error that comes first
+    var tries: i64 = 0;
+    while tries < 64 {
+        x_recv(0, 32);
+        if x_get8(0) == 1 {
+            return x_get32(8);
+        }
+        tries = tries + 1;
+    }
+    fail "no answer from the display" hint "the X server did not reply";
+}
+
+fn x_open(title: i64) -> i64 {
+    raw {
+        // connect to /tmp/.X11-unix/X0, then X1
+        x_sock = syscall(41, 1, 1, 0);
+        if x_sock < 0 {
+            fail "no socket for the display" hint "the system refused a socket";
+        }
+        var addr: i64 = &win_scratch;
+        var i: i64 = 0;
+        while i < 112 {
+            poke(addr + i, 0);
+            i = i + 8;
+        }
+        poke16(addr, 1);
+        var path: i64 = "/tmp/.X11-unix/X0";
+        i = 0;
+        while peek8(path + i) != 0 {
+            poke8(addr + 2 + i, peek8(path + i));
+            i = i + 1;
+        }
+        var r: i64 = syscall(42, x_sock, addr, 110);
+        if r < 0 {
+            poke8(addr + 2 + 16, 49);                // X1
+            r = syscall(42, x_sock, addr, 110);
+        }
+        if r < 0 {
+            win_ignore = syscall(3, x_sock);
+            fail "no display to connect to" hint "start a desktop, or use WSLg on Windows";
+        }
+    }
+    // the setup: little-endian, protocol 11.0, no authorization
+    x_put8(0, 0x6C);
+    x_put8(1, 0);
+    x_put16(2, 11);
+    x_put16(4, 0);
+    x_put16(6, 0);
+    x_put16(8, 0);
+    x_put16(10, 0);
+    x_send(&x_buf, 12);
+    x_recv(0, 8);
+    if x_get8(0) != 1 {
+        fail "the display refused the connection" hint "the X server asks for an authorization Kron does not send";
+    }
+    var more: i64 = x_get16(6) * 4;
+    if more > 65000 {
+        fail "the display's answer is too long" hint "more than 64 KB of setup";
+    }
+    x_recv(8, more);
+    var id_base: i64 = x_get32(12);
+    var kmin: i64 = x_get8(34);
+    var kmax: i64 = x_get8(35);
+    x_kmin_at_open = kmin;
+    x_kmax = kmax;
+    x_maxreq = x_get16(26) * 4;
+    var vendor: i64 = x_get16(24);
+    var formats: i64 = x_get8(29);
+    var screen: i64 = 40 + ((vendor + 3) / 4) * 4 + formats * 8;
+    var root: i64 = x_get32(screen);
+    x_depth = x_get8(screen + 38);
+    x_wid = id_base + 1;
+    x_gc = id_base + 2;
+
+    // CreateWindow: black background; keys, buttons, motion, exposure
+    x_put8(0, 1);
+    x_put8(1, 0);
+    x_put16(2, 10);
+    x_put32(4, x_wid);
+    x_put32(8, root);
+    x_put16(12, 0);
+    x_put16(14, 0);
+    x_put16(16, win_w);
+    x_put16(18, win_h);
+    x_put16(20, 0);
+    x_put16(22, 1);
+    x_put32(24, 0);
+    x_put32(28, 0x802);                        // BackPixel | EventMask
+    x_put32(32, 0);
+    x_put32(36, 0x2804D);
+    x_send(&x_buf, 40);
+
+    // the title (WM_NAME, a STRING)
+    var n: i64 = x_put_text(24, title);
+    var units: i64 = 6 + (n + 3) / 4;
+    x_put8(0, 18);
+    x_put8(1, 0);
+    x_put16(2, units);
+    x_put32(4, x_wid);
+    x_put32(8, 39);
+    x_put32(12, 31);
+    x_put8(16, 8);
+    x_put8(17, 0);
+    x_put16(18, 0);
+    x_put32(20, n);
+    x_send(&x_buf, units * 4);
+
+    // the close button: ask for WM_DELETE_WINDOW instead of being killed
+    var protocols: i64 = x_atom("WM_PROTOCOLS");
+    x_del_atom = x_atom("WM_DELETE_WINDOW");
+    x_put8(0, 18);
+    x_put8(1, 0);
+    x_put16(2, 7);
+    x_put32(4, x_wid);
+    x_put32(8, protocols);
+    x_put32(12, 4);                            // ATOM
+    x_put8(16, 32);
+    x_put8(17, 0);
+    x_put16(18, 0);
+    x_put32(20, 1);
+    x_put32(24, x_del_atom);
+    x_send(&x_buf, 28);
+
+    // a fixed size: the picture does not stretch
+    x_put8(0, 18);
+    x_put8(1, 0);
+    x_put16(2, 24);
+    x_put32(4, x_wid);
+    x_put32(8, 40);                            // WM_NORMAL_HINTS
+    x_put32(12, 41);                           // WM_SIZE_HINTS
+    x_put8(16, 32);
+    x_put8(17, 0);
+    x_put16(18, 0);
+    x_put32(20, 18);
+    var k: i64 = 0;
+    while k < 18 {
+        x_put32(24 + k * 4, 0);
+        k = k + 1;
+    }
+    x_put32(24, 0x30);                         // PMinSize | PMaxSize
+    x_put32(24 + 5 * 4, win_w);
+    x_put32(24 + 6 * 4, win_h);
+    x_put32(24 + 7 * 4, win_w);
+    x_put32(24 + 8 * 4, win_h);
+    x_send(&x_buf, 96);
+
+    // CreateGC, then MapWindow
+    x_put8(0, 55);
+    x_put8(1, 0);
+    x_put16(2, 4);
+    x_put32(4, x_gc);
+    x_put32(8, x_wid);
+    x_put32(12, 0);
+    x_send(&x_buf, 16);
+    x_put8(0, 8);
+    x_put8(1, 0);
+    x_put16(2, 2);
+    x_put32(4, x_wid);
+    x_send(&x_buf, 8);
+    // the keyboard's own layout, and the names the clipboard needs
+    x_keymap(kmin, kmax);
+    x_clip_atom = x_atom("CLIPBOARD");
+    x_utf8_atom = x_atom("UTF8_STRING");
+    x_targets_atom = x_atom("TARGETS");
+    x_prop_atom = x_atom("KRON_CLIP");
+    x_own = 0;
+    return 1;
+}
+
+// the next reply, handling the events that come before it; 0 on an error
+fn x_wait_reply() -> i64 {
+    var tries: i64 = 0;
+    while tries < 4096 {
+        x_recv(0, 32);
+        var t: i64 = x_get8(0);
+        if t == 1 {
+            return 1;
+        }
+        if t == 0 {
+            return 0;
+        }
+        x_event();
+        tries = tries + 1;
+    }
+    return 0;
+}
+
+// GetKeyboardMapping: the keysyms of every key, so characters follow the
+// keyboard's layout (a Spanish ñ, AltGr+2 for @, dead accents)
+fn x_keymap(kmin: i64, kmax: i64) -> i64 {
+    x_kcount = 0;
+    var count: i64 = kmax - kmin + 1;
+    if count <= 0 { return 0; }
+    if count > 255 { count = 255; }
+    x_put8(0, 101);
+    x_put8(1, 0);
+    x_put16(2, 2);
+    x_put8(4, kmin);
+    x_put8(5, count);
+    x_put16(6, 0);
+    x_send(&x_buf, 8);
+    if x_wait_reply() == 0 { return 0; }
+    var per: i64 = x_get8(1);
+    var units: i64 = x_get32(4);
+    if units * 4 > 64000 {
+        // too big to keep: read it away and stay with the US table
+        var extra: i64 = units * 4;
+        while extra > 0 {
+            var part: i64 = extra;
+            if part > 32000 { part = 32000; }
+            x_recv(32, part);
+            extra = extra - part;
+        }
+        return 0;
+    }
+    x_recv(32, units * 4);
+    var keep: i64 = per;
+    if keep > 8 { keep = 8; }
+    var k: i64 = 0;
+    while k < count {
+        var l: i64 = 0;
+        while l < 8 {
+            var ks: i64 = 0;
+            if l < keep {
+                ks = x_get32(32 + (k * per + l) * 4);
+            }
+            raw { poke32(&x_ksyms + (k * 8 + l) * 4, ks); }
+            l = l + 1;
+        }
+        k = k + 1;
+    }
+    x_kmin = kmin;
+    x_kper = keep;
+    x_kcount = count;
+    return 1;
+}
+
+fn x_keysym(code: i64, level: i64) -> i64 {
+    var k: i64 = code - x_kmin;
+    if k < 0 { return 0; }
+    if k >= x_kcount { return 0; }
+    if level >= x_kper { return 0; }
+    var ks: i64 = 0;
+    raw { ks = peek32(&x_ksyms + (k * 8 + level) * 4); }
+    return ks;
+}
+
+// a keysym as a Kron key code
+fn x_ks_key(ks: i64) -> i64 {
+    if ks >= 97 {
+        if ks <= 122 { return ks - 32; }      // letters by their capital
+    }
+    if ks >= 65 {
+        if ks <= 90 { return ks; }
+    }
+    if ks >= 48 {
+        if ks <= 57 { return ks; }
+    }
+    if ks == 32 { return 32; }
+    if ks >= 0xFFBE {
+        if ks <= 0xFFC9 { return ks - 0xFFBE + 112; }   // F1..F12
+    }
+    switch ks {
+        case 0xFF0D: { return 13; }
+        case 0xFF8D: { return 13; }
+        case 0xFF1B: { return 27; }
+        case 0xFF08: { return 8; }
+        case 0xFF09: { return 9; }
+        case 0xFF51: { return 37; }
+        case 0xFF52: { return 38; }
+        case 0xFF53: { return 39; }
+        case 0xFF54: { return 40; }
+        case 0xFFFF: { return 46; }
+        case 0xFF50: { return 36; }
+        case 0xFF57: { return 35; }
+        case 0xFF55: { return 33; }
+        case 0xFF56: { return 34; }
+    }
+    return 0;
+}
+
+// a keysym as a Latin-1 character, 0 when it types none
+fn x_ks_char(ks: i64) -> i64 {
+    if ks >= 32 {
+        if ks <= 126 { return ks; }
+    }
+    if ks >= 160 {
+        if ks <= 255 { return ks; }
+    }
+    if ks >= 0xFFB0 {
+        if ks <= 0xFFB9 { return ks - 0xFFB0 + 48; }   // the keypad's digits
+    }
+    switch ks {
+        case 0xFFAA: { return 42; }
+        case 0xFFAB: { return 43; }
+        case 0xFFAD: { return 45; }
+        case 0xFFAE: { return 46; }
+        case 0xFFAF: { return 47; }
+    }
+    return 0;
+}
+
+// a dead accent followed by a letter: the accented letter, 0 when the
+// pair makes none
+fn x_compose(dead: i64, c: i64) -> i64 {
+    var bases: [i64; 14] = [97, 101, 105, 111, 117, 121, 65, 69, 73, 79, 85, 89, 110, 78];
+    var i: i64 = 0;
+    var at: i64 = -1;
+    while i < 14 {
+        if bases[i] == c {
+            at = i;
+        }
+        i = i + 1;
+    }
+    if at < 0 { return 0; }
+    var grave: [i64; 14] = [224, 232, 236, 242, 249, 0, 192, 200, 204, 210, 217, 0, 0, 0];
+    var acute: [i64; 14] = [225, 233, 237, 243, 250, 253, 193, 201, 205, 211, 218, 221, 0, 0];
+    var circ: [i64; 14] = [226, 234, 238, 244, 251, 0, 194, 202, 206, 212, 219, 0, 0, 0];
+    var tilde: [i64; 14] = [227, 0, 0, 245, 0, 0, 195, 0, 0, 213, 0, 0, 241, 209];
+    var diaer: [i64; 14] = [228, 235, 239, 246, 252, 255, 196, 203, 207, 214, 220, 0, 0, 0];
+    switch dead {
+        case 0xFE50: { return grave[at]; }
+        case 0xFE51: { return acute[at]; }
+        case 0xFE52: { return circ[at]; }
+        case 0xFE53: { return tilde[at]; }
+        case 0xFE57: { return diaer[at]; }
+    }
+    return 0;
+}
+
+// the accent of a dead key on its own: what it types before a space
+fn x_dead_alone(dead: i64) -> i64 {
+    switch dead {
+        case 0xFE50: { return 96; }
+        case 0xFE51: { return 180; }
+        case 0xFE52: { return 94; }
+        case 0xFE53: { return 126; }
+        case 0xFE57: { return 168; }
+    }
+    return 0;
+}
+
+fn x_is_dead(ks: i64) -> i64 {
+    if ks == 0xFE50 { return 1; }
+    if ks == 0xFE51 { return 1; }
+    if ks == 0xFE52 { return 1; }
+    if ks == 0xFE53 { return 1; }
+    if ks == 0xFE57 { return 1; }
+    return 0;
+}
+
+// a key press: its Kron code, and the character it types in this layout
+fn x_press(code: i64, state: i64) -> i64 {
+    if x_kcount == 0 {
+        win_push_key(x_key(code));
+        if (state & 12) == 0 {
+            win_push_char(x_char(code, state));
+        }
+        return 0;
+    }
+    win_push_key(x_ks_key(x_keysym(code, 0)));
+    if (state & 12) != 0 {
+        return 0;                          // Ctrl or Alt: a shortcut, no text
+    }
+    var level: i64 = 0;
+    if (state & 1) != 0 { level = 1; }
+    if (state & 0x80) != 0 || (state & 0x6000) != 0 {
+        level = level + 4;                 // AltGr
+    }
+    var ks: i64 = x_keysym(code, level);
+    if ks == 0 { ks = x_keysym(code, level & 1); }
+    if ks == 0 { ks = x_keysym(code, 0); }
+    // caps lock turns letters
+    if (state & 2) != 0 {
+        if ks >= 97 && ks <= 122 {
+            ks = ks - 32;
+        } else if ks >= 65 && ks <= 90 {
+            ks = ks + 32;
+        }
+    }
+    if x_is_dead(ks) {
+        x_dead = ks;
+        return 0;
+    }
+    var c: i64 = x_ks_char(ks);
+    if c == 0 { return 0; }
+    if x_dead != 0 {
+        var made: i64 = x_compose(x_dead, c);
+        if made != 0 {
+            win_push_char(made);
+        } else {
+            win_push_char(x_dead_alone(x_dead));
+            if c != 32 {
+                win_push_char(c);
+            }
+        }
+        x_dead = 0;
+        return 0;
+    }
+    win_push_char(c);
+    return 0;
+}
+
+// ---- the clipboard ----
+
+fn x_clip_own() -> i64 {
+    if x_clip_atom == 0 { return 0; }
+    x_put8(0, 22);
+    x_put8(1, 0);
+    x_put16(2, 4);
+    x_put32(4, x_wid);
+    x_put32(8, x_clip_atom);
+    x_put32(12, 0);
+    x_send(&x_buf, 16);
+    x_own = 1;
+    return 1;
+}
+
+// another program asked for the clipboard this window holds
+fn x_clip_answer() -> i64 {
+    var tm: i64 = x_get32(4);
+    var req: i64 = x_get32(12);
+    var sel: i64 = x_get32(16);
+    var target: i64 = x_get32(20);
+    var prop: i64 = x_get32(24);
+    if prop == 0 { prop = target; }
+    if target == x_targets_atom {
+        x_put8(0, 18);
+        x_put8(1, 0);
+        x_put16(2, 9);
+        x_put32(4, req);
+        x_put32(8, prop);
+        x_put32(12, 4);                    // ATOM
+        x_put8(16, 32);
+        x_put8(17, 0);
+        x_put16(18, 0);
+        x_put32(20, 3);
+        x_put32(24, x_targets_atom);
+        x_put32(28, x_utf8_atom);
+        x_put32(32, 31);                   // STRING
+        x_send(&x_buf, 36);
+    } else if target == x_utf8_atom || target == 31 {
+        var n: i64 = win_clip_n;
+        var units: i64 = 6 + (n + 3) / 4;
+        x_put8(0, 18);
+        x_put8(1, 0);
+        x_put16(2, units);
+        x_put32(4, req);
+        x_put32(8, prop);
+        x_put32(12, target);
+        x_put8(16, 8);
+        x_put8(17, 0);
+        x_put16(18, 0);
+        x_put32(20, n);
+        x_send(&x_buf, 24);
+        raw {
+            x_send(&win_clip, n);
+        }
+        var pad: i64 = units * 4 - 24 - n;
+        x_put32(0, 0);
+        if pad > 0 {
+            x_send(&x_buf, pad);
+        }
+    } else {
+        prop = 0;
+    }
+    // SendEvent: SelectionNotify back to whoever asked
+    x_put8(0, 25);
+    x_put8(1, 0);
+    x_put16(2, 11);
+    x_put32(4, req);
+    x_put32(8, 0);
+    x_put8(12, 31);
+    x_put8(13, 0);
+    x_put16(14, 0);
+    x_put32(16, tm);
+    x_put32(20, req);
+    x_put32(24, sel);
+    x_put32(28, target);
+    x_put32(32, prop);
+    x_put32(36, 0);
+    x_put32(40, 0);
+    x_send(&x_buf, 44);
+    return 1;
+}
+
+// the clipboard of another program: ConvertSelection, wait for the answer
+// (a second at most), then GetProperty
+fn x_clip_fetch() -> i64 {
+    win_clip_n = 0;
+    if x_clip_atom == 0 { return 0; }
+    x_put8(0, 24);
+    x_put8(1, 0);
+    x_put16(2, 6);
+    x_put32(4, x_wid);
+    x_put32(8, x_clip_atom);
+    x_put32(12, x_utf8_atom);
+    x_put32(16, x_prop_atom);
+    x_put32(20, 0);
+    x_send(&x_buf, 24);
+    x_sel_done = 0;
+    var waited: i64 = 0;
+    while x_sel_done == 0 && waited < 100 {
+        var r: i64 = 0;
+        raw { r = syscall(45, x_sock, &x_buf, 32, 0x40, 0, 0); }
+        if r <= 0 {
+            window_sleep(10);
+            waited = waited + 1;
+        } else {
+            if r < 32 {
+                x_recv(r, 32 - r);
+            }
+            x_event();
+        }
+    }
+    if x_sel_done == 0 { return 0; }
+    if x_sel_prop == 0 { return 0; }
+    x_put8(0, 20);
+    x_put8(1, 1);                          // delete it once read
+    x_put16(2, 6);
+    x_put32(4, x_wid);
+    x_put32(8, x_prop_atom);
+    x_put32(12, 0);
+    x_put32(16, 0);
+    x_put32(20, 16000);
+    x_send(&x_buf, 24);
+    if x_wait_reply() == 0 { return 0; }
+    var format: i64 = x_get8(1);
+    var extra: i64 = x_get32(4) * 4;
+    var items: i64 = x_get32(16);
+    if extra > 64000 { return 0; }
+    x_recv(32, extra);
+    var n: i64 = items;
+    if format == 16 { n = items * 2; }
+    if format == 32 { n = items * 4; }
+    if n > extra { n = extra; }
+    if n > 65535 { n = 65535; }
+    raw {
+        var i: i64 = 0;
+        while i < n {
+            poke8(&win_clip + i, peek8(&x_buf + 32 + i));
+            i = i + 1;
+        }
+    }
+    win_clip_n = n;
+    return n;
+}
+
+fn x_show() -> i64 {
+    // PutImage in bands of rows small enough for one request
+    var rowbytes: i64 = win_w * 4;
+    var rows: i64 = (x_maxreq - 24) / rowbytes;
+    if rows < 1 { rows = 1; }
+    var y: i64 = 0;
+    while y < win_h {
+        var count: i64 = rows;
+        if y + count > win_h { count = win_h - y; }
+        var bytes: i64 = count * rowbytes;
+        x_put8(0, 72);
+        x_put8(1, 2);                          // ZPixmap
+        x_put16(2, 6 + bytes / 4);
+        x_put32(4, x_wid);
+        x_put32(8, x_gc);
+        x_put16(12, win_w);
+        x_put16(14, count);
+        x_put16(16, 0);
+        x_put16(18, y);
+        x_put8(20, 0);
+        x_put8(21, x_depth);
+        x_put16(22, 0);
+        x_send(&x_buf, 24);
+        raw {
+            x_send(&win_fb + y * rowbytes, bytes);
+        }
+        y = y + count;
+    }
+    // the events waiting, without blocking
+    var going: i64 = 1;
+    while going {
+        var r: i64 = 0;
+        raw { r = syscall(45, x_sock, &x_buf, 32, 0x40, 0, 0); }
+        if r <= 0 {
+            going = 0;
+        } else {
+            if r < 32 {
+                x_recv(r, 32 - r);
+            }
+            x_event();
+        }
+    }
+    return 1;
+}
+
+fn x_event() -> i64 {
+    var t: i64 = x_get8(0) & 127;
+    if t == 1 {
+        // a reply nobody asked for here: skip its extra length
+        var extra: i64 = x_get32(4) * 4;
+        while extra > 0 {
+            var part: i64 = extra;
+            if part > 32 { part = 32; }
+            x_recv(0, part);
+            extra = extra - part;
+        }
+        return 0;
+    }
+    if t == 2 {
+        win_mods = x_get16(28);
+        x_press(x_get8(1), x_get16(28));
+        return 0;
+    }
+    if t == 4 {
+        win_mods = x_get16(28);
+        var b: i64 = x_get8(1);
+        if b == 1 {
+            win_down = 1;
+            win_presses = win_presses + 1;
+        } else if b == 3 {
+            win_rdown = 1;
+            win_rpresses = win_rpresses + 1;
+        } else if b == 4 {
+            win_wheel = win_wheel + 1;
+        } else if b == 5 {
+            win_wheel = win_wheel - 1;
+        }
+        win_mx = w32_signed16(x_get16(24));
+        win_my = w32_signed16(x_get16(26));
+        return 0;
+    }
+    if t == 5 {
+        win_mods = x_get16(28);
+        if x_get8(1) == 1 {
+            win_down = 0;
+            win_releases = win_releases + 1;
+        } else if x_get8(1) == 3 {
+            win_rdown = 0;
+        }
+        return 0;
+    }
+    if t == 6 {
+        win_mods = x_get16(28);
+        win_mx = w32_signed16(x_get16(24));
+        win_my = w32_signed16(x_get16(26));
+        return 0;
+    }
+    if t == 30 {
+        x_clip_answer();
+        return 0;
+    }
+    if t == 31 {
+        x_sel_done = 1;
+        x_sel_prop = x_get32(20);
+        return 0;
+    }
+    if t == 29 {
+        x_own = 0;
+        return 0;
+    }
+    if t == 34 {
+        // MappingNotify: the layout changed; read it again
+        if x_get8(4) == 1 {
+            if x_in_keymap == 0 {
+                x_in_keymap = 1;
+                x_keymap(x_kmin_at_open, x_kmax);
+                x_in_keymap = 0;
+            }
+        }
+        return 0;
+    }
+    if t == 33 {
+        if x_get32(12) == x_del_atom {
+            x_close();
+            win_open_now = 0;
+        }
+        return 0;
+    }
+    if t == 17 {
+        win_open_now = 0;
+        return 0;
+    }
+    return 0;
+}
+
+// X key codes are the Linux input codes plus 8: the usual PC keyboard
+fn x_key(code: i64) -> i64 {
+    var c: i64 = code - 8;
+    if c >= 2 {
+        if c <= 10 { return 47 + c; }          // 1..9
+    }
+    if c == 11 { return 48; }                  // 0
+    if c >= 16 {
+        if c <= 25 { return x_row(c - 16, "QWERTYUIOP"); }
+    }
+    if c >= 30 {
+        if c <= 38 { return x_row(c - 30, "ASDFGHJKL"); }
+    }
+    if c >= 44 {
+        if c <= 50 { return x_row(c - 44, "ZXCVBNM"); }
+    }
+    switch c {
+        case 1: { return 27; }
+        case 14: { return 8; }
+        case 15: { return 9; }
+        case 28: { return 13; }
+        case 57: { return 32; }
+        case 103: { return 38; }
+        case 105: { return 37; }
+        case 106: { return 39; }
+        case 108: { return 40; }
+    }
+    return 0;
+}
+
+// the character a key types, on a US keyboard: Linux input code -> text.
+// '#' marks codes that type nothing here (the real '#' is shift 3)
+fn x_char(code: i64, state: i64) -> i64 {
+    var c: i64 = code - 8;
+    if c < 0 { return 0; }
+    if c > 57 { return 0; }
+    if x_types(c) == 0 { return 0; }
+    var shifted: i64 = state & 1;
+    var v: i64 = 0;
+    raw {
+        if shifted {
+            v = peek8("##!@#$%^&*()_+##QWERTYUIOP{}##ASDFGHJKL:\"~#|ZXCVBNM<>?### " + c);
+        } else {
+            v = peek8("##1234567890-=##qwertyuiop[]##asdfghjkl;'`#\\zxcvbnm,./### " + c);
+        }
+    }
+    // caps lock turns letters only
+    if state & 2 {
+        if v >= 97 {
+            if v <= 122 { v = v - 32; }
+        } else if v >= 65 {
+            if v <= 90 { v = v + 32; }
+        }
+    }
+    return v;
+}
+
+fn x_types(c: i64) -> i64 {
+    if c == 0 { return 0; }
+    if c == 1 { return 0; }
+    if c == 14 { return 0; }
+    if c == 15 { return 0; }
+    if c == 28 { return 0; }
+    if c == 29 { return 0; }
+    if c == 42 { return 0; }
+    if c == 54 { return 0; }
+    if c == 55 { return 0; }
+    if c == 56 { return 0; }
+    return 1;
+}
+
+fn x_row(i: i64, letters: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek8(letters + i); }
+    return v;
+}
+
+fn x_close() -> i64 {
+    // DestroyWindow, then the socket
+    x_put8(0, 4);
+    x_put8(1, 0);
+    x_put16(2, 2);
+    x_put32(4, x_wid);
+    raw {
+        win_ignore = syscall(1, x_sock, &x_buf, 8);
+        win_ignore = syscall(3, x_sock);
+    }
+    return 1;
+}
+
+// =========================================================================
+// The web: the page draws the picture in its <canvas> and sends the
+// keyboard and the mouse; the keys come with the codes of Windows already
+// =========================================================================
+
+fn web_open(title: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = syscall(1001, win_w, win_h, title); }
+    if r != 1 {
+        fail "no canvas for the window" hint "open the program's .html page in a browser: node has no canvas";
+    }
+    return 1;
+}
+
+fn web_show() -> i64 {
+    raw { win_ignore = syscall(1002, &win_fb, win_w, win_h); }
+    // events: type, then up to five values
+    var more: i64 = 1;
+    while more {
+        raw { more = syscall(1003, &web_ev); }
+        if more == 1 {
+            var t: i64 = web_ev[0];
+            if t == 1 {
+                win_mods = web_ev[2];
+                win_push_key(w32_key(web_ev[1]));
+            } else if t == 2 {
+                win_mods = web_ev[2];
+            } else if t == 3 {
+                win_mx = web_ev[1];
+                win_my = web_ev[2];
+                win_mods = web_ev[3];
+            } else if t == 4 {
+                win_mx = web_ev[2];
+                win_my = web_ev[3];
+                win_mods = web_ev[4];
+                if web_ev[1] == 0 {
+                    win_down = 1;
+                    win_presses = win_presses + 1;
+                } else if web_ev[1] == 2 {
+                    win_rdown = 1;
+                    win_rpresses = win_rpresses + 1;
+                }
+            } else if t == 5 {
+                win_mods = web_ev[4];
+                if web_ev[1] == 0 {
+                    win_down = 0;
+                    win_releases = win_releases + 1;
+                } else if web_ev[1] == 2 {
+                    win_rdown = 0;
+                }
+            } else if t == 6 {
+                win_wheel = win_wheel + web_ev[1];
+                win_mods = web_ev[2];
+            } else if t == 7 {
+                win_open_now = 0;
+            } else if t == 8 {
+                win_mods = web_ev[2];
+                win_push_char(web_ev[1]);
+            }
+        } else {
+            more = 0;
+        }
+    }
+    return 1;
+}

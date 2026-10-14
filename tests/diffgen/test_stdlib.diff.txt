@@ -1,0 +1,1113 @@
+Comparing files TESTS\DIFFGEN\test_stdlib.good.asm and TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    ret
+mem_copy:
+    push rbp
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    ret
+section .data
+__mod_0_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+section .data
+__mod_1_anon:
+    db "acquire_domain",0
+    db "anon",0
+section .text
+section .bss
+__g_buf: resq 32
+section .text
+section .bss
+__g_buf2: resq 32
+section .text
+main:
+    push rbp
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, 0
+    mov [rbp-32], rax
+.L1:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L2
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    sub rsp, 64
+    lea rax, [rel __g_buf]
+    mov [rbp-8], rax
+    lea rax, [rel __g_buf2]
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    mov rax, 65
+    push rax
+    mov rax, 5
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call mem_set
+    add rsp, 32
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 5
+    mov rcx, rax
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov rcx, rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    mov rax, 0
+    mov rcx, rax
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    mov [rdx], cl
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-32], rax
+    jmp .L1
+.L2:
+    mov rax, [rbp-8]
+    jmp .__ret_0
+.__ret_0:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_set:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, 0
+    mov [rbp-32], rax
+.L4:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L5
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    mov [rdx], cl
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-16]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-32], rax
+    jmp .L4
+.L5:
+    mov rax, [rbp-8]
+    jmp .__ret_3
+.__ret_3:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_zero:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-8]
+    movzx rax, byte [rax]
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    pop r8
+    pop rdx
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    mov rax, 8
+    push rax
+    pop rdx
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    sub rsp, 32
+    call mem_set
+    add rsp, 32
+    jmp .__ret_6
+.__ret_6:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_compare:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, 0
+    mov [rbp-32], rax
+.L8:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L9
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    sub rsp, 32
+    call mem_zero
+    add rsp, 32
+    mov rax, [rbp-8]
+    movzx rax, byte [rax]
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov rcx, rax
+    pop rax
+    sub rax, rcx
+    mov [rbp-40], rax
+    mov rax, [rbp-40]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setne al
+    movzx rax, al
+    test rax, rax
+    jz .L10
+    mov rax, [rbp-40]
+    jmp .__ret_7
+    jmp .L11
+.L10:
+.L11:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-32], rax
+    jmp .L8
+.L9:
+    mov rax, 0
+    jmp .__ret_7
+.__ret_7:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_move:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+section .data
+.str3: db 104,101,108,108,111,0
+section .text
+    lea rax, [rel .str3]
+    push rax
+    mov rax, 6
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call mem_copy
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-16]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L13
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-24]
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    pop rcx
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    sub rsp, 32
+    call mem_copy
+    add rsp, 32
+    jmp .__ret_12
+    jmp .L14
+.L13:
+.L14:
+    mov rax, [rbp-24]
+    mov [rbp-32], rax
+.L15:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setg al
+    movzx rax, al
+    test rax, rax
+    jz .L16
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    sub rax, rcx
+    mov [rbp-32], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    jmp .L15
+.L16:
+    mov rax, [rbp-8]
+    jmp .__ret_12
+.__ret_12:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_find_byte:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, 0
+    mov [rbp-32], rax
+.L18:
+    mov rax, [rbp-32]
+    push rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    sub rsp, 32
+    call str_print_line
+    add rsp, 32
+section .data
+.str4: db 97,98,99,0
+section .text
+    lea rax, [rel .str4]
+    push rax
+section .data
+.str5: db 97,98,99,0
+section .text
+    lea rax, [rel .str5]
+    push rax
+    mov rax, 3
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call mem_compare
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str6: db 97,98,100,0
+section .text
+    lea rax, [rel .str6]
+    push rax
+section .data
+.str7: db 97,98,99,0
+section .text
+    lea rax, [rel .str7]
+    push rax
+    mov rax, 3
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call mem_compare
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str8: db 104,101,108,108,111,0
+section .text
+    lea rax, [rel .str8]
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    push rax
+    mov rax, 108
+    push rax
+    mov rax, 5
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call mem_find_byte
+    add rsp, 32
+    push rax
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L19
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    pop rax
+    sub rax, rcx
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str9: db 74,117,112,105,116,101,114,0
+section .text
+    lea rax, [rel .str9]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str10: db 97,98,99,0
+section .text
+    lea rax, [rel .str10]
+    push rax
+section .data
+.str11: db 97,98,99,0
+section .text
+    lea rax, [rel .str11]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_compare
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str12: db 97,98,99,0
+section .text
+    lea rax, [rel .str12]
+    push rax
+section .data
+.str13: db 97,98,100,0
+section .text
+    lea rax, [rel .str13]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_equals
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str14: db 74,117,112,105,116,101,114,0
+section .text
+    lea rax, [rel .str14]
+    push rax
+section .data
+.str15: db 74,117,112,0
+section .text
+    lea rax, [rel .str15]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_starts_with
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str16: db 74,117,112,105,116,101,114,0
+section .text
+    lea rax, [rel .str16]
+    push rax
+section .data
+.str17: db 120,121,122,0
+section .text
+    lea rax, [rel .str17]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_starts_with
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    push rax
+    mov rax, [rbp-16]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L20
+    mov rax, [rbp-8]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+section .data
+.str18: db 72,101,108,108,111,44,32,0
+section .text
+    lea rax, [rel .str18]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_copy
+    add rsp, 32
+    mov rax, [rbp-8]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    jmp .__ret_17
+    jmp .L21
+.L20:
+.L21:
+    mov rax, [rbp-32]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+section .data
+.str19: db 119,111,114,108,100,0
+section .text
+    lea rax, [rel .str19]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_concat
+    add rsp, 32
+    mov rax, [rbp-8]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_print_line
+    add rsp, 32
+    mov rax, [rbp-8]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_length
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str20: db 97,98,99,100,101,102,0
+section .text
+    lea rax, [rel .str20]
+    mov [rbp-32], rax
+    mov rax, [rbp-32]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, 1
+    mov rcx, rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    mov rax, 100
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_find_byte
+    add rsp, 32
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    pop rax
+    add rax, rcx
+    mov [rbp-32], rax
+    jmp .L18
+.L19:
+    mov rax, 0
+    jmp .__ret_17
+.__ret_17:
+    mov rsp, rbp
+    pop rbp
+    ret
+mem_swap:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov [rbp-24], r8
+    mov rax, 0
+    mov [rbp-32], rax
+.L23:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    pop rax
+    sub rax, rcx
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 12345
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_from_int
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-16]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_print_line
+    add rsp, 32
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 987
+    mov rcx, rax
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    pop rax
+    cmp rax, rcx
+    setl al
+    movzx rax, al
+    test rax, rax
+    jz .L24
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov [rbp-40], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-16]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    pop rax
+    sub rax, rcx
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_from_int
+    add rsp, 32
+    mov rax, [rbp-16]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-16]
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_print_line
+    add rsp, 32
+section .data
+.str21: db 52,51,50,49,0
+section .text
+    lea rax, [rel .str21]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_to_int
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str22: db 45,55,55,0
+section .text
+    lea rax, [rel .str22]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_to_int
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+section .data
+.str23: db 49,50,97,98,0
+section .text
+    lea rax, [rel .str23]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_to_int
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, [rbp-16]
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-40]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-32], rax
+    jmp .L23
+.L24:
+    mov rax, [rbp-8]
+    jmp .__ret_22
+.__ret_22:
+    mov rsp, rbp
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    push rax
+    mov rax, 60000
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_from_int
+    add rsp, 32
+    mov rax, [rbp-16]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_to_int
+    add rsp, 32
+    mov rcx, rax
+    sub rsp, 32
+    call __print_int
+    add rsp, 32
+    mov rax, 0
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+*****
+
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    pop rbp
+    ret
+str_length:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp-8], rcx
+    mov rax, 0
+    mov [rbp-16], rax
+.L26:
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setne al
+    movzx rax, al
+    test rax, rax
+    jz .L27
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-16], rax
+    jmp .L26
+.L27:
+    mov rax, [rbp-16]
+    jmp .__ret_25
+.__ret_25:
+    mov rsp, rbp
+    pop rbp
+    ret
+str_copy:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov rax, 0
+    mov [rbp-24], rax
+    mov rax, [rbp-16]
+    movzx rax, byte [rax]
+    mov [rbp-32], rax
+.L29:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setne al
+    movzx rax, al
+    test rax, rax
+    jz .L30
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-32]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-24]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-24], rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov [rbp-32], rax
+    jmp .L29
+.L30:
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, 0
+    mov rcx, rax
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    pop rbp
+    mov rcx, rax
+*****
+
+Resync Failed.  Files are too different.
+***** TESTS\DIFFGEN\test_stdlib.good.asm
+    mov rcx, rax
+    pop rdx
+    mov [rdx], cl
+    mov rax, [rbp-8]
+    jmp .__ret_28
+.__ret_28:
+    mov rsp, rbp
+    pop rbp
+    ret
+str_concat:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-8]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call str_length
+    add rsp, 32
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call str_copy
+    add rsp, 32
+    mov rax, [rbp-8]
+    jmp .__ret_31
+.__ret_31:
+    mov rsp, rbp
+    pop rbp
+    ret
+str_compare:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    mov [rbp-8], rcx
+    mov [rbp-16], rdx
+    mov rax, 0
+    mov [rbp-24], rax
+.L33:
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L34
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov [rbp-32], rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-24]
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    movzx rax, byte [rax]
+    mov [rbp-40], rax
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-40]
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    setne al
+    movzx rax, al
+    test rax, rax
+    jz .L35
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-40]
+    mov rcx, rax
+    pop rax
+    sub rax, rcx
+    jmp .__ret_32
+    jmp .L36
+.L35:
+.L36:
+    mov rax, [rbp-32]
+    push rax
+    mov rax, 0
+***** TESTS\DIFFGEN\TEST_STDLIB.BAD.ASM
+    mov rcx, rax
+    sub rsp, 32
+    call ExitProcess
+*****
+

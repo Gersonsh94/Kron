@@ -1,0 +1,9 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...
+ERROR: list<...> uses std_list.kr, which is not imported
+  hint: add  acquire_domain "std_list.kr";  (or std_text.kr, which brings it) to the header

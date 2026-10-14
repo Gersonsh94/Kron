@@ -1,0 +1,45 @@
+kron_program
+kron_domain tp3;
+kron_imports
+kron_definitions
+
+// Pointers to doubles. peek loads into rax, which is the wrong register for
+// a real64, so this is where something new may be needed. Each print
+// isolates one step.
+
+fn average(p: ptr<real64>, n: i64) -> real64 {
+    raw {
+        var s: real64 = 0.0;
+        for var i: i64 = 0; i < n; i = i + 1 {
+            s = s + peek(p + i);
+        }
+        var d: real64 = n;
+        return s / d;
+    }
+}
+
+fn first(p: ptr<real64>) -> real64 {
+    raw {
+        return peek(p);
+    }
+}
+
+fn main() {
+    raw {
+        var buf: [real64; 4];
+        buf[0] = 1.5;
+        buf[1] = 2.5;
+        buf[2] = 3.5;
+        buf[3] = 4.5;
+
+        var p: ptr<real64>;
+        p = &buf;
+
+        print(peek(p));          // 1.5   -- reading a double through a pointer
+        print(peek(p + 1));      // 2.5   -- scaled by 8
+        print(first(p));       // 1.5   -- as a parameter
+        print(average(p, 4));      // 3.0   -- the whole array inside a function
+
+        return 0;
+    }
+}

@@ -1,0 +1,61 @@
+kron_program
+kron_domain test_list;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+
+// std_list: a list that grows, checked indexes, sorting, reals.
+
+fn main() {
+    var l: i64 = list_new();
+    var i: i64 = 0;
+    while i < 20 {
+        list_add(l, (i * 7) % 13);
+        i = i + 1;
+    }
+    print(list_len(l));                // 20
+    list_sort(l);
+    i = 0;
+    while i < 5 {
+        print(list_get(l, i));         // 0 0 1 1 2
+        i = i + 1;
+    }
+    print(list_last(l));               // 12
+    print(list_get(l, 99));            // 0: out of range
+    print(failed());                   // 1
+    list_insert(l, 0, 100);
+    print(list_get(l, 0));             // 100
+    print(list_remove(l, 0));          // 100
+    print(list_find(l, 12));           // 19
+    print(list_find(l, 55));           // -1
+    print(list_pop(l));                // 12
+    print(list_len(l));                // 19
+    list_reverse(l);
+    print(list_get(l, 0));             // 11
+    var c: i64 = list_copy(l);
+    list_clear(l);
+    print(list_len(l));                // 0
+    print(list_len(c));                // 19
+    print(list_pop(l));                // 0: empty
+    print(failed());                   // 1
+    var rl: i64 = list_new();
+    list_add_real(rl, 2.5);
+    list_add_real(rl, -0.125);
+    print(list_get_real(rl, 1));       // -0.125000
+    list_set_real(rl, 0, 9.75);
+    print(list_get_real(rl, 0));       // 9.750000
+    list_free(l);
+    print(list_len(l));                // 0: freed
+    print(failed());                   // 1
+    // a big one
+    var big: i64 = list_new();
+    i = 0;
+    while i < 100000 {
+        list_add(big, 100000 - i);
+        i = i + 1;
+    }
+    list_sort(big);
+    print(list_get(big, 0));           // 1
+    print(list_get(big, 99999));       // 100000
+    return 0;
+}

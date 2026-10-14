@@ -1,0 +1,106 @@
+kron_program
+kron_domain cube_reuse;
+kron_imports
+kron_definitions
+
+// ============================================================
+// KRON 3D - cube with REUSED variable names (i, nz).
+// This is the version that did NOT rotate before the scoping fix.
+// If it rotates now, lexical shadowing works.
+// ============================================================
+
+fn main() {
+    var fb: [i64; 1232];
+
+    var vx: [real64; 8];
+    var vy: [real64; 8];
+    var vz: [real64; 8];
+
+    vx[0] = 0.0 - 1.0; vy[0] = 0.0 - 1.0; vz[0] = 0.0 - 1.0;
+    vx[1] = 1.0;       vy[1] = 0.0 - 1.0; vz[1] = 0.0 - 1.0;
+    vx[2] = 1.0;       vy[2] = 1.0;       vz[2] = 0.0 - 1.0;
+    vx[3] = 0.0 - 1.0; vy[3] = 1.0;       vz[3] = 0.0 - 1.0;
+    vx[4] = 0.0 - 1.0; vy[4] = 0.0 - 1.0; vz[4] = 1.0;
+    vx[5] = 1.0;       vy[5] = 0.0 - 1.0; vz[5] = 1.0;
+    vx[6] = 1.0;       vy[6] = 1.0;       vz[6] = 1.0;
+    vx[7] = 0.0 - 1.0; vy[7] = 1.0;       vz[7] = 1.0;
+
+    var ea: [i64; 12];
+    var eb: [i64; 12];
+    ea[0] = 0;  eb[0] = 1;
+    ea[1] = 1;  eb[1] = 5;
+    ea[2] = 5;  eb[2] = 4;
+    ea[3] = 4;  eb[3] = 0;
+    ea[4] = 3;  eb[4] = 2;
+    ea[5] = 2;  eb[5] = 6;
+    ea[6] = 6;  eb[6] = 7;
+    ea[7] = 7;  eb[7] = 3;
+    ea[8] = 0;  eb[8] = 3;
+    ea[9] = 1;  eb[9] = 2;
+    ea[10] = 5; eb[10] = 6;
+    ea[11] = 4; eb[11] = 7;
+
+    // tilt around X - uses 'i' and 'nz'
+    var c2: real64 = 0.94;
+    var s2: real64 = 0.342;
+    for var i: i64 = 0; i < 8; i = i + 1 {
+        var ny: real64 = vy[i] * c2 - vz[i] * s2;
+        var nz: real64 = vy[i] * s2 + vz[i] * c2;
+        vy[i] = ny;
+        vz[i] = nz;
+    }
+
+    var c: real64 = 0.981;
+    var s: real64 = 0.195;
+
+    for var f: i64 = 0; f < 6; f = f + 1 {
+
+        // rotation - REUSES 'i' and 'nz' (this is what broke before)
+        for var i: i64 = 0; i < 8; i = i + 1 {
+            var nx: real64 = vx[i] * c + vz[i] * s;
+            var nz: real64 = vz[i] * c - vx[i] * s;
+            vx[i] = nx;
+            vz[i] = nz;
+        }
+
+        for var k: i64 = 0; k < 1232; k = k + 1 {
+            fb[k] = 32;
+        }
+
+        for var e: i64 = 0; e < 12; e = e + 1 {
+            var a: i64 = ea[e];
+            var b: i64 = eb[e];
+            var x0: real64 = vx[a];
+            var y0: real64 = vy[a];
+            var z0: real64 = vz[a];
+            var x1: real64 = vx[b];
+            var y1: real64 = vy[b];
+            var z1: real64 = vz[b];
+
+            for var t: i64 = 0; t < 40; t = t + 1 {
+                var ft: real64 = t / 39.0;
+                var x: real64 = x0 + (x1 - x0) * ft;
+                var y: real64 = y0 + (y1 - y0) * ft;
+                var z: real64 = z0 + (z1 - z0) * ft;
+
+                var d: real64 = z + 4.0;
+                var px: i64 = trunc(28.0 + x * 30.0 / d);
+                var py: i64 = trunc(11.0 - y * 15.0 / d);
+
+                if px >= 0 && px < 56 && py >= 0 && py < 22 {
+                    fb[py * 56 + px] = 35;
+                }
+            }
+        }
+
+        for var row: i64 = 0; row < 22; row = row + 1 {
+            for var col: i64 = 0; col < 56; col = col + 1 {
+                printc(fb[row * 56 + col]);
+            }
+            printc(10);
+        }
+        printc(10);
+    }
+
+    return 0;
+}

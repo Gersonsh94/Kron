@@ -1,0 +1,26 @@
+kron_program
+kron_domain test_6params;
+kron_imports
+kron_definitions
+
+// test: functions with 5 and 6 parameters
+
+fn sum5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    return a + b + c + d + e;
+}
+
+fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    return a + b + c + d + e + f;
+}
+
+// 6 float params (the whole point: pass a triangle's coords)
+fn fsum6(a: real64, b: real64, c: real64, d: real64, e: real64, f: real64) -> real64 {
+    return a + b + c + d + e + f;
+}
+
+fn main() {
+    print(sum5(1, 2, 3, 4, 5));           // 15
+    print(sum6(1, 2, 3, 4, 5, 6));        // 21
+    print(fsum6(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)); // 21.0
+    return 0;
+}

@@ -1,0 +1,551 @@
+kron_program
+kron_domain std_map;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- maps: values found by a text key.
+//
+//     var ages: i64 = map_new();
+//     map_set(ages, "ana", 31);
+//     map_set(ages, "luis", 27);
+//     print(map_get(ages, "ana"));           // 31
+//     print(map_has(ages, "eva"));           // 0
+//     var keys: i64 = map_keys(ages);        // ["ana", "luis"], in order
+//
+//   map_new()
+//   map_set(m, key, v)            add, or replace the value of that key
+//   map_get(m, key)               its value; fails when the key is not there
+//   map_get_or(m, key, other)     its value, or `other` when it is not there
+//   map_has(m, key)  map_remove(m, key)  map_len(m)  map_clear(m)
+//   map_keys(m)                   a list of new texts, in the order the keys
+//                                 were first set
+//   map_values(m)                 a list of the values, in the same order
+//   map_set_real(m, key, x)  map_get_real(m, key)
+//   map_iset(m, n, v)  map_iget(m, n)  map_ihas(m, n)  map_iremove(m, n)
+//                                 the same with an integer for the key
+//   map_free(m)
+//
+// Keys are texts or string literals; the map keeps its own copy, so the key
+// you pass can change or be freed afterwards. Values are i64: numbers, or
+// handles of texts, lists and other maps -- which map_free does not free.
+// =========================================================================
+
+shared var mp_key: [i64; 4];        // an integer key written as text
+
+// --------------------------------------------------------- internals ---
+// Block: [live][entries][entry room][index room][entries][index]
+// Entry: [key block or 0 when removed][value][hash]
+// Index: per slot 0 empty, -1 removed, otherwise entry + 1.
+
+fn mp_hash(p: i64, n: i64) -> i64 {
+    var h: i64 = -3750763034362895579;
+    raw {
+        var i: i64 = 0;
+        while i < n {
+            h = (h ^ peek8(p + i)) * 1099511628211;
+            i = i + 1;
+        }
+    }
+    return h;
+}
+
+fn mp_new() -> i64 {
+    var q: i64 = hp_alloc(48);
+    if q == 0 {
+        return 0;
+    }
+    var e: i64 = hp_alloc(8 * 3 * 8);
+    var x: i64 = hp_alloc(16 * 8);
+    if e == 0 || x == 0 {
+        return 0;
+    }
+    raw {
+        poke(q + 16, 8);
+        poke(q + 24, 16);
+        poke(q + 32, e);
+        poke(q + 40, x);
+    }
+    var h: i64 = ob_new(OB_MAP, q);
+    return h;
+}
+
+// the entry for the key in tv_p/tv_n, or -1
+fn mp_find(q: i64, kp: i64, kn: i64, hash: i64) -> i64 {
+    var found: i64 = -1;
+    raw {
+        var ents: i64 = peek(q + 32);
+        var idx: i64 = peek(q + 40);
+        var mask: i64 = peek(q + 24) - 1;
+        var s: i64 = hash & mask;
+        var going: i64 = 1;
+        while going {
+            var slot: i64 = peek(idx + s * 8);
+            if slot == 0 {
+                going = 0;
+            } else if slot > 0 {
+                var e: i64 = ents + (slot - 1) * 24;
+                if peek(e + 16) == hash {
+                    var kb: i64 = peek(e);
+                    if kb != 0 {
+                        if peek(kb) == kn {
+                            var i: i64 = 0;
+                            while i < kn {
+                                if peek8(kb + 8 + i) != peek8(kp + i) {
+                                    i = kn + 1;
+                                } else {
+                                    i = i + 1;
+                                }
+                            }
+                            if i == kn {
+                                found = slot - 1;
+                                going = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            s = (s + 1) & mask;
+        }
+    }
+    return found;
+}
+
+// index rebuilt at `cap` slots, removed entries squeezed out
+fn mp_rebuild(q: i64, cap: i64) -> i64 {
+    var nidx: i64 = hp_alloc(cap * 8);
+    if nidx == 0 {
+        return 0;
+    }
+    raw {
+        var ents: i64 = peek(q + 32);
+        var n: i64 = peek(q + 8);
+        var w: i64 = 0;
+        var r: i64 = 0;
+        while r < n {
+            var e: i64 = ents + r * 24;
+            if peek(e) != 0 {
+                if w != r {
+                    var d: i64 = ents + w * 24;
+                    poke(d, peek(e));
+                    poke(d + 8, peek(e + 8));
+                    poke(d + 16, peek(e + 16));
+                }
+                var s: i64 = peek(ents + w * 24 + 16) & (cap - 1);
+                while peek(nidx + s * 8) != 0 {
+                    s = (s + 1) & (cap - 1);
+                }
+                poke(nidx + s * 8, w + 1);
+                w = w + 1;
+            }
+            r = r + 1;
+        }
+        poke(q + 8, w);
+        hp_release(peek(q + 40));
+        poke(q + 40, nidx);
+        poke(q + 24, cap);
+    }
+    return q;
+}
+
+fn mp_set(m: i64, key: i64, v: i64) -> i64 {
+    var q: i64 = ob_get(m, OB_MAP);
+    if q == 0 {
+        return 0;
+    }
+    if tv_view(key) == 0 {
+        return 0;
+    }
+    var kp: i64 = tv_p;
+    var kn: i64 = tv_n;
+    var hash: i64 = mp_hash(kp, kn);
+    var at: i64 = mp_find(q, kp, kn, hash);
+    if at >= 0 {
+        raw { poke(peek(q + 32) + at * 24 + 8, v); }
+        return v;
+    }
+    // room: entries, then the index at most three quarters full
+    var n: i64 = 0;
+    var room: i64 = 0;
+    var cap: i64 = 0;
+    raw {
+        n = peek(q + 8);
+        room = peek(q + 16);
+        cap = peek(q + 24);
+    }
+    if (n + 1) * 4 > cap * 3 {
+        if mp_rebuild(q, cap * 2) == 0 {
+            return 0;
+        }
+        raw {
+            n = peek(q + 8);
+            cap = peek(q + 24);
+        }
+    }
+    if n + 1 > room {
+        var ne: i64 = hp_grow(peek_ents(q), room * 2 * 24);
+        if ne == 0 {
+            return 0;
+        }
+        raw {
+            poke(q + 32, ne);
+            poke(q + 16, room * 2);
+        }
+    }
+    // the key is copied: the caller may change or free theirs
+    var kb: i64 = hp_alloc(8 + kn + 1);
+    if kb == 0 {
+        return 0;
+    }
+    tv_view(key);
+    hp_copy(kb + 8, tv_p, kn);
+    raw {
+        poke(kb, kn);
+        var e: i64 = peek(q + 32) + n * 24;
+        poke(e, kb);
+        poke(e + 8, v);
+        poke(e + 16, hash);
+        poke(q + 8, n + 1);
+        poke(q, peek(q) + 1);
+        var idx: i64 = peek(q + 40);
+        var s: i64 = hash & (cap - 1);
+        while peek(idx + s * 8) > 0 {
+            s = (s + 1) & (cap - 1);
+        }
+        poke(idx + s * 8, n + 1);
+    }
+    return v;
+}
+
+fn peek_ents(q: i64) -> i64 {
+    var e: i64 = 0;
+    raw { e = peek(q + 32); }
+    return e;
+}
+
+// the entry of key, -1 when absent (hp_err left alone), -2 on an error
+fn mp_lookup(m: i64, key: i64) -> i64 {
+    var q: i64 = ob_get(m, OB_MAP);
+    if q == 0 {
+        return -2;
+    }
+    if tv_view(key) == 0 {
+        return -2;
+    }
+    return mp_find(q, tv_p, tv_n, mp_hash(tv_p, tv_n));
+}
+
+fn mp_value(m: i64, at: i64) -> i64 {
+    var q: i64 = ob_get(m, OB_MAP);
+    var v: i64 = 0;
+    raw { v = peek(peek(q + 32) + at * 24 + 8); }
+    return v;
+}
+
+fn mp_remove(m: i64, key: i64) -> i64 {
+    var at: i64 = mp_lookup(m, key);
+    if at < 0 {
+        return 0;
+    }
+    var q: i64 = ob_get(m, OB_MAP);
+    raw {
+        var e: i64 = peek(q + 32) + at * 24;
+        var hash: i64 = peek(e + 16);
+        hp_release(peek(e));
+        poke(e, 0);
+        poke(q, peek(q) - 1);
+        var idx: i64 = peek(q + 40);
+        var mask: i64 = peek(q + 24) - 1;
+        var s: i64 = hash & mask;
+        while peek(idx + s * 8) != at + 1 {
+            s = (s + 1) & mask;
+        }
+        poke(idx + s * 8, -1);
+    }
+    return 1;
+}
+
+// the decimal text of n, in mp_key
+fn mp_ikey(n: i64) -> i64 {
+    raw {
+        var d: i64 = &mp_key;
+        var v: i64 = n;
+        var len: i64 = 0;
+        var neg: i64 = 0;
+        if v < 0 {
+            neg = 1;
+        }
+        var t: [i64; 4];
+        var tp: i64 = &t;
+        if v == 0 {
+            poke8(tp, 48);
+            len = 1;
+        }
+        while v != 0 {
+            var r: i64 = v % 10;
+            if r < 0 {
+                r = 0 - r;
+            }
+            poke8(tp + len, 48 + r);
+            len = len + 1;
+            v = v / 10;
+        }
+        var o: i64 = 0;
+        if neg {
+            poke8(d, 45);
+            o = 1;
+        }
+        var i: i64 = 0;
+        while i < len {
+            poke8(d + o + i, peek8(tp + len - 1 - i));
+            i = i + 1;
+        }
+        poke8(d + o + len, 0);
+    }
+    return &mp_key;
+}
+
+// ---------------------------------------------------------- the calls ---
+
+fn map_new() -> map<i64> {
+    lock_take(HP_LOCK);
+    return text_end(mp_new());
+}
+
+fn map_set(m: i64, key: i64, v: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(mp_set(m, key, v));
+}
+
+fn map_get(m: i64, key: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var at: i64 = mp_lookup(m, key);
+    var v: i64 = 0;
+    if at >= 0 {
+        v = mp_value(m, at);
+    } else if at == -1 {
+        hp_err = 6;
+    }
+    return text_end(v);
+}
+
+fn map_get_or(m: i64, key: i64, other: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var at: i64 = mp_lookup(m, key);
+    var v: i64 = other;
+    if at >= 0 {
+        v = mp_value(m, at);
+    }
+    return text_end(v);
+}
+
+fn map_has(m: i64, key: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if mp_lookup(m, key) >= 0 {
+        r = 1;
+    }
+    return text_end(r);
+}
+
+fn map_remove(m: i64, key: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(mp_remove(m, key));
+}
+
+fn map_len(m: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(m, OB_MAP);
+    var n: i64 = 0;
+    if q != 0 {
+        raw { n = peek(q); }
+    }
+    return text_end(n);
+}
+
+// mode 0 keys, 1 values
+fn mp_list(m: i64, mode: i64) -> i64 {
+    var q: i64 = ob_get(m, OB_MAP);
+    if q == 0 {
+        return 0;
+    }
+    var l: i64 = li_new(8);
+    if l == 0 {
+        return 0;
+    }
+    var n: i64 = 0;
+    raw { n = peek(q + 8); }
+    var i: i64 = 0;
+    while i < n && hp_err == 0 {
+        var kb: i64 = 0;
+        var v: i64 = 0;
+        raw {
+            var e: i64 = peek(q + 32) + i * 24;
+            kb = peek(e);
+            v = peek(e + 8);
+        }
+        if kb != 0 {
+            if mode == 0 {
+                var len: i64 = 0;
+                raw { len = peek(kb); }
+                li_add(l, tx_from_bytes(kb + 8, len));
+            } else {
+                li_add(l, v);
+            }
+        }
+        i = i + 1;
+        q = ob_get(m, OB_MAP);
+    }
+    return l;
+}
+
+fn map_keys(m: i64) -> list<text> {
+    lock_take(HP_LOCK);
+    return text_end(mp_list(m, 0));
+}
+
+fn map_values(m: i64) -> list<i64> {
+    lock_take(HP_LOCK);
+    return text_end(mp_list(m, 1));
+}
+
+fn mp_clear(q: i64) -> i64 {
+    raw {
+        var n: i64 = peek(q + 8);
+        var i: i64 = 0;
+        while i < n {
+            hp_release(peek(peek(q + 32) + i * 24));
+            i = i + 1;
+        }
+        hp_zero(peek(q + 40), peek(q + 24) * 8);
+        poke(q, 0);
+        poke(q + 8, 0);
+    }
+    return 0;
+}
+
+fn map_clear(m: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(m, OB_MAP);
+    if q != 0 {
+        mp_clear(q);
+    }
+    return text_end(m);
+}
+
+fn map_free(m: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(m, OB_MAP);
+    if q != 0 {
+        mp_clear(q);
+        raw {
+            hp_release(peek(q + 32));
+            hp_release(peek(q + 40));
+        }
+        ob_drop(m);
+        hp_release(q);
+    }
+    return text_end(0);
+}
+
+fn map_set_real(m: i64, key: i64, x: f64) -> f64 {
+    var bits: i64 = 0;
+    lock_take(HP_LOCK);
+    raw {
+        li_real = x;
+        bits = peek(&li_real);
+    }
+    mp_set(m, key, bits);
+    var e: i64 = hp_take_err();
+    lock_give(HP_LOCK);
+    if e != 0 {
+        heap_fail(e);
+        return 0.0;
+    }
+    return x;
+}
+
+fn map_get_real(m: i64, key: i64) -> f64 {
+    lock_take(HP_LOCK);
+    var at: i64 = mp_lookup(m, key);
+    var x: f64 = 0.0;
+    if at >= 0 {
+        var bits: i64 = mp_value(m, at);
+        raw {
+            poke(&li_real, bits);
+            x = li_real;
+        }
+    } else if at == -1 {
+        hp_err = 6;
+    }
+    var e: i64 = hp_take_err();
+    lock_give(HP_LOCK);
+    if e != 0 {
+        heap_fail(e);
+        return 0.0;
+    }
+    return x;
+}
+
+fn map_iset(m: i64, n: i64, v: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(mp_set(m, mp_ikey(n), v));
+}
+
+fn map_iget(m: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var at: i64 = mp_lookup(m, mp_ikey(n));
+    var v: i64 = 0;
+    if at >= 0 {
+        v = mp_value(m, at);
+    } else if at == -1 {
+        hp_err = 6;
+    }
+    return text_end(v);
+}
+
+fn map_ihas(m: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var r: i64 = 0;
+    if mp_lookup(m, mp_ikey(n)) >= 0 {
+        r = 1;
+    }
+    return text_end(r);
+}
+
+fn map_iremove(m: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(mp_remove(m, mp_ikey(n)));
+}
+
+// What print does with a map<T>: {"key": value, ...}, the keys in the
+// order map_keys gives them. tag: 0 integer values, 1 texts, 2 reals.
+fn map_show(m: i64, tag: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var keys: i64 = mp_list(m, 0);
+    var h: i64 = tx_new(64);
+    tx_add_bytes(h, "{", 1);
+    var n: i64 = li_len(keys);
+    var i: i64 = 0;
+    while i < n {
+        if i > 0 {
+            tx_add_bytes(h, ", ", 2);
+        }
+        var k: i64 = li_get(keys, i);
+        tx_show_value(h, k, 1);
+        tx_add_bytes(h, ": ", 2);
+        tx_show_value(h, mp_value(m, mp_lookup(m, k)), tag);
+        i = i + 1;
+    }
+    tx_add_bytes(h, "}\n", 2);
+    tx_out(h);
+    i = 0;
+    while i < n {
+        tx_drop(li_get(keys, i));
+        i = i + 1;
+    }
+    li_free(keys);
+    tx_drop(h);
+    return text_end(0);
+}

@@ -1,0 +1,15 @@
+kron_program
+kron_domain chain_b;
+kron_imports
+acquire_domain "chain_a.kr";
+kron_definitions
+
+// =========================================================================
+// chain_b -- second link: uses chain_a, and declares it in its header.
+// Before the expander chained imports, this line was lost when the header was
+// skipped, and whoever imported chain_b had to import chain_a by hand.
+// =========================================================================
+
+fn chain_fortytwo() -> i64 {
+    return chain_seven() * 6;
+}

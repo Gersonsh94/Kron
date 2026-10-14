@@ -1,0 +1,65 @@
+kron_program
+kron_domain test_fields;
+kron_imports
+kron_definitions
+
+// Struct fields at their own width and sign, in locals and in globals.
+//
+// Fields of a global struct used to be reached at offset 0 of the frame --
+// gq.x = 5 overwrote the saved frame pointer -- and an f32 field was written
+// as eight bytes, over the field after it. A signed narrow field read -1 as
+// 255.
+//
+// Expected output:
+//   5 9                  a global struct
+//   1.250000 3.500000    an f32 field next to an f64 one
+//   -1 -300 -70000 200   i8, i16, i32 and u8 fields
+//   0.750000 -2          the same in a global
+//   24                   sizeof(Mixed): 4 + 8 + 4 + 1 + 2 + 4 + 1, packed
+
+struct Q {
+    x: i64;
+    y: i64;
+}
+
+struct Mixed {
+    a: f32;
+    b: f64;
+    c: i32;
+    s8: i8;
+    s16: i16;
+    s32: i32;
+    u: u8;
+}
+
+var gq: Q;
+var gm: Mixed;
+
+fn main() {
+    gq.x = 5;
+    gq.y = 9;
+    print(gq.x);
+    print(gq.y);
+
+    var m: Mixed;
+    m.a = 1.25;
+    m.b = 3.5;
+    m.c = 7;
+    m.s8 = -1;
+    m.s16 = -300;
+    m.s32 = -70000;
+    m.u = 200;
+    print(m.a);
+    print(m.b);
+    print(m.s8);
+    print(m.s16);
+    print(m.s32);
+    print(m.u);
+
+    gm.a = 0.75;
+    gm.s16 = -2;
+    print(gm.a);
+    print(gm.s16);
+    print(sizeof(Mixed));
+    return 0;
+}

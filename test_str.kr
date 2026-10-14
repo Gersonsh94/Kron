@@ -1,0 +1,28 @@
+kron_program
+kron_domain test_str;
+kron_imports
+kron_definitions
+
+// strings: printing text, escapes, and using a literal as a filename
+
+var data: [i64; 2];
+
+fn main() {
+    raw {
+        print("Hello from Kron!\n");
+        print("Numbers and text mixed:\n");
+        print(42);
+        print("Tabbed:\tend\n");
+        print("Quotes: \"quoted\" and backslash: \\ \n");
+
+        // a string literal is just an address -> usable as a filename
+        var dp: i64 = &data;
+        poke8(dp + 0, 79);    // O
+        poke8(dp + 1, 75);    // K
+        poke8(dp + 2, 10);
+        savefile(dp, 3, "greeting.txt");
+        print("File written.\n");
+
+        return 0;
+    }
+}

@@ -1,0 +1,532 @@
+kron_program
+kron_domain std_os;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- the system around the program.
+//
+//     var home: i64 = env_get("HOME");
+//     var code: i64 = os_run("git status");
+//     var listing: i64 = os_run_output("ls -l");      // a text
+//
+//   os_args()                      the command line, a list of texts; the
+//                                  first is the program
+//   os_name()                      "windows" or "linux", a new text
+//   env_get(name)                  an environment variable, a new text;
+//                                  fails when it is not set
+//   env_has(name)
+//   os_run(command)                runs a command line through the system's
+//                                  shell (cmd on Windows, sh on Linux) and
+//                                  waits; returns its exit code
+//   os_run_output(command)         the same, and what it printed, a new text
+//   os_cwd()  os_chdir(path)       the current folder
+//   os_exit(code)                  ends the program now
+// =========================================================================
+
+shared var os_ready: i64;
+shared var os_getenvf: i64;          // Windows procedures
+shared var os_createf: i64;
+shared var os_waitf: i64;
+shared var os_codef: i64;
+shared var os_closef: i64;
+shared var os_pipef: i64;
+shared var os_infof: i64;
+shared var os_readf: i64;
+shared var os_stdf: i64;
+shared var os_exitf: i64;
+shared var os_cwdf: i64;
+shared var os_chdirf: i64;
+shared var os_si: [i64; 13];         // STARTUPINFOA: 104 bytes
+shared var os_pi: [i64; 3];          // PROCESS_INFORMATION
+shared var os_sa: [i64; 3];          // SECURITY_ATTRIBUTES
+shared var os_word: [i64; 2];
+shared var os_ignore: i64;
+
+fn os_linux() -> i64 {
+    return target_os() == 2;
+}
+
+fn os_load() -> i64 {
+    if os_ready {
+        return 1;
+    }
+    raw {
+        var k: i64 = dll_load("kernel32.dll");
+        os_getenvf = dll_proc(k, "GetEnvironmentVariableA");
+        os_createf = dll_proc(k, "CreateProcessA");
+        os_waitf = dll_proc(k, "WaitForSingleObject");
+        os_codef = dll_proc(k, "GetExitCodeProcess");
+        os_closef = dll_proc(k, "CloseHandle");
+        os_pipef = dll_proc(k, "CreatePipe");
+        os_infof = dll_proc(k, "SetHandleInformation");
+        os_readf = dll_proc(k, "ReadFile");
+        os_stdf = dll_proc(k, "GetStdHandle");
+        os_exitf = dll_proc(k, "ExitProcess");
+        os_cwdf = dll_proc(k, "GetCurrentDirectoryA");
+        os_chdirf = dll_proc(k, "SetCurrentDirectoryA");
+    }
+    os_ready = 1;
+    return 1;
+}
+
+// ----------------------------------------------------------- Linux env ---
+
+// /proc/self/environ: NAME=value entries, each ending in a 0
+fn os_environ() -> i64 {
+    var fd: i64 = -1;
+    raw { fd = syscall(2, "/proc/self/environ", 0, 0); }
+    if fd < 0 {
+        return 0;
+    }
+    var h: i64 = tx_new(4096);
+    var got: i64 = 0;
+    var going: i64 = 1;
+    while going && h != 0 {
+        var q: i64 = tx_room(h, got + 4096);
+        if q == 0 {
+            going = 0;
+        } else {
+            var r: i64 = 0;
+            raw { r = syscall(0, fd, q + 8 + got, 4096); }
+            if r <= 0 {
+                going = 0;
+            } else {
+                got = got + r;
+                raw { poke(q, got); }
+            }
+        }
+    }
+    raw { os_ignore = syscall(3, fd); }
+    return h;
+}
+
+// the value of an environment variable as a new text, 0 when not set
+fn os_env(name: i64) -> i64 {
+    if tv_view(name) == 0 {
+        return 0;
+    }
+    var np: i64 = tv_p;
+    var nn: i64 = tv_n;
+    if os_linux() {
+        var env: i64 = os_environ();
+        if env == 0 {
+            return 0;
+        }
+        var q: i64 = ob_get(env, OB_TEXT);
+        var n: i64 = 0;
+        raw { n = peek(q); }
+        var p: i64 = q + 8;
+        var at: i64 = 0;
+        var found: i64 = 0;
+        while at < n && found == 0 {
+            var len: i64 = 0;
+            raw {
+                while at + len < n && peek8(p + at + len) != 0 {
+                    len = len + 1;
+                }
+            }
+            if len > nn {
+                var same: i64 = 1;
+                raw {
+                    var i: i64 = 0;
+                    while i < nn {
+                        if peek8(p + at + i) != peek8(np + i) {
+                            same = 0;
+                            i = nn;
+                        }
+                        i = i + 1;
+                    }
+                    if peek8(p + at + nn) != 61 {
+                        same = 0;
+                    }
+                }
+                if same {
+                    found = tx_from_bytes(p + at + nn + 1, len - nn - 1);
+                }
+            }
+            at = at + len + 1;
+        }
+        ob_drop(env);
+        hp_release(q);
+        return found;
+    }
+    os_load();
+    var h: i64 = tx_new(256);
+    if h == 0 {
+        return 0;
+    }
+    var size: i64 = 0;
+    var q2: i64 = ob_get(h, OB_TEXT);
+    raw { size = call os_getenvf(np, q2 + 8, 256); }
+    size = size & 4294967295;
+    if size == 0 {
+        ob_drop(h);
+        hp_release(q2);
+        return 0;
+    }
+    if size > 256 {
+        q2 = tx_room(h, size);
+        if q2 == 0 {
+            return 0;
+        }
+        raw { size = call os_getenvf(np, q2 + 8, size); }
+        size = size & 4294967295;
+    }
+    raw {
+        poke(q2, size);
+        poke8(q2 + 8 + size, 0);
+    }
+    return h;
+}
+
+// ------------------------------------------------------------ running ---
+
+// Linux: the environment as the pointer array execve takes, in a block
+fn os_envp(env: i64) -> i64 {
+    var q: i64 = ob_get(env, OB_TEXT);
+    var n: i64 = 0;
+    raw { n = peek(q); }
+    var count: i64 = 0;
+    raw {
+        var i: i64 = 0;
+        while i < n {
+            if peek8(q + 8 + i) == 0 {
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+    }
+    var arr: i64 = hp_alloc((count + 1) * 8);
+    if arr == 0 {
+        return 0;
+    }
+    raw {
+        var k: i64 = 0;
+        var start: i64 = 0;
+        var i: i64 = 0;
+        while i < n {
+            if peek8(q + 8 + i) == 0 {
+                poke(arr + k * 8, q + 8 + start);
+                k = k + 1;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        poke(arr + k * 8, 0);
+    }
+    return arr;
+}
+
+// Runs command; with capture set, what it prints is added to text `out`.
+// Returns the exit code, or -1 with hp_err when it could not start.
+fn os_exec(command: i64, capture: i64, out: i64) -> i64 {
+    if tv_view(command) == 0 {
+        return -1;
+    }
+    if os_linux() {
+        return os_exec_linux(command, capture, out);
+    }
+    return os_exec_windows(command, capture, out);
+}
+
+fn os_exec_linux(command: i64, capture: i64, out: i64) -> i64 {
+    var cmd: i64 = tx_copy(command);
+    var env: i64 = os_environ();
+    if cmd == 0 || env == 0 {
+        hp_err = 12;
+        return -1;
+    }
+    var envp: i64 = os_envp(env);
+    var argv: i64 = hp_alloc(32);
+    if envp == 0 || argv == 0 {
+        return -1;
+    }
+    var cq: i64 = ob_get(cmd, OB_TEXT);
+    raw {
+        poke(argv, "sh");
+        poke(argv + 8, "-c");
+        poke(argv + 16, cq + 8);
+        poke(argv + 24, 0);
+    }
+    var fds: [i64; 1];
+    var rd: i64 = -1;
+    var wr: i64 = -1;
+    if capture {
+        var ok: i64 = 0;
+        raw { ok = syscall(22, &fds); }
+        if ok < 0 {
+            hp_err = 12;
+            return -1;
+        }
+        raw {
+            rd = peek32(&fds);
+            wr = peek32(&fds + 4);
+        }
+    }
+    var pid: i64 = 0;
+    raw { pid = syscall(57); }
+    if pid == 0 {
+        // the child: becomes the shell, or ends with 127
+        raw {
+            if capture {
+                os_ignore = syscall(33, wr, 1);
+                os_ignore = syscall(3, rd);
+                os_ignore = syscall(3, wr);
+            }
+            os_ignore = syscall(59, "/bin/sh", argv, envp);
+            os_ignore = syscall(231, 127);
+        }
+    }
+    if pid < 0 {
+        hp_err = 12;
+        return -1;
+    }
+    if capture {
+        raw { os_ignore = syscall(3, wr); }
+        var buf: [i64; 512];
+        var going: i64 = 1;
+        while going {
+            var r: i64 = 0;
+            raw { r = syscall(0, rd, &buf, 4096); }
+            if r <= 0 {
+                going = 0;
+            } else {
+                tx_add_bytes(out, &buf, r);
+            }
+        }
+        raw { os_ignore = syscall(3, rd); }
+    }
+    var status: [i64; 1];
+    raw { os_ignore = syscall(61, pid, &status, 0, 0); }
+    var code: i64 = 0;
+    raw { code = (peek32(&status) >> 8) & 255; }
+    ob_drop(cmd);
+    hp_release(cq);
+    var eq: i64 = ob_get(env, OB_TEXT);
+    ob_drop(env);
+    hp_release(eq);
+    hp_release(envp);
+    hp_release(argv);
+    return code;
+}
+
+fn os_exec_windows(command: i64, capture: i64, out: i64) -> i64 {
+    os_load();
+    var line: i64 = tx_new(64);
+    if line == 0 {
+        return -1;
+    }
+    tx_add(line, "cmd.exe /c ");
+    tx_add(line, command);
+    var lq: i64 = ob_get(line, OB_TEXT);
+    hp_zero(&os_si, 104);
+    hp_zero(&os_pi, 24);
+    var rd: i64 = 0;
+    var wr: i64 = 0;
+    var inherit: i64 = 0;
+    raw {
+        poke32(&os_si, 104);
+        if capture {
+            hp_zero(&os_sa, 24);
+            poke32(&os_sa, 24);
+            poke32(&os_sa + 16, 1);
+            var ok: i64 = call os_pipef(&os_word, &os_word + 8, &os_sa, 0);
+            if (ok & 4294967295) != 0 {
+                rd = peek(&os_word);
+                wr = peek(&os_word + 8);
+                os_ignore = call os_infof(rd, 1, 0);
+                poke32(&os_si + 60, 256);                   // STARTF_USESTDHANDLES
+                poke(&os_si + 80, call os_stdf(0 - 10));
+                poke(&os_si + 88, wr);
+                poke(&os_si + 96, wr);
+                inherit = 1;
+            }
+        }
+    }
+    var started: i64 = 0;
+    raw {
+        started = call os_createf(0, lq + 8, 0, 0, inherit, 0, 0, 0, &os_si, &os_pi);
+        started = started & 4294967295;
+    }
+    if capture {
+        raw {
+            if wr != 0 {
+                os_ignore = call os_closef(wr);
+            }
+        }
+    }
+    ob_drop(line);
+    hp_release(lq);
+    if started == 0 {
+        raw {
+            if rd != 0 {
+                os_ignore = call os_closef(rd);
+            }
+        }
+        hp_err = 12;
+        return -1;
+    }
+    if capture {
+        var buf: [i64; 512];
+        var going: i64 = 1;
+        while going {
+            var ok: i64 = 0;
+            var r: i64 = 0;
+            raw {
+                poke(&os_word, 0);
+                ok = call os_readf(rd, &buf, 4096, &os_word, 0);
+                r = peek32(&os_word);
+            }
+            if (ok & 4294967295) == 0 || r == 0 {
+                going = 0;
+            } else {
+                tx_add_bytes(out, &buf, r);
+            }
+        }
+        raw { os_ignore = call os_closef(rd); }
+    }
+    var code: i64 = 0;
+    raw {
+        var proc: i64 = peek(&os_pi);
+        os_ignore = call os_waitf(proc, 4294967295);
+        poke(&os_word, 0);
+        os_ignore = call os_codef(proc, &os_word);
+        code = peek32(&os_word);
+        os_ignore = call os_closef(proc);
+        os_ignore = call os_closef(peek(&os_pi + 8));
+    }
+    return code;
+}
+
+// ---------------------------------------------------------- the calls ---
+
+fn os_args() -> list<text> {
+    lock_take(HP_LOCK);
+    var l: i64 = li_new(8);
+    var n: i64 = arg_count();
+    var i: i64 = 0;
+    while i < n && l != 0 && hp_err == 0 {
+        li_add(l, tx_copy(arg_get(i)));
+        i = i + 1;
+    }
+    return text_end(l);
+}
+
+// "windows", "linux", "macos" or "web". macOS and the web run the Linux
+// program; their layer underneath answers call 1100, which Linux does not
+// have: 1 macOS, 2 the web.
+fn os_name() -> text {
+    if os_linux() {
+        var under: i64 = 0;
+        raw { under = syscall(1100); }
+        if under == 1 {
+            return text("macos");
+        }
+        if under == 2 {
+            return text("web");
+        }
+        return text("linux");
+    }
+    return text("windows");
+}
+
+fn env_get(name: i64) -> text {
+    lock_take(HP_LOCK);
+    var v: i64 = os_env(name);
+    if v == 0 && hp_err == 0 {
+        hp_err = 15;
+    }
+    return text_end(v);
+}
+
+fn env_has(name: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var v: i64 = os_env(name);
+    var r: i64 = 0;
+    if v != 0 {
+        r = 1;
+        var q: i64 = ob_get(v, OB_TEXT);
+        ob_drop(v);
+        hp_release(q);
+    }
+    return text_end(r);
+}
+
+fn os_run(command: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(os_exec(command, 0, 0));
+}
+
+fn os_run_output(command: i64) -> text {
+    lock_take(HP_LOCK);
+    var out: i64 = tx_new(256);
+    if out != 0 {
+        os_exec(command, 1, out);
+    }
+    return text_end(out);
+}
+
+fn os_cwd() -> text {
+    lock_take(HP_LOCK);
+    var h: i64 = tx_new(1024);
+    if h != 0 {
+        var q: i64 = ob_get(h, OB_TEXT);
+        var n: i64 = 0;
+        raw {
+            if os_linux() {
+                n = syscall(79, q + 8, 1024);
+                if n > 0 {
+                    n = n - 1;           // the count includes the final 0
+                } else {
+                    n = 0;
+                }
+            } else {
+                os_load();
+                n = call os_cwdf(1024, q + 8);
+                n = n & 4294967295;
+                if n > 1024 {
+                    n = 0;
+                }
+            }
+            poke(q, n);
+            poke8(q + 8 + n, 0);
+        }
+    }
+    return text_end(h);
+}
+
+fn os_chdir(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var ok: i64 = 0;
+    if tv_view(path) {
+        raw {
+            if os_linux() {
+                if syscall(80, tv_p) == 0 {
+                    ok = 1;
+                }
+            } else {
+                os_load();
+                ok = call os_chdirf(tv_p);
+                ok = ok & 4294967295;
+            }
+        }
+        if ok == 0 {
+            hp_err = 11;
+        }
+    }
+    return text_end(ok);
+}
+
+fn os_exit(code: i64) -> i64 {
+    raw {
+        if os_linux() {
+            os_ignore = syscall(231, code);
+        } else {
+            os_load();
+            os_ignore = call os_exitf(code);
+        }
+    }
+    return 0;
+}

@@ -1,0 +1,98 @@
+kron_program
+kron_domain std_mem;
+kron_imports
+kron_definitions
+
+// Every function here reads or writes bytes by address, so each body sits
+// inside raw { ... }: programs that only call them get no warning.
+
+// ============================================================================
+// Kron standard library — raw memory.
+//
+// Addresses are plain i64 values, as produced by the & operator or by
+// arithmetic on one. Sizes are byte counts.
+//
+// Supersedes the memory half of the older standard library file, which declared its
+// parameters as `int32` — a type Kron does not actually have.
+// ============================================================================
+
+// Copy `count` bytes from src to dst. The regions must not overlap.
+// Returns dst.
+fn mem_copy(dst: i64, src: i64, count: i64) -> i64 {
+    raw {
+        for var i: i64 = 0; i < count; i = i + 1 {
+            poke8(dst + i, peek8(src + i));
+        }
+        return dst;
+    }
+}
+
+// Fill `count` bytes at dst with the low byte of `value`. Returns dst.
+fn mem_set(dst: i64, value: i64, count: i64) -> i64 {
+    raw {
+        for var i: i64 = 0; i < count; i = i + 1 {
+            poke8(dst + i, value);
+        }
+        return dst;
+    }
+}
+
+// Fill `count` bytes at dst with zero. Returns dst.
+fn mem_zero(dst: i64, count: i64) -> i64 {
+    return mem_set(dst, 0, count);
+}
+
+// Compare `count` bytes. Returns 0 when equal, otherwise the difference of
+// the first differing byte (a - b).
+fn mem_compare(a: i64, b: i64, count: i64) -> i64 {
+    raw {
+        for var i: i64 = 0; i < count; i = i + 1 {
+            var d: i64 = peek8(a + i) - peek8(b + i);
+            if d != 0 {
+                return d;
+            }
+        }
+        return 0;
+    }
+}
+
+// Copy `count` bytes even when the regions overlap. Returns dst.
+fn mem_move(dst: i64, src: i64, count: i64) -> i64 {
+    raw {
+        if dst < src {
+            return mem_copy(dst, src, count);
+        }
+        // walk backwards so a forward overlap does not clobber unread bytes
+        var i: i64 = count;
+        while i > 0 {
+            i = i - 1;
+            poke8(dst + i, peek8(src + i));
+        }
+        return dst;
+    }
+}
+
+// Find the first occurrence of a byte within `count` bytes.
+// Returns its address, or 0 when not present.
+fn mem_find_byte(start: i64, target: i64, count: i64) -> i64 {
+    raw {
+        for var i: i64 = 0; i < count; i = i + 1 {
+            if peek8(start + i) == target {
+                return start + i;
+            }
+        }
+        return 0;
+    }
+}
+
+// Swap `count` bytes between two non-overlapping regions.
+fn mem_swap(a: i64, b: i64, count: i64) -> i64 {
+    raw {
+        for var i: i64 = 0; i < count; i = i + 1 {
+            var t: i64 = peek8(a + i);
+            poke8(a + i, peek8(b + i));
+            poke8(b + i, t);
+        }
+        return a;
+    }
+}

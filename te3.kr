@@ -1,0 +1,10 @@
+kron_program
+kron_domain te3;
+kron_imports
+kron_definitions
+
+fn main() {
+    var a: real64 = 1.0e308;
+    print(a);
+    return 0;
+}

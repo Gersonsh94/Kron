@@ -1,0 +1,12 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_aw_bad.kr:16:17: array element type differs from the parameter's 'b'
+    print(total(b));
+                ^
+  hint: elements are stored at their own width ([u8; N] one byte each), so the parameter must declare the same element type

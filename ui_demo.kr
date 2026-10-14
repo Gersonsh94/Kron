@@ -1,0 +1,78 @@
+kron_program
+kron_domain ui_demo;
+kron_imports
+acquire_domain "std_ui.kr";
+kron_definitions
+
+// A sign-up form: boxes to type in, a switch, a checkbox, a slider and two
+// buttons. The switch turns the dark theme on and off.
+// Windows:  kronc ui_demo.kr --window       Linux / WSL:  kronc ui_demo.kr --target=linux
+
+var name: [i64; 8];          // 64 bytes of text
+var email: [i64; 8];
+var message: [i64; 16];
+
+fn copy_text(dst: i64, src: i64, at: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while peek8(src + i) != 0 {
+            poke8(dst + at + i, peek8(src + i));
+            i = i + 1;
+        }
+        poke8(dst + at + i, 0);
+    }
+    return at + i;
+}
+
+fn main() {
+    if window_open(480, 470, "Kron - sign up") == 0 {
+        print_fail();
+        return 1;
+    }
+    var dark: i64 = 0;
+    var terms: i64 = 0;
+    var volume: i64 = 60;
+    var done: i64 = 0;
+    while window_show() {
+        ui_dark(dark);
+        ui_begin();
+        ui_title(28, 22, "Create your account");
+        ui_muted(30, 64, "It takes less than a minute.");
+
+        ui_card(24, 98, 432, 300, "");
+        ui_bold(48, 120, "Name");
+        ui_input_hint(48, 144, 384, &name, 64, "Your name");
+        ui_bold(48, 194, "Email");
+        ui_input_hint(48, 218, 384, &email, 64, "you@example.com");
+        dark = ui_switch(48, 274, "Dark mode", dark);
+        terms = ui_check(250, 275, "I accept the terms", terms);
+        ui_muted(48, 318, "Notifications");
+        volume = ui_slider(170, 316, 200, volume, 0, 100);
+        ui_progress(48, 360, 384, volume, 100);
+
+        if ui_button(24, 412, 200, 42, "Create account") {
+            if terms {
+                var at: i64 = copy_text(&message, "Welcome, ", 0);
+                at = copy_text(&message, &name, at);
+                at = copy_text(&message, "!", at);
+                done = 1;
+            } else {
+                copy_text(&message, "Please accept the terms first.", 0);
+                done = 1;
+            }
+        }
+        if ui_button_alt(236, 412, 120, 42, "Cancel") {
+            window_close();
+        }
+        if ui_key(27) {
+            window_close();
+        }
+        ui_end();
+        if done {
+            ui_round(24, 60, 432, 28, 8, ui_c_bg);
+            ui_bold(30, 64, &message);
+        }
+        window_sleep(16);
+    }
+    return 0;
+}

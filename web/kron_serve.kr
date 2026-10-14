@@ -1,0 +1,236 @@
+kron_program
+kron_domain kron_serve;
+kron_imports
+acquire_domain "std_text.kr";
+acquire_domain "std_file.kr";
+acquire_domain "std_net.kr";
+kron_definitions
+
+// =========================================================================
+// kron_serve: the pages of the web target, served from this folder.
+//
+// A program built with --target=web is three files: NAME.wasm, NAME.html
+// and kron_web.js. A browser opens them only from a web server, not from
+// the disk, and gives a page threads, sleep and the keyboard (shared
+// memory) only when the server sends two headers:
+//
+//   Cross-Origin-Opener-Policy: same-origin
+//   Cross-Origin-Embedder-Policy: require-corp
+//
+// This one sends them. Build it once, then run it in the folder of the
+// pages:
+//
+//   kronc web\kron_serve.kr -o kron_serve.exe
+//   kron_serve.exe            port 8000
+//   kron_serve.exe 8080       another port
+//
+// and open http://localhost:8000/NAME.html. Only this computer can reach it
+// (127.0.0.1); it serves GET and HEAD, files under the folder, nothing
+// above it. Ctrl+C stops it.
+// =========================================================================
+
+const SERVE_SLOTS: i64 = 32;
+
+fn main() -> i64 {
+    var port: i64 = 8000;
+    if arg_count() > 1 {
+        var a: text = text(arg_get(1));
+        if text_is_int(a) {
+            port = text_to_int(a);
+        }
+    }
+    var server: i64 = net_listen_on(127, 0, 0, 1, port);
+    if failed() {
+        print("kron_serve: cannot listen on port " + port);
+        print_fail();
+        return 1;
+    }
+    print("Serving this folder at http://localhost:" + port + "/  (Ctrl+C stops it)");
+    // one thread per connection, so a browser that opens a connection and
+    // waits does not hold up the others; the handles go round a ring, and
+    // a slot is waited for before it is used again
+    var slots: [i64; 32];
+    var next: i64 = 0;
+    while next < SERVE_SLOTS {
+        slots[next] = 0;
+        next = next + 1;
+    }
+    next = 0;
+    while 1 {
+        var c: i64 = net_accept(server);
+        if failed() {
+            thread_yield();
+        } else {
+            if slots[next] != 0 {
+                thread_wait(slots[next]);
+            }
+            var h: i64 = thread_start(&serve, c);
+            if failed() {
+                serve(c);
+                h = 0;
+            }
+            slots[next] = h;
+            next = (next + 1) % SERVE_SLOTS;
+        }
+    }
+    return 0;
+}
+
+// one request, one answer, then the connection is closed
+fn serve(sock: i64) -> i64 {
+    var req: [i64; 2048];
+    var n: i64 = net_recv(sock, &req, 16000);
+    if failed() {
+        net_close(sock);
+        forget();
+        return 0;
+    }
+    if n <= 0 {
+        net_close(sock);
+        forget();
+        return 0;
+    }
+    var head: text = text_from_bytes(&req, n);
+    var sp1: i64 = text_find(head, " ");
+    var sp2: i64 = -1;
+    if sp1 > 0 {
+        sp2 = text_find_after(head, " ", sp1 + 1);
+    }
+    if sp2 < 0 {
+        answer(sock, "400 Bad Request", "text/plain", "bad request\n", 0);
+        return 0;
+    }
+    var method: text = text_part(head, 0, sp1);
+    var path: text = text_part(head, sp1 + 1, sp2 - sp1 - 1);
+    var q: i64 = text_find(path, "?");
+    if q >= 0 {
+        path = text_part(path, 0, q);
+    }
+    path = text_replace(path, "%20", " ");
+    var only_head: i64 = 0;
+    if method == "HEAD" {
+        only_head = 1;
+    } else if method != "GET" {
+        answer(sock, "405 Method Not Allowed", "text/plain", "GET and HEAD only\n", 0);
+        log_line(method, path, 405);
+        return 0;
+    }
+    if text_contains(path, "..") || text_contains(path, "\\") || text_starts(path, "/") == 0 {
+        answer(sock, "403 Forbidden", "text/plain", "not under this folder\n", only_head);
+        log_line(method, path, 403);
+        return 0;
+    }
+    var file: text = "." + path;
+    if text_ends(file, "/") {
+        var index: text = file + "index.html";
+        if file_exists(index) {
+            file = index;
+        } else {
+            answer(sock, "200 OK", "text/html; charset=utf-8", listing(file), only_head);
+            log_line(method, path, 200);
+            return 0;
+        }
+    }
+    if file_exists(file) == 0 {
+        answer(sock, "404 Not Found", "text/plain", "not found: " + path + "\n", only_head);
+        log_line(method, path, 404);
+        return 0;
+    }
+    var body: text = file_read_all(file);
+    if failed() {
+        answer(sock, "500 Internal Server Error", "text/plain", "cannot read it\n", only_head);
+        log_line(method, path, 500);
+        return 0;
+    }
+    answer(sock, "200 OK", kind_of(file), body, only_head);
+    log_line(method, path, 200);
+    return 0;
+}
+
+fn answer(sock: i64, status: text, kind: text, body: text, only_head: i64) -> i64 {
+    var h: text = "HTTP/1.1 " + status + "\r\n";
+    text_add(h, "Content-Type: " + kind + "\r\n");
+    text_add(h, "Content-Length: ");
+    text_add_int(h, text_len(body));
+    text_add(h, "\r\n");
+    text_add(h, "Cross-Origin-Opener-Policy: same-origin\r\n");
+    text_add(h, "Cross-Origin-Embedder-Policy: require-corp\r\n");
+    text_add(h, "Cross-Origin-Resource-Policy: same-origin\r\n");
+    text_add(h, "Cache-Control: no-cache\r\n");
+    text_add(h, "Connection: close\r\n\r\n");
+    send_all(sock, text_cstr(h), text_len(h));
+    if only_head == 0 {
+        send_all(sock, text_cstr(body), text_len(body));
+    }
+    net_close(sock);
+    forget();
+    return 0;
+}
+
+fn send_all(sock: i64, address: i64, n: i64) -> i64 {
+    var done: i64 = 0;
+    while done < n {
+        var r: i64 = net_send(sock, address + done, n - done);
+        if failed() {
+            return done;
+        }
+        if r <= 0 {
+            return done;
+        }
+        done = done + r;
+    }
+    return done;
+}
+
+fn kind_of(file: text) -> text {
+    var f: text = text_lower(file);
+    if text_ends(f, ".html") { return "text/html; charset=utf-8"; }
+    if text_ends(f, ".htm") { return "text/html; charset=utf-8"; }
+    if text_ends(f, ".js") { return "text/javascript; charset=utf-8"; }
+    if text_ends(f, ".wasm") { return "application/wasm"; }
+    if text_ends(f, ".css") { return "text/css; charset=utf-8"; }
+    if text_ends(f, ".json") { return "application/json"; }
+    if text_ends(f, ".png") { return "image/png"; }
+    if text_ends(f, ".jpg") { return "image/jpeg"; }
+    if text_ends(f, ".jpeg") { return "image/jpeg"; }
+    if text_ends(f, ".gif") { return "image/gif"; }
+    if text_ends(f, ".svg") { return "image/svg+xml"; }
+    if text_ends(f, ".bmp") { return "image/bmp"; }
+    if text_ends(f, ".ico") { return "image/x-icon"; }
+    if text_ends(f, ".txt") { return "text/plain; charset=utf-8"; }
+    if text_ends(f, ".kr") { return "text/plain; charset=utf-8"; }
+    if text_ends(f, ".md") { return "text/plain; charset=utf-8"; }
+    return "application/octet-stream";
+}
+
+// a folder without index.html: its pages, as links
+fn listing(folder: text) -> text {
+    var page: text = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Kron pages</title>\n";
+    text_add(page, "<body style=\"font: 15px sans-serif; margin: 2em\">\n<h3>Pages in " + folder + "</h3>\n<ul>\n");
+    var names = dir_list(folder);
+    var found: i64 = 0;
+    for name in names {
+        if text_ends(text_lower(name), ".html") {
+            text_add(page, "<li><a href=\"" + name + "\">" + name + "</a></li>\n");
+            found = found + 1;
+        }
+    }
+    if found == 0 {
+        text_add(page, "<li>none: build a program with --target=web here</li>\n");
+    }
+    text_add(page, "</ul>\n</body>\n");
+    return page;
+}
+
+fn log_line(method: text, path: text, status: i64) -> i64 {
+    print(method + " " + path + " " + status);
+    return 0;
+}
+
+// a failure read and dropped: a client that went away is not an error here
+fn forget() -> i64 {
+    if failed() {
+        return 1;
+    }
+    return 0;
+}

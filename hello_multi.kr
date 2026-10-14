@@ -1,0 +1,21 @@
+kron_program
+kron_domain hello_multi;
+kron_imports
+kron_definitions
+
+// The same source compiles for Windows, Linux, a Kron system, or bare metal.
+// Only the command-line target changes.
+
+fn main() {
+    var n: int32 = 0;
+    var total: int32 = 0;
+
+    while n < 5 {
+        total = total + n;
+        n = n + 1;
+    }
+
+    print(total);      // 10
+    print(1234);
+    return 0;
+}

@@ -1,0 +1,62 @@
+kron_program
+kron_domain test_simd;
+kron_imports
+kron_definitions
+
+// SIMD intrinsics: TWO f64 per instruction.
+//
+// Kron does all floating-point arithmetic in double precision, so the
+// matching packed family is 'pd': two values per register,
+// not four. An addps on a pair of doubles would read them as four floats
+// and return garbage.
+//
+//   vec2_load(address)          loads two f64
+//   vec2_add/sub/mul(a, b)      works on both at once
+//   vec2_store(address, v)      puts them back in memory
+//
+// They only compose by nesting: a pair of doubles lives in an xmm register and
+// fits no scalar type, so the result of one feeds the next
+// without going through a variable.
+//
+// The arrays are f64: an element is eight bytes, which is what the
+// compiler scales by today. f32 would need the element width of
+// an array to travel like a pointer's, and that does not happen yet.
+//
+// Expected output:
+//   5    c[0] = 1+4
+//   5    c[1] = 2+3
+//   4    d[0] = 1*4
+//   6    d[1] = 2*3
+//   9    nested: (1+4)+4 = 9 in the first cell
+
+fn main() {
+    var a: [f64; 4];
+    var b: [f64; 4];
+    var c: [f64; 4];
+    var d: [f64; 4];
+    var e: [f64; 4];
+
+    a[0] = 1.0;
+    a[1] = 2.0;
+    a[2] = 3.0;
+    a[3] = 4.0;
+
+    b[0] = 4.0;
+    b[1] = 3.0;
+    b[2] = 2.0;
+    b[3] = 1.0;
+
+    vec2_store(&c[0], vec2_add(vec2_load(&a[0]), vec2_load(&b[0])));
+    print(trunc(c[0]));
+    print(trunc(c[1]));
+
+    vec2_store(&d[0], vec2_mul(vec2_load(&a[0]), vec2_load(&b[0])));
+    print(trunc(d[0]));
+    print(trunc(d[1]));
+
+    // nested: checks that the outer operation is not lost
+    vec2_store(&e[0], vec2_add(vec2_add(vec2_load(&a[0]), vec2_load(&b[0])), vec2_load(&b[0])));
+    print(trunc(e[0]));
+
+    return 0;
+}

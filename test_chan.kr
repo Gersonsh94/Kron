@@ -1,0 +1,86 @@
+kron_program
+kron_domain test_chan;
+kron_imports
+acquire_domain "std_chan.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: channels (std_chan, step 1)
+//
+// First on one thread: order and length. Then four producer threads send a
+// hundred thousand numbers each through one channel of 1024 slots, far fewer
+// than the values, so producers really wait for the consumer; main adds
+// everything up. Last, closing: what is left is still received, then
+// chan_recv says the channel is over, and a send on it fails.
+//
+// Expected output:
+//   0              an empty channel
+//   3              three values waiting
+//   10, 20, 30     received in the order they were sent
+//   400000         every value arrived
+//   20000200000    and none was lost or repeated: 4 * (1 + ... + 100000)
+//   0              a closed, empty channel ends
+//   1, 7, 1, 8     a closed channel still hands over what it holds
+//   0              then it ends
+//   0, 1           sending on a closed channel fails
+// =========================================================================
+
+fn producer(c: i64) -> i64 {
+    var i: i64 = 1;
+    while i <= 100000 {
+        chan_send(c, i);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    var got: [i64; 1];
+    var c: i64 = chan_new(8);
+    print(chan_len(c));                  // 0
+    chan_send(c, 10);
+    chan_send(c, 20);
+    chan_send(c, 30);
+    print(chan_len(c));                  // 3
+    chan_recv(c, got);
+    print(got[0]);                       // 10
+    chan_recv(c, got);
+    print(got[0]);                       // 20
+    chan_recv(c, got);
+    print(got[0]);                       // 30
+
+    var d: i64 = chan_new(1024);
+    var h1: i64 = thread_start(&producer, d);
+    var h2: i64 = thread_start(&producer, d);
+    var h3: i64 = thread_start(&producer, d);
+    var h4: i64 = thread_start(&producer, d);
+    var n: i64 = 0;
+    var sum: i64 = 0;
+    while n < 400000 {
+        chan_recv(d, got);
+        sum = sum + got[0];
+        n = n + 1;
+    }
+    thread_wait(h1);
+    thread_wait(h2);
+    thread_wait(h3);
+    thread_wait(h4);
+    print(n);                            // 400000
+    print(sum);                          // 20000200000
+
+    chan_close(d);
+    print(chan_recv(d, got));            // 0
+
+    var e: i64 = chan_new(4);
+    chan_send(e, 7);
+    chan_send(e, 8);
+    chan_close(e);
+    print(chan_recv(e, got));            // 1
+    print(got[0]);                       // 7
+    print(chan_recv(e, got));            // 1
+    print(got[0]);                       // 8
+    print(chan_recv(e, got));            // 0
+    print(chan_send(e, 9));              // 0
+    print(failed());                     // 1
+    return 0;
+}

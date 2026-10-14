@@ -1,0 +1,11 @@
+kron_program
+kron_domain arena_overlap;
+kron_imports
+kron_definitions
+
+mmu OvlMMU {
+    heap_arena_definition {
+        arena a base_address 0x100000 size_bytes 65536 growth_policy fixed_static ;
+        arena b base_address 0x108000 size_bytes 65536 growth_policy fixed_static ;
+    }
+}

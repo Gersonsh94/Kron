@@ -1,0 +1,58 @@
+kron_program
+kron_domain test_map;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// std_map: values by text key, integer keys, removal, many entries.
+
+fn main() {
+    var ages: i64 = map_new();
+    map_set(ages, "ana", 31);
+    map_set(ages, "luis", 27);
+    map_set(ages, "ana", 32);
+    print(map_get(ages, "ana"));               // 32
+    print(map_has(ages, "eva"));               // 0
+    print(map_get(ages, "eva"));               // 0: not there
+    print(failed());                           // 1
+    print(map_get_or(ages, "eva", -1));        // -1
+    print(map_len(ages));                      // 2
+    say(text_join(map_keys(ages), ","));       // ana,luis
+    var m: i64 = map_new();
+    var i: i64 = 0;
+    while i < 5000 {
+        map_iset(m, i, i * i);
+        i = i + 1;
+    }
+    print(map_len(m));                         // 5000
+    print(map_iget(m, 4321));                  // 18671041
+    i = 0;
+    while i < 5000 {
+        if i % 2 == 0 {
+            map_iremove(m, i);
+        }
+        i = i + 1;
+    }
+    print(map_len(m));                         // 2500
+    print(map_ihas(m, 4320));                  // 0
+    print(map_iget(m, 4321));                  // 18671041
+    i = 0;
+    while i < 3000 {
+        map_iset(m, i + 10000, 1);
+        i = i + 1;
+    }
+    print(map_len(m));                         // 5500
+    // the key is copied: freeing the text afterwards changes nothing
+    var name: i64 = text("dyn");
+    text_add(name, "amic");
+    map_set_real(m, name, 2.5);
+    text_free(name);
+    print(map_get_real(m, "dynamic"));         // 2.500000
+    print(list_get(map_values(ages), 1));      // 27
+    map_remove(ages, "ana");
+    say(text_join(map_keys(ages), ","));       // luis
+    map_free(m);
+    print(map_len(m));                         // 0: freed
+    print(failed());                           // 1
+    return 0;
+}

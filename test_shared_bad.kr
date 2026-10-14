@@ -1,0 +1,26 @@
+kron_program
+kron_domain test_shared_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: a thread touches a global that is not shared
+//
+// Code that can run in a thread may only touch globals declared
+// 'shared var'. total is a plain global and worker runs in a thread, so it
+// has to be rejected, pointing at 'total' inside worker.
+// =========================================================================
+
+var total: i64;
+
+fn worker(n: i64) -> i64 {
+    total = total + n;
+    return 0;
+}
+
+fn main() {
+    var h: i64 = thread_start(&worker, 5);
+    thread_wait(h);
+    print(total);
+    return 0;
+}

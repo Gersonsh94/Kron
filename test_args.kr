@@ -1,0 +1,40 @@
+kron_program
+kron_domain test_args;
+kron_imports
+kron_definitions
+
+// Command-line arguments: arg_count() and arg_get(i).
+//
+// arg_get(i) gives the address of argument i as a NUL-terminated string, the
+// form std_str works with. Argument 0 is the program itself. An index out of
+// range gives an empty string, never an address into nowhere.
+//
+// The suites run this test with no arguments, so it only checks what holds
+// everywhere: one argument, the program's own name not empty, and an empty
+// string past the end. The test also prints target_os() through a value that
+// is the same on every system: whether it is one of the four known ones.
+//
+// Expected output:
+//   1     arg_count(): only the program
+//   1     argument 0 has at least one character
+//   0     argument 5 does not exist: empty
+//   0     a negative index is out of range too
+//   1     target_os() is 1, 2, 3 or 4
+
+fn main() {
+    var n: i64 = arg_count();
+    print(n);                              // 1
+
+    var p0: i64 = arg_get(0);
+    var p5: i64 = arg_get(5);
+    var pm: i64 = arg_get(0 - 1);
+    raw {
+        print(peek8(p0) != 0);             // 1
+        print(peek8(p5));                  // 0
+        print(peek8(pm));                  // 0
+    }
+
+    var t: i64 = target_os();
+    print(t >= 1 && t <= 4);               // 1
+    return 0;
+}

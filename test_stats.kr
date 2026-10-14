@@ -1,0 +1,94 @@
+kron_program
+kron_domain test_stats;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_stats.kr";
+kron_definitions
+
+// Test for std_stats.kr
+// Every line prints a value with its expected result beside it.
+
+
+fn main() {
+    // --- data set: 2, 4, 4, 4, 5, 5, 7, 9 ---
+    // The textbook example: mean 5, population variance 4, stddev 2.
+    st_clear();
+    st_push(2.0);
+    st_push(4.0);
+    st_push(4.0);
+    st_push(4.0);
+    st_push(5.0);
+    st_push(5.0);
+    st_push(7.0);
+    st_push(9.0);
+
+    print(st_count());            // 8
+    print(st_sum());              // 40.0
+    print(st_mean());             // 5.0
+    print(st_min());              // 2.0
+    print(st_max());              // 9.0
+    print(st_range());            // 7.0
+    print(st_var());              // 4.0
+    print(st_stddev());           // 2.0
+
+    // eight values, so the median averages the 4th and 5th of the sorted list
+    print(st_median());           // 4.5
+    print(st_mode());             // 4.0
+
+    // --- percentiles on 1..5, where the answers are easy to check by hand ---
+    st_clear();
+    st_push(1.0);
+    st_push(2.0);
+    st_push(3.0);
+    st_push(4.0);
+    st_push(5.0);
+
+    print(st_median());           // 3.0
+    print(st_percentile(0.0));    // 1.0
+    print(st_percentile(50.0));   // 3.0
+    print(st_percentile(100.0));  // 5.0
+    print(st_q1());               // 2.0
+    print(st_q3());               // 4.0
+    print(st_iqr());              // 2.0
+
+    // sample variance of 1..5 is 2.5, against a population variance of 2.0
+    print(st_var());              // 2.0
+    print(st_var_sample());       // 2.5
+
+    // --- a perfect straight line: y = 2x + 1 ---
+    st_clear();
+    st_push(1.0);
+    st_push(2.0);
+    st_push(3.0);
+    st_push(4.0);
+    st_push(5.0);
+    st_push_y(3.0);
+    st_push_y(5.0);
+    st_push_y(7.0);
+    st_push_y(9.0);
+    st_push_y(11.0);
+
+    print(linreg_slope());        // 2.0
+    print(linreg_intercept());    // 1.0
+    print(linreg_predict(10.0));  // 21.0
+    print(st_corr());             // 1.0
+    print(linreg_r2());           // 1.0
+
+    // --- a fit that is not exact, so the numbers are not round ---
+    // x = 1..4, y = 2, 4, 5, 8: slope 1.9, intercept 0.0
+    st_clear();
+    st_push(1.0);
+    st_push(2.0);
+    st_push(3.0);
+    st_push(4.0);
+    st_push_y(2.0);
+    st_push_y(4.0);
+    st_push_y(5.0);
+    st_push_y(8.0);
+
+    print(linreg_slope());        // 1.9
+    print(linreg_intercept());    // 0.0
+    print(st_covar());            // 2.375
+
+    return 0;
+}

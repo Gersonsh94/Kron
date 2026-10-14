@@ -1,0 +1,65 @@
+kron_program
+kron_domain test_pcond;
+kron_imports
+kron_definitions
+
+// Conditions that START with a parenthesis but do not end there.
+//
+// A '(' at the start of a condition used to be taken as wrapping
+// all of it, and the close was demanded right away, so 'if (a & 12) == 12'
+// did not parse. The parenthesised form looked like C and only worked
+// sometimes, which is the worst of both worlds.
+//
+// Expected output:
+//   1    (a & 12) == 12
+//   1    (a) == 60
+//   1    (a + b) > 70
+//   1    (a) > 10 && (b) < 20
+//   1    the usual wrapped form still works
+//   5    and in a while
+
+fn main() {
+    var a: i64;
+    var b: i64;
+    var n: i64;
+
+    a = 60;
+    b = 13;
+
+    if (a & 12) == 12 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    if (a) == 60 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    if (a + b) > 70 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    if (a) > 10 && (b) < 20 {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    if (a > 10) {
+        print(1);
+    } else {
+        print(0);
+    }
+
+    n = 0;
+    while (n) < 5 {
+        n = n + 1;
+    }
+    print(n);
+    return 0;
+}

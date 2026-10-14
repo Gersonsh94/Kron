@@ -1,0 +1,12 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file...ERROR: acquire_domain: cannot find the module 'HashIndexM.kr'
+  hint: the file has to be in the program's folder, with its .kr extension
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+Assembler mode (kasm)
+Bytes written: D:\jupiter\Data Base Hibrida\GanimedesDB engine\Schema\test_hash.exe

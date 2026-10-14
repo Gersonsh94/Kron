@@ -1,0 +1,39 @@
+kron_program
+kron_domain test_arena_lib;
+kron_imports
+acquire_domain "std_arena.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: arenas and slices (std_arena, step 1)
+//
+// Expected output: 5, 0, 30, 0, 1, 0, 7, 0, 1, 99
+// =========================================================================
+
+fn main() {
+    var a: i64 = arena_new(100);
+    var v: i64 = arena_slice(a, 5);
+
+    print(slice_len(v));                 // 5
+    print(slice_get(v, 3));              // 0   just made: zeroed
+
+    slice_set(v, 3, 30);
+    print(slice_get(v, 3));              // 30
+
+    print(slice_get(v, 5));              // 0   outside the slice: fail
+    print(failed());                     // 1
+    print(failed());                     // 0   failed() clears the flag
+
+    var w: i64 = arena_slice(a, 1);
+    slice_set(w, 0, 7);
+    print(slice_get(w, 0));              // 7
+
+    arena_free(a);
+    print(slice_get(v, 3));              // 0   the arena was freed: fail
+    print(failed());                     // 1
+
+    var fresh: i64 = arena_slice(a, 2);  // the same memory, another generation
+    slice_set(fresh, 0, 99);
+    print(slice_get(fresh, 0));          // 99
+    return 0;
+}

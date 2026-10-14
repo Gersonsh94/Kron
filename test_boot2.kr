@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_boot2;
+kron_imports
+kron_definitions
+
+boot ColdStart {
+    cpu_state_init {
+        register cr0 set 0x80000011 ;
+        register cr4 set 0x000006A0 ;
+    }
+    mmu_table_init {
+        entry 0x0000000000000000 flags read_write_kernel ;
+        entry 0x00000000000B8000 flags cache_bypass ;
+        entry 0x0000000000200000 flags execute_disable ;
+    }
+    load_kernel_elf ( "kernel.elf" ) ;
+}

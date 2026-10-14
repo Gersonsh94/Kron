@@ -1,0 +1,55 @@
+kron_program
+kron_domain test_vec3;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_vec3.kr";
+kron_definitions
+
+// Test for std_vec3.kr
+// Every line prints a value with its expected result beside it.
+
+
+fn main() {
+    // --- magnitude ---
+    print(vec3_length(3.0, 4.0, 0.0));        // 5.0
+    print(vec3_length(1.0, 2.0, 2.0));        // 3.0
+    print(vec3_length2(1.0, 2.0, 2.0));       // 9.0
+    print(vec3_distance(0.0, 0.0, 0.0, 3.0, 4.0, 0.0));  // 5.0
+
+    // --- products ---
+    print(vec3_dot(1.0, 2.0, 3.0, 4.0, 5.0, 6.0));       // 32.0
+
+    // cross of (1,0,0) and (0,1,0) is (0,0,1)
+    print(vec3_cross_x(0.0, 0.0, 1.0, 0.0));  // 0.0
+    print(vec3_cross_y(0.0, 1.0, 0.0, 0.0));  // 0.0
+    print(vec3_cross_z(1.0, 0.0, 0.0, 1.0));  // 1.0
+
+    // --- normalise: (3,4,0) becomes (0.6, 0.8, 0) ---
+    print(vec3_norm_x(3.0, 4.0, 0.0));        // 0.6
+    print(vec3_norm_y(3.0, 4.0, 0.0));        // 0.8
+    print(vec3_norm_z(3.0, 4.0, 0.0));        // 0.0
+
+    // --- rotation: turn (1,0,0) a quarter turn about Y ---
+    // expected result is (0, 0, -1)
+    var a: real64 = 1.57079632679489661923;
+    print(rot_y_x(1.0, 0.0, a));              // 0.0
+    print(rot_y_z(1.0, 0.0, a));              // -1.0
+
+    // half turn about Z takes (1,0) to (-1,0)
+    var h: real64 = 3.14159265358979323846;
+    print(rot_z_x(1.0, 0.0, h));              // -1.0
+    print(rot_z_y(1.0, 0.0, h));              // 0.0
+
+    // --- projection: a point on the axis lands at the centre ---
+    print(proj_x(0.0, 0.0, 4.0, 90.0, 50.0)); // 50.0
+    print(proj_y(0.0, 0.0, 4.0, 90.0, 50.0)); // 50.0
+    // one unit right, four units from the camera -> 50 + 90/4
+    print(proj_x(1.0, 0.0, 4.0, 90.0, 50.0)); // 72.5
+    print(proj_depth(2.0, 4.0));              // 6.0
+
+    // --- rasterising ---
+    print(edge_cross(1.0, 0.0, 0.0, 1.0));    // 1.0
+    print(edge_cross(1.0, 0.0, 0.0, 0.0 - 1.0)); // -1.0
+
+    return 0;
+}

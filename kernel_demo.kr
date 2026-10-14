@@ -1,0 +1,22 @@
+kron_program
+kron_domain kernel_demo;
+kron_imports
+kron_definitions
+
+// A kernel with no operating system underneath.
+// The MBR loads it, long mode is already active, output goes straight to VGA.
+
+fn main() {
+    var count: int32 = 0;
+    var sum: int32 = 0;
+
+    print(1234);
+
+    while count < 5 {
+        sum = sum + count;
+        count = count + 1;
+    }
+    print(sum);          // 0+1+2+3+4 = 10
+
+    return 0;
+}

@@ -1,0 +1,225 @@
+kron_program
+kron_domain std_ml;
+kron_imports
+kron_definitions
+
+// std_ml.kr -- logistic regression by gradient descent, plus the usual
+// ways of judging whether the result is any good.
+//
+// Data comes from std_stats: st_push loads the feature, st_push_y the label
+// (0 or 1). Training walks the whole set on every step, which is plain batch
+// gradient descent -- the textbook form, and fast enough for the sizes this
+// buffer holds.
+
+
+var lr_w: real64;          // weight
+var lr_b: real64;          // bias
+var lr_rate: real64;       // learning rate
+var lr_epochs: i64;
+var lr_last_loss: real64;
+
+// Confusion matrix, filled by lr_evaluate.
+var cm_tp: i64;
+var cm_fp: i64;
+var cm_tn: i64;
+var cm_fn: i64;
+
+// ---------------------------------------------------------------- setup ---
+
+fn lr_init() {
+    lr_w = 0.0;
+    lr_b = 0.0;
+    lr_rate = 0.1;
+    lr_epochs = 1000;
+    lr_last_loss = 0.0;
+    return 0;
+}
+
+fn lr_set_rate(r: real64) {
+    lr_rate = r;
+    return 0;
+}
+
+fn lr_set_epochs(n: i64) {
+    lr_epochs = n;
+    return 0;
+}
+
+fn lr_weight() -> real64 {
+    return lr_w;
+}
+
+fn lr_bias() -> real64 {
+    return lr_b;
+}
+
+fn lr_loss() -> real64 {
+    return lr_last_loss;
+}
+
+// ------------------------------------------------------------ inference ---
+
+// P(y = 1 | x)
+fn lr_predict(x: real64) -> real64 {
+    return sigmoid(lr_w * x + lr_b);
+}
+
+// Hard label at the usual 0.5 cut-off.
+fn lr_classify(x: real64) -> i64 {
+    if lr_predict(x) >= 0.5 {
+        return 1;
+    }
+    return 0;
+}
+
+// Mean binary cross-entropy over the loaded set.
+fn lr_cost() -> real64 {
+    var acc: real64 = 0.0;
+    var n: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        acc = acc + cross_entropy(st_y[i], lr_predict(st_x[i]));
+    }
+    n = st_n;
+    return acc / n;
+}
+
+// ------------------------------------------------------------- training ---
+
+// One pass over the data. The gradient of cross-entropy through a sigmoid
+// collapses to (prediction - label), which is why this loop has no
+// derivative term in it: the algebra already cancelled.
+fn lr_step() -> real64 {
+    var gw: real64 = 0.0;
+    var gb: real64 = 0.0;
+    var err: real64 = 0.0;
+    var n: real64 = 0.0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        err = lr_predict(st_x[i]) - st_y[i];
+        gw = gw + err * st_x[i];
+        gb = gb + err;
+    }
+    n = st_n;
+    lr_w = lr_w - lr_rate * (gw / n);
+    lr_b = lr_b - lr_rate * (gb / n);
+    return lr_cost();
+}
+
+fn lr_train() -> real64 {
+    for var e: i64 = 0; e < lr_epochs; e = e + 1 {
+        lr_last_loss = lr_step();
+    }
+    return lr_last_loss;
+}
+
+// ----------------------------------------------------------- evaluation ---
+
+// Fills the confusion matrix from the loaded set and returns accuracy.
+fn lr_evaluate() -> real64 {
+    var pred: i64 = 0;
+    var truth: i64 = 0;
+    var correct: i64 = 0;
+    var total: real64 = 0.0;
+    var c: real64 = 0.0;
+    cm_tp = 0;
+    cm_fp = 0;
+    cm_tn = 0;
+    cm_fn = 0;
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        pred = lr_classify(st_x[i]);
+        truth = 0;
+        if st_y[i] >= 0.5 {
+            truth = 1;
+        }
+        if pred == 1 {
+            if truth == 1 {
+                cm_tp = cm_tp + 1;
+            } else {
+                cm_fp = cm_fp + 1;
+            }
+        } else {
+            if truth == 1 {
+                cm_fn = cm_fn + 1;
+            } else {
+                cm_tn = cm_tn + 1;
+            }
+        }
+        if pred == truth {
+            correct = correct + 1;
+        }
+    }
+    c = correct;
+    total = st_n;
+    return c / total;
+}
+
+fn cm_true_pos() -> i64 {
+    return cm_tp;
+}
+
+fn cm_false_pos() -> i64 {
+    return cm_fp;
+}
+
+fn cm_true_neg() -> i64 {
+    return cm_tn;
+}
+
+fn cm_false_neg() -> i64 {
+    return cm_fn;
+}
+
+// Of everything called positive, how much really was.
+fn lr_precision() -> real64 {
+    var d: real64 = cm_tp + cm_fp;
+    var n: real64 = cm_tp;
+    if d == 0.0 {
+        return 0.0;
+    }
+    return n / d;
+}
+
+// Of everything that really was positive, how much got caught.
+fn lr_recall() -> real64 {
+    var d: real64 = cm_tp + cm_fn;
+    var n: real64 = cm_tp;
+    if d == 0.0 {
+        return 0.0;
+    }
+    return n / d;
+}
+
+// Harmonic mean of the two, which punishes a model that sacrifices one
+// for the other.
+fn lr_f1() -> real64 {
+    var p: real64 = lr_precision();
+    var r: real64 = lr_recall();
+    if p + r == 0.0 {
+        return 0.0;
+    }
+    return 2.0 * p * r / (p + r);
+}
+
+// The input value where the model is exactly undecided: w*x + b = 0.
+fn lr_boundary() -> real64 {
+    if lr_w == 0.0 {
+        return 0.0;
+    }
+    return (0.0 - lr_b) / lr_w;
+}
+
+// ------------------------------------------------------ feature scaling ---
+
+// Standardise the x column in place: subtract the mean, divide by the
+// standard deviation. Gradient descent converges far faster on inputs that
+// sit around zero with unit spread.
+fn lr_scale_x() {
+    var mu: real64 = st_mean();
+    var sd: real64 = st_stddev();
+    if sd == 0.0 {
+        return 0;
+    }
+    for var i: i64 = 0; i < st_n; i = i + 1 {
+        st_x[i] = (st_x[i] - mu) / sd;
+    }
+    return 0;
+}

@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_fmix;
+kron_imports
+kron_definitions
+
+var lo: real64;
+fn probe(v: real64) -> real64 {
+    return v;
+}
+fn probe2(v: real64) -> real64 {
+    return v - lo;
+}
+fn toint(v: real64) -> i64 {
+    return 30 + v;
+}
+fn main() {
+    lo = 0.5;
+    print(probe(4.5));    // 4.5
+    print(probe2(4.5));   // 4.0
+    print(toint(97.0));   // 127
+    return 0;
+}

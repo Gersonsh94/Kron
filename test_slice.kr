@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_slice;
+kron_imports
+acquire_domain "std_arena.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: slice<i64> and v[i]
+//
+// The parser turns v[i] into slice_get(v, i) and v[i] = x into
+// slice_set(v, i, x), so the checks are std_arena's: the
+// index inside the slice, and the arena not freed.
+//
+// Expected output: 30, 100, 0, 1, 11, 0, 1
+// =========================================================================
+
+fn sum_all(v: slice<i64>, n: i64) -> i64 {
+    var s: i64 = 0;
+    var i: i64 = 0;
+    while i < n {
+        s = s + v[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    var a: i64 = arena_new(64);
+    var v: slice<i64> = arena_slice(a, 4);
+    v[0] = 10;
+    v[1] = 20;
+    v[2] = 30;
+    v[3] = 40;
+    print(v[2]);                 // 30
+    print(sum_all(v, 4));           // 100  a slice passed to a function
+
+    print(v[4]);                 // 0    outside the slice: fail
+    print(failed());             // 1
+
+    v[0] = v[0] + 1;             // read and write on the same line
+    print(v[0]);                 // 11
+
+    arena_free(a);
+    print(v[1]);                 // 0    the arena was freed: fail
+    print(failed());             // 1
+    return 0;
+}

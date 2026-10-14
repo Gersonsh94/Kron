@@ -1,0 +1,12 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_raw_bad.kr:16:5: memory access outside raw 'poke8'
+    poke8(p, 7);
+    ^^^^^
+  hint: put it inside raw { ... }: peek, poke and their sized forms are only allowed there

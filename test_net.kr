@@ -1,0 +1,59 @@
+kron_program
+kron_domain test_net;
+kron_imports
+acquire_domain "std_net.kr";
+acquire_domain "std_chan.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: TCP networking (std_net)
+//
+// A server and a client in the same program, over 127.0.0.1 only, so no
+// firewall prompt appears. main listens, starts the server thread, connects,
+// sends "ping" and reads the answer, "pong". The server reports how many
+// bytes it received through a channel.
+//
+// Expected output:
+//   0      listening, no failure
+//   0      connected, no failure
+//   4      "ping" sent
+//   4      "pong" received
+//   112    its first byte is 'p'
+//   4      the server received the four bytes of "ping"
+//   9      everything closed
+// =========================================================================
+
+shared var result_chan: i64;
+
+fn server(listener: i64) -> i64 {
+    var buf: [i64; 8];
+    var c: i64 = net_accept(listener);
+    var n: i64 = net_recv(c, &buf, 64);
+    net_send(c, "pong", 4);
+    net_close(c);
+    chan_send(result_chan, n);
+    return 0;
+}
+
+fn main() {
+    var buf: [i64; 8];
+    var got: [i64; 1];
+    result_chan = chan_new(4);
+    var listener: i64 = net_listen_on(127, 0, 0, 1, 47123);
+    print(failed());                         // 0
+    var h: i64 = thread_start(&server, listener);
+    var s: i64 = net_connect(127, 0, 0, 1, 47123);
+    print(failed());                         // 0
+    print(net_send(s, "ping", 4));           // 4
+    print(net_recv(s, &buf, 64));            // 4
+    raw {
+        print(peek8(&buf));                  // 112
+    }
+    chan_recv(result_chan, got);
+    print(got[0]);                           // 4
+    thread_wait(h);
+    net_close(s);
+    net_close(listener);
+    print(9);                                // 9
+    return 0;
+}

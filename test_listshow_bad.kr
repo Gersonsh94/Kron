@@ -1,0 +1,13 @@
+kron_program
+kron_domain test_listshow_bad;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+
+// print of a list needs std_text.kr, where the printer lives: refused.
+
+fn main() {
+    var l: list<i64> = [1, 2];
+    print(l);
+    return 0;
+}

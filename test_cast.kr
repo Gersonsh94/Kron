@@ -1,0 +1,63 @@
+kron_program
+kron_domain test_cast;
+kron_imports
+kron_definitions
+
+// The conversion operator 'as'. Until now there was no cast syntax at all:
+// an i32 could not be turned into an f32 explicitly.
+//
+// Expected output:
+//   3.000000     integer to double
+//   2.500000     real division after converting
+//   3            double to integer, truncating towards zero
+//   -3           truncated towards zero, not down
+//   200          u8 keeps the high bit
+//   -56          i8 reads it as signed
+//   65535        u16
+//   -1           i16
+//   1000000      fits in i32, unchanged
+//   7            precedence: '-x as i64' is '(-x) as i64', then +10
+//   4            a + b as i64 converts only b
+
+fn main() {
+    var n: i64;
+    var d: f64;
+    var big: i64;
+
+    // integer -> double
+    n = 3;
+    d = n as f64;
+    print(d);              // 3.000000
+
+    // the real use: a division that really is real
+    n = 5;
+    d = n as f64 / 2.0;
+    print(d);              // 2.500000
+
+    // double -> integer, truncating towards zero
+    d = 3.7;
+    print(d as i64);       // 3
+    d = 0.0 - 3.7;
+    print(d as i64);       // -3
+
+    // narrowing: 200 has the high bit set
+    big = 200;
+    print(big as u8);      // 200
+    print(big as i8);      // -56
+
+    big = 65535;
+    print(big as u16);     // 65535
+    print(big as i16);     // -1
+
+    big = 1000000;
+    print(big as i32);     // 1000000
+
+    // precedence: binds tighter than the binary operators
+    n = 0 - 3;
+    print(n as i64 + 10);  // 7
+
+    n = 1;
+    print(n + 3 as i64);   // 4
+
+    return 0;
+}

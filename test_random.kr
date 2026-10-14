@@ -1,0 +1,86 @@
+kron_program
+kron_domain test_random;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_exp.kr";
+acquire_domain "std_stats.kr";
+acquire_domain "std_random.kr";
+kron_definitions
+
+// Test for std_random.kr
+//
+// A pseudorandom generator is deterministic given its seed, so every value
+// here is a fixed number rather than "something in range". The statistical
+// checks at the end are the ones that would catch a generator that returns
+// numbers but not good ones.
+
+
+fn main() {
+    // --- the raw sequence is reproducible ---
+    rnd_seed(42);
+    print(rnd_next());        // 1083814273
+    print(rnd_next());        // 378494188
+    print(rnd_next());        // 2479403867
+
+    // same seed, same numbers
+    rnd_seed(42);
+    print(rnd_uniform());     // 0.252345
+    print(rnd_uniform());     // 0.088125
+    print(rnd_uniform());     // 0.577281
+
+    rnd_seed(42);
+    print(rnd_int(100));      // 73
+    print(rnd_int(100));      // 88
+    print(rnd_int(100));      // 67
+
+    rnd_seed(42);
+    print(rnd_range(10.0, 20.0));   // 12.523452
+    print(rnd_range(10.0, 20.0));   // 10.881250
+
+    // --- a thousand uniforms should average near 0.5 and spread near
+    //     1/sqrt(12) = 0.288675 ---
+    rnd_seed(7);
+    st_clear();
+    for var i: i64 = 0; i < 1000; i = i + 1 {
+        st_push(rnd_uniform());
+    }
+    print(st_mean());         // near 0.5
+    print(st_stddev());       // near 0.288675
+    print(st_min());          // near 0.0
+    print(st_max());          // near 1.0
+
+    // --- a thousand standard normals should centre on 0 with spread 1 ---
+    rnd_seed(7);
+    st_clear();
+    for var i: i64 = 0; i < 1000; i = i + 1 {
+        st_push(rnd_gauss());
+    }
+    print(st_mean());         // near 0.0
+    print(st_stddev());       // near 1.0
+
+    // --- recovering the coefficients of a noisy line ---
+    // 200 points on y = 2x + 5 with mild noise: the fit should land close.
+    rnd_seed(123);
+    rnd_fill_linear(200, 2.0, 5.0, 0.5);
+    print(linreg_slope());        // near 2.0
+    print(linreg_intercept());    // near 5.0
+    print(linreg_r2());           // near 1.0
+
+    // --- shuffling keeps the data, only the order changes ---
+    st_clear();
+    st_push(1.0);   st_push_y(10.0);
+    st_push(2.0);   st_push_y(20.0);
+    st_push(3.0);   st_push_y(30.0);
+    st_push(4.0);   st_push_y(40.0);
+    rnd_seed(99);
+    rnd_shuffle();
+    print(st_sum());          // 10.000000  (1+2+3+4, whatever the order)
+    print(st_count());        // 4
+    // x and y must still be paired: y is always ten times x
+    print(st_y[0] / st_x[0]); // 10.000000
+    print(st_y[1] / st_x[1]); // 10.000000
+    print(st_y[2] / st_x[2]); // 10.000000
+    print(st_y[3] / st_x[3]); // 10.000000
+
+    return 0;
+}

@@ -1,0 +1,922 @@
+kron_program
+kron_domain std_image;
+kron_imports
+acquire_domain "std_file.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- pictures: PNG and BMP files.
+//
+//     var logo: i64 = image_load("logo.png");
+//     print(image_width(logo));
+//     ui_image(20, 20, logo);              // std_ui draws it, with its alpha
+//
+//   image_load(path)               a PNG (every kind: grey, colour, palette,
+//                                  alpha, 1 to 16 bits, interlaced) or a BMP
+//                                  (24 or 32 bits)
+//   image_new(width, height)       a transparent picture
+//   image_width(img)  image_height(img)
+//   image_get(img, x, y)           0xAARRGGBB: alpha 255 is opaque
+//   image_set(img, x, y, color)
+//   image_save_bmp(img, path)      a 32-bit BMP any program opens
+//   image_free(img)
+//
+// An image is a handle, like a text: out of range, freed, or not an image
+// fails with a cause and a hint. The PNG reader is written here, in Kron,
+// with its own inflate: nothing comes from outside.
+// =========================================================================
+
+const OB_IMAGE: i64 = 5;
+
+// the inflater's state: the lock is held while it runs
+shared var im_src: i64;               // compressed bytes
+shared var im_src_n: i64;
+shared var im_pos: i64;               // next byte
+shared var im_bit: i64;               // bits waiting
+shared var im_nbit: i64;
+shared var im_out: i64;               // inflated bytes
+shared var im_out_n: i64;
+shared var im_out_cap: i64;
+shared var im_bad: i64;
+shared var im_lcount: [i64; 16];
+shared var im_lsym: [i64; 320];
+shared var im_dcount: [i64; 16];
+shared var im_dsym: [i64; 32];
+shared var im_lens: [i64; 320];
+shared var im_lbase: [i64; 29];
+shared var im_lextra: [i64; 29];
+shared var im_dbase: [i64; 30];
+shared var im_dextra: [i64; 30];
+shared var im_tables: i64;
+shared var im_pal: [i64; 256];        // a PNG palette, 0xAARRGGBB
+shared var im_key: i64;               // tRNS for grey and colour, -1 none
+
+// --------------------------------------------------------- images ---
+// Block: [width][height][pixels, 4 bytes each]
+
+fn im_new(w: i64, h: i64) -> i64 {
+    if w <= 0 || h <= 0 || w > 32768 || h > 32768 {
+        hp_err = 1;
+        return 0;
+    }
+    var q: i64 = hp_alloc(16 + w * h * 4);
+    if q == 0 {
+        return 0;
+    }
+    raw {
+        poke(q, w);
+        poke(q + 8, h);
+    }
+    var img: i64 = ob_new(OB_IMAGE, q);
+    if img == 0 {
+        hp_release(q);
+    }
+    return img;
+}
+
+fn im_block(img: i64) -> i64 {
+    return ob_get(img, OB_IMAGE);
+}
+
+// ---------------------------------------------------------- inflate ---
+
+fn im_tables_once() -> i64 {
+    if im_tables {
+        return 1;
+    }
+    var lb: [i64; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+    var le: [i64; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+    var db: [i64; 30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+    var de: [i64; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+    var i: i64 = 0;
+    while i < 29 {
+        im_lbase[i] = lb[i];
+        im_lextra[i] = le[i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < 30 {
+        im_dbase[i] = db[i];
+        im_dextra[i] = de[i];
+        i = i + 1;
+    }
+    im_tables = 1;
+    return 1;
+}
+
+// n bits, least significant first
+fn im_bits(n: i64) -> i64 {
+    while im_nbit < n {
+        if im_pos >= im_src_n {
+            im_bad = 1;
+            return 0;
+        }
+        var b: i64 = 0;
+        raw { b = peek8(im_src + im_pos); }
+        im_pos = im_pos + 1;
+        im_bit = im_bit | (b << im_nbit);
+        im_nbit = im_nbit + 8;
+    }
+    var v: i64 = im_bit & ((1 << n) - 1);
+    im_bit = im_bit >> n;
+    im_nbit = im_nbit - n;
+    return v;
+}
+
+fn im_put(b: i64) -> i64 {
+    if im_out_n >= im_out_cap {
+        var bigger: i64 = im_out_cap * 2;
+        if bigger < 65536 {
+            bigger = 65536;
+        }
+        var r: i64 = hp_grow(im_out, bigger);
+        if r == 0 {
+            im_bad = 1;
+            return 0;
+        }
+        im_out = r;
+        im_out_cap = bigger;
+    }
+    raw { poke8(im_out + im_out_n, b); }
+    im_out_n = im_out_n + 1;
+    return 1;
+}
+
+// canonical Huffman codes from lengths: count per length and the symbols
+// in code order (which = 0 lengths/literals, 1 distances)
+fn im_build(which: i64, n: i64) -> i64 {
+    var offs: [i64; 16];
+    var i: i64 = 0;
+    while i < 16 {
+        if which == 0 {
+            im_lcount[i] = 0;
+        } else {
+            im_dcount[i] = 0;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        var l: i64 = im_lens[i];
+        if which == 0 {
+            im_lcount[l] = im_lcount[l] + 1;
+        } else {
+            im_dcount[l] = im_dcount[l] + 1;
+        }
+        i = i + 1;
+    }
+    offs[1] = 0;
+    i = 1;
+    while i < 15 {
+        if which == 0 {
+            offs[i + 1] = offs[i] + im_lcount[i];
+        } else {
+            offs[i + 1] = offs[i] + im_dcount[i];
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        var l2: i64 = im_lens[i];
+        if l2 != 0 {
+            if which == 0 {
+                im_lsym[offs[l2]] = i;
+            } else {
+                im_dsym[offs[l2]] = i;
+            }
+            offs[l2] = offs[l2] + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn im_decode(which: i64) -> i64 {
+    var code: i64 = 0;
+    var first: i64 = 0;
+    var index: i64 = 0;
+    var len: i64 = 1;
+    while len < 16 {
+        code = code | im_bits(1);
+        var count: i64 = 0;
+        if which == 0 {
+            count = im_lcount[len];
+        } else {
+            count = im_dcount[len];
+        }
+        if code - count < first {
+            if which == 0 {
+                return im_lsym[index + (code - first)];
+            }
+            return im_dsym[index + (code - first)];
+        }
+        index = index + count;
+        first = first + count;
+        first = first << 1;
+        code = code << 1;
+        len = len + 1;
+        if im_bad {
+            return 0;
+        }
+    }
+    im_bad = 1;
+    return 0;
+}
+
+fn im_codes() -> i64 {
+    var sym: i64 = 0;
+    while im_bad == 0 {
+        sym = im_decode(0);
+        if sym < 256 {
+            im_put(sym);
+        } else if sym == 256 {
+            return 1;
+        } else {
+            sym = sym - 257;
+            if sym >= 29 {
+                im_bad = 1;
+                return 0;
+            }
+            var len: i64 = im_lbase[sym] + im_bits(im_lextra[sym]);
+            var ds: i64 = im_decode(1);
+            if ds >= 30 {
+                im_bad = 1;
+                return 0;
+            }
+            var dist: i64 = im_dbase[ds] + im_bits(im_dextra[ds]);
+            if dist > im_out_n {
+                im_bad = 1;
+                return 0;
+            }
+            var k: i64 = 0;
+            while k < len {
+                var c: i64 = 0;
+                raw { c = peek8(im_out + im_out_n - dist); }
+                im_put(c);
+                k = k + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn im_fixed() -> i64 {
+    var i: i64 = 0;
+    while i < 288 {
+        var l: i64 = 8;
+        if i >= 144 && i < 256 {
+            l = 9;
+        } else if i >= 256 && i < 280 {
+            l = 7;
+        }
+        im_lens[i] = l;
+        i = i + 1;
+    }
+    im_build(0, 288);
+    i = 0;
+    while i < 30 {
+        im_lens[i] = 5;
+        i = i + 1;
+    }
+    im_build(1, 30);
+    return im_codes();
+}
+
+fn im_dynamic() -> i64 {
+    var nlen: i64 = im_bits(5) + 257;
+    var ndist: i64 = im_bits(5) + 1;
+    var ncode: i64 = im_bits(4) + 4;
+    if nlen > 286 || ndist > 30 {
+        im_bad = 1;
+        return 0;
+    }
+    var order: [i64; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    var i: i64 = 0;
+    while i < 19 {
+        im_lens[order[i]] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < ncode {
+        im_lens[order[i]] = im_bits(3);
+        i = i + 1;
+    }
+    im_build(0, 19);
+    // the lengths of both codes, run-length coded with the code just built
+    var all: [i64; 320];
+    var at: i64 = 0;
+    while at < nlen + ndist && im_bad == 0 {
+        var sym: i64 = im_decode(0);
+        if sym < 16 {
+            all[at] = sym;
+            at = at + 1;
+        } else {
+            var rep: i64 = 0;
+            var val: i64 = 0;
+            if sym == 16 {
+                if at == 0 {
+                    im_bad = 1;
+                    return 0;
+                }
+                val = all[at - 1];
+                rep = 3 + im_bits(2);
+            } else if sym == 17 {
+                rep = 3 + im_bits(3);
+            } else {
+                rep = 11 + im_bits(7);
+            }
+            if at + rep > nlen + ndist {
+                im_bad = 1;
+                return 0;
+            }
+            while rep > 0 {
+                all[at] = val;
+                at = at + 1;
+                rep = rep - 1;
+            }
+        }
+    }
+    if im_bad {
+        return 0;
+    }
+    i = 0;
+    while i < nlen {
+        im_lens[i] = all[i];
+        i = i + 1;
+    }
+    im_build(0, nlen);
+    i = 0;
+    while i < ndist {
+        im_lens[i] = all[nlen + i];
+        i = i + 1;
+    }
+    im_build(1, ndist);
+    return im_codes();
+}
+
+// a zlib stream inflated into im_out; 0 when it is broken
+fn im_inflate(p: i64, n: i64) -> i64 {
+    im_tables_once();
+    im_src = p + 2;                     // the two-byte zlib header
+    im_src_n = n - 2;
+    im_pos = 0;
+    im_bit = 0;
+    im_nbit = 0;
+    im_bad = 0;
+    var last: i64 = 0;
+    while last == 0 && im_bad == 0 {
+        last = im_bits(1);
+        var kind: i64 = im_bits(2);
+        if kind == 0 {
+            im_bit = 0;
+            im_nbit = 0;
+            if im_pos + 4 > im_src_n {
+                im_bad = 1;
+                return 0;
+            }
+            var len: i64 = 0;
+            raw { len = peek16(im_src + im_pos); }
+            im_pos = im_pos + 4;
+            if im_pos + len > im_src_n {
+                im_bad = 1;
+                return 0;
+            }
+            var k: i64 = 0;
+            while k < len {
+                var c: i64 = 0;
+                raw { c = peek8(im_src + im_pos + k); }
+                im_put(c);
+                k = k + 1;
+            }
+            im_pos = im_pos + len;
+        } else if kind == 1 {
+            im_fixed();
+        } else if kind == 2 {
+            im_dynamic();
+        } else {
+            im_bad = 1;
+        }
+    }
+    if im_bad {
+        return 0;
+    }
+    return 1;
+}
+
+// -------------------------------------------------------------- PNG ---
+
+fn im_be32(p: i64) -> i64 {
+    var v: i64 = 0;
+    raw {
+        v = (peek8(p) << 24) | (peek8(p + 1) << 16) | (peek8(p + 2) << 8) | peek8(p + 3);
+    }
+    return v;
+}
+
+fn im_paeth(a: i64, b: i64, c: i64) -> i64 {
+    var p: i64 = a + b - c;
+    var pa: i64 = p - a;
+    if pa < 0 { pa = 0 - pa; }
+    var pb: i64 = p - b;
+    if pb < 0 { pb = 0 - pb; }
+    var pc: i64 = p - c;
+    if pc < 0 { pc = 0 - pc; }
+    if pa <= pb && pa <= pc {
+        return a;
+    }
+    if pb <= pc {
+        return b;
+    }
+    return c;
+}
+
+// undo the filters of `rows` lines of `rowbytes` each, in place at p; every
+// line starts with its filter byte. bpp: bytes per pixel, at least 1.
+fn im_unfilter(p: i64, rows: i64, rowbytes: i64, bpp: i64) -> i64 {
+    var y: i64 = 0;
+    while y < rows {
+        var line: i64 = p + y * (rowbytes + 1);
+        var prev: i64 = line - (rowbytes + 1);
+        var f: i64 = 0;
+        raw { f = peek8(line); }
+        var x: i64 = 0;
+        raw {
+            var cur: i64 = line + 1;
+            var up: i64 = prev + 1;
+            while x < rowbytes {
+                var a: i64 = 0;
+                var b: i64 = 0;
+                var c: i64 = 0;
+                if x >= bpp {
+                    a = peek8(cur + x - bpp);
+                }
+                if y > 0 {
+                    b = peek8(up + x);
+                    if x >= bpp {
+                        c = peek8(up + x - bpp);
+                    }
+                }
+                var v: i64 = peek8(cur + x);
+                if f == 1 {
+                    v = v + a;
+                } else if f == 2 {
+                    v = v + b;
+                } else if f == 3 {
+                    v = v + (a + b) / 2;
+                } else if f == 4 {
+                    v = v + im_paeth(a, b, c);
+                }
+                poke8(cur + x, v & 255);
+                x = x + 1;
+            }
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+
+// sample i of a line of samples `depth` bits wide, scaled to 0..255
+fn im_sample(line: i64, i: i64, depth: i64) -> i64 {
+    var v: i64 = 0;
+    raw {
+        if depth == 8 {
+            v = peek8(line + i);
+        } else if depth == 16 {
+            v = peek8(line + i * 2);
+        } else {
+            var bit: i64 = i * depth;
+            var byte: i64 = peek8(line + bit / 8);
+            var shift: i64 = 8 - depth - (bit % 8);
+            v = (byte >> shift) & ((1 << depth) - 1);
+        }
+    }
+    return v;
+}
+
+fn im_scale(v: i64, depth: i64) -> i64 {
+    if depth == 1 { return v * 255; }
+    if depth == 2 { return v * 85; }
+    if depth == 4 { return v * 17; }
+    return v;
+}
+
+// one decoded line of pass pixels into the picture
+fn im_line(q: i64, line: i64, count: i64, y: i64, x0: i64, dx: i64, ctype: i64, depth: i64) -> i64 {
+    var w: i64 = 0;
+    raw { w = peek(q); }
+    var i: i64 = 0;
+    while i < count {
+        var r: i64 = 0;
+        var g: i64 = 0;
+        var b: i64 = 0;
+        var a: i64 = 255;
+        if ctype == 0 {
+            var raw_v: i64 = im_sample(line, i, depth);
+            r = im_scale(raw_v, depth);
+            if depth == 16 {
+                raw { raw_v = (peek8(line + i * 2) << 8) | peek8(line + i * 2 + 1); }
+            }
+            if raw_v == im_key {
+                a = 0;
+            }
+            g = r;
+            b = r;
+        } else if ctype == 2 {
+            r = im_sample(line, i * 3, depth);
+            g = im_sample(line, i * 3 + 1, depth);
+            b = im_sample(line, i * 3 + 2, depth);
+            if im_key >= 0 && depth == 8 {
+                if ((r << 16) | (g << 8) | b) == im_key {
+                    a = 0;
+                }
+            }
+        } else if ctype == 3 {
+            var c: i64 = im_pal[im_sample(line, i, depth) & 255];
+            a = (c >> 24) & 255;
+            r = (c >> 16) & 255;
+            g = (c >> 8) & 255;
+            b = c & 255;
+        } else if ctype == 4 {
+            r = im_sample(line, i * 2, depth);
+            g = r;
+            b = r;
+            a = im_sample(line, i * 2 + 1, depth);
+        } else {
+            r = im_sample(line, i * 4, depth);
+            g = im_sample(line, i * 4 + 1, depth);
+            b = im_sample(line, i * 4 + 2, depth);
+            a = im_sample(line, i * 4 + 3, depth);
+        }
+        var x: i64 = x0 + i * dx;
+        raw { poke32(q + 16 + (y * w + x) * 4, (a << 24) | (r << 16) | (g << 8) | b); }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn im_png(p: i64, n: i64) -> i64 {
+    var pos: i64 = 8;
+    var w: i64 = 0;
+    var h: i64 = 0;
+    var depth: i64 = 0;
+    var ctype: i64 = 0;
+    var interlace: i64 = 0;
+    var data: i64 = 0;
+    var data_n: i64 = 0;
+    im_key = -1;
+    var k: i64 = 0;
+    while k < 256 {
+        im_pal[k] = 0xFF000000;
+        k = k + 1;
+    }
+    var done: i64 = 0;
+    while pos + 8 <= n && done == 0 {
+        var len: i64 = im_be32(p + pos);
+        var kind: i64 = im_be32(p + pos + 4);
+        var body: i64 = p + pos + 8;
+        if pos + 12 + len > n {
+            done = 1;
+        } else if kind == 0x49484452 {                  // IHDR
+            w = im_be32(body);
+            h = im_be32(body + 4);
+            raw {
+                depth = peek8(body + 8);
+                ctype = peek8(body + 9);
+                interlace = peek8(body + 12);
+            }
+        } else if kind == 0x504C5445 {                  // PLTE
+            var i: i64 = 0;
+            while i < len / 3 && i < 256 {
+                var c: i64 = 0;
+                raw { c = (peek8(body + i * 3) << 16) | (peek8(body + i * 3 + 1) << 8) | peek8(body + i * 3 + 2); }
+                im_pal[i] = 0xFF000000 | c;
+                i = i + 1;
+            }
+        } else if kind == 0x74524E53 {                  // tRNS
+            if ctype == 3 {
+                var j: i64 = 0;
+                while j < len && j < 256 {
+                    var al: i64 = 0;
+                    raw { al = peek8(body + j); }
+                    im_pal[j] = (im_pal[j] & 0xFFFFFF) | (al << 24);
+                    j = j + 1;
+                }
+            } else if ctype == 0 {
+                raw { im_key = (peek8(body) << 8) | peek8(body + 1); }
+                if depth < 16 {
+                    im_key = im_key & ((1 << depth) - 1);
+                }
+            } else if ctype == 2 {
+                raw { im_key = (peek8(body + 1) << 16) | (peek8(body + 3) << 8) | peek8(body + 5); }
+            }
+        } else if kind == 0x49444154 {                  // IDAT
+            var grown: i64 = hp_grow(data, data_n + len + 16);
+            if grown == 0 {
+                hp_release(data);
+                return 0;
+            }
+            data = grown;
+            hp_copy(data + data_n, body, len);
+            data_n = data_n + len;
+        } else if kind == 0x49454E44 {                  // IEND
+            done = 1;
+        }
+        pos = pos + 12 + len;
+    }
+    if w <= 0 || h <= 0 || data == 0 {
+        hp_release(data);
+        hp_err = 17;
+        return 0;
+    }
+    var channels: i64 = 1;
+    if ctype == 2 { channels = 3; }
+    if ctype == 4 { channels = 2; }
+    if ctype == 6 { channels = 4; }
+    var bits: i64 = channels * depth;
+    var bpp: i64 = bits / 8;
+    if bpp < 1 { bpp = 1; }
+    im_out = 0;
+    im_out_n = 0;
+    im_out_cap = 0;
+    var ok: i64 = im_inflate(data, data_n);
+    hp_release(data);
+    if ok == 0 {
+        hp_release(im_out);
+        hp_err = 17;
+        return 0;
+    }
+    var img: i64 = im_new(w, h);
+    if img == 0 {
+        hp_release(im_out);
+        return 0;
+    }
+    var q: i64 = im_block(img);
+    // the seven Adam7 passes, or one pass with every pixel
+    var sx: [i64; 7] = [0, 4, 0, 2, 0, 1, 0];
+    var sy: [i64; 7] = [0, 0, 4, 0, 2, 0, 1];
+    var dxs: [i64; 7] = [8, 8, 4, 4, 2, 2, 1];
+    var dys: [i64; 7] = [8, 8, 8, 4, 4, 2, 2];
+    var passes: i64 = 7;
+    if interlace == 0 {
+        passes = 1;
+        sx[0] = 0;
+        sy[0] = 0;
+        dxs[0] = 1;
+        dys[0] = 1;
+    }
+    var at: i64 = 0;
+    var pass: i64 = 0;
+    while pass < passes {
+        var pw: i64 = (w - sx[pass] + dxs[pass] - 1) / dxs[pass];
+        var ph: i64 = (h - sy[pass] + dys[pass] - 1) / dys[pass];
+        if pw > 0 && ph > 0 {
+            var rowbytes: i64 = (pw * bits + 7) / 8;
+            if at + ph * (rowbytes + 1) > im_out_n {
+                hp_release(im_out);
+                hp_err = 17;
+                return img;
+            }
+            im_unfilter(im_out + at, ph, rowbytes, bpp);
+            var row: i64 = 0;
+            while row < ph {
+                im_line(q, im_out + at + row * (rowbytes + 1) + 1, pw, sy[pass] + row * dys[pass], sx[pass], dxs[pass], ctype, depth);
+                row = row + 1;
+            }
+            at = at + ph * (rowbytes + 1);
+        }
+        pass = pass + 1;
+    }
+    hp_release(im_out);
+    im_out = 0;
+    return img;
+}
+
+// -------------------------------------------------------------- BMP ---
+
+fn im_le(p: i64, n: i64) -> i64 {
+    var v: i64 = 0;
+    raw {
+        var i: i64 = n - 1;
+        while i >= 0 {
+            v = (v << 8) | peek8(p + i);
+            i = i - 1;
+        }
+    }
+    if n == 4 {
+        v = (v << 32) >> 32;
+    }
+    return v;
+}
+
+fn im_bmp(p: i64, n: i64) -> i64 {
+    if n < 54 {
+        hp_err = 17;
+        return 0;
+    }
+    var off: i64 = im_le(p + 10, 4);
+    var w: i64 = im_le(p + 18, 4);
+    var h: i64 = im_le(p + 22, 4);
+    var bpp: i64 = im_le(p + 28, 2);
+    var top_down: i64 = 0;
+    if h < 0 {
+        h = 0 - h;
+        top_down = 1;
+    }
+    if bpp != 24 && bpp != 32 {
+        hp_err = 17;
+        return 0;
+    }
+    var rowbytes: i64 = ((w * bpp / 8) + 3) / 4 * 4;
+    if off + rowbytes * h > n {
+        hp_err = 17;
+        return 0;
+    }
+    var img: i64 = im_new(w, h);
+    if img == 0 {
+        return 0;
+    }
+    var q: i64 = im_block(img);
+    var y: i64 = 0;
+    while y < h {
+        var src_y: i64 = h - 1 - y;
+        if top_down {
+            src_y = y;
+        }
+        raw {
+            var line: i64 = p + off + src_y * rowbytes;
+            var x: i64 = 0;
+            while x < w {
+                var px: i64 = line + x * (bpp / 8);
+                var c: i64 = (peek8(px + 2) << 16) | (peek8(px + 1) << 8) | peek8(px);
+                poke32(q + 16 + (y * w + x) * 4, 0xFF000000 | c);
+                x = x + 1;
+            }
+        }
+        y = y + 1;
+    }
+    return img;
+}
+
+// ---------------------------------------------------------- the calls ---
+
+fn image_load(path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var img: i64 = 0;
+    var t: i64 = fl_read_all(path);
+    if t != 0 {
+        var q: i64 = ob_get(t, OB_TEXT);
+        var n: i64 = 0;
+        var b0: i64 = 0;
+        var b1: i64 = 0;
+        raw {
+            n = peek(q);
+            b0 = peek8(q + 8);
+            b1 = peek8(q + 9);
+        }
+        if n >= 8 && b0 == 137 && b1 == 80 {
+            img = im_png(q + 8, n);
+        } else if n >= 2 && b0 == 66 && b1 == 77 {
+            img = im_bmp(q + 8, n);
+        } else {
+            hp_err = 17;
+        }
+        ob_drop(t);
+        hp_release(q);
+    }
+    return text_end(img);
+}
+
+fn image_new(width: i64, height: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(im_new(width, height));
+}
+
+fn image_free(img: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = im_block(img);
+    if q != 0 {
+        ob_drop(img);
+        hp_release(q);
+    }
+    return text_end(0);
+}
+
+fn image_width(img: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = im_block(img);
+    var w: i64 = 0;
+    if q != 0 {
+        raw { w = peek(q); }
+    }
+    return text_end(w);
+}
+
+fn image_height(img: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = im_block(img);
+    var h: i64 = 0;
+    if q != 0 {
+        raw { h = peek(q + 8); }
+    }
+    return text_end(h);
+}
+
+// the address of pixel (x, y), or 0 with hp_err
+fn im_at(img: i64, x: i64, y: i64) -> i64 {
+    var q: i64 = im_block(img);
+    if q == 0 {
+        return 0;
+    }
+    var w: i64 = 0;
+    var h: i64 = 0;
+    raw {
+        w = peek(q);
+        h = peek(q + 8);
+    }
+    if x < 0 || y < 0 || x >= w || y >= h {
+        hp_err = 5;
+        return 0;
+    }
+    return q + 16 + (y * w + x) * 4;
+}
+
+fn image_get(img: i64, x: i64, y: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var a: i64 = im_at(img, x, y);
+    var c: i64 = 0;
+    if a != 0 {
+        raw { c = peek32(a); }
+    }
+    return text_end(c);
+}
+
+fn image_set(img: i64, x: i64, y: i64, color: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var a: i64 = im_at(img, x, y);
+    if a != 0 {
+        raw { poke32(a, color); }
+    }
+    return text_end(color);
+}
+
+// the pixels' address and size, for drawing: the lock is held by the caller
+fn im_pixels(img: i64) -> i64 {
+    var q: i64 = im_block(img);
+    if q == 0 {
+        return 0;
+    }
+    return q;
+}
+
+fn image_save_bmp(img: i64, path: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = im_block(img);
+    var r: i64 = 0;
+    if q != 0 {
+        var w: i64 = 0;
+        var h: i64 = 0;
+        raw {
+            w = peek(q);
+            h = peek(q + 8);
+        }
+        var size: i64 = 54 + w * h * 4;
+        var t: i64 = tx_new(size);
+        if t != 0 {
+            var tq: i64 = ob_get(t, OB_TEXT);
+            var b: i64 = tq + 8;
+            raw {
+                poke8(b, 66);
+                poke8(b + 1, 77);
+                poke32(b + 2, size);
+                poke32(b + 6, 0);
+                poke32(b + 10, 54);
+                poke32(b + 14, 40);
+                poke32(b + 18, w);
+                poke32(b + 22, h);
+                poke16(b + 26, 1);
+                poke16(b + 28, 32);
+                poke32(b + 30, 0);
+                poke32(b + 34, w * h * 4);
+                poke32(b + 38, 2835);
+                poke32(b + 42, 2835);
+                poke32(b + 46, 0);
+                poke32(b + 50, 0);
+                var y: i64 = 0;
+                while y < h {
+                    var x: i64 = 0;
+                    while x < w {
+                        var c: i64 = peek32(q + 16 + ((h - 1 - y) * w + x) * 4);
+                        poke32(b + 54 + (y * w + x) * 4, c);
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                poke(tq, size);
+            }
+            r = fl_put(path, t, 8);
+            ob_drop(t);
+            hp_release(tq);
+        }
+    }
+    return text_end(r);
+}

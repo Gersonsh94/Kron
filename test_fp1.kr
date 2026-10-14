@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_fp1;
+kron_imports
+kron_definitions
+
+fn triple(n: int32) {
+    return n * 3;
+}
+
+fn main() {
+    var f: int64 = &triple;
+    print(call f(14));
+    return 0;
+}

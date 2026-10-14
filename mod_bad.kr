@@ -1,0 +1,16 @@
+kron_program
+kron_domain mod_bad;
+kron_imports
+kron_definitions
+
+// Imported module with a typo ON PURPOSE.
+//
+// 'accumulated' is declared; line 15 writes 'accumlated'.
+// The diagnostic must point at THIS file and THIS line, not at a line of
+// the expanded text.
+
+fn mod_sum(x: i64) -> i64 {
+    var accumulated: i64;
+    accumulated = x + 1;
+    return accumlated;
+}

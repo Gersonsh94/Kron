@@ -1,0 +1,38 @@
+kron_program
+kron_domain test_ptrarith;
+kron_imports
+kron_definitions
+
+fn main() {
+    raw {
+        var buf: [int32; 8];
+        var base: ptr<uint32>;
+        var bytes: ptr<uint8>;
+        var v: int32 = 0;
+
+        base = &buf;
+        bytes = &buf;
+
+        // lay four 32-bit values down, one every 4 bytes
+        poke32(base, 100);
+        poke32(base + 1, 200);
+        poke32(base + 2, 300);
+        poke32(base + 3, 400);
+
+        // reading through the same pointer walks in 4-byte steps
+        print(peek32(base));         // 100
+        print(peek32(base + 1));     // 200
+        print(peek32(base + 3));     // 400
+
+        // a byte pointer advances one byte at a time over the same memory
+        print(peek8(bytes));         // 100  (low byte of the first value)
+        print(peek8(bytes + 4));     // 200  (low byte of the second)
+
+        // plain integers must NOT be scaled
+        v = 10;
+        v = v + 1;
+        print(v);                    // 11
+
+        return 0;
+    }
+}

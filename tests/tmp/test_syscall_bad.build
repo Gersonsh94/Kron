@@ -1,0 +1,12 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_syscall_bad.kr:10:18: only allowed inside raw: 'syscall'
+    var r: i64 = syscall(39);
+                 ^^^^^^^
+  hint: put it inside raw { ... }: memory by address (peek, poke, *p) and the system (dll_load, dll_proc, syscall) are reached only there

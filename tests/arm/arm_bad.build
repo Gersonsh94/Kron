@@ -1,0 +1,14 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+Assembler mode (karm, ARM64)
+ERROR: karm failed to assemble.
+  at line 14   _start  -- label defined twice
+  at line 8   mov  -- undefined symbol
+  at line 9   add  -- operands this instruction does not take
+  at line 10   frobnicate  -- unknown instruction
+  at line 11   add  -- value or distance out of range
+  at line 12   and  -- immediate cannot be encoded as an ARM64 bit mask
+  at line 13   b.eq  -- undefined symbol
+  at line 16   section  -- unknown section

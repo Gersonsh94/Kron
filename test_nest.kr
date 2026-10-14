@@ -1,0 +1,57 @@
+kron_program
+kron_domain test_nest;
+kron_imports
+kron_definitions
+
+// Nested structs and chained access.
+//
+// Before this, 'm.center.y' compiled to something equivalent to 'm.y' without a
+// word: the access node kept the base variable and a single field, so
+// the field in the middle was lost. And a struct-typed field took 8 bytes
+// instead of its real size.
+//
+// 'Box' is declared BEFORE 'Vec3' on purpose: structs are registered
+// in a pre-pass, so a forward reference works.
+//
+// Expected output:
+//   1.000000   c.min.x
+//   2.000000   c.min.y
+//   7.000000   c.max.x
+//   8.000000   c.max.y
+//   9          c.label, a scalar field after two structs
+//   1.000000   c.min.x is still intact: fields do not overlap
+//   3.000000   chained write, read back
+
+struct Box {
+    min: Vec3;
+    max: Vec3;
+    label: i64;
+}
+
+struct Vec3 {
+    x: f64;
+    y: f64;
+    z: f64;
+}
+
+fn main() {
+    var c: Box;
+
+    c.min.x = 1.0;
+    c.min.y = 2.0;
+    c.min.z = 3.0;
+    c.max.x = 7.0;
+    c.max.y = 8.0;
+    c.max.z = 9.0;
+    c.label = 9;
+
+    print(c.min.x);      // 1.000000
+    print(c.min.y);      // 2.000000
+    print(c.max.x);      // 7.000000
+    print(c.max.y);      // 8.000000
+    print(c.label);   // 9
+    print(c.min.x);      // 1.000000
+    print(c.min.z);      // 3.000000
+
+    return 0;
+}

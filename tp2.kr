@@ -1,0 +1,36 @@
+kron_program
+kron_domain tp2;
+kron_imports
+kron_definitions
+
+// Does p + 1 scale by the element size when p is a parameter, the way it
+// does when p is a local? The two halves print the same thing if it does.
+
+fn via_param(p: ptr<i64>) -> i64 {
+    raw {
+        return peek(p + 1);
+    }
+}
+
+fn main() {
+    raw {
+        var buf: [i64; 4];
+        buf[0] = 10;
+        buf[1] = 20;
+        buf[2] = 30;
+        buf[3] = 40;
+
+        var local: ptr<i64>;
+        local = &buf;
+
+        print(peek(local));         // 10
+        print(peek(local + 1));     // 20   -- scaled by 8 as a local
+        print(via_param(local));    // 20   -- must match the line above
+
+        // the same, spelled out: if the parameter adds raw bytes instead of
+        // elements, this lands eight bytes short of buf[1]
+        var raw_val: i64 = local;
+        print(raw_val);
+        return 0;
+    }
+}

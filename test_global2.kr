@@ -1,0 +1,12 @@
+kron_program
+kron_domain test_global2;
+kron_imports
+kron_definitions
+
+var g: i64;
+
+fn main() {
+    g = 5;
+    print(g);
+    return 0;
+}

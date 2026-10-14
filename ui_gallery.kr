@@ -1,0 +1,68 @@
+kron_program
+kron_domain ui_gallery;
+kron_imports
+acquire_domain "std_ui.kr";
+kron_definitions
+
+// Every control of std_ui on three tabs.
+// Windows:  kronc ui_gallery.kr --window     Linux / WSL:  kronc ui_gallery.kr --target=linux
+
+var tab: i64;
+var fruits: i64;
+var sizes: i64;
+var picked: i64;
+var size: i64;
+var color: i64;
+var name: i64;
+var notes: i64;
+var agree: i64;
+var volume: i64;
+
+fn main() {
+    if window_open(720, 520, "Kron - gallery") == 0 {
+        print_fail();
+        return 1;
+    }
+    fruits = text_split("Apple,Banana,Cherry,Grape,Lemon,Mango,Orange,Peach,Pear,Plum,Strawberry,Watermelon", ",");
+    sizes = text_split("Small,Medium,Large,Extra large", ",");
+    name = text("Gerson");
+    notes = text("Several lines.\nThe wheel scrolls.\nArrows move the caret.");
+    size = 1;
+    volume = 40;
+    while window_show() {
+        ui_begin();
+        ui_title(24, 18, "Gallery");
+        tab = ui_tabs(24, 64, "Controls|Lists|Text", tab);
+        if tab == 0 {
+            ui_card(24, 124, 672, 372, "Choices");
+            ui_muted(48, 170, "Size");
+            size = ui_select(48, 192, 260, sizes, size);
+            ui_muted(360, 170, "Color");
+            color = ui_radio(360, 196, "Red", color, 0);
+            color = ui_radio(460, 196, "Green", color, 1);
+            color = ui_radio(570, 196, "Blue", color, 2);
+            agree = ui_switch(48, 256, "Send me news", agree);
+            ui_muted(48, 304, "Volume");
+            volume = ui_slider(140, 302, 300, volume, 0, 100);
+            ui_progress(48, 350, 600, volume, 100);
+            if ui_button(48, 400, 160, 42, "Copy my size") {
+                ui_copy(list_get(sizes, size));
+            }
+        } else if tab == 1 {
+            picked = ui_list(24, 124, 300, 372, fruits, picked);
+            ui_card(348, 124, 348, 160, "Chosen");
+            ui_title(372, 170, list_get(fruits, picked));
+        } else {
+            ui_muted(24, 128, "Name");
+            ui_edit(24, 150, 400, name, "Your name");
+            ui_muted(24, 206, "Notes");
+            ui_area(24, 228, 672, 268, notes);
+        }
+        if ui_key(27) {
+            window_close();
+        }
+        ui_end();
+        window_sleep(16);
+    }
+    return 0;
+}

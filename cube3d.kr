@@ -1,0 +1,206 @@
+kron_program
+kron_domain cube3d;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_vec3.kr";
+kron_definitions
+
+// ============================================================================
+// Solid rotating cube — rewritten on top of the standard library.
+//
+// The same renderer as solidcube.kr (barycentric fill, z-buffer, coloured
+// faces) but the maths now comes from std_math and std_vec3 instead of being
+// spelled out inline. Because real fsin/fcos are available, the cube can be
+// posed at any angle rather than stepped by precomputed constants.
+//
+// Output: cube.bmp, 100 x 100, 24-bit.
+// ============================================================================
+
+
+// Large buffers live in .bss, off the stack.
+var buf: [i64; 3757];        // 54-byte header + 300*100 pixels
+var zb: [real64; 10000];     // one depth per pixel
+
+var vx: [real64; 8];
+var vy: [real64; 8];
+var vz: [real64; 8];
+var sx: [real64; 8];
+var sy: [real64; 8];
+var sz: [real64; 8];
+
+var t0: [i64; 12];
+var t1: [i64; 12];
+var t2: [i64; 12];
+var tr: [i64; 12];
+var tg: [i64; 12];
+var tb: [i64; 12];
+
+// ---------------------------------------------------------------- helpers ---
+
+// Write the 54-byte BMP header for a 100x100 24-bit image.
+fn write_bmp_header(base: i64) -> i64 {
+    raw {
+        poke8(base + 0, 66);
+        poke8(base + 1, 77);
+        poke32(base + 2, 30054);
+        poke32(base + 6, 0);
+        poke32(base + 10, 54);
+        poke32(base + 14, 40);
+        poke32(base + 18, 100);
+        poke32(base + 22, 100);
+        poke16(base + 26, 1);
+        poke16(base + 28, 24);
+        poke32(base + 30, 0);
+        poke32(base + 34, 30000);
+        poke32(base + 38, 2835);
+        poke32(base + 42, 2835);
+        poke32(base + 46, 0);
+        poke32(base + 50, 0);
+        return base + 54;
+    }
+}
+
+// Paint one pixel, bottom-up as BMP expects.
+fn put_pixel(pix: i64, x: i64, y: i64, rgb_r: i64, rgb_g: i64, rgb_b: i64) -> i64 {
+    raw {
+        var o: i64 = pix + (99 - y) * 300 + x * 3;
+        poke8(o + 0, rgb_b);
+        poke8(o + 1, rgb_g);
+        poke8(o + 2, rgb_r);
+        return o;
+    }
+}
+
+// Fill the framebuffer with the background and reset every depth.
+fn clear_scene(pix: i64) -> i64 {
+    for var y: i64 = 0; y < 100; y = y + 1 {
+        for var x: i64 = 0; x < 100; x = x + 1 {
+            put_pixel(pix, x, y, 12, 15, 40);
+            zb[y * 100 + x] = 1000000000.0;
+        }
+    }
+    return pix;
+}
+
+fn build_cube() -> i64 {
+    vx[0] = 0.0 - 1.0; vy[0] = 0.0 - 1.0; vz[0] = 0.0 - 1.0;
+    vx[1] = 1.0;       vy[1] = 0.0 - 1.0; vz[1] = 0.0 - 1.0;
+    vx[2] = 1.0;       vy[2] = 1.0;       vz[2] = 0.0 - 1.0;
+    vx[3] = 0.0 - 1.0; vy[3] = 1.0;       vz[3] = 0.0 - 1.0;
+    vx[4] = 0.0 - 1.0; vy[4] = 0.0 - 1.0; vz[4] = 1.0;
+    vx[5] = 1.0;       vy[5] = 0.0 - 1.0; vz[5] = 1.0;
+    vx[6] = 1.0;       vy[6] = 1.0;       vz[6] = 1.0;
+    vx[7] = 0.0 - 1.0; vy[7] = 1.0;       vz[7] = 1.0;
+
+    t0[0]=0; t1[0]=1; t2[0]=2;   tr[0]=230; tg[0]=60;  tb[0]=60;
+    t0[1]=0; t1[1]=2; t2[1]=3;   tr[1]=230; tg[1]=60;  tb[1]=60;
+    t0[2]=5; t1[2]=4; t2[2]=7;   tr[2]=60;  tg[2]=200; tb[2]=80;
+    t0[3]=5; t1[3]=7; t2[3]=6;   tr[3]=60;  tg[3]=200; tb[3]=80;
+    t0[4]=4; t1[4]=0; t2[4]=3;   tr[4]=70;  tg[4]=110; tb[4]=240;
+    t0[5]=4; t1[5]=3; t2[5]=7;   tr[5]=70;  tg[5]=110; tb[5]=240;
+    t0[6]=1; t1[6]=5; t2[6]=6;   tr[6]=240; tg[6]=210; tb[6]=70;
+    t0[7]=1; t1[7]=6; t2[7]=2;   tr[7]=240; tg[7]=210; tb[7]=70;
+    t0[8]=3; t1[8]=2; t2[8]=6;   tr[8]=210; tg[8]=80;  tb[8]=210;
+    t0[9]=3; t1[9]=6; t2[9]=7;   tr[9]=210; tg[9]=80;  tb[9]=210;
+    t0[10]=4; t1[10]=5; t2[10]=1; tr[10]=70; tg[10]=210; tb[10]=210;
+    t0[11]=4; t1[11]=1; t2[11]=0; tr[11]=70; tg[11]=210; tb[11]=210;
+    return 0;
+}
+
+// Rotate every vertex by `ax` radians about X, then `ay` about Y.
+fn pose_cube(ax: real64, ay: real64) -> i64 {
+    for var i: i64 = 0; i < 8; i = i + 1 {
+        var ny: real64 = rot_x_y(vy[i], vz[i], ax);
+        var nz: real64 = rot_x_z(vy[i], vz[i], ax);
+        vy[i] = ny;
+        vz[i] = nz;
+    }
+    for var i: i64 = 0; i < 8; i = i + 1 {
+        var nx: real64 = rot_y_x(vx[i], vz[i], ay);
+        var nz: real64 = rot_y_z(vx[i], vz[i], ay);
+        vx[i] = nx;
+        vz[i] = nz;
+    }
+    return 0;
+}
+
+// Project every vertex to screen space, keeping its depth.
+fn project_cube() -> i64 {
+    for var i: i64 = 0; i < 8; i = i + 1 {
+        sx[i] = proj_x(vx[i], vz[i], 4.0, 90.0, 50.0);
+        sy[i] = proj_y(vy[i], vz[i], 4.0, 90.0, 50.0);
+        sz[i] = proj_depth(vz[i], 4.0);
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------- main ---
+
+fn main() {
+    var base: i64 = &buf;
+    var pix: i64 = write_bmp_header(base);
+
+    build_cube();
+    pose_cube(0.55, 0.8);      // radians, straight from the library's trig
+    project_cube();
+    clear_scene(pix);
+
+    for var t: i64 = 0; t < 12; t = t + 1 {
+        var i0: i64 = t0[t];
+        var i1: i64 = t1[t];
+        var i2: i64 = t2[t];
+
+        var ax: real64 = sx[i0];
+        var ay: real64 = sy[i0];
+        var az: real64 = sz[i0];
+        var bx: real64 = sx[i1];
+        var by: real64 = sy[i1];
+        var bz: real64 = sz[i1];
+        var cx: real64 = sx[i2];
+        var cy: real64 = sy[i2];
+        var cz: real64 = sz[i2];
+
+        var abx: real64 = bx - ax;
+        var aby: real64 = by - ay;
+        var bcx: real64 = cx - bx;
+        var bcy: real64 = cy - by;
+        var cax: real64 = ax - cx;
+        var cay: real64 = ay - cy;
+        var area: real64 = edge_cross(abx, aby, cx - ax, cy - ay);
+
+        if fabs(area) > 0.5 {
+            for var y: i64 = 0; y < 100; y = y + 1 {
+                for var x: i64 = 0; x < 100; x = x + 1 {
+                    var fx: real64 = x;
+                    var fy: real64 = y;
+                    var w0: real64 = edge_cross(abx, aby, fx - ax, fy - ay);
+                    var w1: real64 = edge_cross(bcx, bcy, fx - bx, fy - by);
+                    var w2: real64 = edge_cross(cax, cay, fx - cx, fy - cy);
+
+                    var inside: i64 = 0;
+                    if area > 0.0 {
+                        if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 { inside = 1; }
+                    }
+                    if area < 0.0 {
+                        if w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0 { inside = 1; }
+                    }
+
+                    if inside == 1 {
+                        var depth: real64 = (w0 / area) * az
+                                          + (w1 / area) * bz
+                                          + (w2 / area) * cz;
+                        var zi: i64 = y * 100 + x;
+                        if depth < zb[zi] {
+                            zb[zi] = depth;
+                            put_pixel(pix, x, y, tr[t], tg[t], tb[t]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    savefile(base, 30054, "cube.bmp");
+    print(30054);
+    return 0;
+}

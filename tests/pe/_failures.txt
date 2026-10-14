@@ -1,0 +1,10 @@
+DIFFERENT OUTPUT  test_arena_lib
+NO-ASM  test_boot2.asm:681:  mov cr4, rax
+DIFFERENT OUTPUT  test_bounds
+DIFFERENT OUTPUT  test_bounds2
+DIFFERENT OUTPUT  test_bounds3
+DIFFERENT OUTPUT  test_chan
+DIFFERENT OUTPUT  test_fail
+DIFFERENT OUTPUT  test_slice
+NO-ASM  test_slit.asm:706:  mov qword [rbp-56], 10
+DIFFERENT OUTPUT  test_tfail

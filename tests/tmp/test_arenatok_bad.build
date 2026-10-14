@@ -1,0 +1,9 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_arenatok_bad.kr:7:33: expected an identifier, found 'uint64'
+    var h: ArenaAllocationToken<uint64> = 0;
+                                ^^^^^^

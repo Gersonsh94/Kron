@@ -1,0 +1,49 @@
+kron_program
+kron_domain test_fcmp;
+kron_imports
+kron_definitions
+
+fn main() {
+    var a: real64 = 3.5;
+    var b: real64 = 7.2;
+
+    // a < b  -> true
+    if a < b {
+        print(1);        // 1
+    }
+
+    // a > b  -> false (should NOT print)
+    if a > b {
+        print(999);
+    }
+
+    // equal
+    var c: real64 = 3.5;
+    if a == c {
+        print(2);        // 2
+    }
+
+    // >= and <=
+    if b >= 7.2 {
+        print(3);        // 3
+    }
+    if a <= 3.5 {
+        print(4);        // 4
+    }
+
+    // z-buffer pattern: keep the nearest depth
+    var zbuf: real64 = 100.0;
+    var znew: real64 = 5.5;
+    if znew < zbuf {
+        zbuf = znew;
+        print(5);        // 5 (nearer wins)
+    }
+    // second sample farther away -> rejected
+    var zfar: real64 = 8.0;
+    if zfar < zbuf {
+        print(888);      // should NOT print (8.0 not < 5.5)
+    }
+
+    print(6);            // 6 (done)
+    return 0;
+}

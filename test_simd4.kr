@@ -1,0 +1,63 @@
+kron_program
+kron_domain test_simd4;
+kron_imports
+acquire_domain "std_arena.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: four f32 at a time, and slices of reals
+//
+//   vec4_load(&a[i]) vec4_store(&a[i], v)   four f32 of an [f32; N]
+//   vec4_add / sub / mul / div               all four in one instruction
+//   vec4_fill(x)  vec4_sum(v)                one real into four, four into one
+//   vec2_div                                 the f64 pair divided
+//   slice<f64>                               an arena slice of reals
+// =========================================================================
+
+// The four floats live in a register and only compose by nesting.
+fn dot(a: [f32; 8], b: [f32; 8]) -> f64 {
+    return vec4_sum(vec4_add(vec4_mul(vec4_load(&a[0]), vec4_load(&b[0])),
+                             vec4_mul(vec4_load(&a[4]), vec4_load(&b[4]))));
+}
+
+fn main() {
+    var a: [f32; 8];
+    var b: [f32; 8];
+    var c: [f32; 8];
+    var i: i64 = 0;
+    while i < 8 {
+        a[i] = i + 1.0;
+        b[i] = 2.0;
+        i = i + 1;
+    }
+    vec4_store(&c[0], vec4_add(vec4_load(&a[0]), vec4_load(&b[0])));
+    vec4_store(&c[4], vec4_div(vec4_load(&a[4]), vec4_fill(4.0)));
+    print(c[0]);                  // 3.000000
+    print(c[3]);                  // 6.000000
+    print(c[4]);                  // 1.250000
+    print(c[7]);                  // 2.000000
+    print(vec4_sum(vec4_load(&a[0])));      // 10.000000
+    print(dot(a, b));                        // 72.000000
+    vec4_store(&c[0], vec4_sub(vec4_fill(1.5), vec4_load(&b[0])));
+    print(c[2]);                  // -0.500000
+
+    var p: [f64; 2];
+    var q: [f64; 2];
+    p[0] = 9.0;
+    p[1] = 1.0;
+    q[0] = 3.0;
+    q[1] = 4.0;
+    vec2_store(&p[0], vec2_div(vec2_load(&p[0]), vec2_load(&q[0])));
+    print(p[0]);                  // 3.000000
+    print(p[1]);                  // 0.250000
+
+    var ar: i64 = arena_new(64);
+    var xs: slice<f64> = arena_slice(ar, 4);
+    xs[0] = 1.5;
+    xs[3] = xs[0] * 2.0;
+    print(xs[3]);                 // 3.000000
+    print(xs[1] + 0.25);          // 0.250000
+    xs[9] = 1.0;
+    print(failed());              // 1
+    return 0;
+}

@@ -1,0 +1,34 @@
+kron_program
+kron_domain te1;
+kron_imports
+acquire_domain "std_math.kr";
+kron_definitions
+
+fn t1(x: real64) -> real64 {
+    var kf: real64 = fround(x * 1.4426950408889634);
+    var k: i64 = trunc(kf);
+    var r: real64 = x - kf * 0.6931471805599453;
+    var term: real64 = 1.0;
+    var sum: real64 = 1.0;
+    var d: real64 = 0.0;
+    for var i: i64 = 1; i <= 11; i = i + 1 {
+        d = i;
+        term = term * r / d;
+        sum = sum + term;
+    }
+    if k >= 0 {
+        for var i: i64 = 0; i < k; i = i + 1 {
+            sum = sum * 2.0;
+        }
+    } else {
+        var n: i64 = 0 - k;
+        for var i: i64 = 0; i < n; i = i + 1 {
+            sum = sum * 0.5;
+        }
+    }
+    return sum;
+}
+fn main() {
+    print(t1(1.0));
+    return 0;
+}

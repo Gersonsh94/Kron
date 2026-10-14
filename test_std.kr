@@ -1,0 +1,123 @@
+kron_program
+kron_domain test_std;
+kron_imports
+kron_definitions
+
+// Exercises the standard library. Strings are built byte by byte because
+// string literals do not reach codegen yet.
+
+var bufA: [int64; 16];
+var bufB: [int64; 16];
+
+fn mem_copy(dst: int32, src: int32, count: int32) {
+    raw {
+        var i: int32 = 0;
+        while i < count {
+            poke8(dst + i, peek8(src + i));
+            i = i + 1;
+        }
+        return dst;
+    }
+}
+
+fn mem_set(dst: int32, value: int32, count: int32) {
+    raw {
+        var i: int32 = 0;
+        while i < count {
+            poke8(dst + i, value);
+            i = i + 1;
+        }
+        return dst;
+    }
+}
+
+fn str_length(s: int32) {
+    raw {
+        var n: int32 = 0;
+        while peek8(s + n) != 0 {
+            n = n + 1;
+        }
+        return n;
+    }
+}
+
+fn str_compare(a: int32, b: int32) {
+    raw {
+        var i: int32 = 0;
+        var ca: int32 = 0;
+        var cb: int32 = 0;
+        var diff: int32 = 0;
+        var done: int32 = 0;
+        while done == 0 {
+            ca = peek8(a + i);
+            cb = peek8(b + i);
+            if ca != cb {
+                diff = ca - cb;
+                done = 1;
+            }
+            if ca == 0 {
+                done = 1;
+            }
+            i = i + 1;
+        }
+        return diff;
+    }
+}
+
+fn abs_value(n: int32) {
+    if n < 0 {
+        return 0 - n;
+    }
+    return n;
+}
+
+fn max_value(a: int32, b: int32) {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn power_of(base: int32, exponent: int32) {
+    var result: int32 = 1;
+    var i: int32 = 0;
+    while i < exponent {
+        result = result * base;
+        i = i + 1;
+    }
+    return result;
+}
+
+fn main() {
+    raw {
+        var a: int32 = 0;
+        var b: int32 = 0;
+
+        a = &bufA;
+        b = &bufB;
+
+        // build "Jup" at a
+        poke8(a, 74);
+        poke8(a + 1, 117);
+        poke8(a + 2, 112);
+        poke8(a + 3, 0);
+
+        print(str_length(a));        // 3
+
+        mem_copy(b, a, 4);
+        print(str_compare(a, b));    // 0  -- identical after the copy
+
+        poke8(b + 1, 120);           // change one byte
+        print(str_compare(a, b));    // negative: 117 - 120 = -3
+
+        mem_set(a, 65, 5);
+        poke8(a + 5, 0);
+        print(str_length(a));        // 5
+
+        print(abs_value(0 - 42));    // 42
+        print(max_value(7, 19));     // 19
+        print(power_of(2, 10));      // 1024
+
+        return 0;
+    }
+}

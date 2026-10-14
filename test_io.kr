@@ -1,0 +1,25 @@
+kron_program
+kron_domain test_io;
+kron_imports
+kron_definitions
+
+// test: keyboard input (readkey) and audio (beep)
+
+fn main() {
+    // a short melody: three beeps of rising pitch
+    beep(440, 200);   // A
+    beep(554, 200);   // C#
+    beep(659, 300);   // E
+
+    // echo: read 3 keys and print their codes, beeping on each
+    print(0);         // ready marker
+    for var i: i64 = 0; i < 3; i = i + 1 {
+        var k: i64 = readkey();
+        print(k);         // ASCII code of the key
+        beep(800, 80);    // click sound
+    }
+
+    // final chord
+    beep(880, 400);
+    return 0;
+}

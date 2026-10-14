@@ -1,0 +1,66 @@
+kron_program
+kron_domain test_multi;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: several results
+//
+// A function can return up to four values, -> (T1, T2, ...). They are taken
+// with  var a, b = f();  or  a, b = f();  and '_' skips one. Used once, as
+// in print(f()), the call gives its first result.
+// =========================================================================
+
+var gq: i64;
+var gr: i64;
+
+fn divide(a: i64, b: i64) -> (i64, i64) {
+    if b == 0 {
+        fail "division by zero";
+    }
+    return a / b, a % b;
+}
+
+fn stats(a: f64, b: f64, c: f64) -> (f64, f64, f64) {
+    var lo: f64 = a;
+    var hi: f64 = a;
+    if b < lo { lo = b; }
+    if c < lo { lo = c; }
+    if b > hi { hi = b; }
+    if c > hi { hi = c; }
+    return lo, hi, (a + b + c) / 3.0;
+}
+
+fn named(n: i64) -> (text, i64, f64) {
+    return "item " + n, n * n, 0.5 * n;
+}
+
+fn four() -> (i64, i64, i64, i64) {
+    return 1, 2, 3, 4;
+}
+
+fn main() {
+    var q, r = divide(17, 5);
+    print(q);                       // 3
+    print(r);                       // 2
+    q, r = divide(100, 7);
+    print(q * 10 + r);              // 142
+    var lo, hi, mean = stats(4.0, 1.0, 7.0);
+    print(lo);                      // 1.000000
+    print(hi);                      // 7.000000
+    print(mean);                    // 4.000000
+    print(stats(9.0, 2.0, 3.0));    // 2.000000: the first result
+    var label, square, half = named(6);
+    print(label);                   // item 6
+    print(square);                  // 36
+    print(half);                    // 3.000000
+    var _, b, _, d = four();
+    print(b + d);                   // 6
+    gq, gr = divide(9, 4);
+    print(gq);                      // 2
+    print(gr);                      // 1
+    var x, y = divide(1, 0);
+    print(failed());                // 1
+    return 0;
+}

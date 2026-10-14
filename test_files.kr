@@ -1,0 +1,70 @@
+kron_program
+kron_domain test_files;
+kron_imports
+acquire_domain "std_file.kr";
+acquire_domain "std_time.kr";
+kron_definitions
+
+// std_file and std_time. Files are made in the current folder and removed.
+
+fn main() {
+    file_write_all("tf_a.txt", "first line\n");
+    file_append("tf_a.txt", "second line\r\nthird");
+    var all: i64 = file_read_all("tf_a.txt");
+    print(text_len(all));                          // 29
+    var lines: i64 = file_lines("tf_a.txt");
+    print(list_len(lines));                        // 3
+    say(list_get(lines, 1));                       // second line
+    print(file_exists("tf_a.txt"));                // 1
+    print(file_exists("tf_none.txt"));             // 0
+    print(file_length("tf_a.txt"));                // 29
+    var f: i64 = file_open("tf_a.txt", "r");
+    say(file_read_line(f));
+    say(file_read_line(f));
+    say(file_read_line(f));
+    print(file_at_end(f));                         // 1
+    file_close(f);
+
+    // raw bytes at a position: a [u8; N] is a byte buffer
+    var g: i64 = file_open("tf_b.bin", "w");
+    var buf: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    print(file_write_at(g, 4, &buf[0], 8));        // 8
+    file_close(g);
+    print(file_length("tf_b.bin"));                // 12
+    var h: i64 = file_open("tf_b.bin", "r");
+    var back: [u8; 4];
+    print(file_read_at(h, 6, &back[0], 4));        // 4
+    print(back[0]);                                // 3
+    print(back[3]);                                // 6
+    file_close(h);
+    print(file_read_at(h, 0, &back[0], 1));        // 0: closed
+    print(failed());                               // 1
+
+    dir_make("tf_dir");
+    file_write_all("tf_dir/x.txt", "x");
+    file_write_all("tf_dir/a.txt", "a");
+    print(dir_exists("tf_dir"));                   // 1
+    print(dir_exists("tf_a.txt"));                 // 0
+    say(text_join(dir_list("tf_dir"), ","));       // a.txt,x.txt
+    file_delete("tf_dir/x.txt");
+    file_delete("tf_dir/a.txt");
+    print(dir_remove("tf_dir"));                   // 1
+    file_rename("tf_b.bin", "tf_c.bin");
+    print(file_exists("tf_c.bin"));                // 1
+    file_delete("tf_c.bin");
+    file_delete("tf_a.txt");
+    file_read_all("tf_none.txt");
+    print(failed());                               // 1
+
+    var t: i64 = time_make(2026, 10, 12, 9, 41, 7);
+    say(time_text(t));                             // 2026-10-12 09:41:07
+    print(time_weekday(t));                        // 1: Monday
+    print(time_yearday(t));                        // 285
+    say(time_text(0 - 1));                         // 1969-12-31 23:59:59
+    say(time_date_text(time_make(2000, 2, 29, 0, 0, 0)));
+    print(time_now() > 1700000000);                // 1
+    var c0: i64 = time_clock();
+    time_sleep(50);
+    print(time_clock() - c0 >= 45);                // 1
+    return 0;
+}

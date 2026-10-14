@@ -1,0 +1,45 @@
+kron_program
+kron_domain test_dllcall;
+kron_imports
+acquire_domain "std_str.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: calling a system library with more than four arguments (Windows)
+//
+// call ptr(args) follows the Windows convention: four arguments in
+// registers, the fifth on at [rsp+32]. It used to drop everything past the
+// fourth without a word. And the call is aligned to 16 bytes even when it
+// sits inside an expression with temporaries on the stack: system
+// libraries crash on a misaligned stack (LoadCursorA did).
+//
+// wsprintfA formats its arguments into a buffer and returns the length.
+//
+// Expected output:
+//   13      "1 2 3 4 5 6 7": nine arguments, every one arrived
+//   1 2 3 4 5 6 7
+//   8       "10-20-30": five arguments
+//   10-20-30
+//   111     inside an expression: 100 + the length, 11
+//   7 8 9 10 11 12 13 14 15 16 17 18
+// =========================================================================
+
+var buf: [i64; 16];
+
+fn main() {
+    raw {
+        var user32: i64 = dll_load("user32.dll");
+        var f: i64 = dll_proc(user32, "wsprintfA");
+        var n: i64 = call f(&buf, "%d %d %d %d %d %d %d", 1, 2, 3, 4, 5, 6, 7);
+        print(n);
+        str_print_line(&buf);
+        n = call f(&buf, "%d-%d-%d", 10, 20, 30);
+        print(n);
+        str_print_line(&buf);
+        n = 100 + call f(&buf, "%d %d %d", 111, 222, 333);
+        print(n);
+        n = call f(&buf, "%d %d %d %d %d %d %d %d %d %d %d %d", 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
+        str_print_line(&buf);
+    }
+    return 0;
+}

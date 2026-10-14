@@ -1,0 +1,28 @@
+kron_program
+kron_domain test_mouse;
+kron_imports
+kron_definitions
+
+// test: console mouse input
+// Move the mouse or click inside the console window.
+// Prints X, Y (in character cells) and button state for 8 events.
+
+fn main() {
+    print(0);   // ready
+
+    for var i: i64 = 0; i < 8; i = i + 1 {
+        var btn: i64 = readmouse();   // blocks until a mouse event
+        var mx: i64 = mousex();
+        var my: i64 = mousey();
+
+        print(mx);      // column
+        print(my);      // row
+        print(btn);     // 1 = left button down, 0 = just moved
+
+        if btn == 1 {
+            beep(880, 100);   // click feedback
+        }
+    }
+
+    return 0;
+}

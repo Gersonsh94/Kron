@@ -1,0 +1,148 @@
+kron_program
+kron_domain kron_alloc;
+kron_imports
+kron_definitions
+
+// The allocator IS memory access by address -- block headers, the free list --
+// so each function that touches the heap keeps its body inside raw { ... }.
+
+// ============================================================================
+// Dynamic memory allocator, written in Kron itself.
+// Uses only language features: globals, typed pointers, sized memory access.
+//
+// A bump allocator over a static pool, with a free list threaded through
+// released blocks. Every block carries an 8-byte header holding its size,
+// so free() can step back from the payload pointer to find it.
+// ============================================================================
+
+var heap_pool: [int64; 512];      // 4096 bytes of backing storage
+var heap_base: ptr<uint8>;
+var heap_used: int32 = 0;
+var heap_cap: int32 = 4096;
+var free_list: int32 = 0;
+var heap_ready: int32 = 0;
+
+fn heap_init() {
+    heap_base = &heap_pool;
+    heap_used = 0;
+    free_list = 0;
+    heap_ready = 1;
+    return 0;
+}
+
+// Round a request up to a multiple of 8 so every block stays aligned.
+fn align8(n: int32) {
+    var r: int32 = 0;
+    r = n + 7;
+    r = r / 8;
+    r = r * 8;
+    return r;
+}
+
+// Reuse a released block if one is large enough.
+fn free_list_take(need: int32) {
+    raw {
+        var cur: int32 = 0;
+        var prev: int32 = 0;
+        var sz: int32 = 0;
+        var nxt: int32 = 0;
+        var found: int32 = 0;
+
+        cur = free_list;
+
+        while cur != 0 {
+            sz = peek32(cur);
+            nxt = peek32(cur + 4);
+            if sz >= need {
+                if prev == 0 {
+                    free_list = nxt;
+                } else {
+                    poke32(prev + 4, nxt);
+                }
+                found = cur;
+                cur = 0;
+            } else {
+                prev = cur;
+                cur = nxt;
+            }
+        }
+        return found;
+    }
+}
+
+fn alloc(size: int32) {
+    raw {
+        var need: int32 = 0;
+        var block: int32 = 0;
+
+        if heap_ready == 0 {
+            heap_init();
+        }
+
+        need = align8(size);
+        need = need + 8;              // room for the header
+
+        block = free_list_take(need);
+        if block != 0 {
+            return block + 8;
+        }
+
+        if heap_used + need > heap_cap {
+            return 0;                 // out of memory
+        }
+
+        block = heap_base + heap_used;
+        heap_used = heap_used + need;
+
+        poke32(block, need);          // header: total block size
+        poke32(block + 4, 0);         // free-list link, unused while allocated
+        return block + 8;
+    }
+}
+
+fn free(payload: int32) {
+    raw {
+        var block: int32 = 0;
+
+        if payload == 0 {
+            return 0;
+        }
+
+        block = payload - 8;          // step back to the header
+        poke32(block + 4, free_list); // push onto the free list
+        free_list = block;
+        return 0;
+    }
+}
+
+fn heap_available() {
+    return heap_cap - heap_used;
+}
+
+fn main() {
+    raw {
+        var a: int32 = 0;
+        var b: int32 = 0;
+        var c: int32 = 0;
+
+        heap_init();
+        print(heap_available());     // 4096
+
+        a = alloc(16);
+        b = alloc(32);
+        print(heap_available());     // 4096 - 24 - 40 = 4032
+
+        // the returned blocks are usable memory
+        poke32(a, 1234);
+        poke32(b, 5678);
+        print(peek32(a));            // 1234
+        print(peek32(b));            // 5678
+
+        // releasing and re-requesting reuses the same block
+        free(b);
+        c = alloc(32);
+        print(c - b);                // 0  -- same address handed back
+
+        return 0;
+    }
+}

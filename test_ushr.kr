@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_ushr;
+kron_imports
+kron_definitions
+
+fn main() -> int64 {
+    var a: int64 = ~0;
+    print(a >> 60);
+    print(a >>> 60);
+    var b: int64 = 256;
+    print(b >> 4);
+    print(b >>> 4);
+    return 0;
+}

@@ -1,0 +1,221 @@
+kron_program
+kron_domain scatter;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_stats.kr";
+kron_definitions
+
+// ============================================================
+// KRON - scatter plot with a least-squares fit, straight to BMP.
+//
+// Loads a small data set into std_stats, fits a line through it, and draws
+// both the points and the line into a 24-bit bitmap. No plotting library,
+// no runtime: the whole image is built byte by byte in memory.
+//
+// Image: 240 x 180, row = 720 bytes (already 4-aligned).
+// File:  54 header + 720*180 = 129654 bytes -> 16207 slots of 8 bytes.
+// ============================================================
+
+
+var img: [i64; 16207];
+var img_base: i64;
+
+// Plot area inside the image, leaving room for the axes.
+var PX0: i64;
+var PY0: i64;
+var PW: i64;
+var PH: i64;
+
+// Data ranges, cached so the mapping does not rescan the arrays per point.
+var min_x: real64;
+var max_x: real64;
+var min_y: real64;
+var max_y: real64;
+
+// ---------------------------------------------------------------- canvas --
+
+fn px(x: i64, y: i64, r: i64, g: i64, b: i64) {
+    raw {
+        // Bitmaps store rows bottom-up, so flip y to make the origin top-left.
+        if x < 0 || x >= 240 || y < 0 || y >= 180 {
+            return 0;
+        }
+        var row: i64 = 179 - y;
+        var o: i64 = img_base + 54 + row * 720 + x * 3;
+        poke8(o + 0, b);
+        poke8(o + 1, g);
+        poke8(o + 2, r);
+        return 0;
+    }
+}
+
+// A filled disc, so each sample reads as a dot rather than a single pixel.
+fn dot(cx: i64, cy: i64, rad: i64) {
+    for var dy: i64 = 0 - rad; dy <= rad; dy = dy + 1 {
+        for var dx: i64 = 0 - rad; dx <= rad; dx = dx + 1 {
+            if dx * dx + dy * dy <= rad * rad {
+                px(cx + dx, cy + dy, 200, 40, 40);
+            }
+        }
+    }
+    return 0;
+}
+
+// Bresenham, so the fitted line stays connected at any slope.
+fn line(x0: i64, y0: i64, x1: i64, y1: i64) {
+    var x: i64 = x0;
+    var y: i64 = y0;
+    var dx: i64 = x1 - x0;
+    var dy: i64 = y1 - y0;
+    var sx: i64 = 1;
+    var sy: i64 = 1;
+    if dx < 0 {
+        dx = 0 - dx;
+        sx = 0 - 1;
+    }
+    if dy < 0 {
+        dy = 0 - dy;
+        sy = 0 - 1;
+    }
+    var err: i64 = dx - dy;
+    var e2: i64 = 0;
+    while 1 == 1 {
+        px(x, y, 30, 90, 210);
+        px(x, y + 1, 30, 90, 210);
+        if x == x1 && y == y1 {
+            return 0;
+        }
+        e2 = err + err;
+        if e2 > 0 - dy {
+            err = err - dy;
+            x = x + sx;
+        }
+        if e2 < dx {
+            err = err + dx;
+            y = y + sy;
+        }
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------- mapping ----
+
+// Data space to pixel space. Kept to four parameters because the compiler
+// passes the first four arguments in registers.
+fn map_x(v: real64) -> i64 {
+    var span: real64 = max_x - min_x;
+    var w: real64 = PW;
+    var t: real64 = (v - min_x) / span;
+    var off: real64 = t * w;
+    return PX0 + off;
+}
+
+fn map_y(v: real64) -> i64 {
+    var span: real64 = max_y - min_y;
+    var h: real64 = PH;
+    var t: real64 = (v - min_y) / span;
+    var off: real64 = t * h;
+    // y grows upward in data space and downward in screen space
+    return PY0 + PH - off;
+}
+
+// ---------------------------------------------------------------- main -----
+
+fn main() {
+    raw {
+        img_base = &img;
+
+        PX0 = 30;
+        PY0 = 15;
+        PW = 195;
+        PH = 140;
+
+        // ---------- BMP header ----------
+        poke8(img_base + 0, 66);            // 'B'
+        poke8(img_base + 1, 77);            // 'M'
+        poke32(img_base + 2, 129654);       // file size
+        poke32(img_base + 6, 0);
+        poke32(img_base + 10, 54);          // pixel data offset
+        poke32(img_base + 14, 40);          // info header size
+        poke32(img_base + 18, 240);         // width
+        poke32(img_base + 22, 180);         // height
+        poke16(img_base + 26, 1);           // planes
+        poke16(img_base + 28, 24);          // bits per pixel
+        poke32(img_base + 30, 0);           // no compression
+        poke32(img_base + 34, 129600);      // pixel data size
+        poke32(img_base + 38, 2835);
+        poke32(img_base + 42, 2835);
+        poke32(img_base + 46, 0);
+        poke32(img_base + 50, 0);
+
+        // ---------- paper-white background ----------
+        for var y: i64 = 0; y < 180; y = y + 1 {
+            for var x: i64 = 0; x < 240; x = x + 1 {
+                px(x, y, 250, 248, 244);
+            }
+        }
+
+        // ---------- the data: hours studied against score ----------
+        st_clear();
+        st_push(1.0);   st_push_y(2.0);
+        st_push(2.0);   st_push_y(4.0);
+        st_push(3.0);   st_push_y(5.0);
+        st_push(4.0);   st_push_y(8.0);
+        st_push(5.0);   st_push_y(9.0);
+        st_push(6.0);   st_push_y(13.0);
+        st_push(7.0);   st_push_y(13.0);
+        st_push(8.0);   st_push_y(16.0);
+
+        // Ranges with a margin, so points never sit on the axis itself.
+        min_x = st_min() - 0.5;
+        max_x = st_max() + 0.5;
+
+        // st_min/st_max read the x buffer, so scan y here directly.
+        min_y = st_y[0];
+        max_y = st_y[0];
+        for var i: i64 = 1; i < st_n; i = i + 1 {
+            if st_y[i] < min_y { min_y = st_y[i]; }
+            if st_y[i] > max_y { max_y = st_y[i]; }
+        }
+        min_y = min_y - 1.0;
+        max_y = max_y + 1.0;
+
+        // ---------- axes ----------
+        for var x: i64 = PX0; x <= PX0 + PW; x = x + 1 {
+            px(x, PY0 + PH, 60, 60, 70);
+        }
+        for var y: i64 = PY0; y <= PY0 + PH; y = y + 1 {
+            px(PX0, y, 60, 60, 70);
+        }
+
+        // tick marks every whole unit of x
+        var tx: i64 = 0;
+        for var k: i64 = 1; k <= 8; k = k + 1 {
+            var kv: real64 = k;
+            tx = map_x(kv);
+            px(tx, PY0 + PH + 1, 60, 60, 70);
+            px(tx, PY0 + PH + 2, 60, 60, 70);
+            px(tx, PY0 + PH + 3, 60, 60, 70);
+        }
+
+        // ---------- the fitted line, drawn under the points ----------
+        var y_at_min: real64 = linreg_predict(min_x);
+        var y_at_max: real64 = linreg_predict(max_x);
+        line(map_x(min_x), map_y(y_at_min), map_x(max_x), map_y(y_at_max));
+
+        // ---------- the samples ----------
+        for var i: i64 = 0; i < st_n; i = i + 1 {
+            dot(map_x(st_x[i]), map_y(st_y[i]), 3);
+        }
+
+        savefile(img_base, 129654, "scatter.bmp");
+
+        // The same numbers matplotlib would print under the chart.
+        print(linreg_slope());        // 1.976190
+        print(linreg_intercept());    // -0.107142
+        print(st_corr());             // 0.988...
+        print(linreg_r2());           // 0.977...
+
+        return 0;
+    }
+}

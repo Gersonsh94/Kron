@@ -1,0 +1,11 @@
+========================================
+  KRON COMPILER v1.0 - SOVEREIGN
+  100% ASM x86-64  No dependencies
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic...
+test_arena_dup.kr:8:0: duplicate arena name 
+    arena p base_address 0x9000 size_bytes 4096 growth_policy fixed_static ;
+^

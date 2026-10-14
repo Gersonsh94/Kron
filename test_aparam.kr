@@ -1,0 +1,85 @@
+kron_program
+kron_domain test_aparam;
+kron_imports
+kron_definitions
+
+// Arrays passed as parameters. Until now this was not possible: that is why
+// the 143 library functions work on global module buffers instead of
+// on their arguments, as the comment on line 10
+// of std_stats.kr says.
+//
+// The array is passed by ADDRESS, not copied: the parameter slot holds the
+// pointer and indexing loads the base instead of computing it.
+//
+// Expected output:
+//   15        sum of integers
+//   55        sum of another array, with the same function
+//   10.500000 sum of reals
+//   7         write through the parameter, seen by the caller
+//   15        forwarding: a function passes its parameter to another
+
+fn sum_all(v: [i64; 5]) -> i64 {
+    var i: i64;
+    var t: i64;
+    t = 0;
+    for i = 0; i < 5; i = i + 1 {
+        t = t + v[i];
+    }
+    return t;
+}
+
+fn sum_f(v: [f64; 4]) -> f64 {
+    var i: i64;
+    var t: f64;
+    t = 0.0;
+    for i = 0; i < 4; i = i + 1 {
+        t = t + v[i];
+    }
+    return t;
+}
+
+// writes through the parameter: the caller must see the change
+fn put_item(v: [i64; 5]) -> i64 {
+    v[2] = 7;
+    return 0;
+}
+
+// forwards its own parameter to another function
+fn forwards(v: [i64; 5]) -> i64 {
+    return sum_all(v);
+}
+
+fn main() {
+    var a: [i64; 5];
+    var b: [i64; 5];
+    var f: [f64; 4];
+    var n: i64;
+
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    a[3] = 4;
+    a[4] = 5;
+    print(sum_all(a));        // 15
+
+    b[0] = 10;
+    b[1] = 11;
+    b[2] = 12;
+    b[3] = 10;
+    b[4] = 12;
+    print(sum_all(b));        // 55
+
+    f[0] = 1.5;
+    f[1] = 2.5;
+    f[2] = 3.0;
+    f[3] = 3.5;
+    print(sum_f(f));       // 10.500000
+
+    n = put_item(a);
+    print(a[2]);           // 7
+
+    a[2] = 3;
+    print(forwards(a));     // 15
+
+    return 0;
+}
