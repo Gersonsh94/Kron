@@ -2,7 +2,7 @@
   "name": "kron",
   "displayName": "Kron",
   "description": "Kron language support: highlighting, build and run, errors in the editor, completion, go to definition, hover help and outline.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "Codexmy",
   "repository": {
     "type": "git",
