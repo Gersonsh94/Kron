@@ -19,14 +19,4 @@ Language support for Kron while its own IDE is being built.
   Ctrl+Shift+O.
 - **The Kron logo** as the extension icon, and the `{K}` mark as the icon of
   `.kr` files in the explorer, for light and dark themes.
-- Highlighting, `//` comments, bracket matching, indentation, snippets.
-
-## Where the compiler is
-
-A `kronc.exe` in the open folder is used first. Otherwise, the setting
-`kron.compilerPath`, which defaults to `C:\Users\Gerson\Kron-compiler\kronc.exe`.
-
-## Install
-
-Ctrl+Shift+P, "Developer: Install Extension from Location...", choose this
-`kron-lang` folder, then "Developer: Reload Window".
+- Highlighting, `//` comments, bracket matching, indentation, snippets
