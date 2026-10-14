@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'kron-lang/**'
+      - 'kron-vscode/kron-lang/**'
   workflow_dispatch:
 
 jobs:
