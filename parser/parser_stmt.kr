@@ -1,0 +1,2160 @@
+kron_program
+kron_domain parser_stmt;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The parser: functions, parameters, blocks, statements, structs, enums,
+// extern blocks and types. See parser.kr.
+// =========================================================================
+
+// flags of the type just parsed, as a declaration's AST.col packs them:
+// bit 0 float, bit 1 unsigned
+fn prs_fu_bits() -> i64 {
+    return (par_last_is_float & 1) | ((par_last_is_unsigned & 1) << 1);
+}
+
+// the type tag of the type just parsed, where it goes in AST.col (bits 8-15)
+fn prs_vtag_col() -> i64 {
+    return (par_last_vtag & 255) << 8;
+}
+
+// =========================================================================
+// functions
+// =========================================================================
+
+// fn [public|export|private] NAME '(' params ')' [ ('->'|':') type ] block
+fn prs_function() -> ptr<Ast> {
+    var vis: i64 = VIS_DEFAULT;
+    var name: i64 = 0;
+    var params: i64 = 0;
+    var body: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var bits: i64 = 0;
+    par_fn_rettok = 0;
+    par_slice_n = 0;                   // slice names are per function
+    par_in_fn = 1;
+    prs_adv();                         // fn
+    k = prs_ct();
+    if k == KW_GLOBAL_VISIBLE || k == KW_INTER_CLUSTER_EXPORT {
+        vis = VIS_EXPORTED;
+        prs_adv();
+    } else if k == KW_DOMAIN_ISOLATED {
+        prs_adv();
+    }
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    params = prs_param_list();
+    if params == -1 {
+        return 0;
+    }
+    k = prs_ct();
+    if k == TOK_ARROW || k == TOK_COLON {
+        prs_adv();
+        par_last_is_float = 0;
+        par_last_is_unsigned = 0;
+        par_multi = 0;
+        if prs_ct() == TOK_LPAREN {
+            // (T1, T2...): par_multi, and the first type left as the one
+            // just parsed
+            if prs_multi_type() == 0 {
+                return 0;
+            }
+        } else {
+            // fn f() -> S with S a name: the struct it returns
+            if prs_ct() == TOK_IDENTIFIER {
+                par_fn_rettok = prs_cur();
+            }
+            // the type keyword, above the visibility: an export hands C an
+            // f32 as one
+            vis = vis | (prs_ct() << 16);
+            if prs_type() == 0 {
+                return 0;
+            }
+        }
+        bits = prs_fu_bits();
+        pending_ret_float = bits | prs_vtag_col();
+        // remembered by name, for declarations that take the type from a call
+        if (par_last_vtag & 0xFFFFFFFF) != 0 {
+            if par_fnvt_n < 2048 {
+                tset(&par_fnvt_toks, par_fnvt_n, name);
+                tset(&par_fnvt_tags, par_fnvt_n, par_last_vtag & 0xFFFFFFFF);
+                par_fnvt_n = par_fnvt_n + 1;
+            }
+        }
+    }
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    f = prs_new(AST_FUNCTION);
+    if f == 0 {
+        return 0;
+    }
+    f.data = name;
+    f.right = body;
+    f.left = params;
+    f.type_info = vis;
+    f.col = pending_ret_float;           // bit 0 a real; bits 8-15 the tag
+    pending_ret_float = 0;
+    f.child_count = par_multi;           // several results
+    par_multi = 0;
+    f.owner_type = par_fn_rettok;        // the struct it returns, by name
+    par_fn_rettok = 0;
+    par_in_fn = 0;
+    return f;
+}
+
+// '(' ( IDENT ( ':' type )? ( ',' ... )* )? ')' -> the first AST_PARAM,
+// 0 when there are none, -1 on an error
+fn prs_param_list() -> i64 {
+    var head: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    var count: i64 = 0;
+    var k: i64 = 0;
+    prs_adv();                         // (
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RPAREN {
+            break;
+        }
+        if k == TOK_EOF {
+            return -1;
+        }
+        if k == TOK_DOT {
+            // '...': the rest are variadic, in an extern fn only
+            par_custom_msg = "... comes last in the parameters of an extern fn, and only there";
+            if par_extern_mode == 0 { return -1; }
+            prs_adv();
+            if prs_ct() != TOK_DOT { return -1; }
+            prs_adv();
+            if prs_ct() != TOK_DOT { return -1; }
+            prs_adv();
+            if prs_ct() != TOK_RPAREN { return -1; }
+            par_custom_msg = 0;
+            par_variadic = 1;
+            break;
+        }
+        if prs_want(TOK_IDENTIFIER) == 0 { return -1; }
+        count += 1;
+        if count > 16 {
+            par_custom_msg = "a function takes at most 16 parameters";
+            return -1;
+        }
+        p = prs_new(AST_PARAM);
+        if p == 0 {
+            return -1;
+        }
+        p.data = prs_cur();
+        if tail == 0 {
+            head = p;
+        } else {
+            tail.right = p;
+        }
+        tail = p;
+        prs_adv();                     // the name
+        if prs_ct() == TOK_COLON {
+            prs_adv();
+            par_last_is_float = 0;
+            par_last_is_unsigned = 0;
+            // Only ptr<T> sets a width. Left from the parameter before, a
+            // ptr<T> one, it made 'x + 1' on an i64 after it add 8 times 1.
+            par_last_ptr_elem = 0;
+            // the type token: a name here is a struct
+            k = prs_ct();
+            if k == KW_STR || k == TOK_IDENTIFIER {
+                tail.left = prs_cur();
+            }
+            // the type keyword, for an extern fn: how wide the argument is
+            tail.owner_type = prs_ct();
+            if prs_type() == 0 {
+                return -1;
+            }
+            par_note_pstruct(tail.data);       // a parameter p: ptr<S>
+            tail.col = prs_fu_bits() | ((par_last_arr_elem & 15) << 4) | prs_vtag_col();
+            par_coll_of_vtag(tail.data);
+            // an array parameter is passed by address: its length here
+            tail.type_info = par_last_array_len;
+            tail.child_count = par_last_ptr_elem;
+            if par_last_is_slice != 0 {
+                par_slice_add(tail.data);
+            }
+        }
+        if prs_ct() == TOK_COMMA {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // )
+    return head;
+}
+
+// '(' ( expr ( ',' expr )* )? ')' -> the first AST_ARG, 0 when there are
+// none, -1 on an error
+fn prs_arg_list() -> i64 {
+    var head: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var a: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();                         // (
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RPAREN {
+            break;
+        }
+        if k == TOK_EOF {
+            return -1;
+        }
+        e = prs_expression();
+        if e == 0 {
+            return -1;
+        }
+        a = prs_new(AST_ARG);
+        if a == 0 {
+            return -1;
+        }
+        a.left = e;
+        if tail == 0 {
+            head = a;
+        } else {
+            tail.right = a;
+        }
+        tail = a;
+        if prs_ct() == TOK_COMMA {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // )
+    return head;
+}
+
+// -> (T1, T2, ...), up to four, at its '('. par_multi = count | floats << 4
+// | tags << 8: bit 4+i says result i is a real; bits 8+4i..11+4i its type
+// tag in four bits (kind 0-3, element 0-2 << 2). The first type stays as
+// the one just parsed, so a single use of the call sees an ordinary result.
+fn prs_multi_type() -> i64 {
+    var count: i64 = 0;
+    var packed: i64 = 0;
+    var first_vtag: i64 = 0;
+    var tag: i64 = 0;
+    prs_adv();                         // (
+    while 1 == 1 {
+        if count >= 4 {
+            return 0;
+        }
+        par_last_is_float = 0;
+        par_last_is_unsigned = 0;
+        if prs_type() == 0 {
+            return 0;
+        }
+        if count == 0 {
+            mt_first_uns = par_last_is_unsigned;
+            mt_first_float = par_last_is_float;
+            first_vtag = par_last_vtag;
+        }
+        if par_last_is_float != 0 {
+            packed = packed | ((16 << count) & 0xFFFFFFFF);
+        }
+        tag = (par_last_vtag & 3) | ((((par_last_vtag & 0xFFFFFFFF) >> 4) & 3) << 2);
+        packed = packed | ((tag << (count * 4 + 8)) & 0xFFFFFFFF);
+        count += 1;
+        if prs_ct() != TOK_COMMA {
+            break;
+        }
+        prs_adv();
+    }
+    if prs_ct() != TOK_RPAREN {
+        return 0;
+    }
+    prs_adv();
+    packed = packed | count;
+    if count > 1 {
+        par_multi = packed;
+    }
+    par_last_is_float = mt_first_float;
+    par_last_is_unsigned = mt_first_uns;
+    par_last_vtag = first_vtag;
+    return 1;
+}
+
+// the declaration just typed was ptr<S> with S a name: the pair goes in
+// par_ps_*, where codegen finds the struct p points to
+fn par_note_pstruct(name: i64) -> i64 {
+    if par_last_ptr_tok == 0 || name == 0 {
+        return 0;
+    }
+    if par_ps_n < 8192 {
+        tset(&par_ps_decl, par_ps_n, name);
+        tset(&par_ps_type, par_ps_n, par_last_ptr_tok);
+        par_ps_n = par_ps_n + 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// blocks
+// =========================================================================
+
+// '{' statements '}' -> a chain of AST_BLOCK, left = the statement, right =
+// the next. At its '{'.
+fn prs_block() -> ptr<Ast> {
+    var head: ptr<Ast> = 0;
+    var cur: ptr<Ast> = 0;
+    var s: ptr<Ast> = 0;
+    var link: ptr<Ast> = 0;
+    var t: ptr<Tok> = 0;
+    var line: i64 = 0;
+    var k: i64 = 0;
+    prs_adv();                         // {
+    head = prs_new(AST_BLOCK);
+    if head == 0 {
+        return 0;
+    }
+    cur = head;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        t = prs_cur();
+        line = t.line;                 // where the statement starts
+        s = prs_statement();
+        if s == 0 {
+            return 0;
+        }
+        s.line = line;
+        if s.node_type == AST_BLOCK && s.type_info == BLOCK_SPLICE {
+            // a statement the parser turned into several: its chain goes
+            // in as it is
+            s.type_info = 0;
+            if cur.left == 0 {
+                // the block is still empty: the chain's first link takes
+                // its place
+                cur.left = s.left;
+                cur.right = s.right;
+            } else {
+                cur.right = s;
+                cur = s;
+            }
+            while cur.right != 0 {
+                cur = cur.right;
+            }
+        } else if cur.left == 0 {
+            cur.left = s;
+        } else {
+            link = prs_new(AST_BLOCK);
+            if link == 0 {
+                return 0;
+            }
+            link.left = s;
+            cur.right = link;
+            cur = link;
+        }
+    }
+    prs_adv();                         // }
+    return head;
+}
+
+// a statement without its ';': an assignment or an expression (the step
+// of a for)
+fn prs_statement_no_semi() -> ptr<Ast> {
+    var target: ptr<Ast> = prs_expression();
+    var value: ptr<Ast> = 0;
+    if target == 0 {
+        return 0;
+    }
+    if prs_ct() != TOK_ASSIGN {
+        return target;
+    }
+    prs_adv();
+    value = prs_expression();
+    if value == 0 {
+        return 0;
+    }
+    return par_make_assign(target, value);
+}
+
+// =========================================================================
+// statements
+// =========================================================================
+
+fn prs_statement() -> ptr<Ast> {
+    var k: i64 = prs_ct();
+    var t: ptr<Tok> = 0;
+    if k == KW_VAR || k == KW_CONST { return prs_var(); }
+    if k == KW_OUTB { return prs_args_stmt(AST_OUTB, 2); }
+    if k == KW_POKE { return prs_args_stmt(AST_POKE, 2); }
+    if k == KW_BEEP { return prs_args_stmt(AST_BEEP, 2); }
+    if k == KW_SAVEFILE { return prs_args_stmt(AST_SAVEFILE, 3); }
+    if k == KW_POKE8 { return prs_args_stmt(AST_POKE8, 2); }
+    if k == KW_POKE16 { return prs_args_stmt(AST_POKE16, 2); }
+    if k == KW_POKE32 { return prs_args_stmt(AST_POKE32, 2); }
+    if k == KW_ASM { return prs_asm(); }
+    if k == KW_IF { return prs_if(); }
+    if k == KW_SWITCH { return prs_switch(); }
+    if k == KW_WHILE { return prs_while(); }
+    if k == KW_FOR { return prs_for(); }
+    if k == KW_RAW { return prs_raw(); }
+    if k == KW_LOOP { return prs_loop(); }
+    if k == KW_RETURN { return prs_return(); }
+    if k == KW_PRINT { return prs_print(AST_PRINT); }
+    if k == KW_PRINTC { return prs_print(AST_PRINTC); }
+    if k == KW_FAIL { return prs_fail(); }
+    if k == KW_VEC2_STORE { return prs_vec2_store(); }
+    if k == KW_THREAD_WAIT { return prs_thread_one(AST_THREAD_WAIT); }
+    if k == KW_THREAD_YIELD { return prs_expr_stmt(); }
+    if k == KW_LOCK_INIT { return prs_thread_one(AST_LOCK_INIT); }
+    if k == KW_LOCK_TAKE { return prs_thread_one(AST_LOCK_TAKE); }
+    if k == KW_LOCK_GIVE { return prs_thread_one(AST_LOCK_GIVE); }
+    if k == KW_PRINTFAIL { return prs_printfail(); }
+    if k == KW_BREAK { return prs_jump(AST_BREAK); }
+    if k == KW_CONTINUE { return prs_jump(AST_CONTINUE); }
+    if k == TOK_LBRACE { return prs_block(); }
+    if k == TOK_IDENTIFIER {
+        // a, b = f(): a name followed by a comma
+        if par_pos + 1 < par_token_count {
+            t = par_tokens + (par_pos + 1) * PRS_TOK;
+            if t.kind == TOK_COMMA {
+                t = prs_cur();
+                prs_adv();
+                return prs_multi_assign(t, 0);
+            }
+        }
+        return prs_expr_stmt();
+    }
+    if k == TOK_STAR { return prs_expr_stmt(); }
+    return 0;
+}
+
+// var NAME [: type] [= value] ;   (const too)
+fn prs_var() -> ptr<Ast> {
+    var name: i64 = 0;
+    var typetok: i64 = 0;
+    var value: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var len: i64 = 0;
+    prs_adv();                         // var / const
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    // var a, b = f(): several names take the results of one call
+    if prs_ct() == TOK_COMMA {
+        return prs_multi_assign(name, 1);
+    }
+    par_last_array_len = 0;
+    par_last_ptr_elem = 0;
+    par_last_is_float = 0;
+    par_last_is_unsigned = 0;
+    par_last_arr_elem = 0;
+    par_last_row_len = 0;
+    par_last_vtag = 0;
+    par_decl_typed = 0;
+    if prs_ct() == TOK_COLON {
+        prs_adv();
+        // the type token: a name may be a struct
+        k = prs_ct();
+        if k == KW_F32 || k == KW_F64 {
+            par_last_is_float = 1;
+        } else if k == KW_STR || k == TOK_IDENTIFIER {
+            typetok = prs_cur();
+        }
+        if prs_type() == 0 {
+            return 0;
+        }
+        par_note_pstruct(name);        // var p: ptr<S>
+        par_decl_typed = 1;
+        // a typed declaration may leave out the value
+        if prs_ct() == TOK_SEMICOLON {
+            prs_adv();
+            len = par_last_array_len;
+            d = prs_new(AST_VAR_DECL);
+            if d == 0 {
+                return 0;
+            }
+            d.data = name;
+            d.right = 0;
+            d.left = typetok;                  // the struct type, or 0
+            d.type_info = len;                 // the array length, or 0
+            d.owner_type = par_last_row_len;   // a 2-D array's row stride
+            d.child_count = par_last_ptr_elem; // a pointer's element width
+            if par_last_is_slice != 0 {
+                par_slice_add(name);
+            }
+            d.col = prs_decl_col();
+            par_coll_of_vtag(name);
+            return d;
+        }
+    }
+    if prs_want(TOK_ASSIGN) == 0 { return 0; }
+    prs_adv();
+    value = prs_expression();
+    if value == 0 {
+        return 0;
+    }
+    // var x = f() with f returning a text, list<T> or map<T>: x is one too
+    if par_decl_typed == 0 {
+        par_infer_vtag(value);
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    d = prs_new(AST_VAR_DECL);
+    if d == 0 {
+        return 0;
+    }
+    d.data = name;
+    d.child_count = par_last_ptr_elem;
+    if par_last_is_slice != 0 {
+        par_slice_add(name);
+    }
+    d.col = prs_decl_col();
+    par_coll_of_vtag(name);
+    d.left = typetok;
+    d.type_info = par_last_array_len;
+    d.owner_type = par_last_row_len;
+    d.right = value;
+    return d;
+}
+
+// AST.col of a declaration: bit 0 float, bit 1 unsigned, bit 3 a type was
+// written, bits 4-7 the array element width, bits 8-15 the type tag
+fn prs_decl_col() -> i64 {
+    return prs_fu_bits() | ((par_last_arr_elem & 15) << 4) | prs_vtag_col() | ((par_decl_typed << 3) & 0xFFFF);
+}
+
+// the initial value of an untyped declaration: a call to a function
+// declared earlier with a text, list<T> or map<T> result, or an element of
+// a list<text>, gives the type just parsed
+fn par_infer_vtag(value: ptr<Ast>) -> i64 {
+    var tag: i64 = 0;
+    var name: i64 = 0;
+    var i: i64 = 0;
+    if value.node_type != AST_CALL {
+        return 0;
+    }
+    tag = value.col >> 8;
+    if tag != 0 {
+        par_last_vtag = tag;
+        return 0;
+    }
+    name = value.data;
+    if name == 0 {
+        return 0;
+    }
+    while i < par_fnvt_n {
+        if prs_tok_same(tget(&par_fnvt_toks, i), name) == 1 {
+            par_last_vtag = tget(&par_fnvt_tags, i);
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// a, b = f();  at the ',' after the first name. The targets are names, '_'
+// for a result nobody wants. With 'var' each name is declared first and the
+// whole comes back as a BLOCK_SPLICE chain: var a; var b; AST_MULTI.
+fn prs_multi_assign(first: ptr<Tok>, declare: i64) -> ptr<Ast> {
+    var head: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var arg: ptr<Ast> = 0;
+    var id: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    var value: ptr<Ast> = 0;
+    var m: ptr<Ast> = 0;
+    var name: ptr<Tok> = first;
+    var c: i64 = 0;
+    var chain_head: i64 = 0;
+    var chain_tail: i64 = 0;
+    prs_chain_head = 0;
+    prs_chain_tail = 0;
+    while 1 == 1 {
+        arg = prs_new(AST_ARG);
+        if arg == 0 {
+            return 0;
+        }
+        if tail == 0 {
+            head = arg;
+        } else {
+            tail.right = arg;
+        }
+        tail = arg;
+        c = 0;
+        if name.length == 1 {
+            c = bget(name.value);
+        }
+        if c != 95 {
+            id = prs_new(AST_IDENTIFIER);
+            if id == 0 {
+                return 0;
+            }
+            id.data = name;
+            tail.left = id;
+            if declare != 0 {
+                // var NAME; -- typed by codegen from the function's results
+                d = prs_new(AST_VAR_DECL);
+                if d == 0 {
+                    return 0;
+                }
+                d.data = name;
+                prs_chain(d);
+            }
+        }
+        if prs_ct() != TOK_COMMA {
+            break;
+        }
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        name = prs_cur();
+        prs_adv();
+    }
+    if prs_want(TOK_ASSIGN) == 0 { return 0; }
+    prs_adv();
+    // the value may hold a fn with an a, b = of its own: the chain is kept
+    chain_head = prs_chain_head;
+    chain_tail = prs_chain_tail;
+    value = prs_expression();
+    prs_chain_head = chain_head;
+    prs_chain_tail = chain_tail;
+    if value == 0 {
+        return 0;
+    }
+    if value.node_type != AST_CALL {
+        par_custom_msg = "a, b = ... takes the results of a function call";
+        return 0;
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    m = prs_new(AST_MULTI);
+    if m == 0 {
+        return 0;
+    }
+    m.left = head;
+    m.right = value;
+    m.data = declare;
+    if declare == 0 {
+        return m;                      // a, b = f(): one statement
+    }
+    if par_in_fn == 0 {
+        par_custom_msg = "var a, b = f() is for inside a function";
+        return 0;
+    }
+    prs_chain(m);
+    d = prs_chain_head;
+    d.type_info = BLOCK_SPLICE;
+    return d;
+}
+
+// s, at the end of the splice chain being built
+fn prs_chain(s: ptr<Ast>) -> i64 {
+    var b: ptr<Ast> = prs_new(AST_BLOCK);
+    var t: ptr<Ast> = 0;
+    if b == 0 {
+        return 0;
+    }
+    b.left = s;
+    if prs_chain_tail != 0 {
+        t = prs_chain_tail;
+        t.right = b;
+        prs_chain_tail = b;
+        return 0;
+    }
+    prs_chain_head = b;
+    prs_chain_tail = b;
+    return 0;
+}
+
+// if cond block [else (if ... | block)]
+fn prs_if() -> ptr<Ast> {
+    var cond: ptr<Ast> = 0;
+    var then: ptr<Ast> = 0;
+    var other: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    cond = prs_opt_paren_expr();
+    if cond == 0 {
+        return 0;
+    }
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    then = prs_block();
+    if then == 0 {
+        return 0;
+    }
+    if prs_ct() == KW_ELSE {
+        prs_adv();
+        if prs_ct() == KW_IF {
+            other = prs_statement();           // a chained if
+        } else {
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            other = prs_block();
+        }
+        if other == 0 {
+            return 0;
+        }
+    }
+    n = prs_new(AST_IF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = cond;
+    n.left = then;
+    n.right = other;
+    return n;
+}
+
+// switch x { case a: { } case b: { } default: { } }
+// becomes  if x == a {} else if x == b {} else {}: the subject is a name,
+// so it can be read once per case
+fn prs_switch() -> ptr<Ast> {
+    var subject: i64 = 0;
+    var head: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var id: ptr<Ast> = 0;
+    var value: ptr<Ast> = 0;
+    var cond: ptr<Ast> = 0;
+    var body: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();                         // switch
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    subject = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    while 1 == 1 {
+        k = prs_ct();
+        if k == KW_CASE {
+            prs_adv();
+            id = prs_new(AST_IDENTIFIER);
+            if id == 0 {
+                return 0;
+            }
+            id.data = subject;
+            value = prs_expression();
+            if value == 0 {
+                return 0;
+            }
+            cond = prs_new(AST_BINOP);
+            if cond == 0 {
+                return 0;
+            }
+            cond.left = id;
+            cond.right = value;
+            cond.data = TOK_EQ;
+            if prs_ct() != TOK_COLON {
+                return 0;
+            }
+            prs_adv();
+            if prs_ct() != TOK_LBRACE {
+                return 0;
+            }
+            body = prs_block();
+            if body == 0 {
+                return 0;
+            }
+            n = prs_new(AST_IF);
+            if n == 0 {
+                return 0;
+            }
+            n.data = cond;
+            n.left = body;
+            n.right = 0;
+            if tail == 0 {
+                head = n;
+            } else {
+                tail.right = n;
+            }
+            tail = n;
+        } else if k == KW_DEFAULT {
+            prs_adv();
+            if prs_want(TOK_COLON) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            body = prs_block();
+            if body == 0 {
+                return 0;
+            }
+            if tail == 0 {
+                return 0;              // a default with no case before it
+            }
+            tail.right = body;
+            if prs_want(TOK_RBRACE) == 0 { return 0; }
+            break;
+        } else if k == TOK_RBRACE {
+            break;
+        } else {
+            return 0;
+        }
+    }
+    prs_adv();                         // }
+    if head == 0 {
+        return 0;                      // a switch needs a case
+    }
+    return head;
+}
+
+fn prs_while() -> ptr<Ast> {
+    var cond: ptr<Ast> = 0;
+    var body: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    cond = prs_opt_paren_expr();
+    if cond == 0 {
+        return 0;
+    }
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    n = prs_new(AST_WHILE);
+    if n == 0 {
+        return 0;
+    }
+    n.data = cond;
+    n.right = body;
+    return n;
+}
+
+// loop { }: a while with no condition
+fn prs_loop() -> ptr<Ast> {
+    var body: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    n = prs_new(AST_WHILE);
+    if n == 0 {
+        return 0;
+    }
+    n.data = 0;
+    n.right = body;
+    return n;
+}
+
+// raw { BODY }: a block with a mark; the 'raw' token in AST.data, for
+// positions
+fn prs_raw() -> ptr<Ast> {
+    var kw: i64 = prs_cur();
+    var body: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    n = prs_new(AST_BLOCK);
+    if n == 0 {
+        return 0;
+    }
+    n.left = body;
+    n.data = kw;
+    n.type_info = BLOCK_RAW;
+    return n;
+}
+
+// for INIT; COND; STEP { BODY }, a block and a while; for x in l { } over a
+// list<T>
+fn prs_for() -> ptr<Ast> {
+    var t: ptr<Tok> = 0;
+    var init: ptr<Ast> = 0;
+    var cond: ptr<Ast> = 0;
+    var step: ptr<Ast> = 0;
+    var body: ptr<Ast> = 0;
+    var w: ptr<Ast> = 0;
+    var b1: ptr<Ast> = 0;
+    var b2: ptr<Ast> = 0;
+    prs_adv();
+    if prs_ct() == TOK_IDENTIFIER && par_pos + 1 < par_token_count {
+        t = par_tokens + (par_pos + 1) * PRS_TOK;
+        if t.kind == KW_IN {
+            return prs_for_in();
+        }
+    }
+    init = prs_statement();
+    if init == 0 {
+        return 0;
+    }
+    par_no_slit = par_no_slit + 1;     // the condition and the step reach the '{'
+    cond = prs_expression();
+    par_no_slit = par_no_slit - 1;
+    if cond == 0 {
+        return 0;
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    par_no_slit = par_no_slit + 1;
+    step = prs_statement_no_semi();
+    par_no_slit = par_no_slit - 1;
+    if step == 0 {
+        return 0;
+    }
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    // the step in the while's own left: continue runs it before looping
+    w = prs_new(AST_WHILE);
+    if w == 0 {
+        return 0;
+    }
+    w.data = cond;
+    w.right = body;
+    w.left = step;
+    b1 = prs_new(AST_BLOCK);
+    if b1 == 0 {
+        return 0;
+    }
+    b1.left = init;
+    b2 = prs_new(AST_BLOCK);
+    if b2 == 0 {
+        return 0;
+    }
+    b2.left = w;
+    b1.right = b2;
+    return b1;
+}
+
+// a made name __xxx_NNNN: prefix, then the number in four digits
+fn prs_make_name(at: i64, prefix: i64, plen: i64, num: i64) -> i64 {
+    var i: i64 = 0;
+    var d: i64 = num;
+    while i < plen {
+        bset(at + i, bget(prefix + i));
+        i += 1;
+    }
+    i = 3;
+    while i >= 0 {
+        bset(at + plen + i, 48 + d % 10);
+        d = d / 10;
+        i -= 1;
+    }
+    return 0;
+}
+
+// for x in l { BODY }, at x, with l a list<T>. It becomes
+//     { var __for_N = 0;
+//       while __for_N < list_len(l) {  var x = l[__for_N];  BODY  }
+//       step: __for_N = __for_N + 1 }
+fn prs_for_in() -> ptr<Ast> {
+    var x: ptr<Tok> = prs_cur();
+    var l: i64 = 0;
+    var how: i64 = 0;
+    var k: i64 = 0;
+    var num: i64 = 0;
+    var name: i64 = 0;
+    var ctr: ptr<Tok> = 0;
+    var body: ptr<Ast> = 0;
+    var id: ptr<Ast> = 0;
+    var ix: ptr<Ast> = 0;
+    var rd: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    var blk: ptr<Ast> = 0;
+    var arg: ptr<Ast> = 0;
+    var cn: ptr<Ast> = 0;
+    var id2: ptr<Ast> = 0;
+    var cond: ptr<Ast> = 0;
+    var one: ptr<Ast> = 0;
+    var sum: ptr<Ast> = 0;
+    var step: ptr<Ast> = 0;
+    var w: ptr<Ast> = 0;
+    var zero: ptr<Ast> = 0;
+    var b1: ptr<Ast> = 0;
+    var b2: ptr<Ast> = 0;
+    var flags: i64 = 0;
+    prs_adv();                         // x
+    prs_adv();                         // in
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    l = prs_cur();
+    how = par_is_slice(l);             // what l[i] turns into
+    k = how & 255;
+    if k != 7 && (k < 2 || k > 3) {
+        par_custom_msg = "for x in l: l has to be a list<T> declared before";
+        return 0;
+    }
+    par_fi_stok = par_coll_stok;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    // the hidden counter: a token of its own, __for_N
+    num = par_for_n;
+    if num >= 4096 {
+        return 0;
+    }
+    par_for_n = num + 1;
+    name = &par_for_names + num * 16;
+    prs_make_name(name, "__for_", 6, num);
+    ctr = &par_for_toks + num * PRS_TOK;
+    ctr.kind = TOK_IDENTIFIER;
+    ctr.value = name;
+    ctr.length = 10;
+    ctr.line = x.line;
+    ctr.col = 0;
+    // the body, with x declared at its top
+    body = prs_block();
+    if body == 0 {
+        return 0;
+    }
+    // x = l[__for_N], through the call l[i] becomes
+    id = prs_new(AST_IDENTIFIER);
+    if id == 0 {
+        return 0;
+    }
+    id.data = ctr;
+    ix = prs_new(AST_INDEX);
+    if ix == 0 {
+        return 0;
+    }
+    ix.right = id;
+    ix.data = l;
+    rd = par_slice_get_call(ix, how);
+    if rd == 0 {
+        return 0;
+    }
+    d = prs_new(AST_VAR_DECL);
+    if d == 0 {
+        return 0;
+    }
+    d.data = x;
+    d.right = rd;
+    if k == 7 {
+        d.left = par_fi_stok;          // a list<S>: x is an S
+    }
+    // x's flags: a real for a list<f64>, the element's tag otherwise
+    flags = (how & 0xFF00) | 8;
+    if k == 3 {
+        flags = flags | 1;
+    }
+    d.col = flags;
+    blk = prs_new(AST_BLOCK);
+    if blk == 0 {
+        return 0;
+    }
+    blk.left = d;
+    blk.right = body;                  // the declaration, then the body
+    // the condition: __for_N < list_len(l)
+    id = prs_new(AST_IDENTIFIER);
+    if id == 0 {
+        return 0;
+    }
+    id.data = l;
+    arg = prs_new(AST_ARG);
+    if arg == 0 {
+        return 0;
+    }
+    arg.left = id;
+    cn = prs_new(AST_CALL);
+    if cn == 0 {
+        return 0;
+    }
+    cn.right = arg;
+    cn.data = prs_made(PT_LIST_LEN);
+    id2 = prs_new(AST_IDENTIFIER);
+    if id2 == 0 {
+        return 0;
+    }
+    id2.data = ctr;
+    cond = prs_new(AST_BINOP);
+    if cond == 0 {
+        return 0;
+    }
+    cond.left = id2;
+    cond.right = cn;
+    cond.data = TOK_LT;
+    // the step: __for_N = __for_N + 1
+    id = prs_new(AST_IDENTIFIER);
+    if id == 0 {
+        return 0;
+    }
+    id.data = ctr;
+    one = prs_new(AST_INTEGER_LIT);
+    if one == 0 {
+        return 0;
+    }
+    one.data = prs_made(PT_ONE);
+    sum = prs_new(AST_BINOP);
+    if sum == 0 {
+        return 0;
+    }
+    sum.left = id;
+    sum.right = one;
+    sum.data = TOK_PLUS;
+    id2 = prs_new(AST_IDENTIFIER);
+    if id2 == 0 {
+        return 0;
+    }
+    id2.data = ctr;
+    step = prs_new(AST_ASSIGN);
+    if step == 0 {
+        return 0;
+    }
+    step.left = id2;
+    step.right = sum;
+    w = prs_new(AST_WHILE);
+    if w == 0 {
+        return 0;
+    }
+    w.left = step;
+    w.data = cond;
+    w.right = blk;
+    // var __for_N = 0, then the loop
+    zero = prs_new(AST_INTEGER_LIT);
+    if zero == 0 {
+        return 0;
+    }
+    zero.data = prs_made(PT_ZERO);
+    d = prs_new(AST_VAR_DECL);
+    if d == 0 {
+        return 0;
+    }
+    d.data = ctr;
+    d.right = zero;
+    d.col = 8;
+    b1 = prs_new(AST_BLOCK);
+    if b1 == 0 {
+        return 0;
+    }
+    b1.left = d;
+    b2 = prs_new(AST_BLOCK);
+    if b2 == 0 {
+        return 0;
+    }
+    b2.left = w;
+    b1.right = b2;
+    return b1;
+}
+
+// return [expr (, expr)*] ;  -- the values after the first, an AST_ARG
+// chain in left
+fn prs_return() -> ptr<Ast> {
+    var first: ptr<Ast> = 0;
+    var head: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var a: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    if prs_ct() == TOK_SEMICOLON {
+        prs_adv();
+        return prs_new(AST_RETURN);
+    }
+    first = prs_expression();
+    if first == 0 {
+        return 0;
+    }
+    while prs_ct() == TOK_COMMA {
+        prs_adv();
+        e = prs_expression();
+        if e == 0 {
+            return 0;
+        }
+        a = prs_new(AST_ARG);
+        if a == 0 {
+            return 0;
+        }
+        a.left = e;
+        if tail == 0 {
+            head = a;
+        } else {
+            tail.right = a;
+        }
+        tail = a;
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_RETURN);
+    if n == 0 {
+        return 0;
+    }
+    n.right = first;
+    n.left = head;
+    return n;
+}
+
+// print(expr);  printc(expr);
+fn prs_print(kind: i64) -> ptr<Ast> {
+    var e: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    e = prs_expression();
+    if e == 0 {
+        return 0;
+    }
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(kind);
+    if n == 0 {
+        return 0;
+    }
+    n.right = e;
+    return n;
+}
+
+// thread_wait(h);  lock_init(n);  lock_take(n);  lock_give(n);
+fn prs_thread_one(kind: i64) -> ptr<Ast> {
+    var e: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    par_thread_node = kind;
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    e = prs_expression();
+    if e == 0 {
+        return 0;
+    }
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(par_thread_node);
+    if n == 0 {
+        return 0;
+    }
+    n.right = e;
+    return n;
+}
+
+// vec2_store(addr, value);
+fn prs_vec2_store() -> ptr<Ast> {
+    var addr: ptr<Ast> = 0;
+    var value: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    addr = prs_expression();
+    if addr == 0 {
+        return 0;
+    }
+    if prs_want(TOK_COMMA) == 0 { return 0; }
+    prs_adv();
+    value = prs_expression();
+    if value == 0 {
+        return 0;
+    }
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_VEC2_STORE);
+    if n == 0 {
+        return 0;
+    }
+    n.right = value;
+    n.left = addr;
+    return n;
+}
+
+// fail "cause";  fail "cause" hint "what to do";
+// the texts as string-literal nodes: codegen emits them as it emits any
+fn prs_fail() -> ptr<Ast> {
+    var cause: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var hn: ptr<Ast> = 0;
+    var t: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_STRING) == 0 { return 0; }
+    t = prs_cur();
+    cause = prs_new(AST_STRING_LIT);
+    if cause == 0 {
+        return 0;
+    }
+    cause.data = t;
+    prs_adv();
+    f = prs_new(AST_FAIL);
+    if f == 0 {
+        return 0;
+    }
+    f.data = cause;
+    if prs_ct() == KW_HINT {
+        prs_adv();
+        if prs_want(TOK_STRING) == 0 { return 0; }
+        t = prs_cur();
+        hn = prs_new(AST_STRING_LIT);
+        if hn == 0 {
+            return 0;
+        }
+        hn.data = t;
+        f.left = hn;
+        prs_adv();
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    return f;
+}
+
+// print_fail();
+fn prs_printfail() -> ptr<Ast> {
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    return prs_new(AST_PRINTFAIL);
+}
+
+// break;  continue;
+fn prs_jump(kind: i64) -> ptr<Ast> {
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    return prs_new(kind);
+}
+
+// outb(port, value);  poke(addr, value);  beep(hz, ms);  poke8/16/32;
+// savefile(buffer, length, name);
+fn prs_args_stmt(kind: i64, count: i64) -> ptr<Ast> {
+    var a: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    var c: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    if count == 2 {
+        // the keyword token, for the position of a warning about it
+        par_stmt_kw = prs_cur();
+    }
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    a = prs_expression();
+    if a == 0 {
+        return 0;
+    }
+    if prs_want(TOK_COMMA) == 0 { return 0; }
+    prs_adv();
+    b = prs_expression();
+    if b == 0 {
+        return 0;
+    }
+    if count == 3 {
+        if prs_want(TOK_COMMA) == 0 { return 0; }
+        prs_adv();
+        c = prs_expression();
+        if c == 0 {
+            return 0;
+        }
+    }
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(kind);
+    if n == 0 {
+        return 0;
+    }
+    n.left = a;
+    n.right = b;
+    if count == 3 {
+        n.data = c;                    // savefile: the name
+    } else {
+        n.data = par_stmt_kw;
+    }
+    return n;
+}
+
+// asm { "instruction"; "instruction"; }
+fn prs_asm() -> ptr<Ast> {
+    var n: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var s: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_ASM);
+    if n == 0 {
+        return 0;
+    }
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_want(TOK_STRING) == 0 { return 0; }
+        s = prs_new(AST_STRING_LIT);
+        if s == 0 {
+            return 0;
+        }
+        s.data = prs_cur();
+        prs_adv();
+        if prs_ct() == TOK_SEMICOLON {
+            prs_adv();
+        }
+        if tail == 0 {
+            n.right = s;
+        } else {
+            tail.right = s;
+        }
+        tail = s;
+    }
+    prs_adv();
+    return n;
+}
+
+// an expression as a statement, an assignment, or a compound one:
+// x += e is built as x = x + e, the target node on both sides
+fn prs_expr_stmt() -> ptr<Ast> {
+    var target: ptr<Ast> = prs_expression();
+    var value: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var op: i64 = 0;
+    if target == 0 {
+        return 0;
+    }
+    k = prs_ct();
+    if k == TOK_ASSIGN {
+        prs_adv();
+        value = prs_expression();
+        if value == 0 {
+            return 0;
+        }
+    } else {
+        if k == TOK_PLUS_ASSIGN {
+            op = TOK_PLUS;
+        } else if k == TOK_MINUS_ASSIGN {
+            op = TOK_MINUS;
+        } else if k == TOK_STAR_ASSIGN {
+            op = TOK_STAR;
+        } else if k == TOK_SLASH_ASSIGN {
+            op = TOK_SLASH;
+        } else if k == TOK_XOR_ASSIGN {
+            op = TOK_CARET;
+        } else {
+            if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+            prs_adv();
+            return target;             // the expression is the statement
+        }
+        prs_adv();
+        e = prs_expression();
+        if e == 0 {
+            return 0;
+        }
+        value = prs_new(AST_BINOP);
+        if value == 0 {
+            return 0;
+        }
+        value.left = target;
+        value.right = e;
+        value.data = op;
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    return par_make_assign(target, value);
+}
+
+// a condition: it runs up to the '{' of the block, so a struct literal
+// cannot be told from it here
+fn prs_opt_paren_expr() -> ptr<Ast> {
+    var e: ptr<Ast> = 0;
+    par_no_slit = par_no_slit + 1;
+    e = prs_expression();
+    par_no_slit = par_no_slit - 1;
+    return e;
+}
+
+// =========================================================================
+// structs and enums
+// =========================================================================
+
+// struct NAME '{' ( FIELD ':' type ';' )* '}'
+fn prs_struct() -> ptr<Ast> {
+    var name: i64 = 0;
+    var s: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();                         // struct
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    s = prs_new(AST_STRUCT_DEF);
+    if s == 0 {
+        return 0;
+    }
+    s.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        par_expected = TOK_IDENTIFIER;
+        if prs_is_field_name(k) == 0 {
+            return 0;
+        }
+        f = prs_new(AST_FIELD);
+        if f == 0 {
+            return 0;
+        }
+        f.data = prs_cur();
+        if tail == 0 {
+            s.right = f;
+        } else {
+            tail.right = f;
+        }
+        tail = f;
+        prs_adv();                     // the field's name
+        if prs_ct() == TOK_COLON {
+            prs_adv();
+            // the type: its token type gives the width, the token itself
+            // names another struct
+            tail.type_info = prs_ct();
+            tail.left = prs_cur();
+            if prs_type() == 0 {
+                return 0;
+            }
+            tail.col = prs_vtag_col();
+        }
+        if prs_ct() == TOK_SEMICOLON {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // }
+    return s;
+}
+
+// enum NAME { A, B = 3, C }: members number from zero, a value moves the
+// counter. A chain of AST_FIELD, data the name, type_info the value.
+fn prs_enum() -> ptr<Ast> {
+    var name: i64 = 0;
+    var en: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var m: ptr<Ast> = 0;
+    var next: i64 = 0;
+    var k: i64 = 0;
+    prs_adv();                         // enum
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    en = prs_new(AST_ENUM_DEF);
+    if en == 0 {
+        return 0;
+    }
+    en.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        par_expected = TOK_IDENTIFIER;
+        if prs_is_field_name(k) == 0 {
+            return 0;
+        }
+        m = prs_new(AST_FIELD);
+        if m == 0 {
+            return 0;
+        }
+        m.data = prs_cur();
+        prs_adv();
+        if prs_ct() == TOK_ASSIGN {
+            prs_adv();
+            k = prs_ct();
+            if k != TOK_INTEGER && k != TOK_HEX {
+                return 0;
+            }
+            next = prs_tok_uint(prs_cur());
+            prs_adv();
+        }
+        m.type_info = next;
+        next += 1;
+        if tail == 0 {
+            en.right = m;
+        } else {
+            tail.right = m;
+        }
+        tail = m;
+        if prs_ct() == TOK_COMMA {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // }
+    return en;
+}
+
+// Vec3{1.0, 2.0, 3.0} or Vec3{x: 1.0, z: 3.0}, at the '{'. The first
+// initialiser decides which of the two forms the whole literal is.
+fn prs_struct_lit(name: i64) -> ptr<Ast> {
+    var n: ptr<Ast> = prs_new(AST_STRUCT_LIT);
+    var tail: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var v: ptr<Ast> = 0;
+    var form: i64 = 0;                 // 1 named, 2 positional
+    var k: i64 = 0;
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    prs_adv();                         // {
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        f = prs_new(AST_FINIT);
+        if f == 0 {
+            return 0;
+        }
+        if prs_ct() == TOK_IDENTIFIER && prs_peek_next() == TOK_COLON {
+            if form == 2 {
+                return 0;
+            }
+            form = 1;
+            f.data = prs_cur();
+            prs_adv();                 // the name
+            prs_adv();                 // :
+        } else {
+            if form == 1 {
+                return 0;
+            }
+            form = 2;
+        }
+        v = prs_expression();
+        if v == 0 {
+            return 0;
+        }
+        f.left = v;
+        if tail == 0 {
+            n.right = f;
+        } else {
+            tail.right = f;
+        }
+        tail = f;
+        if prs_ct() == TOK_COMMA {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // }
+    return n;
+}
+
+// =========================================================================
+// extern blocks
+// =========================================================================
+
+// extern STRING (',' STRING)* '{' ( fn NAME '(' params [, ...] ')'
+// [ '->' type ] ';' )* '}'  -> the first AST_EXTERN. Every function keeps
+// the list of the libraries, tried in order until one loads.
+fn prs_extern() -> ptr<Ast> {
+    var libs: ptr<Ast> = 0;
+    var last: ptr<Ast> = 0;
+    var a: ptr<Ast> = 0;
+    var first: ptr<Ast> = 0;
+    var prev: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var params: i64 = 0;
+    var k: i64 = 0;
+    var kind: i64 = 0;
+    prs_adv();                         // extern
+    while 1 == 1 {
+        if prs_want(TOK_STRING) == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        a = prs_new(AST_ARG);
+        if a == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        a.data = prs_cur();
+        if last == 0 {
+            libs = a;
+        } else {
+            last.right = a;
+        }
+        last = a;
+        prs_adv();
+        if prs_ct() != TOK_COMMA {
+            break;
+        }
+        prs_adv();
+    }
+    if prs_want(TOK_LBRACE) == 0 {
+        par_extern_mode = 0;
+        return 0;
+    }
+    prs_adv();
+    while prs_ct() != TOK_RBRACE {
+        if prs_want(KW_FN) == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        f = prs_new(AST_EXTERN);
+        if f == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        f.data = prs_cur();
+        f.owner_type = libs;
+        prs_adv();
+        if prs_want(TOK_LPAREN) == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        par_extern_mode = 1;
+        par_variadic = 0;
+        params = prs_param_list();
+        par_extern_mode = 0;
+        if params == -1 {
+            return 0;
+        }
+        f.left = params;
+        f.col = par_variadic;
+        f.child_count = 0;
+        k = prs_ct();
+        if k == TOK_ARROW || k == TOK_COLON {
+            prs_adv();
+            // what it returns, for __ccall: 1 i32, 2 u32, 3 u8 or bool,
+            // 4 u16, 5 i16, 6 i8, 8 f64, 9 f32, 0 a whole register
+            k = prs_ct();
+            kind = 0;
+            if k == KW_I32 { kind = 1; }
+            if k == KW_U32 { kind = 2; }
+            if k == KW_U8 || k == KW_BOOL { kind = 3; }
+            if k == KW_U16 { kind = 4; }
+            if k == KW_I16 { kind = 5; }
+            if k == KW_I8 { kind = 6; }
+            if k == KW_F64 { kind = 8; }
+            if k == KW_F32 { kind = 9; }
+            f.child_count = kind;
+            par_last_is_float = 0;
+            par_last_is_unsigned = 0;
+            if prs_type() == 0 {
+                par_extern_mode = 0;
+                return 0;
+            }
+        }
+        if prs_ct() == TOK_LBRACE {
+            par_custom_msg = "an extern fn has no body: its code is in the library -- end it with ;";
+            par_extern_mode = 0;
+            return 0;
+        }
+        if prs_want(TOK_SEMICOLON) == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+        prs_adv();
+        if prev == 0 {
+            first = f;
+        } else {
+            prev.right = f;
+        }
+        prev = f;
+    }
+    prs_adv();                         // }
+    if first == 0 {
+        // an empty block still gives a node: data 0, nothing to declare
+        first = prs_new(AST_EXTERN);
+        if first == 0 {
+            par_extern_mode = 0;
+            return 0;
+        }
+    }
+    return first;
+}
+
+// =========================================================================
+// types
+// =========================================================================
+
+// 1 'text', 2 'list', 3 'map', 0 any other name
+fn par_builtin_type(t: ptr<Tok>) -> i64 {
+    if prs_tok_is(t, "map", 3) == 1 { return 3; }
+    if prs_tok_is(t, "text", 4) == 1 { return 1; }
+    if prs_tok_is(t, "list", 4) == 1 { return 2; }
+    return 0;
+}
+
+// the width in bytes of a scalar type token, 0 when it has none
+fn prs_type_width(k: i64) -> i64 {
+    if k == KW_U8 || k == KW_I8 || k == KW_BOOL { return 1; }
+    if k == KW_U16 || k == KW_I16 { return 2; }
+    if k == KW_U32 || k == KW_I32 || k == KW_F32 { return 4; }
+    if k == KW_U64 || k == KW_I64 || k == KW_F64 { return 8; }
+    if k == TOK_IDENTIFIER { return 8; }
+    return 0;
+}
+
+// the value of a decimal or 0x hex integer token
+fn prs_tok_uint(t: ptr<Tok>) -> i64 {
+    var p: i64 = t.value;
+    var n: i64 = t.length;
+    var v: i64 = 0;
+    var c: i64 = 0;
+    var b: i64 = 0;
+    if n == 0 {
+        return 0;
+    }
+    if n > 2 && bget(p) == 48 {
+        b = bget(p + 1);
+        if b == 120 || b == 88 {
+            p = p + 2;
+            n = n - 2;
+            while n > 0 {
+                c = bget(p);
+                if c >= 48 && c <= 57 {
+                    c = c - 48;
+                } else {
+                    c = c | 32;
+                    if c < 97 || c > 102 {
+                        return v;
+                    }
+                    c = c - 87;
+                }
+                v = (v << 4) + c;
+                p += 1;
+                n -= 1;
+            }
+            return v;
+        }
+    }
+    while n > 0 {
+        c = bget(p);
+        if c < 48 || c > 57 {
+            return v;
+        }
+        v = v * 10 + (c - 48);
+        p += 1;
+        n -= 1;
+    }
+    return v;
+}
+
+// a type: consumes its tokens and leaves what it was in par_last_*.
+// 1, or 0 when it is no type.
+fn prs_type() -> i64 {
+    var k: i64 = 0;
+    var b: i64 = 0;
+    par_last_ptr_tok = 0;
+    par_last_coll_stok = 0;
+    par_last_is_float = 0;
+    par_last_is_unsigned = 0;
+    par_last_array_len = 0;
+    par_last_is_slice = 0;
+    par_last_arr_elem = 0;
+    par_last_vtag = 0;
+    k = prs_ct();
+    if k == TOK_LBRACKET { return prs_type_array(); }
+    if k == KW_PTR { return prs_type_ptr(); }
+    if k == KW_SLICE { return prs_type_slice(); }
+    if k == KW_ARENA_TOKEN { return prs_type_arena_tok(); }
+    if k == KW_FN { return prs_type_fn(); }
+    if k == TOK_IDENTIFIER {
+        // text, list<T>, map<T>: values held as one i64, handles of
+        // std_text, std_list, std_map. Any other name is a struct.
+        b = par_builtin_type(prs_cur());
+        if b == 1 {
+            par_last_vtag = 1;
+            par_used_text = 1;
+        } else if b != 0 {
+            return prs_type_coll(b);
+        }
+        return prs_type_scalar();
+    }
+    if k == KW_U8 || k == KW_U16 || k == KW_U32 || k == KW_U64 {
+        return prs_type_scalar();
+    }
+    if k == KW_I8 || k == KW_I16 || k == KW_I32 || k == KW_I64 {
+        return prs_type_scalar();
+    }
+    if k == KW_F32 || k == KW_F64 || k == KW_BOOL || k == KW_STR || k == KW_VOID {
+        return prs_type_scalar();
+    }
+    return 0;
+}
+
+// a scalar or a name: whether it is a real or unsigned, then past it
+fn prs_type_scalar() -> i64 {
+    var k: i64 = prs_ct();
+    if k == KW_F32 || k == KW_F64 {
+        par_last_is_float = 1;
+    } else if k == KW_U8 || k == KW_U16 || k == KW_U32 || k == KW_U64 {
+        par_last_is_unsigned = 1;
+    }
+    prs_adv();
+    return 1;
+}
+
+// list<T> (b 2) or map<T> (b 3), at the name
+fn prs_type_coll(b: i64) -> i64 {
+    var named: i64 = 0;
+    var t: i64 = 0;
+    var tag: i64 = 0;
+    prs_adv();                         // list / map
+    if prs_ct() != TOK_LT {
+        par_last_vtag = 0;
+        return 0;
+    }
+    prs_adv();
+    // list<S> with S a name that is no built-in type: kept (tag 3)
+    if prs_ct() == TOK_IDENTIFIER {
+        t = prs_cur();
+        if par_builtin_type(t) == 0 {
+            named = t;
+        }
+    }
+    if prs_type() == 0 {               // the element type
+        par_last_vtag = 0;
+        return 0;
+    }
+    // the element's tag: 2 real, 1 text, 0 an integer or a handle, 3 a name
+    par_last_coll_stok = named;
+    if named != 0 {
+        tag = 3;
+    } else if par_last_is_float != 0 {
+        tag = 2;
+    } else if par_last_vtag == 1 {
+        tag = 1;
+    }
+    if prs_ct() != TOK_GT {
+        par_last_vtag = 0;
+        return 0;
+    }
+    prs_adv();
+    par_last_vtag = b | (tag << 4);
+    par_last_is_float = 0;
+    par_last_is_unsigned = 0;
+    par_last_array_len = 0;
+    par_last_ptr_elem = 0;
+    par_last_arr_elem = 0;
+    if b == 2 {
+        par_used_list = 1;
+    } else {
+        par_used_map = 1;
+    }
+    return 1;
+}
+
+// fn(T1, T2) -> R: a function value. Tag 5, with what it returns as the
+// element: 2 a real, 1 a text, 0 anything else.
+fn prs_type_fn() -> i64 {
+    var tag: i64 = 0;
+    prs_adv();                         // fn
+    if prs_ct() != TOK_LPAREN {
+        par_last_vtag = 0;
+        return 0;
+    }
+    prs_adv();
+    while prs_ct() != TOK_RPAREN {
+        if prs_type() == 0 {
+            par_last_vtag = 0;
+            return 0;
+        }
+        if prs_ct() == TOK_COMMA {
+            prs_adv();
+        }
+    }
+    prs_adv();                         // )
+    if prs_ct() == TOK_ARROW {
+        prs_adv();
+        par_last_is_float = 0;
+        if prs_type() == 0 {
+            par_last_vtag = 0;
+            return 0;
+        }
+        if par_last_is_float != 0 {
+            tag = 2;
+        } else if par_last_vtag == 1 {
+            tag = 1;
+        }
+    }
+    par_last_vtag = (tag << 4) | 5;
+    par_last_is_float = 0;
+    par_last_is_unsigned = 0;
+    par_last_array_len = 0;
+    par_last_ptr_elem = 0;
+    par_last_arr_elem = 0;
+    return 1;
+}
+
+// ptr<T>: sizeof(T) in par_last_ptr_elem; ptr<S> with S a name keeps S,
+// so p.x reaches a field of the S it points to
+fn prs_type_ptr() -> i64 {
+    var named: i64 = 0;
+    var w: i64 = 0;
+    par_last_ptr_elem = 0;
+    prs_adv();                         // ptr
+    if prs_ct() != TOK_LT {
+        par_last_ptr_elem = 0;
+        par_last_ptr_tok = 0;
+        return 0;
+    }
+    prs_adv();
+    if prs_ct() == TOK_IDENTIFIER {
+        named = prs_cur();
+    }
+    w = prs_type_width(prs_ct());
+    if w == 0 {
+        par_last_ptr_elem = 0;
+        par_last_ptr_tok = 0;
+        return 0;
+    }
+    par_last_ptr_elem = w;
+    if prs_type() == 0 {
+        par_last_ptr_elem = 0;
+        par_last_ptr_tok = 0;
+        return 0;
+    }
+    par_last_ptr_tok = named;
+    // the pointer itself is an address: ptr<f32> is no real
+    par_last_is_float = 0;
+    par_last_is_unsigned = 0;
+    if prs_ct() != TOK_GT {
+        par_last_ptr_elem = 0;
+        par_last_ptr_tok = 0;
+        return 0;
+    }
+    prs_adv();
+    return 1;
+}
+
+// slice<T>: a run of an arena. The variable holds one i64; v[i] becomes
+// slice_get / slice_set.
+fn prs_type_slice() -> i64 {
+    var real: i64 = 0;
+    prs_adv();                         // slice
+    if prs_ct() != TOK_LT {
+        return 0;
+    }
+    prs_adv();
+    if prs_type() == 0 {
+        return 0;
+    }
+    // slice<f64>: the handle is an integer; its elements are reals
+    real = par_last_is_float;
+    par_last_is_float = 0;
+    if prs_ct() != TOK_GT {
+        return 0;
+    }
+    prs_adv();
+    par_last_array_len = 0;
+    par_last_ptr_elem = 0;
+    par_last_vtag = 0;
+    par_last_is_slice = 1;
+    if real != 0 {
+        par_last_is_slice = 2;
+    }
+    return 1;
+}
+
+// ArenaAllocationToken<ARENA>: a handle into a named arena
+fn prs_type_arena_tok() -> i64 {
+    par_last_ptr_elem = 0;
+    prs_adv();
+    if prs_ct() != TOK_LT {
+        par_last_ptr_elem = 0;
+        return 0;
+    }
+    prs_adv();
+    if prs_ct() != TOK_IDENTIFIER {
+        par_last_ptr_elem = 0;
+        return 0;
+    }
+    prs_adv();
+    if prs_ct() != TOK_GT {
+        par_last_ptr_elem = 0;
+        return 0;
+    }
+    prs_adv();
+    par_last_is_float = 0;
+    return 1;
+}
+
+// [type; N]: N in par_last_array_len. [[T; C]; R] is stored flat, row by
+// row: R * C elements, C the row stride.
+fn prs_type_array() -> i64 {
+    var k: i64 = 0;
+    var w: i64 = 0;
+    var inner: i64 = 0;
+    var n: i64 = 0;
+    par_last_array_len = 0;
+    par_last_row_len = 0;
+    prs_adv();                         // [
+    k = prs_ct();
+    if k == KW_F32 || k == KW_F64 {
+        par_last_is_float = 1;
+    }
+    // the element's width; a nested '[' leaves the inner array's
+    if k != TOK_LBRACKET {
+        w = prs_type_width(k);
+    }
+    if prs_type() == 0 {
+        par_last_array_len = 0;
+        par_last_row_len = 0;
+        return 0;
+    }
+    // [text; N]: an array whose elements print as texts
+    if par_last_vtag == 1 {
+        par_last_vtag = 0x14;
+    } else {
+        par_last_vtag = 0;
+    }
+    if w != 0 {
+        par_last_arr_elem = w;
+    }
+    inner = par_last_array_len;
+    k = prs_ct();
+    if k != TOK_SEMICOLON {
+        par_last_array_len = 0;
+        par_last_row_len = 0;
+        return 0;
+    }
+    prs_adv();
+    k = prs_ct();
+    if k != TOK_INTEGER && k != TOK_HEX {
+        par_last_array_len = 0;
+        par_last_row_len = 0;
+        return 0;
+    }
+    n = prs_tok_uint(prs_cur());
+    if inner != 0 {
+        par_last_row_len = inner;
+        n = n * inner;
+    }
+    par_last_array_len = n;
+    prs_adv();
+    if prs_ct() != TOK_RBRACKET {
+        par_last_array_len = 0;
+        par_last_row_len = 0;
+        return 0;
+    }
+    prs_adv();
+    return 1;
+}

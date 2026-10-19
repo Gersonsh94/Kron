@@ -2,12 +2,8 @@
   "name": "kron",
   "displayName": "Kron",
   "description": "Kron language support: highlighting, build and run, errors in the editor, completion, go to definition, hover help and outline.",
-  "version": "0.3.6",
+  "version": "0.6.1",
   "publisher": "Codexmy",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Gersonsh94/Kron.git"
-  },
   "engines": {
     "vscode": "^1.70.0"
   },
@@ -108,10 +104,10 @@
     "configuration": {
       "title": "Kron",
       "properties": {
-       "kron.compilerPath": {
+        "kron.compilerPath": {
           "type": "string",
           "default": "kronc",
-          "description": "Path to kronc.exe..."
+          "description": "Path to kronc executable. Used when the open folder has no kronc of its own."
         },
         "kron.checkOnSave": {
           "type": "boolean",

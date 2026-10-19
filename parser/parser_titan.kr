@@ -1,0 +1,1176 @@
+kron_program
+kron_domain parser_titan;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The parser: the TITAN modules -- the declarations of a system written in
+// Kron. Most are captured as key = value pairs; the blocks that hold code
+// (handlers, an ISR, the scheduler's task switch) are parsed as Kron.
+// See parser.kr.
+// =========================================================================
+
+// key = VALUE: the token types a value may have
+fn prs_is_cfg_value(k: i64) -> i64 {
+    if k == TOK_HEX || k == TOK_INTEGER || k == TOK_IDENTIFIER || k == TOK_STRING {
+        return 1;
+    }
+    if k == KW_TRUE || k == KW_FALSE {
+        return 1;
+    }
+    return 0;
+}
+
+// the current token is a name of n characters, and these
+fn prs_cur_is(text: i64, n: i64) -> i64 {
+    return prs_tok_is(prs_cur(), text, n);
+}
+
+// a NUMBER or a HEX
+fn prs_is_num(k: i64) -> i64 {
+    if k == TOK_INTEGER || k == TOK_HEX {
+        return 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// syscall_dispatch NAME '{'
+//     mechanism = syscall_fast | int_vector ;
+//     service N name handler { block }
+//     ...
+// '}'
+// =========================================================================
+fn prs_sys() -> ptr<Ast> {
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    var t: ptr<Tok> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_SYS_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if k != TOK_IDENTIFIER {
+            if k == TOK_LBRACE {
+                if prs_generic_block() == 0 {
+                    return 0;
+                }
+            } else {
+                prs_adv();
+            }
+        } else if prs_cur_is("service", 7) == 1 {
+            // service N name handler { block }
+            prs_adv();
+            if prs_is_num(prs_ct()) == 0 {
+                return 0;
+            }
+            e = prs_new(AST_SYS_ENTRY);
+            if e == 0 {
+                return 0;
+            }
+            e.data = prs_cur();            // the number
+            prs_adv();
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+            e.left = prs_cur();            // the name
+            prs_adv();
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+            prs_adv();                     // handler
+            b = prs_block();
+            if b == 0 {
+                return 0;
+            }
+            e.right = b;
+            if tail == 0 {
+                n.right = e;
+            } else {
+                tail.right = e;
+            }
+            tail = e;
+        } else if prs_sys_is_mechanism() == 1 {
+            // mechanism = syscall_fast: SYSCALL / SYSRET (1)
+            prs_adv();
+            if prs_ct() == TOK_ASSIGN {
+                prs_adv();
+                if prs_ct() == TOK_IDENTIFIER {
+                    if prs_cur_is("syscall_fast", 12) == 1 {
+                        n.type_info = 1;
+                    }
+                    prs_adv();
+                }
+            }
+        } else {
+            // the rest: param_register = X ; and the like
+            if prs_ct() == TOK_LBRACE {
+                if prs_generic_block() == 0 {
+                    return 0;
+                }
+            } else {
+                prs_adv();
+            }
+        }
+    }
+    prs_adv();
+    return n;
+}
+
+// 'mechanism': nine characters, the fifth not looked at
+fn prs_sys_is_mechanism() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    if t.length != 9 {
+        return 0;
+    }
+    if prs_memeq(t.value, "mech", 4) == 0 {
+        return 0;
+    }
+    return prs_memeq(t.value + 5, "nism", 4);
+}
+
+// =========================================================================
+// scheduler_domain NAME [policy X] '{'
+//     ( key = value ; )*
+//     task_switching { statements }       compiled to code
+// '}'   -- AST_SCHED_DEF: data the name, right the pairs, left the block
+// =========================================================================
+fn prs_sched() -> ptr<Ast> {
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    while prs_ct() != TOK_LBRACE {
+        if prs_ct() == TOK_EOF {
+            return 0;
+        }
+        prs_adv();                     // policy, its value...
+    }
+    prs_adv();
+    n = prs_new(AST_SCHED_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if k == TOK_IDENTIFIER {
+            e = prs_new(AST_CFG_ENTRY);
+            if e == 0 {
+                return 0;
+            }
+            e.data = prs_cur();
+            prs_adv();
+            if prs_ct() == TOK_ASSIGN {
+                prs_adv();
+                k = prs_ct();
+                if prs_is_cfg_value(k) == 0 {
+                    return 0;
+                }
+                e.type_info = k;
+                e.left = prs_cur();
+                prs_adv();
+                if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+                prs_adv();
+                if tail == 0 {
+                    n.right = e;
+                } else {
+                    tail.right = e;
+                }
+                tail = e;
+            } else if prs_ct() == TOK_LBRACE {
+                // a block: the first is the task switch, as code
+                if n.left == 0 {
+                    b = prs_block();
+                    if b == 0 {
+                        return 0;
+                    }
+                    n.left = b;
+                } else if prs_generic_block() == 0 {
+                    return 0;
+                }
+            }
+        } else if k == TOK_LBRACE {
+            if prs_generic_block() == 0 {
+                return 0;
+            }
+        } else if k == TOK_LPAREN {
+            if prs_balanced_parens() == 0 {
+                return 0;
+            }
+        } else {
+            prs_adv();
+        }
+    }
+    prs_adv();
+    return n;
+}
+
+// =========================================================================
+// <keyword> NAME '{' ( KEY '=' value ';' | name { ... } | on_x { code } )* '}'
+// The generic capture of the declarative modules. A block is CODE when its
+// name starts with on_ or it has a parameter list, name(...) { }; any other
+// is nested data, whose pairs are captured too.
+// =========================================================================
+fn prs_config() -> ptr<Ast> {
+    var ty: i64 = prs_cur();
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    var key: ptr<Tok> = 0;
+    var k: i64 = 0;
+    var code: i64 = 0;
+    prs_adv();                         // the module keyword
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_CFG_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    n.left = ty;
+    par_cfg_depth = 0;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            if par_cfg_depth == 0 {
+                break;
+            }
+            par_cfg_depth = par_cfg_depth - 1;
+            prs_adv();
+        } else if k == TOK_EOF {
+            return 0;
+        } else if k != TOK_IDENTIFIER {
+            if k == TOK_LBRACE {
+                prs_adv();
+                par_cfg_depth = par_cfg_depth + 1;
+            } else if k == TOK_LPAREN {
+                if prs_balanced_parens() == 0 {
+                    return 0;
+                }
+            } else {
+                prs_adv();
+            }
+        } else {
+            // perhaps key = value ; -- the node is made before it is known
+            e = prs_new(AST_CFG_ENTRY);
+            if e == 0 {
+                return 0;
+            }
+            e.data = prs_cur();
+            prs_adv();
+            if prs_ct() == TOK_ASSIGN {
+                prs_adv();
+                k = prs_ct();
+                if prs_is_cfg_value(k) == 0 {
+                    return 0;
+                }
+                e.type_info = k;
+                e.left = prs_cur();
+                prs_adv();
+                if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+                prs_adv();
+                if tail == 0 {
+                    n.right = e;
+                } else {
+                    tail.right = e;
+                }
+                tail = e;
+            } else {
+                code = 0;
+                if prs_ct() == TOK_LPAREN {
+                    if prs_balanced_parens() == 0 {
+                        return 0;
+                    }
+                    code = 1;
+                } else {
+                    key = e.data;
+                    if key.length >= 3 && bget(key.value) == 111 && bget(key.value + 1) == 110 && bget(key.value + 2) == 95 {
+                        code = 1;              // on_...
+                    }
+                }
+                if code == 1 {
+                    if prs_ct() == TOK_LBRACE {
+                        b = prs_block();
+                        if b == 0 {
+                            return 0;
+                        }
+                        e.left = b;            // the handler's body
+                        e.type_info = CFG_HANDLER_MARK;
+                        if tail == 0 {
+                            n.right = e;
+                        } else {
+                            tail.right = e;
+                        }
+                        tail = e;
+                    }
+                } else {
+                    // nested data: enter it and go on capturing
+                    k = prs_ct();
+                    if k == TOK_LBRACE {
+                        prs_adv();
+                        par_cfg_depth = par_cfg_depth + 1;
+                    } else if k == TOK_LPAREN {
+                        if prs_balanced_parens() == 0 {
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    prs_adv();
+    return n;
+}
+
+// =========================================================================
+// interrupt_service_routine NAME [vector_id HEX] [ring] '{' statements '}'
+// The body is code.
+// =========================================================================
+fn prs_isr() -> ptr<Ast> {
+    var name: i64 = 0;
+    var vec: i64 = 0;
+    var b: ptr<Ast> = 0;
+    var n: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_LBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_is_num(k) == 1 {
+            vec = prs_cur();
+        }
+        prs_adv();
+    }
+    b = prs_block();
+    if b == 0 {
+        return 0;
+    }
+    n = prs_new(AST_ISR_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    n.left = vec;
+    n.right = b;
+    return n;
+}
+
+// =========================================================================
+// mmu_configuration NAME '{' ... '}'
+//   page_table_hierarchy { level N entries M ; ... }
+//   heap_arena_definition { arena A base_address H size_bytes S
+//                           growth_policy P ; ... }
+//   cache_policy { range H policy write_back|write_through ; ... }
+//   numa_node_affinity { node N cpu_mask H local_bandwidth_gbps N ; ... }
+//   garbage_collection_policy = P ;
+//   on_page_fault ( error_code NAME ) { block }
+//   on_out_of_memory_pressure { block }
+//   dynamic_allocation_pool NAME { ... }
+// =========================================================================
+
+// the MMU entry e at the end of the chain on n.type_info
+fn prs_mmu_push(n: ptr<Ast>, e: ptr<Ast>) -> i64 {
+    var t: ptr<Ast> = 0;
+    e.right = 0;
+    if par_mmu_tail == 0 {
+        n.type_info = e;
+    } else {
+        t = par_mmu_tail;
+        t.right = e;
+    }
+    par_mmu_tail = e;
+    return 0;
+}
+
+// par_pool_node at the end of the directive chain on e.left
+fn prs_pool_push(e: ptr<Ast>) -> i64 {
+    var d: ptr<Ast> = par_pool_node;
+    var t: ptr<Ast> = 0;
+    d.right = 0;
+    if par_pool_tail == 0 {
+        e.left = d;
+    } else {
+        t = par_pool_tail;
+        t.right = d;
+    }
+    par_pool_tail = d;
+    return 0;
+}
+
+fn prs_mmu() -> ptr<Ast> {
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var r: i64 = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_MMU_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    prs_mmu_levels = 0;
+    par_mmu_tail = 0;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        r = 2;
+        if k == TOK_IDENTIFIER {
+            r = prs_mmu_section(n);
+            if r == 0 {
+                return 0;
+            }
+        }
+        if r == 2 {
+            // not a section: skipped
+            k = prs_ct();
+            if k == TOK_LBRACE {
+                if prs_generic_block() == 0 {
+                    return 0;
+                }
+            } else if k == TOK_LPAREN {
+                if prs_balanced_parens() == 0 {
+                    return 0;
+                }
+            } else {
+                prs_adv();
+            }
+        }
+    }
+    prs_adv();
+    return n;
+}
+
+// one section of an mmu_configuration, at its name: 1 parsed, 0 an error,
+// 2 no section of this name
+fn prs_mmu_section(n: ptr<Ast>) -> i64 {
+    if prs_cur_is("page_table_hierarchy", 20) == 1 { return prs_mmu_pages(n); }
+    if prs_cur_is("heap_arena_definition", 21) == 1 { return prs_mmu_arenas(n); }
+    if prs_cur_is("cache_policy", 12) == 1 { return prs_mmu_cache(n); }
+    if prs_cur_is("numa_node_affinity", 18) == 1 { return prs_mmu_numa(n); }
+    if prs_cur_is("garbage_collection_policy", 25) == 1 { return prs_mmu_gc(n); }
+    if prs_cur_is("on_page_fault", 13) == 1 { return prs_mmu_pgfault(n); }
+    if prs_cur_is("on_out_of_memory_pressure", 25) == 1 { return prs_mmu_oom(n); }
+    if prs_cur_is("dynamic_allocation_pool", 23) == 1 { return prs_mmu_pool(n); }
+    return 2;
+}
+
+// page_table_hierarchy { level N entries M ; ... }
+fn prs_mmu_pages(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var t: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // level
+        if prs_is_num(prs_ct()) == 0 {
+            return 0;
+        }
+        e = prs_new(AST_MMU_LEVEL);
+        if e == 0 {
+            return 0;
+        }
+        e.data = prs_cur();            // the level
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // entries
+        if prs_is_num(prs_ct()) == 0 {
+            return 0;
+        }
+        e.left = prs_cur();            // how many
+        prs_adv();
+        if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+        prs_adv();
+        if prs_mmu_levels == 0 {
+            n.right = e;
+        } else {
+            t = prs_mmu_levels;
+            t.right = e;
+        }
+        prs_mmu_levels = e;
+    }
+    prs_adv();
+    return 1;
+}
+
+// heap_arena_definition { arena A base_address H size_bytes S
+// growth_policy P ; ... }
+fn prs_mmu_arenas(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var t: ptr<Ast> = 0;
+    var tok: ptr<Tok> = 0;
+    var k: i64 = 0;
+    var pol: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    par_arn_tail = 0;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // arena
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        e = prs_new(AST_ARENA_ENTRY);
+        if e == 0 {
+            return 0;
+        }
+        e.data = prs_cur();            // its name
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // base_address
+        if prs_is_num(prs_ct()) == 0 {
+            return 0;
+        }
+        e.left = prs_cur();
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // size_bytes
+        if prs_is_num(prs_ct()) == 0 {
+            return 0;
+        }
+        e.type_info = prs_cur();
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // growth_policy
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        // the four policies have four lengths
+        tok = prs_cur();
+        if tok.length == 12 {
+            pol = ARENA_GROWTH_FIXED;              // fixed_static
+        } else if tok.length == 18 {
+            pol = ARENA_GROWTH_LINEAR;             // linear_page_stride
+        } else if tok.length == 20 {
+            pol = ARENA_GROWTH_DOUBLING;           // doubling_exponential
+        } else if tok.length == 21 {
+            pol = ARENA_GROWTH_LAZY;               // lazy_on_demand_commit
+        } else {
+            return 0;
+        }
+        e.child_count = pol;
+        prs_adv();
+        if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+        prs_adv();
+        if par_arn_tail == 0 {
+            n.left = e;
+        } else {
+            t = par_arn_tail;
+            t.right = e;
+        }
+        par_arn_tail = e;
+    }
+    prs_adv();
+    return 1;
+}
+
+// cache_policy { range H policy write_back|write_through ; ... }
+fn prs_mmu_cache(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var tok: ptr<Tok> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        // 'range' is a keyword elsewhere: both it and a name are taken
+        if k != KW_RANGE {
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        }
+        prs_adv();                     // range
+        if prs_ct() != TOK_HEX {
+            if prs_want(TOK_INTEGER) == 0 { return 0; }
+        }
+        e = prs_new(AST_MMU_ENTRY);
+        if e == 0 {
+            return 0;
+        }
+        e.child_count = MMU_ENTRY_CACHE;
+        e.data = prs_cur();
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // policy
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        tok = prs_cur();
+        if tok.length == 10 {
+            e.left = CACHE_WRITE_BACK;
+        } else if tok.length == 13 {
+            e.left = CACHE_WRITE_THROUGH;
+        } else {
+            return 0;
+        }
+        prs_adv();
+        if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+        prs_adv();
+        prs_mmu_push(n, e);
+    }
+    prs_adv();
+    return 1;
+}
+
+// numa_node_affinity { node N cpu_mask H local_bandwidth_gbps N ; ... }
+fn prs_mmu_numa(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // node
+        if prs_want(TOK_INTEGER) == 0 { return 0; }
+        e = prs_new(AST_MMU_ENTRY);
+        if e == 0 {
+            return 0;
+        }
+        e.child_count = MMU_ENTRY_NUMA;
+        e.data = prs_cur();
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // cpu_mask
+        if prs_ct() != TOK_HEX {
+            if prs_want(TOK_INTEGER) == 0 { return 0; }
+        }
+        e.left = prs_cur();
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();                     // local_bandwidth_gbps
+        if prs_want(TOK_INTEGER) == 0 { return 0; }
+        e.type_info = prs_cur();
+        prs_adv();
+        if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+        prs_adv();
+        prs_mmu_push(n, e);
+    }
+    prs_adv();
+    return 1;
+}
+
+// garbage_collection_policy = P ;
+fn prs_mmu_gc(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var tok: ptr<Tok> = 0;
+    var pol: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_ASSIGN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    // manual_only 11, reference_counted 17, mark_sweep_deferred 19,
+    // generational_incremental 24
+    tok = prs_cur();
+    if tok.length == 11 {
+        pol = GC_MANUAL_ONLY;
+    } else if tok.length == 17 {
+        pol = GC_REF_COUNTED;
+    } else if tok.length == 19 {
+        pol = GC_MARK_SWEEP;
+    } else if tok.length == 24 {
+        pol = GC_GENERATIONAL;
+    } else {
+        return 0;
+    }
+    e = prs_new(AST_MMU_ENTRY);
+    if e == 0 {
+        return 0;
+    }
+    e.child_count = MMU_ENTRY_GC;
+    e.data = pol;
+    prs_adv();
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    prs_mmu_push(n, e);
+    return 1;
+}
+
+// on_page_fault ( error_code NAME ) { block }
+fn prs_mmu_pgfault(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    prs_adv();                         // error_code
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    e = prs_new(AST_MMU_ENTRY);
+    if e == 0 {
+        return 0;
+    }
+    e.child_count = MMU_ENTRY_PGFAULT;
+    e.data = prs_cur();
+    prs_adv();
+    if prs_want(TOK_RPAREN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    b = prs_block();
+    if b == 0 {
+        return 0;
+    }
+    e.left = b;
+    prs_mmu_push(n, e);
+    return 1;
+}
+
+// on_out_of_memory_pressure { block }
+fn prs_mmu_oom(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    e = prs_new(AST_MMU_ENTRY);
+    if e == 0 {
+        return 0;
+    }
+    e.child_count = MMU_ENTRY_OOM;
+    b = prs_block();
+    if b == 0 {
+        return 0;
+    }
+    e.left = b;
+    prs_mmu_push(n, e);
+    return 1;
+}
+
+// dynamic_allocation_pool NAME { allocator_class = X ;
+//     fragmentation_compaction_trigger = F ;
+//     minimum_allocation_granularity_bytes = N ;
+//     on_allocation_request ( size_bytes NAME ) { block }
+//     on_deallocation_request ( pointer_handle NAME ) { block } }
+// The five directives have five lengths: 15, 32, 36, 21, 23.
+fn prs_mmu_pool(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    var tok: ptr<Tok> = 0;
+    var k: i64 = 0;
+    var len: i64 = 0;
+    var cls: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    e = prs_new(AST_MMU_ENTRY);
+    if e == 0 {
+        return 0;
+    }
+    e.child_count = MMU_ENTRY_POOL;
+    e.data = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    par_pool_tail = 0;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        tok = prs_cur();
+        len = tok.length;
+        if len == 15 {
+            // allocator_class = CLASS ;
+            prs_adv();
+            if prs_want(TOK_ASSIGN) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+            tok = prs_cur();
+            if tok.length == 16 {
+                cls = ALLOC_SLAB;
+            } else if tok.length == 17 {
+                cls = ALLOC_BUMP;
+            } else if tok.length == 19 {
+                cls = ALLOC_BUDDY;
+            } else if tok.length == 20 {
+                cls = ALLOC_FREELIST;
+            } else if tok.length == 28 {
+                cls = ALLOC_PREDICTIVE;
+            } else {
+                return 0;
+            }
+            d = prs_new(AST_POOL_DIR);
+            if d == 0 {
+                return 0;
+            }
+            par_pool_node = d;
+            d.child_count = POOL_DIR_CLASS;
+            d.data = cls;
+            prs_adv();
+            if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+            prs_adv();
+            prs_pool_push(e);
+        } else if len == 32 || len == 36 {
+            // fragmentation_compaction_trigger = F ;
+            // minimum_allocation_granularity_bytes = N ;
+            par_pool_kind = POOL_DIR_COMPACT;
+            if len != 32 {
+                par_pool_kind = POOL_DIR_GRAN;
+            }
+            prs_adv();
+            if prs_want(TOK_ASSIGN) == 0 { return 0; }
+            prs_adv();
+            k = prs_ct();
+            if k != TOK_INTEGER && k != TOK_FLOAT {
+                if prs_want(TOK_HEX) == 0 { return 0; }
+            }
+            d = prs_new(AST_POOL_DIR);
+            if d == 0 {
+                return 0;
+            }
+            par_pool_node = d;
+            d.child_count = par_pool_kind;
+            d.data = prs_cur();
+            prs_adv();
+            if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+            prs_adv();
+            prs_pool_push(e);
+        } else if len == 21 || len == 23 {
+            // on_allocation_request ( size_bytes NAME ) { block }
+            // on_deallocation_request ( pointer_handle NAME ) { block }
+            par_pool_kind = POOL_DIR_ONALLOC;
+            if len == 23 {
+                par_pool_kind = POOL_DIR_ONFREE;
+            }
+            prs_adv();
+            if prs_want(TOK_LPAREN) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+            d = prs_new(AST_POOL_DIR);
+            if d == 0 {
+                return 0;
+            }
+            par_pool_node = d;
+            d.child_count = par_pool_kind;
+            d.data = prs_cur();
+            prs_adv();
+            if prs_want(TOK_RPAREN) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            b = prs_block();
+            if b == 0 {
+                return 0;
+            }
+            d = par_pool_node;
+            d.left = b;
+            prs_pool_push(e);
+        } else {
+            return 0;
+        }
+    }
+    prs_adv();                         // }
+    prs_mmu_push(n, e);
+    return 1;
+}
+
+// =========================================================================
+// boot_sequence NAME '{' ... '}'
+//   cpu_state_init { register R set H ; ... }
+//   mmu_table_init { entry H flags F ; ... }
+//   load_kernel_elf ( "path" ) ;
+// =========================================================================
+fn prs_boot() -> ptr<Ast> {
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var regs: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var t: ptr<Ast> = 0;
+    var tok: ptr<Tok> = 0;
+    var k: i64 = 0;
+    var flag: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_BOOT_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if k == TOK_IDENTIFIER && prs_cur_is("cpu_state_init", 14) == 1 {
+            prs_adv();
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            prs_adv();
+            while 1 == 1 {
+                k = prs_ct();
+                if k == TOK_RBRACE {
+                    break;
+                }
+                if k == TOK_EOF {
+                    return 0;
+                }
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                prs_adv();             // register
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                e = prs_new(AST_BOOT_REG);
+                if e == 0 {
+                    return 0;
+                }
+                e.data = prs_cur();    // the register
+                prs_adv();
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                prs_adv();             // set
+                if prs_is_num(prs_ct()) == 0 {
+                    return 0;
+                }
+                e.left = prs_cur();
+                prs_adv();
+                if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+                prs_adv();
+                if regs == 0 {
+                    n.right = e;
+                } else {
+                    regs.right = e;
+                }
+                regs = e;
+            }
+            prs_adv();
+        } else if k == TOK_IDENTIFIER && prs_cur_is("mmu_table_init", 14) == 1 {
+            prs_adv();
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            prs_adv();
+            par_boot_tail = 0;
+            while 1 == 1 {
+                k = prs_ct();
+                if k == TOK_RBRACE {
+                    break;
+                }
+                if k == TOK_EOF {
+                    return 0;
+                }
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                prs_adv();             // entry
+                if prs_ct() != TOK_HEX {
+                    if prs_want(TOK_INTEGER) == 0 { return 0; }
+                }
+                e = prs_new(AST_BOOT_ENTRY);
+                if e == 0 {
+                    return 0;
+                }
+                e.data = prs_cur();    // the address
+                prs_adv();
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                prs_adv();             // flags
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                // cache_bypass 12, read_only_user 14, execute_disable 15,
+                // read_write_kernel 17
+                tok = prs_cur();
+                if tok.length == 12 {
+                    flag = PGFLAG_CACHE_BYPASS;
+                } else if tok.length == 14 {
+                    flag = PGFLAG_RO_USER;
+                } else if tok.length == 15 {
+                    flag = PGFLAG_EXEC_DIS;
+                } else if tok.length == 17 {
+                    flag = PGFLAG_RW_KERNEL;
+                } else {
+                    return 0;
+                }
+                e.left = flag;
+                prs_adv();
+                if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+                prs_adv();
+                e.right = 0;
+                if par_boot_tail == 0 {
+                    n.left = e;
+                } else {
+                    t = par_boot_tail;
+                    t.right = e;
+                }
+                par_boot_tail = e;
+            }
+            prs_adv();
+        } else if k == TOK_IDENTIFIER && prs_cur_is("load_kernel_elf", 15) == 1 {
+            prs_adv();
+            if prs_want(TOK_LPAREN) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_STRING) == 0 { return 0; }
+            n.type_info = prs_cur();   // the kernel image
+            prs_adv();
+            if prs_want(TOK_RPAREN) == 0 { return 0; }
+            prs_adv();
+            if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+            prs_adv();
+        } else {
+            k = prs_ct();
+            if k == TOK_LBRACE {
+                if prs_generic_block() == 0 {
+                    return 0;
+                }
+            } else if k == TOK_LPAREN {
+                if prs_balanced_parens() == 0 {
+                    return 0;
+                }
+            } else {
+                prs_adv();
+            }
+        }
+    }
+    prs_adv();
+    return n;
+}
+
+// =========================================================================
+// kron_isa_dynamic NAME '{' ... opcode_set { NAME = H ; ... } ... '}'
+// The other sections are only checked for shape.
+// =========================================================================
+fn prs_isa() -> ptr<Ast> {
+    var name: i64 = 0;
+    var n: ptr<Ast> = 0;
+    var tail: ptr<Ast> = 0;
+    var e: ptr<Ast> = 0;
+    var k: i64 = 0;
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    name = prs_cur();
+    prs_adv();
+    if prs_want(TOK_LBRACE) == 0 { return 0; }
+    prs_adv();
+    n = prs_new(AST_ISA_DEF);
+    if n == 0 {
+        return 0;
+    }
+    n.data = name;
+    while 1 == 1 {
+        k = prs_ct();
+        if k == TOK_RBRACE {
+            break;
+        }
+        if k == TOK_EOF {
+            return 0;
+        }
+        if k == TOK_IDENTIFIER && prs_cur_is("opcode_set", 10) == 1 {
+            prs_adv();
+            if prs_want(TOK_LBRACE) == 0 { return 0; }
+            prs_adv();
+            while 1 == 1 {
+                k = prs_ct();
+                if k == TOK_RBRACE {
+                    break;
+                }
+                if k == TOK_EOF {
+                    return 0;
+                }
+                if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+                e = prs_new(AST_ISA_ENTRY);
+                if e == 0 {
+                    return 0;
+                }
+                e.data = prs_cur();
+                prs_adv();
+                if prs_want(TOK_ASSIGN) == 0 { return 0; }
+                prs_adv();
+                if prs_is_num(prs_ct()) == 0 {
+                    return 0;
+                }
+                e.left = prs_cur();
+                prs_adv();
+                if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+                prs_adv();
+                if tail == 0 {
+                    n.right = e;
+                } else {
+                    tail.right = e;
+                }
+                tail = e;
+            }
+            prs_adv();
+        } else if prs_ct() == TOK_LBRACE {
+            if prs_generic_block() == 0 {
+                return 0;
+            }
+        } else {
+            prs_adv();
+        }
+    }
+    prs_adv();
+    return n;
+}

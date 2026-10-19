@@ -14,8 +14,8 @@ bits 64
 
 extern jup_lexer_init, jup_lexer_run, lexer_error_kind, lexer_error_token
 extern jup_parser_init, jup_parser_run
-extern par_used_slice
-extern par_used_text, par_used_list, par_used_map
+extern __g_parser_par_used_slice
+extern __g_parser_par_used_text, __g_parser_par_used_list, __g_parser_par_used_map
 extern cg_thread_error_tok, jup_semantic_set_error, cg_type_error
 extern parser_get_error_token, parser_get_position
 extern parser_get_error_line
@@ -598,7 +598,7 @@ main:
     ; v[i] on a slice became a call to slice_get / slice_set, which live in
     ; std_arena.kr. Without that import kasm would not notice the missing
     ; function -- it does not check undefined symbols -- so say it here.
-    cmp  dword [rel par_used_slice], 0
+    cmp  dword [rel __g_parser_par_used_slice], 0
     je   .slice_ok
     xor  ebx, ebx
 .slice_imp:
@@ -616,7 +616,7 @@ main:
     jmp  .slice_imp
 .slice_ok:
     ; the built-in types text, list<T> and map<T> are handles of the library
-    cmp  dword [rel par_used_text], 0
+    cmp  dword [rel __g_parser_par_used_text], 0
     je   .text_ok
     lea  rdi, [rel s_std_text]
     call imp_have
@@ -625,7 +625,7 @@ main:
     lea  rcx, [rel msg_text_imp]
     jmp  .error_type_imp
 .text_ok:
-    cmp  dword [rel par_used_list], 0
+    cmp  dword [rel __g_parser_par_used_list], 0
     je   .list_ok
     lea  rdi, [rel s_std_list]
     call imp_have
@@ -634,7 +634,7 @@ main:
     lea  rcx, [rel msg_list_imp]
     jmp  .error_type_imp
 .list_ok:
-    cmp  dword [rel par_used_map], 0
+    cmp  dword [rel __g_parser_par_used_map], 0
     je   .map_ok
     lea  rdi, [rel s_std_map]
     call imp_have

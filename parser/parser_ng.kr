@@ -1,0 +1,966 @@
+kron_program
+kron_domain parser_ng;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// GENERICS AND MODULE NAMES -- one pass over the tokens, before parsing
+//
+// Generics. A function or struct written with type parameters
+//     fn biggest<T>(a: T, b: T) -> T { ... }
+//     struct Pair<A, B> { first: A; second: B; }
+// is a template: it produces no code itself. Each use with types,
+// biggest<f64>(x, y) or Pair<i64, text>, names a copy made for those types
+// -- biggest__f64, Pair__i64__text -- written where the template stood,
+// with every T replaced by the type given. A copy may use other templates;
+// their copies are made the same way, until nothing new is asked for.
+//
+// Module names. module.name reaches a declaration of one module: the file
+// name without .kr (std_math.fsqrt), or the name given in the program's
+// header with  acquire_domain "file.kr" as name;  When two modules define
+// a function of the same name, each keeps its own: its calls inside its
+// module go to it, and from anywhere else it is written module.name.
+//
+// ng_run works on the token array the lexer filled and leaves the result
+// in the same array. Tokens it makes point their text into ng_text.
+// =========================================================================
+
+// the token at index i of a token array
+fn ng_at(base: i64, i: i64) -> ptr<Tok> {
+    return base + i * PRS_TOK;
+}
+
+// copy the 24 bytes of a token
+fn ng_copy_tok(to: i64, src: i64) -> i64 {
+    tset(to, 0, tget(src, 0));
+    tset(to, 1, tget(src, 1));
+    tset(to, 2, tget(src, 2));
+    return 0;
+}
+
+// the first error wins
+fn ng_err(t: i64, msg: i64) -> i64 {
+    if ng_err_msg == 0 {
+        ng_err_tok = t;
+        ng_err_msg = msg;
+    }
+    return 0;
+}
+
+// the name of a path: its start, and in ng_bn_len its length without the
+// extension
+fn ng_basename(path: i64) -> i64 {
+    var start: i64 = path;
+    var p: i64 = path;
+    var c: i64 = bget(p);
+    var q: i64 = 0;
+    while c != 0 {
+        p += 1;
+        if c == 47 || c == 92 {
+            start = p;
+        }
+        c = bget(p);
+    }
+    // p is the NUL; the last '.' at or after the start ends the name
+    q = p;
+    while q > start {
+        q -= 1;
+        if bget(q) == 46 {
+            p = q;
+            break;
+        }
+    }
+    ng_bn_len = p - start;
+    return start;
+}
+
+// the module a path is, added when it is new
+fn ng_mod_of(path: i64) -> i64 {
+    var name: i64 = ng_basename(path);
+    var len: i64 = ng_bn_len;
+    var i: i64 = 0;
+    while i < ng_nmod {
+        if tget(&ng_mod_len, i) == len {
+            if prs_memeq(tget(&ng_mod_name, i), name, len) == 1 {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    if i >= NG_MAXMOD {
+        return 0;
+    }
+    tset(&ng_mod_name, i, name);
+    tset(&ng_mod_len, i, len);
+    tset(&ng_mod_alias, i, 0);
+    ng_nmod = ng_nmod + 1;
+    return i;
+}
+
+// is c a character of a name
+fn ng_is_name_char(c: i64) -> i64 {
+    if c == 95 { return 1; }
+    if c >= 48 && c <= 57 { return 1; }
+    if c >= 65 && c <= 90 { return 1; }
+    if c >= 97 && c <= 122 { return 1; }
+    return 0;
+}
+
+fn ng_is_blank(c: i64) -> i64 {
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+// every token's module, from the line map main keeps
+fn ng_modules() -> i64 {
+    var count: i64 = 0;
+    var i: i64 = 0;
+    var run: i64 = 0;
+    var mod: i64 = 0;
+    var line: i64 = 0;
+    var next: i64 = 0;
+    var t: ptr<Tok> = 0;
+    ng_nmod = 0;
+    ng_mod_of(prs_arg_input);          // module 0: the program
+    count = tget(prs_lmap_count, 0);
+    if count != 0 {
+        mod = ng_mod_of(tget(prs_lmap_file, 0));
+    }
+    while i < ng_cnt && i < NG_MAXTOK {
+        if count != 0 {
+            // the last run that starts at or before this token's line
+            t = ng_at(ng_tok, i);
+            line = t.line;
+            while 1 == 1 {
+                next = run + 1;
+                if next >= count {
+                    break;
+                }
+                if tget(prs_lmap_out, next) > line {
+                    break;
+                }
+                run = next;
+                mod = ng_mod_of(tget(prs_lmap_file, run));
+            }
+        }
+        bset(&ng_tokmod + i, mod);
+        tset(&ng_tokflag, i, 0);
+        i += 1;
+    }
+    ng_aliases();
+    return 0;
+}
+
+// acquire_domain "file.kr" as name;  in the program's own text
+fn ng_aliases() -> i64 {
+    var p: i64 = prs_src_buffer;
+    var c: i64 = 0;
+    var file: i64 = 0;
+    var quote: i64 = 0;
+    var alias: i64 = 0;
+    var name: i64 = 0;
+    var len: i64 = 0;
+    var m: i64 = 0;
+    while 1 == 1 {
+        c = bget(p);
+        if c == 0 {
+            return 0;
+        }
+        if c != 97 || prs_memeq(p, "acquire_domain", 14) == 0 {
+            p += 1;
+        } else {
+            p = p + 14;
+            while ng_is_blank(bget(p)) == 1 {
+                p += 1;
+            }
+            if bget(p) == 34 {
+                p += 1;
+                file = p;
+                // to the closing quote, on this line
+                c = bget(p);
+                while c != 34 && c != 10 && c != 0 {
+                    p += 1;
+                    c = bget(p);
+                }
+                if c == 0 {
+                    return 0;
+                }
+                if c == 34 {
+                    quote = p;
+                    p += 1;
+                    while ng_is_blank(bget(p)) == 1 {
+                        p += 1;
+                    }
+                    if bget(p) == 97 && bget(p + 1) == 115 && ng_is_blank(bget(p + 2)) == 1 {
+                        p = p + 3;
+                        while ng_is_blank(bget(p)) == 1 {
+                            p += 1;
+                        }
+                        alias = p;
+                        while ng_is_name_char(bget(p)) == 1 {
+                            p += 1;
+                        }
+                        if p != alias {
+                            // the module of that file: its name, as ng_mod_of
+                            // compares it
+                            bset(quote, 0);
+                            name = ng_basename(file);
+                            len = ng_bn_len;
+                            bset(quote, 34);
+                            m = 0;
+                            while m < ng_nmod {
+                                if tget(&ng_mod_len, m) == len && prs_memeq(tget(&ng_mod_name, m), name, len) == 1 {
+                                    tset(&ng_mod_alias, m, alias);
+                                    tset(&ng_mod_alen, m, p - alias);
+                                    break;
+                                }
+                                m += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// the index past the '}' that matches the first '{' from index i on, or
+// the count when there is none
+fn ng_close(i: i64) -> i64 {
+    var depth: i64 = 0;
+    var k: i64 = 0;
+    while i < ng_cnt {
+        k = ng_ttype(i);
+        if k == TOK_LBRACE {
+            depth += 1;
+        } else if k == TOK_RBRACE {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+        i += 1;
+    }
+    return ng_cnt;
+}
+
+// the type of token i of ng_tok, TOK_EOF past the end
+fn ng_ttype(i: i64) -> i64 {
+    var t: ptr<Tok> = 0;
+    if i >= ng_cnt {
+        return 0;
+    }
+    t = ng_at(ng_tok, i);
+    return t.kind;
+}
+
+fn ng_add_decl(t: i64, mod: i64, kind: i64) -> i64 {
+    var i: i64 = ng_nd;
+    if i >= NG_MAXDECL {
+        return 0;
+    }
+    tset(&ng_d_tok, i, t);
+    tset(&ng_d_mod, i, mod);
+    tset(&ng_d_kind, i, kind);
+    tset(&ng_d_dup, i, 0);
+    ng_nd = i + 1;
+    return 0;
+}
+
+// the declarations at depth 0 of each module, and the templates
+fn ng_decls() -> i64 {
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var depth: i64 = 0;
+    var k: i64 = 0;
+    var kind: i64 = 0;
+    var at: i64 = 0;
+    var t: i64 = 0;
+    var np: i64 = 0;
+    var mod: i64 = 0;
+    var end: i64 = 0;
+    ng_nd = 0;
+    ng_nt = 0;
+    ng_anydup = 0;
+    while i < ng_cnt {
+        k = ng_ttype(i);
+        kind = 0;
+        if k == TOK_LBRACE {
+            depth += 1;
+        } else if k == TOK_RBRACE {
+            depth -= 1;
+        } else if depth == 0 {
+            if k == KW_FN {
+                kind = 1;
+            } else if k == KW_STRUCT {
+                kind = 2;
+            } else if k == KW_ENUM || k == KW_VAR || k == KW_CONST {
+                kind = 4;
+            }
+        }
+        mod = bget(&ng_tokmod + i);
+        if kind == 4 {
+            if ng_ttype(i + 1) == TOK_IDENTIFIER {
+                ng_add_decl(ng_at(ng_tok, i + 1), mod, 2);
+            }
+        } else if kind != 0 {
+            // the name: the next IDENT, past one keyword (fn public name)
+            at = i + 1;
+            k = ng_ttype(at);
+            if k != TOK_IDENTIFIER {
+                if k < 100 {
+                    at = -1;
+                } else {
+                    at += 1;
+                    if ng_ttype(at) != TOK_IDENTIFIER {
+                        at = -1;
+                    }
+                }
+            }
+            if at != -1 {
+                if ng_ttype(at + 1) != TOK_LT {
+                    ng_add_decl(ng_at(ng_tok, at), mod, kind);
+                } else if ng_nt < NG_MAXT {
+                    // fn NAME < P, Q > ...  /  struct NAME < P > { ... }
+                    t = ng_nt;
+                    tset(&ng_t_start, t, i);
+                    if kind == 1 {
+                        tset(&ng_t_isfn, t, 1);
+                    } else {
+                        tset(&ng_t_isfn, t, 0);
+                    }
+                    tset(&ng_t_name, t, ng_at(ng_tok, at));
+                    tset(&ng_t_mod, t, mod);
+                    ng_add_decl(ng_at(ng_tok, at), mod, 3);   // module.name reaches it
+                    tset(&ng_t_lt, t, at + 1);
+                    // the parameters: IDENT (, IDENT)* >
+                    np = 0;
+                    at = at + 2;
+                    while ng_ttype(at) == TOK_IDENTIFIER && np < 8 {
+                        tset(&ng_t_par, t * 8 + np, ng_at(ng_tok, at));
+                        np += 1;
+                        at += 1;
+                        if ng_ttype(at) != TOK_COMMA {
+                            break;
+                        }
+                        at += 1;
+                    }
+                    if ng_ttype(at) == TOK_GT {
+                        at += 1;
+                        tset(&ng_t_np, t, np);
+                        tset(&ng_t_body, t, at);
+                        end = ng_close(at);
+                        tset(&ng_t_end, t, end);
+                        tset(&ng_tokflag, i, t + 1);
+                        ng_nt = ng_nt + 1;
+                        // on past the template: its braces are not counted
+                        i = end - 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    // a function name two modules define
+    i = 0;
+    while i < ng_nd {
+        if tget(&ng_d_kind, i) == 1 {
+            j = i + 1;
+            while j < ng_nd {
+                if tget(&ng_d_kind, j) == 1 && tget(&ng_d_mod, i) != tget(&ng_d_mod, j) {
+                    if prs_tok_same(tget(&ng_d_tok, i), tget(&ng_d_tok, j)) == 1 {
+                        tset(&ng_d_dup, i, 1);
+                        tset(&ng_d_dup, j, 1);
+                        ng_anydup = 1;
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// text, n bytes, onto a name being built in ng_mbuf at dst: dst past it
+fn ng_put(dst: i64, text: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if dst >= &ng_mbuf + 500 {
+            return dst;
+        }
+        bset(dst, bget(text + i));
+        dst += 1;
+        i += 1;
+    }
+    return dst;
+}
+
+// the name ending at end in ng_mbuf, copied to ng_text: where it went, and
+// its length in ng_keep_len (0 and 0 when ng_text is full)
+fn ng_keep(end: i64) -> i64 {
+    var len: i64 = end - &ng_mbuf;
+    var at: i64 = &ng_text + ng_ntext;
+    var i: i64 = 0;
+    if ng_ntext + len >= NG_TEXT {
+        ng_keep_len = 0;
+        return 0;
+    }
+    ng_ntext = ng_ntext + len;
+    while i < len {
+        bset(at + i, bget(&ng_mbuf + i));
+        i += 1;
+    }
+    ng_keep_len = len;
+    return at;
+}
+
+// a copy of the token t at the destination
+fn ng_emit(t: i64) -> i64 {
+    var n: i64 = tget(ng_dstn, 0);
+    if n >= NG_MAXTOK - 2 {
+        ng_err(t, "too many generic copies or tokens (more than the compiler's tables hold)");
+        return 0;
+    }
+    tset(ng_dstn, 0, n + 1);
+    ng_copy_tok(ng_dst + n * PRS_TOK, t);
+    return 0;
+}
+
+// the token t with that text instead of its own
+fn ng_emit_named(t: i64, text: i64, len: i64) -> i64 {
+    var n: i64 = 0;
+    var d: ptr<Tok> = 0;
+    ng_emit(t);
+    n = tget(ng_dstn, 0);
+    if n == 0 {
+        return 0;
+    }
+    d = ng_dst + (n - 1) * PRS_TOK;
+    d.kind = TOK_IDENTIFIER;
+    d.value = text;
+    d.length = len;
+    return 0;
+}
+
+// a '>' of our own, in the place of t
+fn ng_emit_gt(t: i64) -> i64 {
+    var n: i64 = 0;
+    var d: ptr<Tok> = 0;
+    ng_emit(t);
+    n = tget(ng_dstn, 0);
+    d = ng_dst + (n - 1) * PRS_TOK;
+    d.kind = TOK_GT;
+    d.value = ">";
+    d.length = 1;
+    return 0;
+}
+
+// token i of the source being rewritten, or 0 past its end
+fn ng_srct(i: i64) -> i64 {
+    if i < 0 || i >= ng_srcn {
+        return 0;
+    }
+    return ng_src + i * PRS_TOK;
+}
+
+// its type, TOK_EOF past the end
+fn ng_stype(i: i64) -> i64 {
+    var t: ptr<Tok> = ng_srct(i);
+    if t == 0 {
+        return 0;
+    }
+    return t.kind;
+}
+
+// the module a token names, by file or alias, or -1
+fn ng_find_mod(t: i64) -> i64 {
+    var i: i64 = 0;
+    var a: i64 = 0;
+    while i < ng_nmod {
+        if prs_tok_is(t, tget(&ng_mod_name, i), tget(&ng_mod_len, i)) == 1 {
+            return i;
+        }
+        a = tget(&ng_mod_alias, i);
+        if a != 0 {
+            if prs_tok_is(t, a, tget(&ng_mod_alen, i)) == 1 {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the declaration of that name in module mod (-1 any), functions only when
+// fnonly; -1 when there is none
+fn ng_find_decl(t: i64, mod: i64, fnonly: i64) -> i64 {
+    var i: i64 = 0;
+    while i < ng_nd {
+        if mod == -1 || tget(&ng_d_mod, i) == mod {
+            if fnonly == 0 || tget(&ng_d_kind, i) == 1 {
+                if prs_tok_same(t, tget(&ng_d_tok, i)) == 1 {
+                    return i;
+                }
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the template of that name, or -1
+fn ng_find_t(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < ng_nt {
+        if prs_tok_same(t, tget(&ng_t_name, i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// "module__name" kept in ng_text; its length in ng_dn_len
+fn ng_dupname(mod: i64, t: ptr<Tok>) -> i64 {
+    var dst: i64 = ng_put(&ng_mbuf, tget(&ng_mod_name, mod), tget(&ng_mod_len, mod));
+    var r: i64 = 0;
+    bset(dst, 95);
+    bset(dst + 1, 95);
+    dst = ng_put(dst + 2, t.value, t.length);
+    r = ng_keep(dst);
+    ng_dn_len = ng_keep_len;
+    return r;
+}
+
+// a token of a type, into ng_args: 0 when they are full
+fn ng_arg_push(t: i64) -> i64 {
+    if ng_nargs >= NG_ARGTOK - 1 {
+        return 0;
+    }
+    ng_copy_tok(&ng_args + ng_nargs * PRS_TOK, t);
+    ng_nargs = ng_nargs + 1;
+    return 1;
+}
+
+// at index at of the source, the name of template t followed by < T1, T2 >:
+// finds or makes the copy and writes its name. 1 done, with ng_use_next past
+// what was used; 0 when this was no use after all.
+fn ng_use(at: i64, t: i64) -> i64 {
+    var saved: i64 = ng_nargs;         // the types start here in ng_args
+    var count: i64 = 0;                // types read
+    var i: i64 = at + 2;               // past NAME <
+    var depth: i64 = 1;
+    var left: i64 = 0;                 // '>' still to write after the name
+    var tok: ptr<Tok> = 0;
+    var k: i64 = 0;
+    var closes: i64 = 0;
+    var g: ptr<Tok> = 0;
+    var dst: i64 = 0;
+    var ty: i64 = 0;
+    var a: i64 = 0;
+    var e: ptr<Tok> = 0;
+    var len: i64 = 0;
+    var c: i64 = 0;
+    var name: i64 = 0;
+    var tn: ptr<Tok> = 0;
+    var done: i64 = 0;
+    tset(&ng_ab, 0, ng_nargs);
+    while done == 0 {
+        tok = ng_srct(i);
+        if tok == 0 {
+            ng_nargs = saved;
+            return 0;
+        }
+        k = tok.kind;
+        if k == TOK_SEMICOLON || k == TOK_LBRACE || k == TOK_EOF {
+            ng_nargs = saved;          // nothing kept
+            return 0;
+        }
+        closes = 0;
+        if k == TOK_GT { closes = 1; }
+        if k == TOK_RSHIFT { closes = 2; }
+        if k == TOK_URSHIFT { closes = 3; }
+        if k == TOK_COMMA && depth == 1 {
+            // the next type
+            count += 1;
+            if count >= 8 {
+                ng_nargs = saved;
+                return 0;
+            }
+            tset(&ng_ab, count, ng_nargs);
+            i += 1;
+        } else if closes != 0 {
+            // each '>' closes one level; the one that closes the generic
+            // ends the types, the rest come after its name
+            while closes > 0 && done == 0 {
+                closes -= 1;
+                if depth == 1 {
+                    done = 1;
+                } else {
+                    depth -= 1;
+                    // a '>' of the type itself
+                    if ng_nargs >= NG_ARGTOK - 1 {
+                        ng_err(tok, "too many generic copies or tokens (more than the compiler's tables hold)");
+                        return 0;
+                    }
+                    g = &ng_args + ng_nargs * PRS_TOK;
+                    ng_nargs = ng_nargs + 1;
+                    tset(g, 1, tget(tok, 1));
+                    tset(g, 2, tget(tok, 2));
+                    g.kind = TOK_GT;
+                    g.value = ">";
+                    g.length = 1;
+                }
+            }
+            if done == 1 {
+                left = closes;
+                i += 1;
+                ng_use_next = i;
+                count += 1;
+                tset(&ng_ab, count, ng_nargs);
+            } else {
+                i += 1;
+            }
+        } else {
+            if k == TOK_LT {
+                depth += 1;
+            }
+            if ng_arg_push(tok) == 0 {
+                ng_err(tok, "too many generic copies or tokens (more than the compiler's tables hold)");
+                return 0;
+            }
+            i += 1;
+        }
+    }
+    // as many types as the template has parameters
+    if tget(&ng_t_np, t) != count {
+        ng_err(ng_srct(ng_use_next - 1), "this generic is used with a different number of types than it declares");
+        return 0;
+    }
+    // the copy's name: NAME__T1__T2, each type's words joined by '_'
+    tn = tget(&ng_t_name, t);
+    dst = ng_put(&ng_mbuf, tn.value, tn.length);
+    ty = 0;
+    while ty < count {
+        bset(dst, 95);
+        bset(dst + 1, 95);
+        dst = dst + 2;
+        a = tget(&ng_ab, ty);
+        while a < tget(&ng_ab, ty + 1) {
+            e = &ng_args + a * PRS_TOK;
+            k = e.kind;
+            if k == TOK_IDENTIFIER || k == TOK_INTEGER || k >= 100 {
+                dst = ng_put(dst, e.value, e.length);
+            } else {
+                bset(dst, 95);
+                dst += 1;
+            }
+            a += 1;
+        }
+        ty += 1;
+    }
+    // a copy of that name already?
+    len = dst - &ng_mbuf;
+    c = 0;
+    while c < ng_ni {
+        if tget(&ng_i_nlen, c) == len && prs_memeq(tget(&ng_i_name, c), &ng_mbuf, len) == 1 {
+            ng_nargs = saved;          // its types are kept already
+            name = tget(&ng_i_name, c);
+            return ng_use_write(name, len, left);
+        }
+        c += 1;
+    }
+    if c >= NG_MAXI {
+        ng_err(0, "too many generic copies or tokens (more than the compiler's tables hold)");
+        return 0;
+    }
+    name = ng_keep(dst);
+    if ng_keep_len == 0 {
+        ng_err(0, "too many generic copies or tokens (more than the compiler's tables hold)");
+        return 0;
+    }
+    tset(&ng_i_name, c, name);
+    tset(&ng_i_nlen, c, ng_keep_len);
+    tset(&ng_i_t, c, t);
+    tset(&ng_i_bodyn, c, -1);          // not made yet
+    ty = 0;
+    while ty < count {
+        tset(&ng_i_argb, c * 8 + ty, tget(&ng_ab, ty));
+        tset(&ng_i_argn, c * 8 + ty, tget(&ng_ab, ty + 1) - tget(&ng_ab, ty));
+        ty += 1;
+    }
+    ng_ni = ng_ni + 1;
+    return ng_use_write(name, ng_keep_len, left);
+}
+
+// the copy's name where NAME stood, then the '>' that closed more than it
+fn ng_use_write(name: i64, len: i64, left: i64) -> i64 {
+    ng_emit_named(ng_srct(ng_use_at), name, len);
+    while left > 0 {
+        ng_emit_gt(ng_srct(ng_use_at));
+        left -= 1;
+    }
+    return 1;
+}
+
+// rewrites the source tokens (ng_src, ng_srcn) into the destination.
+// ng_main says whether they are the program's own (their module per
+// token, templates in place) or a copy being made (module ng_ctxmod).
+fn ng_rw() -> i64 {
+    var i: i64 = 0;
+    var t: ptr<Tok> = 0;
+    var mod: i64 = 0;
+    var f: i64 = 0;
+    var prev: i64 = 0;
+    var m: i64 = 0;
+    var d: i64 = 0;
+    var q: i64 = 0;
+    var name: i64 = 0;
+    var tp: i64 = 0;
+    var next: i64 = 0;
+    var meant: i64 = 0;
+    while i < ng_srcn {
+        if ng_err_msg != 0 {
+            return 0;
+        }
+        t = ng_srct(i);
+        mod = ng_ctxmod;
+        f = 0;
+        if ng_main != 0 {
+            mod = bget(&ng_tokmod + i);
+            // a template: skipped, and in the last round its copies here
+            f = tget(&ng_tokflag, i);
+        }
+        if f != 0 {
+            if ng_round == 2 {
+                ng_put_copies(f - 1);
+            }
+            i = tget(&ng_t_end, f - 1);
+        } else if t.kind != TOK_IDENTIFIER {
+            ng_emit(t);
+            i += 1;
+        } else {
+            // after a '.', a name is a field
+            prev = 0;
+            if i != 0 {
+                prev = ng_stype(i - 1);
+            }
+            next = -1;
+            if prev != TOK_DOT && ng_stype(i + 1) == TOK_DOT && ng_stype(i + 2) == TOK_IDENTIFIER {
+                // module.name
+                m = ng_find_mod(t);
+                if m != -1 {
+                    q = ng_srct(i + 2);
+                    d = ng_find_decl(q, m, 0);
+                    if d != -1 {
+                        if tget(&ng_d_kind, d) == 3 {
+                            next = i + 2;      // the template's name, read next
+                        } else if tget(&ng_d_dup, d) != 0 {
+                            name = ng_dupname(m, q);
+                            ng_emit_named(q, name, ng_dn_len);
+                            next = i + 3;
+                        } else {
+                            ng_emit(q);
+                            next = i + 3;
+                        }
+                    }
+                }
+            }
+            if prev == TOK_DOT {
+                ng_emit(t);
+                next = i + 1;
+            }
+            if next == -1 {
+                // a template's name
+                tp = ng_find_t(t);
+                if tp != -1 {
+                    if ng_stype(i + 1) == TOK_LT {
+                        ng_use_at = i;
+                        if ng_use(i, tp) == 1 {
+                            next = ng_use_next;
+                        }
+                    } else if ng_stype(i + 1) == TOK_LPAREN && tget(&ng_t_isfn, tp) != 0 {
+                        ng_err(t, "a generic function is called with its types: name<T>(...)");
+                        return 0;
+                    }
+                } else if ng_anydup != 0 {
+                    // a function two modules define, called or named
+                    d = ng_find_decl(t, -1, 1);
+                    if d != -1 && tget(&ng_d_dup, d) != 0 {
+                        // only where a function is meant: f(...), &f, fn f
+                        meant = 0;
+                        if ng_stype(i + 1) == TOK_LPAREN || prev == TOK_AMPERSAND || prev == KW_FN {
+                            meant = 1;
+                        } else if i >= 2 && prev >= 100 && ng_stype(i - 2) == KW_FN {
+                            meant = 1;
+                        }
+                        if meant == 1 {
+                            // this module's own, if it has one
+                            if ng_find_decl(t, mod, 1) == -1 {
+                                ng_err(t, "two modules define a function of this name: write which, module.name");
+                                return 0;
+                            }
+                            name = ng_dupname(mod, t);
+                            ng_emit_named(t, name, ng_dn_len);
+                            next = i + 1;
+                        }
+                    }
+                }
+            }
+            if next == -1 {
+                ng_emit(t);
+                next = i + 1;
+            }
+            i = next;
+        }
+    }
+    return 0;
+}
+
+// the copies of template t, made already, at the destination
+fn ng_put_copies(t: i64) -> i64 {
+    var c: i64 = 0;
+    var n: i64 = 0;
+    var b: i64 = 0;
+    while c < ng_ni {
+        if tget(&ng_i_t, c) == t && tget(&ng_i_bodyn, c) != -1 {
+            n = tget(&ng_i_bodyn, c);
+            b = tget(&ng_i_bodyb, c);
+            while n > 0 {
+                ng_emit(&ng_itok + b * PRS_TOK);
+                b += 1;
+                n -= 1;
+            }
+        }
+        c += 1;
+    }
+    return 0;
+}
+
+// copy c: the template's tokens with each parameter replaced by its type,
+// rewritten into ng_itok
+fn ng_make(c: i64) -> i64 {
+    var t: i64 = tget(&ng_i_t, c);
+    var i: i64 = 0;
+    var end: i64 = 0;
+    var tok: ptr<Tok> = 0;
+    var p: i64 = 0;
+    var np: i64 = 0;
+    var found: i64 = 0;
+    var a: i64 = 0;
+    var n: i64 = 0;
+    // 1. substituted, into ng_sub
+    ng_nsub = 0;
+    ng_dst = &ng_sub;
+    ng_dstn = &ng_nsub;
+    i = tget(&ng_t_start, t);              // fn / struct ... up to the name
+    end = tget(&ng_t_lt, t) - 1;
+    while i < end {
+        ng_emit(ng_at(ng_tok, i));
+        i += 1;
+    }
+    ng_emit_named(ng_at(ng_tok, i), tget(&ng_i_name, c), tget(&ng_i_nlen, c));
+    i = tget(&ng_t_body, t);
+    end = tget(&ng_t_end, t);
+    np = tget(&ng_t_np, t);
+    while i < end {
+        tok = ng_at(ng_tok, i);
+        found = -1;
+        if tok.kind == TOK_IDENTIFIER {
+            // one of the parameters?
+            p = 0;
+            while p < np && found == -1 {
+                if prs_tok_same(tget(&ng_t_par, t * 8 + p), tok) == 1 {
+                    found = p;
+                }
+                p += 1;
+            }
+        }
+        if found == -1 {
+            ng_emit(tok);
+        } else {
+            a = tget(&ng_i_argb, c * 8 + found);
+            n = tget(&ng_i_argn, c * 8 + found);
+            while n > 0 {
+                ng_emit(&ng_args + a * PRS_TOK);
+                a += 1;
+                n -= 1;
+            }
+        }
+        i += 1;
+    }
+    // 2. rewritten, so the copy's own uses of generics and modules resolve
+    ng_dst = &ng_itok;
+    ng_dstn = &ng_nitok;
+    ng_src = &ng_sub;
+    ng_srcn = ng_nsub;
+    ng_main = 0;
+    ng_ctxmod = tget(&ng_t_mod, t);
+    tset(&ng_i_bodyb, c, ng_nitok);
+    ng_rw();
+    tset(&ng_i_bodyn, c, ng_nitok - tget(&ng_i_bodyb, c));
+    return 0;
+}
+
+// the program's tokens rewritten into ng_out
+fn ng_main_pass() -> i64 {
+    ng_nout = 0;
+    ng_dst = &ng_out;
+    ng_dstn = &ng_nout;
+    ng_src = ng_tok;
+    ng_srcn = ng_cnt;
+    ng_main = 1;
+    ng_rw();
+    return 0;
+}
+
+// the new count of the token array, or 0 with ng_err_tok / ng_err_msg
+// saying why. Nothing changes when the program has no templates and no
+// module names to resolve.
+fn ng_run(tokens: i64, count: i64) -> i64 {
+    var c: i64 = 0;
+    var i: i64 = 0;
+    ng_tok = tokens;
+    ng_cnt = count;
+    ng_err_msg = 0;
+    ng_err_tok = 0;
+    ng_ni = 0;
+    ng_nargs = 0;
+    ng_nitok = 0;
+    ng_ntext = 0;
+    if count >= NG_MAXTOK - 2 {
+        return count;                  // too big for the tables: left alone
+    }
+    ng_modules();
+    ng_decls();
+    // 1. the program, for the copies it asks for
+    ng_round = 1;
+    ng_main_pass();
+    if ng_err_msg != 0 {
+        return 0;
+    }
+    // 2. each copy, which may ask for more
+    while c < ng_ni {
+        ng_make(c);
+        if ng_err_msg != 0 {
+            return 0;
+        }
+        c += 1;
+    }
+    // 3. the program again, the copies written where their templates were
+    ng_round = 2;
+    ng_main_pass();
+    if ng_err_msg != 0 {
+        return 0;
+    }
+    // back into the lexer's array
+    while i < ng_nout * 3 {
+        tset(ng_tok, i, tget(&ng_out, i));
+        i += 1;
+    }
+    return ng_nout;
+}

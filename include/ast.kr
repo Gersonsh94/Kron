@@ -1,0 +1,160 @@
+kron_program
+kron_domain ast;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The tree the parser builds and the passes after it read, for the parts
+// of the compiler written in Kron. The numbers are the same as the %define
+// lines of include/kron_types.inc, which the hand-written parts read.
+//
+// A node is 56 bytes:
+// =========================================================================
+
+struct Ast {
+    node_type: i64;
+    left: i64;
+    right: i64;
+    data: i64;
+    child_count: u32;
+    line: u16;
+    col: u16;
+    type_info: i64;
+    owner_type: i64;
+}
+
+const AST_NODE_SIZE: i64 = 56;
+
+const VIS_DEFAULT: i64 = 0;
+const VIS_EXPORTED: i64 = 1;
+const AST_PROGRAM: i64 = 1000;
+const AST_FUNCTION: i64 = 1001;
+const AST_BLOCK: i64 = 1002;
+const AST_VAR_DECL: i64 = 1003;
+const AST_ASSIGN: i64 = 1005;
+const AST_BINOP: i64 = 1006;
+const AST_UNOP: i64 = 1007;
+const AST_CALL: i64 = 1008;
+const AST_RETURN: i64 = 1009;
+const AST_IF: i64 = 1010;
+const AST_WHILE: i64 = 1011;
+const AST_BREAK: i64 = 1013;
+const AST_CONTINUE: i64 = 1014;
+const AST_IDENTIFIER: i64 = 1015;
+const AST_INTEGER_LIT: i64 = 1016;
+const AST_FLOAT_LIT: i64 = 1017;
+const AST_STRING_LIT: i64 = 1018;
+const AST_BOOL_LIT: i64 = 1019;
+const AST_STRUCT_DEF: i64 = 1020;
+const AST_ENUM_DEF: i64 = 1021;
+const AST_HARDWARE_BLOCK: i64 = 1024;
+const AST_PRINT: i64 = 1025;
+const AST_PRINTC: i64 = 1061;
+const AST_ISA_DEF: i64 = 1030;
+const AST_ISA_ENTRY: i64 = 1031;
+const AST_BOOT_DEF: i64 = 1032;
+const AST_BOOT_REG: i64 = 1033;
+const AST_MMU_DEF: i64 = 1034;
+const AST_MMU_LEVEL: i64 = 1035;
+const AST_ISR_DEF: i64 = 1036;
+const AST_CFG_DEF: i64 = 1037;
+const AST_CFG_ENTRY: i64 = 1038;
+const AST_SCHED_DEF: i64 = 1039;
+const AST_SYS_DEF: i64 = 1040;
+const AST_SYS_ENTRY: i64 = 1041;
+const AST_OUTB: i64 = 1042;
+const AST_INB: i64 = 1043;
+const AST_POKE: i64 = 1044;
+const AST_PEEK: i64 = 1045;
+const AST_TRUNC: i64 = 1062;
+const AST_SAVEFILE: i64 = 1063;
+const AST_READKEY: i64 = 1064;
+const AST_BEEP: i64 = 1065;
+const AST_READMOUSE: i64 = 1066;
+const AST_MOUSEX: i64 = 1067;
+const AST_MOUSEY: i64 = 1068;
+const AST_ASM: i64 = 1046;
+const AST_INDEX: i64 = 1047;
+const AST_ADDR_OF: i64 = 1048;
+const AST_DEREF: i64 = 1049;
+const AST_POKE8: i64 = 1050;
+const AST_POKE16: i64 = 1051;
+const AST_POKE32: i64 = 1052;
+const AST_PEEK8: i64 = 1053;
+const AST_PEEK16: i64 = 1054;
+const AST_PEEK32: i64 = 1055;
+const AST_PARAM: i64 = 1056;
+const AST_ARG: i64 = 1057;
+const AST_FIELD: i64 = 1058;
+const AST_MEMBER: i64 = 1059;
+const AST_CALL_INDIRECT: i64 = 1060;
+const AST_ARENA_ENTRY: i64 = 1069;
+const ARENA_GROWTH_FIXED: i64 = 0;
+const ARENA_GROWTH_DOUBLING: i64 = 1;
+const ARENA_GROWTH_LINEAR: i64 = 2;
+const ARENA_GROWTH_LAZY: i64 = 3;
+const AST_MMU_ENTRY: i64 = 1070;
+const MMU_ENTRY_CACHE: i64 = 0;
+const MMU_ENTRY_NUMA: i64 = 1;
+const MMU_ENTRY_GC: i64 = 2;
+const MMU_ENTRY_PGFAULT: i64 = 3;
+const MMU_ENTRY_OOM: i64 = 4;
+const MMU_ENTRY_POOL: i64 = 5;
+const AST_POOL_DIR: i64 = 1071;
+const POOL_DIR_CLASS: i64 = 0;
+const POOL_DIR_COMPACT: i64 = 1;
+const POOL_DIR_GRAN: i64 = 2;
+const POOL_DIR_ONALLOC: i64 = 3;
+const POOL_DIR_ONFREE: i64 = 4;
+const ALLOC_BUDDY: i64 = 0;
+const ALLOC_SLAB: i64 = 1;
+const ALLOC_BUMP: i64 = 2;
+const ALLOC_FREELIST: i64 = 3;
+const ALLOC_PREDICTIVE: i64 = 4;
+const AST_BOOT_ENTRY: i64 = 1072;
+const AST_CAST: i64 = 1073;
+const AST_STRUCT_LIT: i64 = 1074;
+const AST_FINIT: i64 = 1075;
+const AST_FAIL: i64 = 1076;
+const AST_FAILED: i64 = 1077;
+const AST_PRINTFAIL: i64 = 1078;
+const AST_SIZEOF: i64 = 1079;
+const AST_ARRAY_LIT: i64 = 1080;
+const AST_VEC2_LOAD: i64 = 1081;
+const AST_VEC2_STORE: i64 = 1082;
+const AST_VEC2_ADD: i64 = 1083;
+const AST_VEC2_SUB: i64 = 1084;
+const AST_VEC2_MUL: i64 = 1085;
+const AST_LOADFILE: i64 = 1086;
+const AST_THREAD_START: i64 = 1087;
+const AST_THREAD_WAIT: i64 = 1088;
+const AST_LOCK_INIT: i64 = 1089;
+const AST_LOCK_TAKE: i64 = 1090;
+const AST_LOCK_GIVE: i64 = 1091;
+const AST_CPU_COUNT: i64 = 1092;
+const AST_TICKS: i64 = 1093;
+const AST_TICKS_PER_SEC: i64 = 1094;
+const AST_THREAD_YIELD: i64 = 1095;
+const AST_DLL_LOAD: i64 = 1096;
+const AST_DLL_PROC: i64 = 1097;
+const AST_ARG_COUNT: i64 = 1098;
+const AST_ARG_GET: i64 = 1099;
+const AST_TARGET_OS: i64 = 1100;
+const AST_LAMBDA: i64 = 1102;
+const AST_EXTERN: i64 = 1103;
+const AST_MULTI: i64 = 1101;
+const BLOCK_SPLICE: i64 = 0x53504C;
+const PGFLAG_RW_KERNEL: i64 = 0;
+const PGFLAG_RO_USER: i64 = 1;
+const PGFLAG_EXEC_DIS: i64 = 2;
+const PGFLAG_CACHE_BYPASS: i64 = 3;
+const CACHE_WRITE_BACK: i64 = 0;
+const CACHE_WRITE_THROUGH: i64 = 1;
+const GC_MANUAL_ONLY: i64 = 0;
+const GC_REF_COUNTED: i64 = 1;
+const GC_MARK_SWEEP: i64 = 2;
+const GC_GENERATIONAL: i64 = 3;
+const CFG_HANDLER_MARK: i64 = 0xFFFF;
+const BLOCK_RAW: i64 = 0x524157;
+const SLICE_GET_MARK: i64 = 0x534C4943;
+const AST_SYSCALL: i64 = 29;

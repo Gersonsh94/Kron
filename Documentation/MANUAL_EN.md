@@ -994,7 +994,8 @@ editor, the tests, building for other systems.
 ## 22. Building the compiler
 
 The compiler is written in x86-64 assembly and, part by part, in Kron
-itself; its lexer is `lexer/lexer.kr`. `BUILD.bat` builds `kronc.exe` from
+itself: its lexer is `lexer/lexer.kr`, its parser `parser/parser.kr` and
+the files it imports. `BUILD.bat` builds `kronc.exe` from
 the seed with nothing but Kron's own tools, and `BOOTSTRAP.bat` checks that
 it reproduces itself byte for byte.
 
@@ -1002,11 +1003,14 @@ A part in Kron is compiled as a module:
 
 ```
 kronc.exe lexer\lexer.kr --module        lexer\lexer_kr.asm
+kronc.exe parser\parser.kr --module      parser\parser_kr.asm
 ```
 
 which is its functions as assembly text, with no runtime and no entry, for
 `kron_all.asm` to include. A module has no `main` and exports nothing; its
-globals start from numbers written out. `KRONPARTS.bat` makes every part
+globals start from numbers written out. A function of the compiler outside
+the part is named in `extern "kronc" { fn name(...); }` and called as any
+other. `KRONPARTS.bat` makes every part
 again, and BUILD.bat and BOOTSTRAP.bat call it with each compiler they
 build.
 

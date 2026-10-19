@@ -5,6 +5,13 @@
 > documentation, in the compiler, the library, the tests and Ganimedes. Only
 > the conversation with Gerson is in Spanish.
 
+> **RULE (19-10-2026, decided by Gerson): from now on, all development and
+> optimization is in pure Kron.** New work on the compiler is written in
+> Kron. The parts still in assembly are not grown: they are rewritten in
+> Kron, part by part ("The compiler moves to Kron, part by part"). Until a
+> part's turn comes, what it needs is the least change that keeps the
+> build and the tests right -- a fix, or the hook a part in Kron calls.
+
 **For Claude:** everything in this file has been DECIDED by Gerson. It is not
 reopened, no alternatives are proposed, and nobody asks "are you sure...?". If
 a decision looks wrong, say so once, in one sentence, and carry on with what
@@ -925,8 +932,9 @@ How a part is built:
   headers repeat aside): two parts can no longer clash in silence.
 
 Part 1, the lexer (done 19-10-2026): `lexer/lexer.kr`, with
-`lexer/tokens.kr` (the token numbers, the same as include/kron_types.inc),
-and `lexer/lexer.asm` as its door. It gives the same tokens as the
+`include/tokens.kr` (the token numbers, the same as include/kron_types.inc;
+it was `lexer/tokens.kr` until the parser needed it too), and
+`lexer/lexer.asm` as its door. It gives the same tokens as the
 assembly lexer on every `.kr` file of the repository and on 2,500
 generated files, and `kronc -S` of every test is the same text. One
 behaviour changed on purpose: a character Kron does not use (`@`, `#`, an
@@ -934,7 +942,39 @@ behaviour changed on purpose: a character Kron does not use (`@`, `#`, an
 came after it was not compiled at all. It is now an error with its line
 and column, and so is a text with no closing quote.
 
+Part 2, the parser (done 19-10-2026): `parser/parser.kr` and the files it
+imports -- `parser_state.kr` (every global and constant of the parser),
+`parser_stmt.kr` (statements, functions, structs, types),
+`parser_expr.kr` (expressions), `parser_titan.kr` (isa, boot, mmu, isr,
+config, sched, sys) and `parser_ng.kr` (the pass over the tokens for
+generics and module names) -- with `include/ast.kr` (the tree's node and
+its numbers, the same as include/kron_types.inc) and `parser/parser.asm`
+as its door. The 10,000 lines of assembly are gone. It builds the same
+tree as the assembly parser -- every node, every field, the tables codegen
+reads, the same error at the same token with the same message -- on every
+`.kr` file of the repository and on 3,500 programs made by changing,
+dropping and repeating tokens of the tests, and `kronc -S` of every test
+is the same text.
+
+- The parser's globals are the module's: main and codegen read them as
+  `__g_parser_par_used_slice`, `__g_parser_par_ps_decl` and the like.
+- In a part, `extern "kronc" { fn name(...); }` names a function of the
+  compiler in another part or in the hand-written code; the call is a
+  plain Kron call (the parser asks the lexer for a keyword's text so).
+- A global or constant is declared before the first function that passes
+  it as an argument (the semantic pass reads the file in order): that is
+  why `parser_state.kr` holds them all and is imported first.
+
 ## Fixed 19-10-2026
+
+- A function's parameter after a `ptr<T>` one -- and the parameters of
+  the functions after it, up to the next `var` -- kept
+  the pointer's element width: `x + 1` on an `i64` there added 8. Each
+  parameter's type now sets its own width. Found while the parser in Kron
+  was being checked: it made the names it needs for `list` and `slice`
+  calls one letter long. Test: `test_ptrparam`.
+- `var x = e;` with no type kept a stray register in the tree node where
+  the type goes; nothing read it, but it was not the same twice. It is 0.
 
 - A global array given values (`var t: [i64; 4] = [1, 2, 3, 4];`) started
   at zero: the values were dropped without a word. They are data now, at

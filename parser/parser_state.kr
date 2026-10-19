@@ -1,0 +1,219 @@
+kron_program
+kron_domain parser_state;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The parser's state: every global and constant of the parser's files, in
+// one place, before the functions that use them. See parser.kr.
+// =========================================================================
+
+const PRS_TOK: i64 = 24;            // bytes of a token
+
+// --- the input and the output ---
+var par_tokens: i64;
+var par_token_count: i64;
+var par_pos: i64;
+var par_ast_buf: i64;
+var par_arena_ptr: i64;
+var par_arena_end: i64;
+var par_ast_root: i64;
+
+// --- what the type just parsed was ---
+var par_last_array_len: i64;
+var par_last_row_len: i64;         // elements per row of a 2-D array, 0 flat
+var par_last_arr_elem: i64;        // bytes per element of an array type
+var par_last_ptr_elem: i64;
+var par_last_ptr_tok: i64;         // ptr<S>: the name token of S, else 0
+var par_last_is_float: i64;
+var par_last_is_unsigned: i64;
+var par_last_is_slice: i64;        // 1 slice<T>, 2 slice of reals
+var par_last_vtag: i64;            // bits 0-3 1 text, 2 list, 3 map, 5 fn;
+                                   // bits 4-7 the element
+var par_last_coll_stok: i64;       // list<S> just parsed: S, else 0
+
+// --- the declaration or function being parsed ---
+var par_fn_rettok: i64;            // fn f() -> S: the name token of S
+var pending_ret_float: i64;
+var par_multi: i64;                // results of the function being parsed
+var par_in_fn: i64;
+var par_decl_typed: i64;
+var par_extern_mode: i64;
+var par_variadic: i64;
+var mt_first_float: i64;
+var mt_first_uns: i64;
+
+// --- errors ---
+var par_expected: i64;             // the token type looked for
+var par_custom_msg: i64;           // a message of its own, or 0
+var tn_kwbuf: [u8; 64];            // 'keyword', quoted
+
+// --- odds and ends ---
+var par_cfg_depth: i64;
+var par_thread_node: i64;          // which of a family of nodes is parsed
+var par_no_slit: i64;              // > 0 while a struct literal would be
+                                   // taken for the '{' of a block
+var par_stmt_kw: i64;              // keyword token of the statement
+var par_hdr_phase: i64;            // 1 inside the imports block
+var par_arn_tail: i64;             // chains of the TITAN modules
+var par_mmu_tail: i64;
+var par_pool_tail: i64;
+var par_pool_node: i64;
+var par_pool_kind: i64;
+var par_boot_tail: i64;
+var prs_mmu_levels: i64;           // the last page level, for the chain
+var prs_chain_head: i64;           // the splice chain of var a, b = f()
+var prs_chain_tail: i64;
+
+// --- names whose v[i] becomes a call: slice<T>, list<T>, map<T> ---
+var par_slice_toks: [i64; 64];     // in the function being parsed
+var par_slice_kind: [i64; 64];     // collection kind | element tag << 8
+var par_slice_stok: [i64; 64];     // list<S>: S
+var par_slice_n: i64;
+var par_gcoll_toks: [i64; 256];    // the globals
+var par_gcoll_kind: [i64; 256];
+var par_gcoll_stok: [i64; 256];
+var par_gcoll_n: i64;
+var par_coll_stok: i64;            // S of the entry made / found last
+var par_fi_stok: i64;
+
+// --- what codegen and main read after the parse ---
+// every declaration of a ptr<S> and of a list<S>: its name token and S
+var par_ps_decl: [i64; 8192];
+var par_ps_type: [i64; 8192];
+var par_ps_n: i64;
+var par_ls_decl: [i64; 8192];
+var par_ls_type: [i64; 8192];
+var par_ls_n: i64;
+var par_used_slice: i64;           // some v[i] became a slice call
+var par_used_text: i64;            // the type text appeared
+var par_used_list: i64;
+var par_used_map: i64;
+
+// --- functions returning a text, list or map: 'var x = f()' takes the type
+var par_fnvt_toks: [i64; 2048];
+var par_fnvt_tags: [i64; 2048];
+var par_fnvt_n: i64;
+
+// --- tokens the parser makes: hidden counters, function values ---
+var par_for_n: i64;
+var par_for_toks: [u8; 98304];     // 4096 tokens: __for_N
+var par_for_names: [u8; 65536];    // 16 bytes each
+var par_lam_n: i64;
+var par_lam_toks: [u8; 98304];     // __lambda_N
+var par_lam_names: [u8; 65536];
+
+// the tokens of names the parser writes itself: slice_get, list_len, 1...
+var prs_names: [u8; 432];
+var prs_eof: [i64; 3];
+var prs_ready: i64;
+
+// main's line map and file names, for the module names (parser_ng.kr)
+var prs_arg_input: i64;
+var prs_src_buffer: i64;
+var prs_lmap_out: i64;
+var prs_lmap_file: i64;
+var prs_lmap_count: i64;
+
+// the made tokens, by number
+const PT_SLICE_GET: i64 = 0;
+const PT_SLICE_SET: i64 = 1;
+const PT_SLICER_GET: i64 = 2;
+const PT_SLICER_SET: i64 = 3;
+const PT_LIST_GET: i64 = 4;
+const PT_LIST_SET: i64 = 5;
+const PT_LISTR_GET: i64 = 6;
+const PT_LISTR_SET: i64 = 7;
+const PT_MAP_GET: i64 = 8;
+const PT_MAP_SET: i64 = 9;
+const PT_MAPR_GET: i64 = 10;
+const PT_MAPR_SET: i64 = 11;
+const PT_LISTS_GET: i64 = 12;
+const PT_LISTS_SET: i64 = 13;
+const PT_LIST_LEN: i64 = 14;
+const PT_ONE: i64 = 15;
+const PT_ZERO: i64 = 16;
+
+// =========================================================================
+// generics and module names (parser_ng.kr)
+// =========================================================================
+
+const NG_MAXDECL: i64 = 16384;
+const NG_MAXMOD: i64 = 72;
+const NG_MAXT: i64 = 512;
+const NG_MAXI: i64 = 4096;
+const NG_MAXTOK: i64 = 349500;     // TOKEN_BUFFER_SIZE / TOKEN_SIZE, rounded down
+const NG_ARGTOK: i64 = 65536;
+const NG_TEXT: i64 = 1048576;
+
+var ng_tok: i64;                   // the token array
+var ng_cnt: i64;                   // and its count, EOF included
+var ng_err_tok: i64;               // the token an error is about
+var ng_err_msg: i64;
+
+// --- modules ---
+var ng_mod_name: [i64; 72];        // the file's name without .kr
+var ng_mod_len: [i64; 72];
+var ng_mod_alias: [i64; 72];       // the program's name for it, or 0
+var ng_mod_alen: [i64; 72];
+var ng_nmod: i64;
+var ng_tokmod: [u8; 349500];       // which module each token is from
+var ng_tokflag: [i64; 349500];     // template t starts here: t + 1
+
+// --- declarations at the top of a module ---
+var ng_d_tok: [i64; 16384];        // the name token
+var ng_d_mod: [i64; 16384];
+var ng_d_kind: [i64; 16384];       // 1 fn, 2 other, 3 a template
+var ng_d_dup: [i64; 16384];        // a fn another module defines too
+var ng_nd: i64;
+var ng_anydup: i64;
+
+// --- templates ---
+var ng_t_name: [i64; 512];         // the name token
+var ng_t_start: [i64; 512];        // index of 'fn' / 'struct'
+var ng_t_lt: [i64; 512];           // index of its '<'
+var ng_t_body: [i64; 512];         // index just past its '>'
+var ng_t_end: [i64; 512];          // index past its closing '}'
+var ng_t_np: [i64; 512];
+var ng_t_par: [i64; 4096];         // parameter name tokens, 8 each
+var ng_t_mod: [i64; 512];
+var ng_t_isfn: [i64; 512];
+var ng_nt: i64;
+
+// --- copies (instantiations) ---
+var ng_i_t: [i64; 4096];
+var ng_i_name: [i64; 4096];        // the mangled name, in ng_text
+var ng_i_nlen: [i64; 4096];
+var ng_i_argb: [i64; 32768];       // each type: its first token in ng_args
+var ng_i_argn: [i64; 32768];       // and how many
+var ng_i_bodyb: [i64; 4096];       // its tokens in ng_itok
+var ng_i_bodyn: [i64; 4096];
+var ng_ni: i64;
+
+// --- token stores ---
+var ng_args: [u8; 1572864];        // NG_ARGTOK tokens
+var ng_nargs: i64;
+var ng_itok: [u8; 8388000];        // NG_MAXTOK tokens
+var ng_nitok: i64;
+var ng_sub: [u8; 8388000];
+var ng_nsub: i64;
+var ng_out: [u8; 8388000];
+var ng_nout: i64;
+var ng_text: [u8; 1048576];
+var ng_ntext: i64;
+
+// --- the rewrite in progress ---
+var ng_src: i64;                   // tokens being read
+var ng_srcn: i64;
+var ng_main: i64;                  // 1 the program's own tokens
+var ng_round: i64;                 // 2 when the copies are written out
+var ng_ctxmod: i64;                // module of a copy being made
+var ng_dst: i64;                   // where tokens go
+var ng_dstn: i64;                  // the address of their count
+var ng_mbuf: [u8; 512];            // a name being built
+var ng_ab: [i64; 16];              // where each type of a use starts in ng_args
+var ng_use_at: i64;                // the index of the name a use starts at
+var ng_bn_len: i64;                // what ng_basename found
+var ng_keep_len: i64;              // what ng_keep kept
+var ng_dn_len: i64;                // what ng_dupname made
+var ng_use_next: i64;              // where ng_use stopped

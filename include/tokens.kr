@@ -8,7 +8,17 @@ kron_definitions
 // lexer puts in each token, and the numbers of the keywords. They are the
 // same numbers as the %define lines of include/kron_types.inc, which the
 // hand-written parts read: a number changed here is changed there too.
+//
+// A token, as the lexer writes it (24 bytes):
 // =========================================================================
+
+struct Tok {
+    kind: i64;          // the token type
+    value: i64;         // where its text starts
+    length: u32;
+    line: u16;
+    col: u16;
+}
 
 // --- what is not a keyword ---
 const TOK_EOF: i64 = 0;
@@ -17,6 +27,8 @@ const TOK_INTEGER: i64 = 2;
 const TOK_FLOAT: i64 = 3;
 const TOK_STRING: i64 = 4;
 const TOK_HEX: i64 = 5;
+const TOK_BOOLEAN: i64 = 6;
+const TOK_EXPECT_EXPR: i64 = 98;   // no token: 'an expression', in error messages
 const TOK_LBRACE: i64 = 10;
 const TOK_RBRACE: i64 = 11;
 const TOK_LPAREN: i64 = 12;

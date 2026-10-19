@@ -135,7 +135,7 @@ set LIST=%LIST% test_text test_list test_map test_files test_os
 set LIST=%LIST% test_libthreads
 set LIST=%LIST% test_exp_lit
 set LIST=%LIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
-set LIST=%LIST% test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray
+set LIST=%LIST% test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray test_ptrparam
 for %%T in (%LIST%) do call :armtest %%T
 
 REM ---- programs that call the C library (extern): they need the C library

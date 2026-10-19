@@ -19,6 +19,12 @@ section .data
 __g_lexer_TOK_HEX: dq 5
 section .text
 section .data
+__g_lexer_TOK_BOOLEAN: dq 6
+section .text
+section .data
+__g_lexer_TOK_EXPECT_EXPR: dq 98
+section .text
+section .data
 __g_lexer_TOK_LBRACE: dq 10
 section .text
 section .data

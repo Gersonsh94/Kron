@@ -1,7 +1,7 @@
 kron_program
 kron_domain lexer;
 kron_imports
-acquire_domain "tokens.kr";
+acquire_domain "include/tokens.kr";
 kron_definitions
 
 // =========================================================================

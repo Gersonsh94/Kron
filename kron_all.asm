@@ -4,9 +4,10 @@
 ;
 ;   kronc.exe kron_all.asm --assemble --pe
 ;
-; lexer/lexer_kr.asm is not written by hand: kronc --module makes it from
-; lexer/lexer.kr, the lexer written in Kron. BUILD.bat and BOOTSTRAP.bat
-; make it again with every compiler they build.
+; lexer/lexer_kr.asm and parser/parser_kr.asm are not written by hand:
+; kronc --module makes them from lexer/lexer.kr and parser/parser.kr, the
+; parts of the compiler written in Kron. BUILD.bat and BOOTSTRAP.bat make
+; them again with every compiler they build (KRONPARTS.bat).
 ;
 ; Every module includes the same headers, so the constants and the macros
 ; arrive once per module; the preprocessor keeps the first of each and skips
@@ -18,6 +19,7 @@
 %include "lexer/lexer.asm"
 %include "lexer/lexer_kr.asm"
 %include "parser/parser.asm"
+%include "parser/parser_kr.asm"
 %include "semantic/semantic.asm"
 %include "codegen/codegen.asm"
 %include "runtime/runtime.asm"

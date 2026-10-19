@@ -1,0 +1,732 @@
+kron_program
+kron_domain parser;
+kron_imports
+acquire_domain "include/tokens.kr";
+acquire_domain "include/ast.kr";
+acquire_domain "parser_state.kr";
+acquire_domain "parser_stmt.kr";
+acquire_domain "parser_expr.kr";
+acquire_domain "parser_titan.kr";
+acquire_domain "parser_ng.kr";
+kron_definitions
+
+// =========================================================================
+// THE PARSER
+//
+// The second part of the compiler written in Kron. It reads the tokens
+// the lexer made and builds the tree (include/ast.kr) the semantic pass
+// and the code generator walk. kronc --module turns it, with the files it
+// imports, into parser_kr.asm; parser.asm beside it is the hand-written
+// door the rest of the compiler calls through.
+//
+//   parser.kr          the program, declarations, the door
+//   parser_state.kr    the state: every global, before what uses it
+//   parser_stmt.kr     statements and blocks, functions, structs, types
+//   parser_expr.kr     expressions
+//   parser_titan.kr    the TITAN modules: isa, boot, mmu, isr, config...
+//   parser_ng.kr       generics and module names: a pass over the tokens
+//                      before parsing
+//
+// Like every part, it runs with no runtime underneath: memory through
+// ptr<Ast> and ptr<Tok> fields and peek / poke, its tables through their
+// address. A function returns 0 for "no node" and for an error alike, as
+// the assembly it replaces did; the error is the token the parser stopped
+// at, and what it expected there (par_expected) or a message of its own
+// (par_custom_msg).
+// =========================================================================
+
+extern "kronc" {
+    fn klx_keyword_name(kind: i64) -> i64;
+}
+
+// =========================================================================
+// tables, by address
+// =========================================================================
+
+fn tget(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn tset(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+fn bget(p: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(p);
+    }
+    return r;
+}
+
+fn bset(p: i64, v: i64) -> i64 {
+    raw {
+        poke8(p, v);
+    }
+    return 0;
+}
+
+// the n bytes at a and at b are the same
+fn prs_memeq(a: i64, b: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if bget(a + i) != bget(b + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// two tokens have the same text
+fn prs_tok_same(a: ptr<Tok>, b: ptr<Tok>) -> i64 {
+    if a.length != b.length {
+        return 0;
+    }
+    return prs_memeq(a.value, b.value, a.length);
+}
+
+// the token reads text, n characters
+fn prs_tok_is(t: ptr<Tok>, text: i64, n: i64) -> i64 {
+    if t.length != n {
+        return 0;
+    }
+    return prs_memeq(t.value, text, n);
+}
+
+// =========================================================================
+// the tokens the parser makes itself
+// =========================================================================
+
+fn prs_put_name(i: i64, text: i64) -> i64 {
+    var t: ptr<Tok> = &prs_names + i * PRS_TOK;
+    var n: i64 = 0;
+    while bget(text + n) != 0 {
+        n += 1;
+    }
+    t.kind = TOK_IDENTIFIER;
+    t.value = text;
+    t.length = n;
+    t.line = 0;
+    t.col = 0;
+    return 0;
+}
+
+fn prs_names_init() -> i64 {
+    var t: ptr<Tok> = 0;
+    prs_put_name(PT_SLICE_GET, "slice_get");
+    prs_put_name(PT_SLICE_SET, "slice_set");
+    prs_put_name(PT_SLICER_GET, "slice_get_real");
+    prs_put_name(PT_SLICER_SET, "slice_set_real");
+    prs_put_name(PT_LIST_GET, "list_get");
+    prs_put_name(PT_LIST_SET, "list_set");
+    prs_put_name(PT_LISTR_GET, "list_get_real");
+    prs_put_name(PT_LISTR_SET, "list_set_real");
+    prs_put_name(PT_MAP_GET, "map_get");
+    prs_put_name(PT_MAP_SET, "map_set");
+    prs_put_name(PT_MAPR_GET, "map_get_real");
+    prs_put_name(PT_MAPR_SET, "map_set_real");
+    prs_put_name(PT_LISTS_GET, "list_sget");
+    prs_put_name(PT_LISTS_SET, "list_sset");
+    prs_put_name(PT_LIST_LEN, "list_len");
+    prs_put_name(PT_ONE, "1");
+    prs_put_name(PT_ZERO, "0");
+    t = &prs_names + PT_ONE * PRS_TOK;
+    t.kind = TOK_INTEGER;
+    t = &prs_names + PT_ZERO * PRS_TOK;
+    t.kind = TOK_INTEGER;
+    return 0;
+}
+
+fn prs_made(i: i64) -> i64 {
+    return &prs_names + i * PRS_TOK;
+}
+
+// the call v[i] becomes, by collection kind: 0 slice, 1 list, 2 list of
+// reals, 3 map, 4 map of reals, 5 slice of reals, 6 list<S>
+fn prs_coll_get(kind: i64) -> i64 {
+    if kind == 0 { return prs_made(PT_SLICE_GET); }
+    if kind == 1 { return prs_made(PT_LIST_GET); }
+    if kind == 2 { return prs_made(PT_LISTR_GET); }
+    if kind == 3 { return prs_made(PT_MAP_GET); }
+    if kind == 4 { return prs_made(PT_MAPR_GET); }
+    if kind == 5 { return prs_made(PT_SLICER_GET); }
+    return prs_made(PT_LISTS_GET);
+}
+
+fn prs_coll_set(kind: i64) -> i64 {
+    if kind == 0 { return prs_made(PT_SLICE_SET); }
+    if kind == 1 { return prs_made(PT_LIST_SET); }
+    if kind == 2 { return prs_made(PT_LISTR_SET); }
+    if kind == 3 { return prs_made(PT_MAP_SET); }
+    if kind == 4 { return prs_made(PT_MAPR_SET); }
+    if kind == 5 { return prs_made(PT_SLICER_SET); }
+    return prs_made(PT_LISTS_SET);
+}
+
+// =========================================================================
+// the token being read
+// =========================================================================
+
+fn prs_cur() -> ptr<Tok> {
+    if par_pos < par_token_count {
+        return par_tokens + par_pos * PRS_TOK;
+    }
+    return &prs_eof;
+}
+
+fn prs_ct() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    return t.kind;
+}
+
+// the type of the token after the current one, TOK_EOF at the end
+fn prs_peek_next() -> i64 {
+    var t: ptr<Tok> = 0;
+    if par_pos + 1 < par_token_count {
+        t = par_tokens + (par_pos + 1) * PRS_TOK;
+        return t.kind;
+    }
+    return TOK_EOF;
+}
+
+fn prs_adv() -> i64 {
+    par_pos = par_pos + 1;
+    return 0;
+}
+
+// the current token is of type kind; kind is what an error expects
+fn prs_want(kind: i64) -> i64 {
+    par_expected = kind;
+    return prs_ct() == kind;
+}
+
+// After a '.', a word can be nothing but a field name, so every keyword is
+// one there: x.ptr, x.data, x.size.
+fn prs_is_field_name(kind: i64) -> i64 {
+    if kind == TOK_IDENTIFIER { return 1; }
+    if kind >= 100 { return 1; }
+    return 0;
+}
+
+// =========================================================================
+// nodes
+// =========================================================================
+
+// a node of that type, zeroed, on the line of the token being read; 0 when
+// the tree's memory is full
+fn prs_new(kind: i64) -> ptr<Ast> {
+    var n: ptr<Ast> = par_arena_ptr;
+    var t: ptr<Tok> = 0;
+    if par_arena_ptr + AST_NODE_SIZE > par_arena_end {
+        return 0;
+    }
+    par_arena_ptr = par_arena_ptr + AST_NODE_SIZE;
+    n.node_type = kind;
+    n.left = 0;
+    n.right = 0;
+    n.data = 0;
+    n.child_count = 0;
+    n.line = 0;
+    n.col = 0;
+    n.type_info = 0;
+    n.owner_type = 0;
+    if par_pos < par_token_count {
+        t = par_tokens + par_pos * PRS_TOK;
+        n.line = t.line;
+    }
+    return n;
+}
+
+// =========================================================================
+// slices and collections: the names whose v[i] and v[i] = x become calls
+// =========================================================================
+
+fn par_slice_add(name: i64) -> i64 {
+    var kind: i64 = 0;
+    par_coll_stok = 0;
+    if par_last_is_slice == 2 {
+        kind = 5;
+    }
+    par_coll_add(name, kind);
+    return 0;
+}
+
+// inside a function the name is a local; outside, a global
+fn par_coll_add(name: i64, kind: i64) -> i64 {
+    var i: i64 = 0;
+    if par_in_fn == 0 {
+        i = par_gcoll_n;
+        if i >= 256 {
+            return 0;
+        }
+        tset(&par_gcoll_toks, i, name);
+        tset(&par_gcoll_kind, i, kind);
+        tset(&par_gcoll_stok, i, par_coll_stok);
+        par_gcoll_n = i + 1;
+        return 0;
+    }
+    i = par_slice_n;
+    if i >= 64 {
+        return 0;
+    }
+    tset(&par_slice_toks, i, name);
+    tset(&par_slice_kind, i, kind);
+    tset(&par_slice_stok, i, par_coll_stok);
+    par_slice_n = i + 1;
+    return 0;
+}
+
+// after a declaration: a list<T> or map<T> name is remembered like a slice
+fn par_coll_of_vtag(name: i64) -> i64 {
+    var v: i64 = par_last_vtag;
+    var kind: i64 = v & 15;
+    var e: i64 = 0;
+    if kind == 2 {
+        kind = 1;
+    } else if kind == 3 {
+        kind = 3;
+    } else {
+        return 0;
+    }
+    par_coll_stok = 0;
+    e = (v & 0xFFFFFFFF) >> 4;
+    e = e & 15;
+    if e == 2 {
+        // a list or map of reals: the _real calls
+        kind = kind + 1;
+    } else if e == 3 {
+        if kind == 1 {
+            // a list<S> with S a name
+            kind = 6;
+            par_coll_stok = par_last_coll_stok;
+            if par_ls_n < 8192 {
+                tset(&par_ls_decl, par_ls_n, name);
+                tset(&par_ls_type, par_ls_n, par_last_coll_stok);
+                par_ls_n = par_ls_n + 1;
+            }
+        }
+        // a map<S>: integers
+    } else {
+        kind = kind | (e << 8);
+    }
+    par_coll_add(name, kind);
+    return 0;
+}
+
+// 0 when v[i] on that name is an ordinary index, else 1 + its kind |
+// element tag << 8. A local hides a global.
+fn par_is_slice(name: ptr<Tok>) -> i64 {
+    var i: i64 = 0;
+    var k: i64 = 0;
+    while i < par_slice_n {
+        if prs_tok_same(tget(&par_slice_toks, i), name) == 1 {
+            par_coll_stok = tget(&par_slice_stok, i);
+            k = tget(&par_slice_kind, i);
+            return ((k & 255) + 1) | (k & 0xFF00);
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < par_gcoll_n {
+        if prs_tok_same(tget(&par_gcoll_toks, i), name) == 1 {
+            par_coll_stok = tget(&par_gcoll_stok, i);
+            k = tget(&par_gcoll_kind, i);
+            return ((k & 255) + 1) | (k & 0xFF00);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// the call slice_get(v, i), list_get(v, i)... for the AST_INDEX of v[i],
+// marked with SLICE_GET_MARK + kind so an assignment can pick the setter
+fn par_slice_get_call(index: ptr<Ast>, how: i64) -> ptr<Ast> {
+    var second: ptr<Ast> = prs_new(AST_ARG);
+    var first: ptr<Ast> = 0;
+    var arg: ptr<Ast> = 0;
+    var cn: ptr<Ast> = 0;
+    var kind: i64 = 0;
+    if second == 0 {
+        return 0;
+    }
+    second.left = index.right;
+    first = prs_new(AST_IDENTIFIER);
+    if first == 0 {
+        return 0;
+    }
+    first.data = index.data;
+    arg = prs_new(AST_ARG);
+    if arg == 0 {
+        return 0;
+    }
+    arg.left = first;
+    arg.right = second;
+    cn = prs_new(AST_CALL);
+    if cn == 0 {
+        return 0;
+    }
+    kind = (how & 255) - 1;
+    cn.data = prs_coll_get(kind);
+    cn.right = arg;
+    cn.owner_type = SLICE_GET_MARK + kind;
+    // the element's tag: a list<text> read prints as text
+    cn.col = how & 0xFF00;
+    if kind == 0 || kind == 5 {
+        par_used_slice = 1;
+    }
+    return cn;
+}
+
+// target = value: AST_ASSIGN; on a slice element (a call carrying
+// SLICE_GET_MARK) a NEW call slice_set(v, i, value), the read left alone
+// because a compound assignment uses it on the right
+fn par_make_assign(target: ptr<Ast>, value: ptr<Ast>) -> ptr<Ast> {
+    var a3: ptr<Ast> = 0;
+    var a2: ptr<Ast> = 0;
+    var a1: ptr<Ast> = 0;
+    var cn: ptr<Ast> = 0;
+    var args: ptr<Ast> = 0;
+    var mark: i64 = 0;
+    if target.node_type == AST_CALL {
+        mark = target.owner_type - SLICE_GET_MARK;
+        if mark >= 0 && mark <= 6 {
+            a3 = prs_new(AST_ARG);
+            if a3 == 0 {
+                return 0;
+            }
+            a3.left = value;
+            a2 = prs_new(AST_ARG);
+            if a2 == 0 {
+                return 0;
+            }
+            args = target.right;
+            args = args.right;
+            a2.left = args.left;
+            a2.right = a3;
+            a1 = prs_new(AST_ARG);
+            if a1 == 0 {
+                return 0;
+            }
+            args = target.right;
+            a1.left = args.left;
+            a1.right = a2;
+            cn = prs_new(AST_CALL);
+            if cn == 0 {
+                return 0;
+            }
+            cn.right = a1;
+            cn.data = prs_coll_set(mark);
+            return cn;
+        }
+    }
+    cn = prs_new(AST_ASSIGN);
+    if cn == 0 {
+        return 0;
+    }
+    cn.left = target;
+    cn.right = value;
+    return cn;
+}
+
+// =========================================================================
+// the program
+// =========================================================================
+
+fn prs_init(tokens: i64, count: i64, buf: i64, size: i64) -> i64 {
+    if prs_ready == 0 {
+        prs_names_init();
+        prs_ready = 1;
+    }
+    par_tokens = tokens;
+    par_token_count = count;
+    par_ast_buf = buf;
+    par_arena_ptr = buf;
+    par_arena_end = buf + size;
+    par_pos = 0;
+    par_ast_root = 0;
+    return 1;
+}
+
+// main's names for the files: the program's path, its source, the line map
+fn prs_env(arg_input: i64, src: i64, lmap_out: i64, lmap_file: i64, lmap_count: i64) -> i64 {
+    prs_arg_input = arg_input;
+    prs_src_buffer = src;
+    prs_lmap_out = lmap_out;
+    prs_lmap_file = lmap_file;
+    prs_lmap_count = lmap_count;
+    return 0;
+}
+
+// 1 when the program parsed; the tree is par_ast_root
+fn prs_run() -> i64 {
+    var n: i64 = 0;
+    var prog: ptr<Ast> = 0;
+    var decl: ptr<Ast> = 0;
+    var more: ptr<Ast> = 0;
+    var t: ptr<Tok> = 0;
+    var e: ptr<Tok> = 0;
+    par_pos = 0;
+    // generics and module names first: a pass over the tokens
+    n = ng_run(par_tokens, par_token_count);
+    if n == 0 {
+        // the error may be about one of the pass's own tokens: it is put
+        // first, where the report looks
+        if ng_err_tok != 0 {
+            t = par_tokens;
+            e = ng_err_tok;
+            t.kind = e.kind;
+            t.value = e.value;
+            t.length = e.length;
+            t.line = e.line;
+            t.col = e.col;
+        }
+        par_custom_msg = ng_err_msg;
+        return 0;
+    }
+    par_token_count = n;
+    prog = prs_new(AST_PROGRAM);
+    if prog == 0 {
+        return 0;
+    }
+    par_ast_root = prog;
+    // kron_program
+    // kron_domain path::to::module [epoch N] ;
+    // kron_imports      (main has put each acquire_domain's file here)
+    // kron_definitions
+    if prs_want(KW_KRON_PROGRAM) == 0 { return 0; }
+    prs_adv();
+    if prs_want(KW_KRON_DOMAIN) == 0 { return 0; }
+    prs_adv();
+    if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+    prs_adv();
+    while prs_ct() == TOK_DOUBLE_COLON {
+        prs_adv();
+        if prs_want(TOK_IDENTIFIER) == 0 { return 0; }
+        prs_adv();
+    }
+    if prs_ct() == KW_EPOCH {
+        prs_adv();
+        if prs_want(TOK_INTEGER) == 0 { return 0; }
+        prs_adv();
+    }
+    if prs_want(TOK_SEMICOLON) == 0 { return 0; }
+    prs_adv();
+    if prs_want(KW_KRON_IMPORTS) == 0 { return 0; }
+    prs_adv();
+    // the imported files' declarations sit between kron_imports and
+    // kron_definitions, and are parsed like any others
+    par_hdr_phase = 1;
+    while prs_ct() != TOK_EOF {
+        if par_hdr_phase != 0 && prs_ct() == KW_KRON_DEFINITIONS {
+            prs_adv();
+            par_hdr_phase = 0;
+        } else {
+            decl = prs_top_level();
+            if decl == 0 {
+                return 0;
+            }
+            if prog.left == 0 {
+                prog.left = decl;
+            } else {
+                more = prs_new(AST_PROGRAM);
+                if more == 0 {
+                    return 0;
+                }
+                prog.right = more;
+                prog = more;
+                prog.left = decl;
+            }
+        }
+    }
+    // kron_definitions is not optional
+    if par_hdr_phase != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// a declaration at file level
+fn prs_top_level() -> ptr<Ast> {
+    var k: i64 = prs_ct();
+    var r: ptr<Ast> = 0;
+    var ty: i64 = 0;
+    var name: i64 = 0;
+    if k == KW_FN { return prs_function(); }
+    if k == KW_VAR {
+        return prs_statement();
+    }
+    if k == KW_CONST {
+        // a constant cannot be written, so threads may read it: it carries
+        // the 'shared' mark (bit 2) for the thread check
+        r = prs_statement();
+        if r != 0 {
+            r.col = r.col | 4;
+        }
+        return r;
+    }
+    if k == KW_SHARED {
+        // shared var x: T; -- a global code running in a thread may touch
+        prs_adv();
+        if prs_want(KW_VAR) == 0 { return 0; }
+        r = prs_statement();
+        if r != 0 {
+            r.col = r.col | 4;
+        }
+        return r;
+    }
+    if k == KW_STRUCT { return prs_struct(); }
+    if k == KW_ENUM { return prs_enum(); }
+    if k == KW_KRON_ISA { return prs_isa(); }
+    if k == KW_BOOT_SEQUENCE { return prs_boot(); }
+    if k == KW_MMU_CONFIGURATION { return prs_mmu(); }
+    if k == KW_INTERRUPT_SERVICE { return prs_isr(); }
+    if k == KW_DMA_CHANNEL || k == KW_HARDWARE_DRIVER || k == KW_KERNEL_ARCHITECTURE {
+        return prs_config();
+    }
+    if k == KW_SECURITY_MODEL || k == KW_FILESYSTEM_VOLUME || k == KW_NETWORK_KERNEL {
+        return prs_config();
+    }
+    if k == KW_POWER_MANAGER || k == KW_KRON_HYPERVISOR || k == KW_PACKAGE_MANAGER {
+        return prs_config();
+    }
+    if k == KW_EXECUTABLE_LOADER || k == KW_HUMAN_MACHINE || k == KW_KRON3D_CONTEXT {
+        return prs_config();
+    }
+    if k == KW_EXECUTION_MODEL || k == KW_DEPLOYMENT_MODEL || k == KW_SECURITY_RING {
+        return prs_config();
+    }
+    if k == KW_SCHEDULER_DOMAIN { return prs_sched(); }
+    if k == KW_SYSCALL_DISPATCH { return prs_sys(); }
+    if k == KW_EXTERN { return prs_extern(); }
+    // Only a module keyword starts a module. Anything else here -- a name,
+    // a statement, a stray '}' -- is code outside a function.
+    if k < 200 || k >= 532 {
+        par_custom_msg = "a declaration goes here -- fn, var, const, shared var, struct, enum: is there a } too many above?";
+        return 0;
+    }
+    // a TITAN module: its keyword and, when one follows, its name
+    ty = prs_cur();
+    prs_adv();
+    if prs_ct() == TOK_IDENTIFIER {
+        name = prs_cur();
+        prs_adv();
+    }
+    if prs_generic_decl() == 0 {
+        return 0;
+    }
+    r = prs_new(AST_HARDWARE_BLOCK);
+    if r == 0 {
+        return 0;
+    }
+    r.data = ty;
+    r.left = name;
+    return r;
+}
+
+// =========================================================================
+// the door: what main reads after the parse
+// =========================================================================
+
+fn prs_ast_root() -> i64 {
+    return par_ast_root;
+}
+
+fn prs_error_token() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    return t.kind;
+}
+
+fn prs_position() -> i64 {
+    return par_pos;
+}
+
+fn prs_error_line() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    return t.line;
+}
+
+fn prs_error_col() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    return t.col;
+}
+
+fn prs_error_len() -> i64 {
+    var t: ptr<Tok> = prs_cur();
+    return t.length;
+}
+
+fn prs_expected() -> i64 {
+    return par_expected;
+}
+
+fn prs_custom_msg() -> i64 {
+    return par_custom_msg;
+}
+
+fn prs_error_msg() -> i64 {
+    return "Parser: invalid structure";
+}
+
+fn prs_token_count() -> i64 {
+    return par_token_count;
+}
+
+fn prs_ast_used() -> i64 {
+    return par_arena_ptr - par_ast_buf;
+}
+
+// a token type, as an error message names it
+fn prs_token_name(kind: i64) -> i64 {
+    var text: i64 = 0;
+    var n: i64 = 0;
+    var c: i64 = 0;
+    if kind == 0 { return "end of file"; }
+    if kind == 1 { return "an identifier"; }
+    if kind == 2 { return "an integer"; }
+    if kind == 3 { return "a decimal number"; }
+    if kind == 4 { return "a string"; }
+    if kind == 10 { return "'{'"; }
+    if kind == 11 { return "'}'"; }
+    if kind == 12 { return "'('"; }
+    if kind == 13 { return "')'"; }
+    if kind == 14 { return "'['"; }
+    if kind == 15 { return "']'"; }
+    if kind == 16 { return "';'"; }
+    if kind == 17 { return "':'"; }
+    if kind == 18 { return "','"; }
+    if kind == 20 { return "'='"; }
+    if kind == 21 { return "'->'"; }
+    if kind == TOK_EXPECT_EXPR { return "an expression"; }
+    if kind >= 100 {
+        // the keyword's own text, in quotes: 'kron_program'
+        raw {
+            text = klx_keyword_name(kind);
+        }
+        if text == 0 {
+            return "a keyword";
+        }
+        bset(&tn_kwbuf, 39);
+        n = 0;
+        while n < 60 {
+            c = bget(text + n);
+            if c == 0 {
+                break;
+            }
+            bset(&tn_kwbuf + 1 + n, c);
+            n += 1;
+        }
+        bset(&tn_kwbuf + 1 + n, 39);
+        bset(&tn_kwbuf + 2 + n, 0);
+        return &tn_kwbuf;
+    }
+    if kind >= 30 { return "an operator"; }
+    return "a token";
+}

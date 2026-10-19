@@ -4275,8 +4275,8 @@ FNVAL_MARK   equ 0x464E56          ; AST.owner_type of a call through a value
 KT_MAX_MARKS equ 65536
 extern lmap_lookup
 extern parse_float
-extern par_ps_decl, par_ps_type, par_ps_n
-extern par_ls_decl, par_ls_type, par_ls_n
+extern __g_parser_par_ps_decl, __g_parser_par_ps_type, __g_parser_par_ps_n
+extern __g_parser_par_ls_decl, __g_parser_par_ls_type, __g_parser_par_ls_n
 
 section .bss
     cg_out       resq 1
@@ -11557,6 +11557,10 @@ cg_call_kind:
     pop  r12
     ret
 .ck_ext:
+    ; in a module, an extern block names functions of the compiler's other
+    ; parts: they are called as Kron calls, by name
+    cmp  byte [rel cg_as_module], 0
+    jne  .ck_fn
     mov  eax, 3
     pop  r12
     ret
@@ -16576,16 +16580,16 @@ cg_member_global:
 ; cg_pstruct_of(rdi = a declaration's name token) -> eax = the struct that a
 ; variable declared ptr<S> points to, or -1. Preserves rbx and r12-r15.
 cg_pstruct_of:
-    mov  ecx, [rel par_ps_n]
+    mov  ecx, [rel __g_parser_par_ps_n]
 .po_l:
     test ecx, ecx
     jz   .po_no
     dec  ecx
-    lea  rdx, [rel par_ps_decl]
+    lea  rdx, [rel __g_parser_par_ps_decl]
     mov  rax, [rdx + rcx*8]
     cmp  rax, rdi
     jne  .po_l
-    lea  rdx, [rel par_ps_type]
+    lea  rdx, [rel __g_parser_par_ps_type]
     mov  rdi, [rdx + rcx*8]
     call cg_find_struct
     ret
@@ -17226,16 +17230,16 @@ cg_list_struct:
     lea  rcx, [rel g_toks]
     mov  rdi, [rcx + rax*8]
 .ls_find:
-    mov  ecx, [rel par_ls_n]
+    mov  ecx, [rel __g_parser_par_ls_n]
 .ls_l:
     test ecx, ecx
     jz   .ls_no
     dec  ecx
-    lea  rdx, [rel par_ls_decl]
+    lea  rdx, [rel __g_parser_par_ls_decl]
     mov  rax, [rdx + rcx*8]
     cmp  rax, rdi
     jne  .ls_l
-    lea  rdx, [rel par_ls_type]
+    lea  rdx, [rel __g_parser_par_ls_type]
     mov  rdi, [rdx + rcx*8]
     call cg_find_struct
     pop  rbx

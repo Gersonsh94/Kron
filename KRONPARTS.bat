@@ -8,7 +8,8 @@ REM
 REM   Makes the assembly text of each part again, with COMPILER
 REM   (kronc.exe when none is named):
 REM
-REM       lexer\lexer.kr  makes  lexer\lexer_kr.asm
+REM       lexer\lexer.kr    makes  lexer\lexer_kr.asm
+REM       parser\parser.kr  makes  parser\parser_kr.asm
 REM
 REM   kron_all.asm includes those files, so kasm still builds the
 REM   whole compiler alone. BUILD.bat and BOOTSTRAP.bat call this
@@ -24,6 +25,8 @@ if not exist "%JC%" (
 )
 
 call :part lexer\lexer.kr
+if errorlevel 1 exit /b 1
+call :part parser\parser.kr
 if errorlevel 1 exit /b 1
 exit /b 0
 

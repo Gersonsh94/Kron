@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_ptrparam;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Pointer parameters and the parameters after them. Arithmetic on a
+// ptr<T> moves by whole elements; on an i64 beside it, by ones -- in the
+// same function and in the functions after it. (The width of a ptr<T>
+// parameter used to stay for the plain parameters after it, so x + 1 there
+// added 8.)
+// =========================================================================
+
+struct Pair { a: i64; b: i64; }
+
+var cells: [i32; 8];
+var pairs: [i64; 8];
+
+// a ptr<Pair> first, then plain numbers
+fn after_ptr(p: ptr<Pair>, x: i64, y: i64) -> i64 {
+    p.a = x + 1;
+    p.b = y - 1;
+    return x + y + 1;
+}
+
+// the function after: no pointer at all
+fn plain(z: i64) -> i64 {
+    return z + 1;
+}
+
+// a ptr<i32> moves by 4, the i64 after it by 1
+fn step(p: ptr<i32>, n: i64) -> i64 {
+    var q: ptr<i32> = p + n;
+    var a: i64 = q;
+    var b: i64 = p;
+    return (a - b) + (n + 1);
+}
+
+fn main() {
+    var pp: ptr<Pair> = &pairs;
+    print(after_ptr(pp, 10, 20));
+    print(pp.a);
+    print(pp.b);
+    print(plain(41));
+    var pc: ptr<i32> = &cells;
+    print(step(pc, 3));
+}
