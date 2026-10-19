@@ -1,16 +1,19 @@
 {
-  "name": "kron-lang",
+  "name": "kron",
   "displayName": "Kron",
-  "description": "Kron language support: highlighting, build and run, a debugger (breakpoints, stepping, variables), builds for every target, errors in the editor, completion, go to definition, hover help and outline.",
-  "version": "0.5.0",
-  "publisher": "gerson",
+  "description": "Kron language support: highlighting, build and run, errors in the editor, completion, go to definition, hover help and outline.",
+  "version": "0.3.6",
+  "publisher": "Codexmy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gersonsh94/Kron.git"
+  },
   "engines": {
     "vscode": "^1.70.0"
   },
   "categories": [
     "Programming Languages",
-    "Snippets",
-    "Debuggers"
+    "Snippets"
   ],
   "contributes": {
     "languages": [
@@ -72,29 +75,15 @@
         "icon": "$(play)"
       },
       {
-        "command": "kron.debug",
-        "title": "Kron: Debug",
-        "icon": "$(debug-alt)"
-      },
-      {
-        "command": "kron.buildTarget",
-        "title": "Kron: Build for Another System..."
-      },
-      {
         "command": "kron.check",
         "title": "Kron: Check for Errors"
       }
     ],
     "keybindings": [
       {
-        "command": "kron.debug",
-        "key": "f5",
-        "when": "editorLangId == kron && !inDebugMode"
-      },
-      {
         "command": "kron.run",
-        "key": "ctrl+f5",
-        "when": "editorLangId == kron && !inDebugMode"
+        "key": "f5",
+        "when": "editorLangId == kron"
       },
       {
         "command": "kron.build",
@@ -110,24 +99,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "kron.debug",
-          "when": "editorLangId == kron",
-          "group": "navigation@2"
-        },
-        {
           "command": "kron.build",
           "when": "editorLangId == kron",
-          "group": "navigation@3"
+          "group": "navigation@2"
         }
       ]
     },
     "configuration": {
       "title": "Kron",
       "properties": {
-        "kron.compilerPath": {
+       "kron.compilerPath": {
           "type": "string",
-          "default": "C:\\Users\\Gerson\\Kron-compiler\\kronc.exe",
-          "description": "Path to kronc.exe. Used when the open folder has no kronc.exe of its own."
+          "default": "kronc",
+          "description": "Path to kronc.exe..."
         },
         "kron.checkOnSave": {
           "type": "boolean",
@@ -135,79 +119,11 @@
           "description": "Compile in the background on every save and underline the errors."
         }
       }
-    },
-    "breakpoints": [
-      {
-        "language": "kron"
-      }
-    ],
-    "debuggers": [
-      {
-        "type": "kron",
-        "label": "Kron",
-        "languages": [
-          "kron"
-        ],
-        "configurationAttributes": {
-          "launch": {
-            "required": [
-              "program"
-            ],
-            "properties": {
-              "program": {
-                "type": "string",
-                "description": "The .kr file to debug.",
-                "default": "${file}"
-              },
-              "args": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Words for the program's command line.",
-                "default": []
-              },
-              "cwd": {
-                "type": "string",
-                "description": "The folder it runs in; the program's own by default."
-              },
-              "stopOnEntry": {
-                "type": "boolean",
-                "description": "Stop at the first statement.",
-                "default": false
-              }
-            }
-          }
-        },
-        "initialConfigurations": [
-          {
-            "type": "kron",
-            "request": "launch",
-            "name": "Debug the open Kron file",
-            "program": "${file}"
-          }
-        ],
-        "configurationSnippets": [
-          {
-            "label": "Kron: Debug a file",
-            "description": "Build with --debug and run under the debugger",
-            "body": {
-              "type": "kron",
-              "request": "launch",
-              "name": "Debug ${1:program}",
-              "program": "^\"\\${workspaceFolder}/${1:program}.kr\""
-            }
-          }
-        ]
-      }
-    ]
+    }
   },
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:kron",
-    "onDebugResolve:kron",
-    "onDebugDynamicConfigurations:kron",
-    "onCommand:kron.debug"
+    "onLanguage:kron"
   ],
   "icon": "icon.png"
 }

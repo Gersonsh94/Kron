@@ -1,4 +1,4 @@
-// Kron for VS Code -- build, run, debug, errors, completion, definitions, hover, outline.
+// Kron for VS Code -- build, run, errors, completion, definitions, hover, outline.
 // Plain JavaScript on the VS Code API: no dependencies, nothing to install.
 
 const vscode = require('vscode');
@@ -110,24 +110,30 @@ async function currentKronFile() {
     return ed.document.fileName;
 }
 
-// kronc goes from the .kr straight to the .exe next to it, as a C compiler
-// does: nothing else is written. Returns the .exe path, or null.
+// Compile, then assemble into an .exe. Returns the .exe path, or null.
 async function build(file, quiet) {
     const cwd = path.dirname(file);
-    const exe = file.replace(/\.kr$/i, '.exe');
     output.clear();
-    const res = await runCompiler([file], cwd);
-    output.append(res.text);
-    if (!res.ok || showErrors(res.text, file) || !fs.existsSync(exe)) {
-        showErrors(res.text, file);
+    const step1 = await runCompiler([file], cwd);
+    output.append(step1.text);
+    if (!step1.ok || showErrors(step1.text, file)) {
+        showErrors(step1.text, file);
         if (!quiet) {
             output.show(true);
-            vscode.window.showErrorMessage(res.missing ? res.text : 'Kron: compilation failed. See the Problems panel.');
+            vscode.window.showErrorMessage(step1.missing ? step1.text : 'Kron: compilation failed. See the Problems panel.');
         }
         return null;
     }
+    const asm = file.replace(/\.kr$/i, '.asm');
+    const step2 = await runCompiler([asm, '--assemble', '--pe'], cwd);
+    output.append(step2.text);
+    if (!step2.ok) {
+        output.show(true);
+        vscode.window.showErrorMessage('Kron: the assembler failed. See the Kron output.');
+        return null;
+    }
     diagnostics.clear();
-    return exe;
+    return file.replace(/\.kr$/i, '.exe');
 }
 
 async function cmdBuild() {
@@ -151,299 +157,9 @@ async function cmdRun() {
 async function cmdCheck(doc) {
     const file = doc ? doc.fileName : await currentKronFile();
     if (!file) return;
-    // --check runs every check, the thread rule included, and writes nothing
-    const res = await runCompiler([file, '--check'], path.dirname(file));
+    const res = await runCompiler([file], path.dirname(file));
     if (res.missing) return;
     if (!showErrors(res.text, file)) diagnostics.clear();
-}
-
-// Build for another system: the file next to the source, named for it.
-const TARGETS = [
-    { label: 'Windows', target: 'windows', out: f => f.replace(/\.kr$/i, '.exe') },
-    { label: 'Linux (x86-64)', target: 'linux', out: f => f.replace(/\.kr$/i, '') },
-    { label: 'Linux (ARM64)', target: 'linux-arm64', out: f => f.replace(/\.kr$/i, '_arm64') },
-    { label: 'macOS (Apple silicon)', target: 'macos', out: f => f.replace(/\.kr$/i, '_mac') },
-    { label: 'Web (WebAssembly)', target: 'web', out: f => path.join(path.dirname(f), 'web', path.basename(f).replace(/\.kr$/i, '.wasm')) },
-    { label: 'Android library (.so)', target: 'android', lib: true, out: f => path.join(path.dirname(f), 'lib' + path.basename(f).replace(/\.kr$/i, '.so')) },
-    { label: 'iOS library (.dylib)', target: 'ios', lib: true, out: f => f.replace(/\.kr$/i, '.dylib') }
-];
-
-async function cmdBuildTarget() {
-    const file = await currentKronFile();
-    if (!file) return;
-    const pick = await vscode.window.showQuickPick(TARGETS.map(t => t.label), { placeHolder: 'Build for which system?' });
-    if (!pick) return;
-    const t = TARGETS.find(x => x.label === pick);
-    const out = t.out(file);
-    if (!fs.existsSync(path.dirname(out))) fs.mkdirSync(path.dirname(out), { recursive: true });
-    const args = [file, '--target=' + t.target, '-o', out];
-    if (t.lib) args.push('--lib');
-    output.clear();
-    const res = await runCompiler(args, path.dirname(file));
-    output.append(res.text);
-    if (!res.ok || showErrors(res.text, file) || !fs.existsSync(out)) {
-        output.show(true);
-        vscode.window.showErrorMessage(res.missing ? res.text : 'Kron: the build for ' + t.label + ' failed. See the Problems panel.');
-        return;
-    }
-    diagnostics.clear();
-    vscode.window.showInformationMessage('Kron: built ' + path.relative(path.dirname(file), out) + ' for ' + t.label +
-        (t.target === 'web' ? ' (serve the folder with kron_serve and open the .html)' : ''));
-}
-
-async function cmdDebug() {
-    const file = await currentKronFile();
-    if (!file) return;
-    vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file)),
-        { type: 'kron', request: 'launch', name: 'Debug ' + path.basename(file), program: file });
-}
-
-// ------------------------------------------------------------------ the debugger
-
-// A build made with --debug stops where it is told: before each statement
-// of the program's own files it asks std_debug.kr, which talks to this code
-// through the program's standard input and output (lines starting with
-// "@@kdbg "; the protocol is described at the top of std_debug.kr). This
-// class turns that into the Debug Adapter Protocol VS Code speaks, without
-// any package: requests come in through handleMessage, answers and events
-// go out through onDidSendMessage.
-class KronDebugSession {
-    constructor() {
-        this.emitter = new vscode.EventEmitter();
-        this.onDidSendMessage = this.emitter.event;
-        this.seq = 1;
-        this.proc = null;
-        this.files = [];          // number -> absolute path
-        this.ready = false;       // the program said ready
-        this.configured = false;  // VS Code sent its breakpoints
-        this.started = false;
-        this.stopOnEntry = false;
-        this.bps = new Map();     // absolute path -> [lines]
-        this.frames = [];         // of the last stop: { id, file, line, name }
-        this.vars = new Map();    // frame ('0', '1', ... or 'g') -> [{ path, type, value }]
-        this.refs = [];           // variablesReference - 1 -> { frame, path }
-        this.pending = null;      // the stop being read
-        this.buf = '';
-        this.cwd = '';
-    }
-    send(m) { m.seq = this.seq++; this.emitter.fire(m); }
-    respond(req, body, ok, message) {
-        this.send({ type: 'response', request_seq: req.seq, command: req.command,
-                    success: ok !== false, message, body: body || {} });
-    }
-    event(name, body) { this.send({ type: 'event', event: name, body: body || {} }); }
-    out(text, category) { this.event('output', { category: category || 'stdout', output: text }); }
-    write(line) { if (this.proc && this.proc.stdin.writable) this.proc.stdin.write(line + '\n'); }
-
-    key(p) { const r = path.resolve(p); return process.platform === 'win32' ? r.toLowerCase() : r; }
-
-    // every breakpoint, again: the program takes them at its next stop
-    sendBreakpoints() {
-        this.write('c');
-        for (const [file, lines] of this.bps) {
-            this.files.forEach((f, i) => {
-                if (f && this.key(f) === file) for (const l of lines) this.write('b ' + i + ' ' + l);
-            });
-        }
-    }
-    maybeStart() {
-        if (this.started || !this.ready || !this.configured) return;
-        this.started = true;
-        this.sendBreakpoints();
-        this.write(this.stopOnEntry ? 'step' : 'run');
-    }
-
-    // a line the program wrote
-    line(text) {
-        if (!text.startsWith('@@kdbg ')) { this.out(text + '\n'); return; }
-        const rest = text.slice(7);
-        const word = rest.split(' ', 1)[0];
-        const args = rest.slice(word.length + 1);
-        if (word === 'hello') { this.files = []; }
-        else if (word === 'file') {
-            const sp = args.indexOf(' ');
-            const n = parseInt(args.slice(0, sp), 10);
-            this.files[n] = path.resolve(this.cwd, args.slice(sp + 1));
-        }
-        else if (word === 'ready') { this.ready = true; this.maybeStart(); }
-        else if (word === 'stop') { this.pending = { reason: args, frames: [], vars: new Map() }; }
-        else if (word === 'frame' && this.pending) {
-            const p = args.split(' ');
-            this.pending.frames.push({ id: parseInt(p[0], 10), file: this.files[parseInt(p[1], 10)] || '',
-                                       line: parseInt(p[2], 10), name: p.slice(3).join(' ') });
-        }
-        else if (word === 'var' && this.pending) {
-            // var FRAME PATH TYPE VALUE...
-            const a = args.indexOf(' '), b = args.indexOf(' ', a + 1), c = args.indexOf(' ', b + 1);
-            const frame = args.slice(0, a), vpath = args.slice(a + 1, b);
-            const type = c < 0 ? args.slice(b + 1) : args.slice(b + 1, c);
-            const value = c < 0 ? '' : args.slice(c + 1);
-            if (!this.pending.vars.has(frame)) this.pending.vars.set(frame, []);
-            this.pending.vars.get(frame).push({ path: vpath, type, value });
-        }
-        else if (word === 'end' && this.pending) {
-            this.frames = this.pending.frames;
-            this.vars = this.pending.vars;
-            this.refs = [];
-            const reason = this.pending.reason === 'breakpoint' ? 'breakpoint' : (this.pending.reason === 'entry' ? 'entry' : 'step');
-            this.pending = null;
-            this.event('stopped', { reason, threadId: 1, allThreadsStopped: true });
-        }
-    }
-
-    async launch(req) {
-        const a = req.arguments || {};
-        const program = a.program;
-        if (!program || !fs.existsSync(program)) {
-            this.respond(req, {}, false, 'Kron: no program to debug (set "program" to a .kr file)');
-            return;
-        }
-        this.cwd = path.dirname(program);
-        this.stopOnEntry = !!a.stopOnEntry;
-        const exe = program.replace(/\.kr$/i, '') + '_debug' + (process.platform === 'win32' ? '.exe' : '');
-        this.out('Building ' + path.basename(program) + ' for debugging...\n', 'console');
-        const res = await runCompiler([program, '--debug', '-o', exe], this.cwd);
-        if (!res.ok || showErrors(res.text, program) || !fs.existsSync(exe)) {
-            this.out(res.text, 'stderr');
-            this.respond(req, {}, false, res.missing ? res.text : 'Kron: the program does not compile; see the Problems panel.');
-            return;
-        }
-        diagnostics.clear();
-        if (process.platform !== 'win32') { try { fs.chmodSync(exe, 0o755); } catch (e) { /* as it is */ } }
-        try {
-            this.proc = cp.spawn(exe, a.args || [], { cwd: a.cwd || this.cwd, windowsHide: false });
-        } catch (e) {
-            this.respond(req, {}, false, 'Kron: the program would not start: ' + e.message);
-            return;
-        }
-        this.proc.stdout.setEncoding('utf8');
-        this.proc.stdout.on('data', d => {
-            this.buf += d;
-            let i;
-            while ((i = this.buf.indexOf('\n')) >= 0) {
-                const l = this.buf.slice(0, i).replace(/\r$/, '');
-                this.buf = this.buf.slice(i + 1);
-                this.line(l);
-            }
-        });
-        this.proc.on('error', e => {
-            this.out('Kron: the program would not start: ' + e.message + '\n', 'stderr');
-            this.event('terminated');
-            this.proc = null;
-        });
-        this.proc.stderr.setEncoding('utf8');
-        this.proc.stderr.on('data', d => this.out(d, 'stderr'));
-        this.proc.on('exit', code => {
-            if (this.buf) { this.line(this.buf); this.buf = ''; }
-            this.event('exited', { exitCode: code === null ? 0 : code });
-            this.event('terminated');
-            this.proc = null;
-        });
-        this.respond(req);
-        this.event('initialized');
-    }
-
-    // the variables under a path (top level: path '')
-    children(frame, parent) {
-        const list = this.vars.get(frame) || [];
-        const out = [];
-        for (const v of list) {
-            let rest;
-            if (parent === '') {
-                if (/[.\[]/.test(v.path)) continue;
-                rest = v.path;
-            } else {
-                if (!v.path.startsWith(parent)) continue;
-                rest = v.path.slice(parent.length);
-                if (!/^(\.[A-Za-z_]\w*|\[\d+\])$/.test(rest)) continue;
-                if (rest[0] === '.') rest = rest.slice(1);
-            }
-            const hasKids = list.some(w => w.path.startsWith(v.path) && /^(\.|\[)/.test(w.path.slice(v.path.length)));
-            let ref = 0;
-            if (hasKids) { this.refs.push({ frame, path: v.path }); ref = this.refs.length; }
-            out.push({ name: rest, value: v.value, type: v.type, variablesReference: ref,
-                       evaluateName: v.path });
-        }
-        return out;
-    }
-
-    handleMessage(req) {
-        switch (req.command) {
-            case 'initialize':
-                this.respond(req, { supportsConfigurationDoneRequest: true, supportsEvaluateForHovers: true,
-                                    supportsTerminateRequest: true });
-                break;
-            case 'launch':
-                this.launch(req);
-                break;
-            case 'setBreakpoints': {
-                const src = req.arguments.source || {};
-                const lines = (req.arguments.breakpoints || []).map(b => b.line);
-                if (src.path) this.bps.set(this.key(src.path), lines);
-                if (this.started) this.sendBreakpoints();
-                this.respond(req, { breakpoints: lines.map(l => ({ verified: true, line: l })) });
-                break;
-            }
-            case 'setExceptionBreakpoints':
-                this.respond(req, { breakpoints: [] });
-                break;
-            case 'configurationDone':
-                this.configured = true;
-                this.respond(req);
-                this.maybeStart();
-                break;
-            case 'threads':
-                this.respond(req, { threads: [{ id: 1, name: 'main' }] });
-                break;
-            case 'stackTrace':
-                this.respond(req, {
-                    stackFrames: this.frames.map(f => ({ id: f.id, name: f.name, line: f.line, column: 1,
-                        source: f.file ? { name: path.basename(f.file), path: f.file } : undefined })),
-                    totalFrames: this.frames.length
-                });
-                break;
-            case 'scopes': {
-                const fid = String(req.arguments.frameId);
-                this.refs.push({ frame: fid, path: '' });
-                const locals = this.refs.length;
-                this.refs.push({ frame: 'g', path: '' });
-                const globals = this.refs.length;
-                this.respond(req, { scopes: [
-                    { name: 'Locals', variablesReference: locals, expensive: false },
-                    { name: 'Globals', variablesReference: globals, expensive: false }] });
-                break;
-            }
-            case 'variables': {
-                const r = this.refs[req.arguments.variablesReference - 1];
-                this.respond(req, { variables: r ? this.children(r.frame, r.path) : [] });
-                break;
-            }
-            case 'evaluate': {
-                const e = (req.arguments.expression || '').trim();
-                const fid = req.arguments.frameId !== undefined ? String(req.arguments.frameId) : '0';
-                const find = fr => (this.vars.get(fr) || []).find(v => v.path === e);
-                const v = find(fid) || find('g');
-                if (v) this.respond(req, { result: v.value, type: v.type, variablesReference: 0 });
-                else this.respond(req, {}, false, 'Kron: only the names shown under Variables can be read here (p, p.x, a[3])');
-                break;
-            }
-            case 'continue': this.write('run'); this.respond(req, { allThreadsContinued: true }); break;
-            case 'next': this.write('next'); this.respond(req); break;
-            case 'stepIn': this.write('step'); this.respond(req); break;
-            case 'stepOut': this.write('out'); this.respond(req); break;
-            case 'pause':
-                this.respond(req, {}, false, 'Kron: set a breakpoint to stop the program; it cannot be paused from outside yet');
-                break;
-            case 'terminate':
-            case 'disconnect':
-                if (this.proc) { try { this.proc.kill(); } catch (e) { /* gone */ } }
-                this.respond(req);
-                break;
-            default:
-                this.respond(req, {}, false, 'Kron: ' + req.command + ' is not supported');
-        }
-    }
-    dispose() { if (this.proc) { try { this.proc.kill(); } catch (e) { /* gone */ } } }
 }
 
 // ------------------------------------------------------------------ the index
@@ -538,22 +254,14 @@ const HELP = {
     trunc: 'trunc(x) -> a real truncated towards zero, as an integer.',
     dll_load: 'dll_load("x.dll") -> a library handle, 0 if it cannot be loaded. Only inside raw { }.',
     dll_proc: 'dll_proc(lib, "name") -> the function\'s address, 0 if not found. Call it with call ptr(args). Only inside raw { }.',
-    call: 'call ptr(args) -- calls a function through its address, with the Windows convention.',
-    extern: 'extern "libm.so.6", "libm.dylib", "msvcrt.dll" {\n    fn cos(x: f64) -> f64;\n}\n\nFunctions of a system library (.dll .so .dylib): the first library that loads is used. Call them inside raw { }.',
-    export: 'fn export name(...) -> T { }\n\nA function C can call: of a library built with --lib, or a callback (c_fn).',
-    c_fn: 'c_fn(f) -> the address C calls to reach the exported function f (callbacks: qsort, a window procedure...). Only inside raw { }.',
-    c_call: 'c_call(address, args...) -- calls a C function through its address, in the system\'s C convention. Only inside raw { }.',
-    target_os: 'target_os() -> 1 Windows, 2 Linux, 3 krn, 4 bare: known when compiling.',
-    say: 'say(x): prints a text, a number or a "..." and a new line.'
+    call: 'call ptr(args) -- calls a function through its address, with the Windows convention.'
 };
 
 const KEYWORDS = ('if else while for loop break continue return switch case default in fn var const struct enum ' +
-    'shared raw fail hint call as true false null i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void stream ptr slice ' +
-    'extern export text list map str').split(' ');
+    'shared raw fail hint call as true false null i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void stream ptr slice').split(' ');
 const BUILTINS = ('print printc failed print_fail peek peek8 peek16 peek32 poke poke8 poke16 poke32 sizeof trunc ' +
     'loadfile savefile cpu_count thread_start thread_wait thread_yield lock_init lock_take lock_give ' +
-    'ticks ticks_per_sec rotl rotr vec2_load vec2_store vec2_add vec2_sub vec2_mul readkey dll_load dll_proc ' +
-    'c_fn c_call target_os syscall say').split(' ');
+    'ticks ticks_per_sec rotl rotr vec2_load vec2_store vec2_add vec2_sub vec2_mul readkey dll_load dll_proc').split(' ');
 
 function wordAt(doc, pos) {
     const r = doc.getWordRangeAtPosition(pos, /[A-Za-z_]\w*/);
@@ -570,32 +278,7 @@ function activate(context) {
     context.subscriptions.push(
         vscode.commands.registerCommand('kron.build', cmdBuild),
         vscode.commands.registerCommand('kron.run', cmdRun),
-        vscode.commands.registerCommand('kron.check', () => cmdCheck(null)),
-        vscode.commands.registerCommand('kron.buildTarget', cmdBuildTarget),
-        vscode.commands.registerCommand('kron.debug', cmdDebug));
-
-    // the debugger: built in, nothing to install
-    context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('kron', {
-        createDebugAdapterDescriptor: () => new vscode.DebugAdapterInlineImplementation(new KronDebugSession())
-    }));
-    context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('kron', {
-        // F5 with no launch.json: debug the file in the editor
-        resolveDebugConfiguration(folder, config) {
-            if (!config.type && !config.request && !config.name) {
-                const ed = vscode.window.activeTextEditor;
-                if (ed && ed.document.languageId === 'kron') {
-                    config.type = 'kron';
-                    config.request = 'launch';
-                    config.name = 'Debug ' + path.basename(ed.document.fileName);
-                    config.program = ed.document.fileName;
-                }
-            }
-            if (!config.program) {
-                return vscode.window.showWarningMessage('Open a .kr file to debug it.').then(() => undefined);
-            }
-            return config;
-        }
-    }));
+        vscode.commands.registerCommand('kron.check', () => cmdCheck(null)));
 
     context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(doc => {
         if (doc.languageId !== 'kron') return;
