@@ -13,9 +13,6 @@
       "include": "#strings"
     },
     {
-      "include": "#chars"
-    },
-    {
       "include": "#numbers"
     },
     {
@@ -54,19 +51,15 @@
         }
       ]
     },
-    "chars": {
-      "name": "string.quoted.single.kron",
-      "match": "'(?:\\\\.|[^'\\\\])'"
-    },
     "numbers": {
       "patterns": [
         {
           "name": "constant.numeric.hex.kron",
-          "match": "\\b0[xX][0-9A-Fa-f_]+\\b"
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
         },
         {
           "name": "constant.numeric.float.kron",
-          "match": "\\b\\d+\\.\\d+\\b"
+          "match": "\\b\\d+(?:\\.\\d*(?:[eE][+-]?\\d+)?|[eE][+-]?\\d+)"
         },
         {
           "name": "constant.numeric.integer.kron",

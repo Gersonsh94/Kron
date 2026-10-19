@@ -11,8 +11,13 @@ let output;
 
 // ------------------------------------------------------------------ compiler
 
-// The compiler: a kronc.exe in an open folder or repo root wins, then the setting.
-function findCompiler() {
+// The compiler, with no path written in. In this order: the open folder;
+// the folder of the file being built (or the active one) and the folders
+// above it; the repository the extension sits in, when it is installed
+// from one (it lives in kron-vscode/kron-lang under the repository's
+// root); the setting -- a path, absolute or relative to the open folder,
+// or a command found on PATH ("kronc", the default).
+function findCompiler(cwd) {
     const exeName = process.platform === 'win32' ? 'kronc.exe' : 'kronc';
 
     // 1. Open workspace folder root
@@ -21,11 +26,14 @@ function findCompiler() {
         if (fs.existsSync(p)) return p;
     }
 
-    // 2. Walk up from the active .kr file (finds the repo root if a subfolder is open)
+    // 2. Walk up from the file being built, or the active one (finds the
+    //    repo root when a subfolder is open)
+    const starts = [];
+    if (cwd) starts.push(path.resolve(cwd));
     const ed = vscode.window.activeTextEditor;
-    if (ed && ed.document.fileName) {
-        let dir = path.dirname(ed.document.fileName);
-        for (let i = 0; i < 5; i++) {
+    if (ed && ed.document.fileName) starts.push(path.dirname(ed.document.fileName));
+    for (let dir of starts) {
+        for (let i = 0; i < 8; i++) {
             const candidate = path.join(dir, exeName);
             if (fs.existsSync(candidate)) return candidate;
             const parent = path.dirname(dir);
@@ -34,7 +42,7 @@ function findCompiler() {
         }
     }
 
-    // 3. Repository root relative to kron-vscode/kron-lang/
+    // 3. The repository the extension is installed from: kron-vscode/kron-lang
     const repoExe = path.resolve(__dirname, '..', '..', exeName);
     if (fs.existsSync(repoExe)) return repoExe;
 
@@ -52,16 +60,23 @@ function findCompiler() {
     return null;
 }
 
+const NOT_FOUND = 'kronc not found: not in the open folder, the folders above the file, ' +
+                  'the repository, nor on PATH. Build it (BUILD.bat) or set "kron.compilerPath".';
+
 function runCompiler(args, cwd) {
     return new Promise(resolve => {
-        const kronc = findCompiler();
+        const kronc = findCompiler(cwd);
         if (!kronc) {
-            resolve({ ok: false, text: 'kronc.exe not found. Set "kron.compilerPath" in the settings, ' +
-                                       'or open the compiler folder.', missing: true });
+            resolve({ ok: false, text: NOT_FOUND, missing: true });
             return;
         }
         cp.execFile(kronc, args, { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
             (err, stdout, stderr) => {
+                // "kronc" taken from PATH, and not there
+                if (err && err.code === 'ENOENT') {
+                    resolve({ ok: false, text: NOT_FOUND, missing: true });
+                    return;
+                }
                 const text = (stdout || '') + (stderr || '');
                 // kronc exits 0 on success; any other code is a failure
                 resolve({ ok: !err, text });
