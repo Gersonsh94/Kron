@@ -4,6 +4,10 @@
   "description": "Kron language support: highlighting, build and run, a debugger (breakpoints, stepping, variables), builds for every target, errors in the editor, completion, go to definition, hover help and outline.",
   "version": "0.6.0",
   "publisher": "Codexmy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gersonsh94/Kron.git"
+  },
   "engines": {
     "vscode": "^1.70.0"
   },
@@ -120,7 +124,7 @@
           "group": "navigation@3"
         }
       ]
-    },
+    ],
     "configuration": {
       "title": "Kron",
       "properties": {
