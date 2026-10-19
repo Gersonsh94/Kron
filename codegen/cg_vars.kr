@@ -1,0 +1,478 @@
+kron_program
+kron_domain cg_vars;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE LOCALS OF A FUNCTION, LOOPS, ARRAYS AND LITERALS WRITTEN IN PLACE
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// the locals: one entry per name, slots accumulate
+// -------------------------------------------------------------------------
+
+// cg_add_var(token, slots) -> the base offset of its slots. A name already
+// declared reuses its slot -- 'i' in a second loop is the same 'i' -- with
+// the type the declaration brings; a temporary (cg_add_fresh) always takes
+// a slot of its own. What the pending_* values say is attached and they are
+// cleared.
+fn cg_add_var(t: ptr<Tok>, slots: i64) -> i64 {
+    var i: i64 = 0;
+    var off: i64 = 0;
+    if slots == 0 {
+        slots = 1;
+    }
+    if cg_add_fresh == 0 {
+        i = cg_find_var_idx(t);
+        if i != -1 {
+            cg_var_take_pending(i);
+            return cg_q(&var_offs, i);
+        }
+    }
+    i = var_count;
+    if i >= CG_MAX_VARS {
+        // said with the name that did not fit, once
+        if cg_err_msg == 0 {
+            cg_err_tok = 0;
+            if t.line != 0 {
+                cg_err_tok = t;
+            }
+            cg_err_msg = "too many locals in one function (1024 at most): ";
+            cg_err_hint = "  hint: split the function, or keep the values in an array\r\n";
+        }
+        cg_had_error = 1;
+        dbg_which = 2;
+        return 0;
+    }
+    if i > 0 {
+        off = cg_q(&var_offs, i - 1);
+    }
+    off = cg_i32(off + slots * 8);
+    cg_qs(&var_toks, i, t);
+    cg_qs(&var_offs, i, off);
+    cg_var_take_pending(i);
+    var_count = i + 1;
+    return off;
+}
+
+// the pending_* values onto variable i, and cleared
+fn cg_var_take_pending(i: i64) -> i64 {
+    cg_qs(&var_structs, i, pending_struct);
+    pending_struct = -1;
+    cg_qs(&var_elemsz, i, pending_elem);
+    pending_elem = 0;
+    cg_qs(&var_isfloat, i, pending_float);
+    pending_float = 0;
+    cg_qs(&var_unsigned, i, pending_unsigned);
+    pending_unsigned = 0;
+    cg_qs(&var_isref, i, pending_ref);
+    pending_ref = 0;
+    cg_qs(&var_arrlen, i, pending_arrlen);
+    pending_arrlen = 0;
+    cg_qs(&var_stride, i, pending_stride);
+    pending_stride = 0;
+    cg_qs(&var_aw, i, pending_aw);
+    pending_aw = 0;
+    cg_qs(&var_vtag, i, pending_vtag);
+    pending_vtag = 0;
+    return 0;
+}
+
+// cg_find_var(token) -> its offset, 0 when it is no local. From the last
+// one declared backwards: a name declared again is its latest slot.
+fn cg_find_var(t: i64) -> i64 {
+    var i: i64 = var_count - 1;
+    while i >= 0 {
+        if tok_equal(t, cg_q(&var_toks, i)) == 1 {
+            return cg_q(&var_offs, i);
+        }
+        i -= 1;
+    }
+    return 0;
+}
+
+// tok_equal(a, b) -> 1 when the two tokens have the same text
+fn tok_equal(a: ptr<Tok>, b: ptr<Tok>) -> i64 {
+    var n: i64 = a.length;
+    var i: i64 = 0;
+    var p: i64 = a.value;
+    var q: i64 = b.value;
+    if n != b.length {
+        return 0;
+    }
+    while i < n {
+        if cg_b(p + i) != cg_b(q + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// name_is_main(token) -> 1 when it reads main (a library has none: there it
+// is a function like the others)
+fn name_is_main(t: ptr<Tok>) -> i64 {
+    var p: i64 = 0;
+    if cg_lib != 0 {
+        return 0;
+    }
+    if t.length != 4 {
+        return 0;
+    }
+    p = t.value;
+    if cg_b(p) == 109 && cg_b(p + 1) == 97 && cg_b(p + 2) == 105 && cg_b(p + 3) == 110 {
+        return 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the loop stack: what break and continue mean right now. Past
+// CG_MAX_LOOPS the extra levels are not kept, and break and continue there
+// fall back to the deepest one kept.
+// -------------------------------------------------------------------------
+
+fn cg_loop_push(brk: i64, cont: i64) -> i64 {
+    if loop_depth < CG_MAX_LOOPS {
+        cg_qs(&loop_brk, loop_depth, brk);
+        cg_qs(&loop_cont, loop_depth, cont);
+    }
+    loop_depth += 1;
+    return 0;
+}
+
+fn cg_loop_pop() -> i64 {
+    if loop_depth != 0 {
+        loop_depth -= 1;
+    }
+    return 0;
+}
+
+// the end label of the innermost loop, -1 outside any
+fn cg_loop_brk() -> i64 {
+    var d: i64 = loop_depth;
+    if d == 0 {
+        return -1;
+    }
+    d -= 1;
+    if d >= CG_MAX_LOOPS {
+        d = CG_MAX_LOOPS - 1;
+    }
+    return cg_q(&loop_brk, d);
+}
+
+// its continue label, -1 outside any
+fn cg_loop_cont() -> i64 {
+    var d: i64 = loop_depth;
+    if d == 0 {
+        return -1;
+    }
+    d -= 1;
+    if d >= CG_MAX_LOOPS {
+        d = CG_MAX_LOOPS - 1;
+    }
+    return cg_q(&loop_cont, d);
+}
+
+// -------------------------------------------------------------------------
+// arrays
+// -------------------------------------------------------------------------
+
+// cg_index_len(name) -> its element count, 0 when not known (a parameter,
+// a pointer): those go unchecked
+fn cg_index_len(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    if i != -1 {
+        return cg_q(&var_arrlen, i);
+    }
+    i = cg_find_global(t);
+    if i != -1 {
+        return cg_q(&g_arrlen, i);
+    }
+    return 0;
+}
+
+// cg_emit_bounds(count): with the index in rax, what a fail statement does
+// when it is not below count -- the comparison is unsigned, so a negative
+// index is caught as a huge one. A count that does not fit 32 bits signed
+// is left unchecked.
+fn cg_emit_bounds(count: i64) -> i64 {
+    var ok: i64 = 0;
+    count = cg_i32(count);
+    if count < 0 {
+        return 0;
+    }
+    emit_cstr("    cmp rax, ");
+    emit_u32(count);
+    emit_cstr("\n");
+    ok = new_label();
+    ir_jcc(ok, CC_B);
+    emit_cstr("    lea rcx, [rel __bounds_msg]\n    lea rdx, [rel __bounds_hint]\n    sub rsp, 32\n");
+    kt_failcall();
+    emit_cstr("    add rsp, 32\n    xor rax, rax\n");
+    ir_ctl(IR_JMPRET, cur_ret_id);
+    ir_ctl(IR_LABEL, ok);
+    return 0;
+}
+
+// cg_emit_index_value(index node): the flat element index in rax. Two
+// subscripts on a 2-D array are i * row + j: the storage is flat, row by
+// row. Every read and write of an element comes through here, so this is
+// where the bounds are checked.
+fn cg_emit_index_value(n: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    var stride: i64 = 0;
+    cg_emit(n.right);
+    if n.left != 0 {
+        i = cg_find_var_idx(n.data);
+        if i != -1 {
+            stride = cg_q(&var_stride, i);
+            if stride != 0 {
+                emit_cstr("    imul rax, rax, ");
+                emit_u32(stride);
+                emit_cstr("\n");
+                emit_cstr("    push rax\n");
+                cg_emit(n.left);
+                emit_cstr("    pop rcx\n    add rax, rcx\n");
+            }
+        }
+    }
+    i = cg_index_len(n.data);
+    if cg_u32(i) != 0 {
+        cg_emit_bounds(i);
+    }
+    return 0;
+}
+
+// cg_emit_struct_lit(literal, base offset): each field written straight
+// into the destination. Every byte starts at zero, so a field left out
+// reads 0 and one written narrower finds clean bytes around it.
+fn cg_emit_struct_lit(n: ptr<Ast>, base: i64) -> i64 {
+    var sid: i64 = 0;
+    var slots: i64 = 0;
+    var k: i64 = 0;
+    var e: ptr<Ast> = 0;
+    var f: i64 = 0;
+    var off: i64 = 0;
+    var w: i64 = 0;
+    var nested: i64 = 0;
+    sid = cg_find_struct(n.data);
+    if sid == -1 {
+        return 0;
+    }
+    slots = cg_struct_size(sid);
+    k = 0;
+    while k < slots {
+        emit_cstr("    mov qword [rbp-");
+        emit_u32(base - k * 8);
+        emit_cstr("], ");
+        emit_cstr("0\n");
+        k += 1;
+    }
+    e = n.right;
+    k = 0;
+    while e != 0 {
+        f = -1;
+        if e.data != 0 {
+            f = cg_field_index(sid, e.data);
+        } else {
+            f = k;
+        }
+        if f != -1 {
+            f = cg_u32(f + cg_q(&struct_first, sid));
+            off = cg_u32(base - cg_q(&field_offs, f));
+            w = cg_q(&field_sizes, f);
+            nested = cg_q(&field_struct, f);
+            if nested != -1 {
+                // a struct inside: its value copied in, exactly its size
+                if cg_emit_struct_addr(e.left) != -1 {
+                    cg_emit_dest_rdx(off, 1);
+                    cg_emit_copy(cg_q(&struct_bytes, nested));
+                }
+            } else if cg_q(&field_isfloat, f) != 0 {
+                // a real: f64 whole, f32 narrowed to four bytes
+                cg_emit_float(e.left);
+                if w == 4 {
+                    emit_cstr("    cvtsd2ss xmm0, xmm0\n");
+                    emit_cstr("    movss [rbp-");
+                } else {
+                    emit_cstr("    movsd [rbp-");
+                }
+                emit_u32(off);
+                emit_cstr("], xmm0\n");
+            } else {
+                // Text, not an IR_STLOC: the slots of an array or a struct
+                // are read back through a base and an offset, so only the
+                // base is ever [rbp-N]. As plain stores the allocator put the
+                // other slots in registers, and the memory the reads go to was
+                // never written.
+                cg_emit(e.left);
+                emit_cstr("    mov [rbp-");
+                emit_u32(off);
+                emit_cstr(cg_st_suffix(w));
+            }
+        }
+        k += 1;
+        e = e.right;
+    }
+    return 0;
+}
+
+// the suffix of a store of rax at a width: '], rax' and its narrower kin
+fn cg_st_suffix(w: i64) -> i64 {
+    if w == 4 {
+        return "], eax\n";
+    }
+    if w == 2 {
+        return "], ax\n";
+    }
+    if w == 1 {
+        return "], al\n";
+    }
+    return "], rax\n";
+}
+
+// cg_emit_array_lit(literal, base offset, reals): the elements straight
+// into the slots, element k at base - k * width. Elements past the declared
+// length are dropped.
+fn cg_emit_array_lit(n: ptr<Ast>, base: i64, reals: i64) -> i64 {
+    var e: ptr<Ast> = n.right;
+    var k: i64 = 0;
+    var w: i64 = 0;
+    var off: i64 = 0;
+    while e != 0 {
+        if reals != 0 {
+            cg_emit_float(e.left);
+            off = k * 8;
+            if cur_lit_aw == 4 {
+                off = k * 4;                 // [f32; N]: four bytes apart
+            }
+            off = cg_u32(base - off);
+            if cur_lit_aw == 4 {
+                emit_cstr("    cvtsd2ss xmm0, xmm0\n");
+                emit_cstr("    movss [rbp-");
+            } else {
+                emit_cstr("    movsd [rbp-");
+            }
+            emit_u32(off);
+            emit_cstr("], xmm0\n");
+        } else {
+            cg_emit(e.left);
+            w = cur_lit_aw;
+            if w == 1 || w == 2 || w == 4 {
+                // element i of a packed array sits i * width above the base
+                emit_cstr("    mov [rbp-");
+                emit_u32(base - k * w);
+                if w == 1 {
+                    emit_cstr("], al\n");
+                } else if w == 2 {
+                    emit_cstr("], ax\n");
+                } else {
+                    emit_cstr("], eax\n");
+                }
+            } else {
+                // text, not IR_STLOC: see cg_emit_struct_lit
+                emit_cstr("    mov [rbp-");
+                emit_u32(base - k * 8);
+                emit_cstr("], rax\n");
+            }
+        }
+        k += 1;
+        e = e.right;
+    }
+    return 0;
+}
+
+// cg_arr_aw(name) -> bytes per element: 1, 2, 4 or 8. Locals first, then
+// globals; anything unknown is eight.
+fn cg_arr_aw(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    var w: i64 = 0;
+    if i != -1 {
+        w = cg_q(&var_aw, i);
+    } else {
+        i = cg_find_global(t);
+        if i == -1 {
+            return 8;
+        }
+        w = cg_q(&g_aw, i);
+    }
+    if w == 1 || w == 2 || w == 4 {
+        return w;
+    }
+    return 8;
+}
+
+// cg_arr_unsigned(name) -> 1 when the elements are u8..u64: a read is then
+// zero-extended, not sign-extended
+fn cg_arr_unsigned(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    if i != -1 {
+        return cg_q(&var_unsigned, i);
+    }
+    i = cg_find_global(t);
+    if i != -1 {
+        return cg_q(&g_unsigned, i);
+    }
+    return 0;
+}
+
+// with the index in rcx and the base in rdx: the element into rax, at its
+// own width
+fn cg_emit_elem_read(t: i64) -> i64 {
+    var w: i64 = cg_arr_aw(t);
+    var u: i64 = cg_arr_unsigned(t);
+    if w == 8 {
+        return emit_cstr("    mov rax, [rdx+rcx*8]\n");
+    }
+    if w == 4 {
+        if u == 0 {
+            return emit_cstr("    mov eax, dword [rdx+rcx*4]\n    shl rax, 32\n    sar rax, 32\n");
+        }
+        return emit_cstr("    mov eax, dword [rdx+rcx*4]\n");
+    }
+    if w == 2 {
+        if u == 0 {
+            return emit_cstr("    movzx eax, word [rdx+rcx*2]\n    shl rax, 48\n    sar rax, 48\n");
+        }
+        return emit_cstr("    movzx eax, word [rdx+rcx*2]\n");
+    }
+    if u == 0 {
+        return emit_cstr("    movzx eax, byte [rdx+rcx]\n    shl rax, 56\n    sar rax, 56\n");
+    }
+    return emit_cstr("    movzx eax, byte [rdx+rcx]\n");
+}
+
+// rax into [rdx + rcx * width]
+fn cg_emit_elem_write(t: i64) -> i64 {
+    var w: i64 = cg_arr_aw(t);
+    if w == 8 {
+        return emit_cstr("    mov [rdx+rcx*8], rax\n");
+    }
+    if w == 4 {
+        return emit_cstr("    mov [rdx+rcx*4], eax\n");
+    }
+    if w == 2 {
+        return emit_cstr("    mov [rdx+rcx*2], ax\n");
+    }
+    return emit_cstr("    mov [rdx+rcx], al\n");
+}
+
+// the base of an array into rdx: lea rdx, [rbp-OFF] for a local, the
+// address it holds for an array parameter, lea rdx, [rel __g_NAME] for a
+// global
+fn cg_emit_idx_base(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    if i == -1 {
+        cg_emit_gpre("    lea rdx, [rel __g_");
+        cg_emit_gtok(t);
+        return emit_cstr("]\n");
+    }
+    if cg_q(&var_isref, i) != 0 {
+        emit_cstr("    mov rdx, [rbp-");
+    } else {
+        emit_cstr("    lea rdx, [rbp-");
+    }
+    emit_u32(cg_find_var(t));
+    return emit_cstr("]\n");
+}

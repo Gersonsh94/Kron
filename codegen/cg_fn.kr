@@ -1,0 +1,288 @@
+kron_program
+kron_domain cg_fn;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// A FUNCTION: ITS FRAME, ITS PARAMETERS, ITS BODY
+// =========================================================================
+
+// the name of argument register i, in the order the prologue takes them:
+// rcx, rdx, r8, r9, r10, rax
+fn cg_argreg_name(i: i64) -> i64 {
+    if i == 0 {
+        return "rcx";
+    }
+    if i == 1 {
+        return "rdx";
+    }
+    if i == 2 {
+        return "r8";
+    }
+    if i == 3 {
+        return "r9";
+    }
+    if i == 4 {
+        return "r10";
+    }
+    return "rax";
+}
+
+// cg_param_struct_id(parameter) -> the struct it is, or -1. The parser
+// leaves the type's name token in left only when the type was written as a
+// name: a struct, when it is registered as one (str is the stream).
+fn cg_param_struct_id(p: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = 0;
+    if p == 0 {
+        return -1;
+    }
+    t = p.left;
+    if t == 0 {
+        return -1;
+    }
+    if t.kind == KW_STR {
+        return stream_struct_id;
+    }
+    return cg_find_struct(t);
+}
+
+// cg_param_slots(parameters) -> the slots they take: a struct passed by
+// value is copied into the frame, one slot per eight bytes
+fn cg_param_slots(p: ptr<Ast>) -> i64 {
+    var n: i64 = 0;
+    var s: i64 = 0;
+    var sz: i64 = 0;
+    while p != 0 {
+        s = cg_param_struct_id(p);
+        sz = 0;
+        if s != -1 {
+            sz = cg_struct_size(s);
+        }
+        if sz != 0 {
+            n = cg_u32(n + sz);
+        } else {
+            n = cg_u32(n + 1);
+        }
+        p = p.right;
+    }
+    return n;
+}
+
+// cg_arg_struct_id(argument) -> the struct a name passes, 1 a local array
+// (passed by address), 2 an array parameter (already an address), -1 when
+// it is evaluated as a value; anything else that is a struct goes by
+// address too (cg_struct_kind)
+fn cg_arg_struct_id(a: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    if a == 0 {
+        return -1;
+    }
+    if a.node_type == AST_IDENTIFIER {
+        if a.data == 0 {
+            return -1;
+        }
+        i = cg_find_var_idx(a.data);
+        if i != -1 {
+            // the parameter first: it carries its declared size too, and
+            // taken for a local array the address of its slot was passed
+            if cg_q(&var_isref, i) != 0 {
+                return 2;
+            }
+            if cg_q(&var_arrlen, i) != 0 {
+                return 1;
+            }
+            return cg_q(&var_structs, i);
+        }
+    }
+    return cg_struct_kind(a);
+}
+
+// cg_function(fn node): everything it emits is captured (ir_begin), the
+// register allocator sees it whole, and ir_end writes it out
+fn cg_function(n: ptr<Ast>) -> i64 {
+    var ret: i64 = 0;
+    var count: i64 = 0;
+    var frame: i64 = 0;
+    var s: i64 = 0;
+    var off: i64 = 0;
+    ir_begin();
+    kt_fn_begin(n);
+    kdb_fn_begin(n);
+    cg_cur_fn = cg_find_func(n.data);
+    var_count = 0;
+    ret = new_label();
+    cur_ret_id = ret;
+    cur_ret_float = n.col & 1;
+    cur_fn_multi = n.child_count;
+    // the frame: a slot per local -- a fn value also holds the names it
+    // keeps -- and per parameter (a struct parameter one per eight bytes),
+    // the shadow space, 16-aligned
+    count = cg_count_vars(n.right);
+    if cg_lam_cur != -1 {
+        count = cg_u32(count + cg_q(&lq_ncap, cg_lam_cur));
+    }
+    count = cg_u32(count + cg_param_slots(n.left));
+    frame = (count * 8 + 32 + 15) & 0xFFFFFFF0;
+    // exported: global (main is exported by the preamble already)
+    if (n.type_info & 0xFFFF) == VIS_EXPORTED {
+        if name_is_main(n.data) == 0 {
+            emit_cstr("global ");
+            emit_tok(n.data);
+            emit_cstr("\n");
+        }
+    }
+    if name_is_main(n.data) == 1 {
+        // on Linux too main is main: the preamble's _start calls it
+        if cg_bare != 0 {
+            emit_cstr("kmain:\n");
+        } else {
+            emit_cstr("main:\n");
+        }
+    } else {
+        emit_tok(n.data);
+        emit_cstr(":\n");
+    }
+    emit_cstr("    push rbp\n");
+    emit_cstr("    mov rbp, rsp\n");
+    ir_ctl(IR_FRAME, frame);             // the allocator may grow it
+    // a function that returns a struct: r11 says where, kept in a slot of
+    // its own before anything can change it
+    cg_cur_sret = -1;
+    s = cg_fn_ret_struct(n.data);
+    if s != -1 {
+        cg_cur_sret = s;
+        pending_struct = -1;
+        cg_add_fresh = 1;
+        off = cg_add_var(cg_tok(CT_TMP), 1);
+        cg_add_fresh = 0;
+        cg_sret_slot = off;
+        emit_cstr("    mov [rbp-");
+        emit_u32(off);
+        emit_cstr("], r11\n");
+    }
+    cg_param_spill(n.left);
+    // a fn value: the names it keeps, out of its record
+    if cg_lam_cur != -1 {
+        cg_lam_prologue();
+    }
+    // main on Windows starts the runtime before any thread can exist (the
+    // failure state needs its TLS slot); a library's first call does the
+    // same, through __kron_lib_init
+    if cg_is_entry(n.data) != 0 {
+        if cg_target != TARGET_ELF && cg_bare == 0 {
+            emit_cstr("    sub rsp, 32\n    call __rt_init\n    add rsp, 32\n");
+        }
+    }
+    // main also gives the globals whose first value is not a plain number
+    // that value, before anything else runs
+    if cg_is_entry(n.data) != 0 {
+        cg_emit_global_inits();
+    }
+    cg_emit(n.right);
+    ir_ctl(IR_RETLBL, ret);
+    emit_cstr("    mov rsp, rbp\n");
+    emit_cstr("    pop rbp\n");
+    // main ends the process; the others return
+    if name_is_main(n.data) == 1 {
+        if cg_target == TARGET_ELF {
+            emit_cstr("    mov rcx, rax\n    call __main_exit\n");
+        } else if cg_bare != 0 {
+            emit_cstr("    cli\n    hlt\n");
+        } else {
+            emit_cstr("    mov rcx, rax\n    sub rsp, 32\n    call __main_exit\n");
+        }
+    } else {
+        emit_cstr("    ret\n");
+    }
+    cg_frame_fit();                      // room for the temporaries too
+    ir_end();
+    kdb_fn_end(n);                       // --debug: its record, before .kfe
+    kt_fn_end(n);
+    return 0;
+}
+
+// The incoming parameters into their slots. The first six arrive in rcx,
+// rdx, r8, r9, r10, rax (reals in xmm0..xmm5); from the seventh on they are
+// on the stack, past the shadow space. A struct arrives as an address and
+// is copied in by value; an array as an address, kept as one.
+fn cg_param_spill(p: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    var off: i64 = 0;
+    var s: i64 = 0;
+    var slots: i64 = 0;
+    var k: i64 = 0;
+    var c: i64 = 0;
+    while p != 0 {
+        c = p.col;
+        pending_vtag = c >> 8;               // text, list<T>, map<T>
+        if i >= 6 {
+            // a real keeps its flag: the slot holds the bits of a double
+            pending_float = c & 1;
+            pending_unsigned = (c >> 1) & 1;
+            pending_elem = p.child_count;
+            off = cg_add_var(p.data, 1);
+            emit_cstr("    mov rax, [rbp+");
+            emit_u32((i - 6) * 8 + 48);      // return address, rbp, shadow
+            emit_cstr("]\n");
+            ir_stloc(off);
+        } else if p.type_info != 0 {
+            // an array: one slot holding the address, marked as a reference;
+            // the float flag describes the element
+            pending_aw = (c >> 4) & 15;
+            pending_float = c & 1;
+            pending_unsigned = (c >> 1) & 1;
+            pending_struct = -1;
+            pending_elem = 0;
+            pending_ref = 1;
+            pending_arrlen = cg_u32(p.type_info);
+            off = cg_add_var(p.data, 1);
+            emit_cstr("    mov [rbp-");
+            emit_u32(off);
+            emit_cstr("], ");
+            emit_cstr(cg_argreg_name(i));
+            emit_cstr("\n");
+        } else {
+            s = cg_param_struct_id(p);
+            if s != -1 {
+                pending_struct = s;
+                pending_elem = 0;
+                pending_float = 0;
+                slots = cg_struct_size(s);
+                if slots == 0 {
+                    slots = 1;
+                }
+                off = cg_add_var(p.data, slots);
+                // the source is this parameter's own register: no other
+                // argument is disturbed; r11 is the only scratch
+                k = 0;
+                while k < slots {
+                    emit_cstr("    mov r11, [");
+                    emit_cstr(cg_argreg_name(i));
+                    emit_cstr(" + ");
+                    emit_u32(k * 8);
+                    emit_cstr("]\n");
+                    emit_cstr("    mov [rbp-");
+                    emit_u32(off - k * 8);
+                    emit_cstr("], ");
+                    emit_cstr("r11");
+                    emit_cstr("\n");
+                    k += 1;
+                }
+            } else {
+                pending_float = c & 1;
+                // a pointer's element width too, or arithmetic on it would
+                // walk single bytes
+                pending_elem = p.child_count;
+                off = cg_add_var(p.data, 1);
+                if (c & 1) != 0 {
+                    ir_withlen(IR_FSTPARAM, off, i);
+                } else {
+                    ir_stparam(off, i);
+                }
+            }
+        }
+        i += 1;
+        p = p.right;
+    }
+    return 0;
+}

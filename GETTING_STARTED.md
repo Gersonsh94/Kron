@@ -11,7 +11,7 @@ Optional, for the editor and the tests:
 
 | For | Install |
 |---|---|
-| The editor | VS Code, then the extension in `tools\kron-vscode\kron-lang` (section 3) |
+| The editor | VS Code, then the extension in `kron-vscode\kron-lang` (section 3) |
 | `LINUXTESTS.bat`, `ARMTESTS.bat` | WSL (`wsl --install`); for ARM64 also `wsl sudo apt install -y qemu-user` |
 | `WEBTESTS.bat` | Node.js 18 or later |
 | `GPUTESTS.bat` | a graphics card driver with Vulkan (any NVIDIA, AMD or Intel from the last ten years) |
@@ -46,7 +46,7 @@ the program first, then where the compiler runs.
 ## 3. The editor
 
 In VS Code: Ctrl+Shift+P, "Developer: Install Extension from Location...",
-choose `tools\kron-vscode\kron-lang`, then "Developer: Reload Window".
+choose `kron-vscode\kron-lang`, then "Developer: Reload Window".
 
 | Key | |
 |---|---|
@@ -94,10 +94,11 @@ the page and open `http://localhost:8000/prog.html`.
 
 After an update of the compiler's sources (the `*.asm` files, and the
 parts written in Kron, `lexer\lexer.kr`, `parser\parser.kr` with the
-files it imports, and `semantic\semantic.kr`), `BOOTSTRAP.bat` builds it
+files it imports, `semantic\semantic.kr`, and `codegen\codegen.kr` with
+the files it imports), `BOOTSTRAP.bat` builds it
 three times with itself and checks that the last two are identical;
 `SEED.bat` then keeps the result as the seed, and `BUILD.bat` installs it
 as `kronc.exe`. The parts in Kron become assembly text (`lexer_kr.asm`,
-`parser_kr.asm`, `semantic_kr.asm`)
+`parser_kr.asm`, `semantic_kr.asm`, `codegen_kr.asm`)
 with `kronc --module`; `KRONPARTS.bat` does that for all of them, and the
 two scripts call it on their own.

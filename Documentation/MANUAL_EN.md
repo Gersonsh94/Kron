@@ -995,15 +995,18 @@ editor, the tests, building for other systems.
 
 The compiler is written in x86-64 assembly and, part by part, in Kron
 itself: its lexer is `lexer/lexer.kr`, its parser `parser/parser.kr` and
-the files it imports. `BUILD.bat` builds `kronc.exe` from
-the seed with nothing but Kron's own tools, and `BOOTSTRAP.bat` checks that
-it reproduces itself byte for byte.
+the files it imports, its semantic pass `semantic/semantic.kr`, its code
+generator `codegen/codegen.kr` and the files it imports. `BUILD.bat`
+builds `kronc.exe` from the seed with nothing but Kron's own tools, and
+`BOOTSTRAP.bat` checks that it reproduces itself byte for byte.
 
 A part in Kron is compiled as a module:
 
 ```
 kronc.exe lexer\lexer.kr --module        lexer\lexer_kr.asm
 kronc.exe parser\parser.kr --module      parser\parser_kr.asm
+kronc.exe semantic\semantic.kr --module  semantic\semantic_kr.asm
+kronc.exe codegen\codegen.kr --module    codegen\codegen_kr.asm
 ```
 
 which is its functions as assembly text, with no runtime and no entry, for

@@ -83,7 +83,7 @@ set RUNLIST=%RUNLIST% test_text test_list test_map test_files test_os
 set RUNLIST=%RUNLIST% test_libthreads
 set RUNLIST=%RUNLIST% test_exp_lit
 set RUNLIST=%RUNLIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
-set RUNLIST=%RUNLIST% test_extern test_callback test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray test_ptrparam test_longfn
+set RUNLIST=%RUNLIST% test_extern test_callback test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray test_ptrparam test_longfn test_gconst
 
 REM ---- Slow tests (3D rendering): only with /slow ----
 set SLOWLIST=tri bmp solidcube cube3d

@@ -1,0 +1,34 @@
+kron_program
+kron_domain test_gconst;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Globals and constants given a literal. A hexadecimal one with an E among
+// its digits was taken for a real -- 0x1E came out as 0x1.0E, which the
+// assembler read as 0 -- and a true or a false stopped the compiler.
+// =========================================================================
+
+const SMALL: i64 = 0x1E;
+const MARK: i64 = 0x464E56;
+var big: i64 = 0xE5;
+var mask: u64 = 0xFFE0;
+var on: bool = true;
+var off: bool = false;
+var r: f64 = 2e3;
+
+fn main() -> i64 {
+    print(SMALL);
+    print(MARK);
+    print(big);
+    print(mask);
+    print(SMALL + big);
+    if on {
+        print(1);
+    }
+    if off {
+        print(2);
+    }
+    print(r);
+    return 0;
+}

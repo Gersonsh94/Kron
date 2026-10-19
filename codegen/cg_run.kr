@@ -1,0 +1,433 @@
+kron_program
+kron_domain cg_run;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE PROGRAM: THE PRE-PASS, THE WALK, AND WHAT COMES AFTER IT
+// =========================================================================
+
+// cg_run(root) -> 1 written, 0 an error (a type error in cg_err_msg, a
+// thread error in cg_thread_tok), below 0 an internal one: -dbg_which
+fn cg_run(root: ptr<Ast>) -> i64 {
+    var p: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var t: i64 = 0;
+    cg_root = root;
+    pending_struct = -1;
+    cg_pool_n = 0;
+    lq_n = 0;
+    lq_done = 0;
+    cg_lam_cur = -1;
+    cg_in_raw = 0;
+    // A module has no preamble: it is text for the compiler's own build,
+    // which has its own entry, and like bare metal it has no runtime -- no
+    // failure traces, no debugger hooks, no system libraries.
+    if cg_as_module != 0 {
+        cg_bare = 1;
+        emit_cstr("; A Kron module, written by kronc --module. Edit the .kr file it comes\n; from, not this one: the build makes it again.\n");
+    } else if cg_target == TARGET_ELF {
+        cg_emit_hdrelf();
+        cg_emit_hdrtrace();
+    } else if cg_bare != 0 {
+        cg_emit_hdrbare();
+    } else {
+        cg_emit_hdr();
+        cg_emit_hdrtrace();
+    }
+    // the pre-pass: every function name, so &fn resolves in any order;
+    // structs and enums, so a field may be of a type declared further down;
+    // every global with its 'shared' mark; the extern blocks
+    fn_count = 0;
+    gs_count = 0;
+    ce_count = 0;
+    cg_ext_count = 0;
+    cg_ext_any = 0;
+    cg_has_exp = 0;
+    cg_cur_fn = -1;
+    cg_dyn_thread = 0;
+    cg_thread_tok = 0;
+    p = root;
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            break;
+        }
+        d = p.left;
+        if d != 0 {
+            k = d.node_type;
+            if k == AST_STRUCT_DEF {
+                cg_register_struct_name(d);
+            } else if k == AST_ENUM_DEF {
+                cg_register_enum(d);
+            } else if k == AST_VAR_DECL {
+                if gs_count < CG_MAX_GLOBALS {
+                    cg_qs(&gs_toks, gs_count, d.data);
+                    cg_qs(&gs_shared, gs_count, (d.col >> 2) & 1);
+                    gs_count += 1;
+                }
+            } else if k == AST_EXTERN {
+                cg_register_externs(d);
+            } else if k == AST_FUNCTION {
+                if (d.type_info & 0xFFFF) == VIS_EXPORTED {
+                    cg_has_exp = 1;
+                }
+                if d.data != 0 && fn_count < CG_MAX_FUNCS {
+                    cg_qs(&fn_toks, fn_count, d.data);
+                    cg_qs(&fn_nodes, fn_count, d);
+                    cg_qs(&fn_ret_unsig, fn_count, (d.col >> 1) & 1);
+                    cg_qs(&fn_ret_vtag, fn_count, d.col >> 8);
+                    cg_qs(&fn_multi, fn_count, d.child_count);
+                    cg_qs(&fn_ret_float, fn_count, d.col & 1);
+                    fn_count += 1;
+                }
+            }
+        }
+        p = p.right;
+    }
+    // every global, now that every struct name is known
+    p = root;
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            break;
+        }
+        d = p.left;
+        if d != 0 {
+            if d.node_type == AST_VAR_DECL || d.node_type == AST_CONST_DECL {
+                cg_global_note(d);
+            }
+        }
+        p = p.right;
+    }
+    // The fields, measured. Sizing 'Box { min: Vec3; }' needs Vec3's size,
+    // which may be measured later in the file: the pass is repeated, from
+    // scratch each time, four rounds for four levels of nesting.
+    struct_rounds = 4;
+    while struct_rounds > 0 {
+        field_count = 2;                     // fields 0 and 1 are stream's
+        p = root;
+        while p != 0 {
+            if p.node_type != AST_PROGRAM {
+                break;
+            }
+            d = p.left;
+            if d != 0 {
+                if d.node_type == AST_STRUCT_DEF {
+                    cg_register_struct(d);
+                }
+            }
+            p = p.right;
+        }
+        struct_rounds -= 1;
+    }
+    // the walk: functions to .text, the TITAN modules to real data
+    kt_program_begin();
+    cg_walk_top(root);
+    if cg_lib != 0 || cg_has_exp != 0 {
+        cg_emit_lib();
+    }
+    kt_program_end();
+    kdb_program_end();
+    cg_module_check();
+    // what C calls into, after the program's own functions (outside the
+    // range a failure's trace walks)
+    if cg_lib != 0 || cg_has_exp != 0 {
+        cg_emit_hdrlib();
+        if cg_target == TARGET_ELF {
+            cg_emit_hdrlib_elf();
+        } else {
+            cg_emit_hdrlib_win();
+        }
+    }
+    cg_emit_fnrecs();
+    cg_emit_extrecs();
+    if cg_had_error != 0 {
+        return 0 - dbg_which;
+    }
+    // code that can run in a thread may only touch 'shared' globals
+    t = cg_thread_check();
+    cg_thread_tok = t;
+    if t != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the top of the program: every function, module, global and TITAN block
+fn cg_walk_top(p: ptr<Ast>) -> i64 {
+    var d: ptr<Ast> = 0;
+    var k: i64 = 0;
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            break;
+        }
+        d = p.left;
+        if d != 0 {
+            k = d.node_type;
+            if k == AST_FUNCTION {
+                cg_function(d);
+                cg_drain_lambdas();
+            } else if k == AST_HARDWARE_BLOCK {
+                cg_module(d);
+            } else if k == AST_VAR_DECL || k == AST_CONST_DECL {
+                cg_global_decl(d);
+            } else if k == AST_ISA_DEF {
+                cg_isa(d);
+            } else if k == AST_BOOT_DEF {
+                cg_boot(d);
+            } else if k == AST_MMU_DEF {
+                cg_mmu(d);
+            } else if k == AST_ISR_DEF {
+                cg_isr_routine(d);
+            } else if k == AST_CFG_DEF {
+                cg_config(d);
+            } else if k == AST_SCHED_DEF {
+                cg_sched(d);
+            } else if k == AST_SYS_DEF {
+                cg_sys(d);
+            }
+        }
+        p = p.right;
+    }
+    return 0;
+}
+
+// =========================================================================
+// THE THREAD CHECK
+// Code that can run in a thread may only touch globals declared 'shared
+// var'. While emitting, the code generator notes who calls whom, which
+// functions start threads, whose address is taken, and each function's
+// first access to a global that is not shared. After the last function,
+// cg_thread_check works out which functions can run in a thread -- the ones
+// passed to thread_start and all they call -- and returns the offending
+// access, if any. An indirect call could go anywhere: once reachable code
+// makes one, every function whose address is taken is reachable too.
+// =========================================================================
+
+// a global's name, its access noted
+fn cg_emit_gtok(t: i64) -> i64 {
+    cg_note_global(t);
+    return emit_tok(t);
+}
+
+// the first access of the current function to a global that is not shared
+fn cg_note_global(t: i64) -> i64 {
+    var f: i64 = cg_cur_fn;
+    var i: i64 = 0;
+    if f < 0 || f >= CG_MAX_FUNCS {
+        return 0;
+    }
+    if cg_q(&fn_gtok, f) != 0 {
+        return 0;
+    }
+    while i < gs_count {
+        if tok_equal(t, cg_q(&gs_toks, i)) == 1 {
+            if cg_q(&gs_shared, i) == 0 {
+                cg_qs(&fn_gtok, f, t);
+            }
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// a call edge from the current function to the one a token names
+fn cg_note_call(t: i64) -> i64 {
+    var fr: i64 = cg_cur_fn;
+    var to: i64 = 0;
+    if fr < 0 {
+        return 0;
+    }
+    to = cg_find_func(t);
+    if to < 0 {
+        return 0;
+    }
+    if ce_count >= CG_MAX_EDGES {
+        return 0;
+    }
+    cg_qs(&ce_from, ce_count, fr);
+    cg_qs(&ce_to, ce_count, to);
+    ce_count += 1;
+    return 0;
+}
+
+// function f's address is taken
+fn cg_note_addr(f: i64) -> i64 {
+    if f >= 0 && f < CG_MAX_FUNCS {
+        cg_qs(&fn_addr, f, 1);
+    }
+    return 0;
+}
+
+// the current function makes an indirect call
+fn cg_note_indirect() -> i64 {
+    if cg_cur_fn >= 0 {
+        cg_qs(&fn_indir, cg_cur_fn, 1);
+    }
+    return 0;
+}
+
+// the first argument of thread_start: &fn starts a thread in fn; anything
+// computed could be any function
+fn cg_note_thread(a: ptr<Ast>) -> i64 {
+    var f: i64 = 0;
+    if a != 0 {
+        if a.node_type == AST_ADDR_OF && a.data != 0 {
+            f = cg_find_func(a.data);
+            if f >= 0 {
+                cg_qs(&fn_root, f, 1);
+                return 0;
+            }
+        }
+    }
+    cg_dyn_thread = 1;
+    return 0;
+}
+
+// the token of a non-shared global touched by code that can run in a
+// thread, 0 when there is none. main is the main thread wherever it is
+// started from: nothing reaches it.
+fn cg_thread_check() -> i64 {
+    var n: i64 = fn_count;
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var r: i64 = 0;
+    var changed: i64 = 1;
+    var fr: i64 = 0;
+    var to: i64 = 0;
+    cg_main_idx = cg_find_func(cg_tok(CT_MAINNAME));
+    while i < n {
+        r = cg_q(&fn_root, i);
+        if cg_dyn_thread != 0 {
+            r = r | cg_q(&fn_addr, i);
+        }
+        cg_qs(&fn_reach, i, r);
+        i += 1;
+    }
+    while changed != 0 {
+        changed = 0;
+        i = 0;
+        while i < n {
+            if cg_q(&fn_reach, i) != 0 && cg_q(&fn_indir, i) != 0 {
+                j = 0;
+                while j < n {
+                    if cg_q(&fn_addr, j) != 0 && cg_q(&fn_reach, j) == 0 {
+                        cg_qs(&fn_reach, j, 1);
+                        changed = 1;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < ce_count {
+            fr = cg_q(&ce_from, i);
+            to = cg_q(&ce_to, i);
+            if cg_q(&fn_reach, fr) != 0 && to != cg_main_idx {
+                if cg_q(&fn_reach, to) == 0 {
+                    cg_qs(&fn_reach, to, 1);
+                    changed = 1;
+                }
+            }
+            i += 1;
+        }
+    }
+    i = 0;
+    while i < n {
+        if cg_q(&fn_reach, i) != 0 && cg_q(&fn_gtok, i) != 0 {
+            return cg_q(&fn_gtok, i);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// What a module cannot hold. Nothing starts a module -- the compiler's
+// hand-written code calls its functions -- so it has no main, no global
+// whose first value has to be computed when main begins, and no function C
+// calls.
+fn cg_module_check() -> i64 {
+    var p: ptr<Ast> = cg_root;
+    var d: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var v: ptr<Ast> = 0;
+    var tt: ptr<Tok> = 0;
+    var bad: i64 = 0;
+    var msg: i64 = 0;
+    var hn: i64 = 0;
+    var tag: i64 = 0;
+    if cg_as_module == 0 || cg_had_error != 0 {
+        return 0;
+    }
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            return 0;
+        }
+        d = p.left;
+        bad = 0;
+        if d != 0 {
+            k = d.node_type;
+            if k == AST_FUNCTION {
+                if d.data != 0 {
+                    if name_is_main(d.data) == 1 {
+                        bad = 1;
+                        msg = "a module has no main: ";
+                        hn = "  hint: its functions are called by the compiler's own code; build a program without --module\r\n";
+                    } else if (d.type_info & 0xFFFF) == VIS_EXPORTED {
+                        bad = 1;
+                        msg = "a module exports nothing to C: ";
+                        hn = "  hint: its functions are called by name from the compiler's own code; drop 'export'\r\n";
+                    }
+                }
+            } else if k == AST_VAR_DECL || k == AST_CONST_DECL {
+                bad = cg_module_global_bad(d);
+                msg = "a global of a module must start from a number written out: ";
+                hn = "  hint: nothing runs before a module's functions are called; give it its value in one of them\r\n";
+            }
+        }
+        if bad != 0 {
+            cg_err_tok = d.data;
+            cg_err_msg = msg;
+            cg_err_hint = hn;
+            cg_had_error = 1;
+            return 0;
+        }
+        p = p.right;
+    }
+    return 0;
+}
+
+// 1 when a module's global needs a first value computed at start: not an
+// array (data), a stream or a struct (zero), a literal; a list or a map is
+// made when main begins
+fn cg_module_global_bad(d: ptr<Ast>) -> i64 {
+    var tt: ptr<Tok> = 0;
+    var v: ptr<Ast> = 0;
+    var tag: i64 = 0;
+    if d.type_info != 0 {
+        return 0;
+    }
+    if d.left != 0 {
+        tt = d.left;
+        if tt.kind == KW_STR {
+            return 0;
+        }
+        if cg_find_struct(tt) != -1 {
+            return 0;
+        }
+    }
+    v = d.right;
+    if v != 0 {
+        if v.node_type == AST_INTEGER_LIT || v.node_type == AST_FLOAT_LIT {
+            return 0;
+        }
+        return 1;
+    }
+    tag = cg_decl_vtag(d) & 15;
+    if tag == 2 || tag == 3 {
+        return 1;
+    }
+    return 0;
+}

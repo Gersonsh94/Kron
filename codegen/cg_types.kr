@@ -1,0 +1,453 @@
+kron_program
+kron_domain cg_types;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE BUILT-IN TYPES: text, list<T>, map<T>
+//
+// All three are one i64 at run time, a handle of std_text, std_list or
+// std_map. What the compiler adds is knowing which is which: print shows a
+// text as its words and a list as [1, 2, 3], == compares two texts by their
+// bytes, + joins texts, a text declared from "..." is a text of its own that
+// text_add can grow, and a list<T> or map<T> declared without a value starts
+// empty. l[i] and m[k] are turned into calls by the parser already.
+//
+// The type tag: bits 0-3 the kind (1 text, 2 list, 3 map, 4 an array of
+// texts, 5 a function value), bits 4-7 the element (0 integer or handle,
+// 1 text, 2 real).
+// =========================================================================
+
+// cg_expr_vtag(expression) -> its type tag, 0 for a plain value
+fn cg_expr_vtag(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var t: i64 = 0;
+    var i: i64 = 0;
+    if e == 0 {
+        return 0;
+    }
+    k = e.node_type;
+    if k == AST_IDENTIFIER {
+        t = cg_vtag_of_name(e.data);
+        if cg_u32(t) != 0 {
+            return t;
+        }
+        // a function's name: a function value
+        if cg_find_var_idx(e.data) != -1 {
+            return 0;
+        }
+        if cg_find_global(e.data) != -1 {
+            return 0;
+        }
+        i = cg_find_func(e.data);
+        if i == -1 {
+            return 0;
+        }
+        return cg_fnval_tag(cg_u32((cg_q(&fn_ret_vtag, i) << 8) | cg_q(&fn_ret_float, i)));
+    }
+    if k == AST_CALL {
+        // a read the parser made from l[i] carries its element's tag
+        t = e.col >> 8;
+        if t != 0 {
+            return t;
+        }
+        if e.data == 0 {
+            return 0;
+        }
+        if cg_find_var_idx(e.data) == -1 {
+            i = cg_find_func(e.data);
+            if i != -1 {
+                return cg_q(&fn_ret_vtag, i);
+            }
+            if cg_find_global(e.data) == -1 {
+                return 0;
+            }
+        }
+        // through a value: what fn(...) -> R says R is
+        t = cg_vtag_of_name(e.data);
+        if (t & 15) != 5 {
+            return 0;
+        }
+        if ((t >> 4) & 15) != 1 {
+            return 0;
+        }
+        return 1;
+    }
+    if k == AST_BINOP {
+        // text + anything, or "..." + text, is a new text
+        if e.data != TOK_PLUS {
+            return 0;
+        }
+        if cg_is_concat(e) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_MEMBER {
+        cg_member_resolve(e);
+        return mem_vtag;
+    }
+    if k == AST_INDEX {
+        // an element of an array of texts
+        t = cg_vtag_of_name(e.data);
+        if (t & 15) != 4 {
+            return 0;
+        }
+        return (t >> 4) & 15;
+    }
+    if k == AST_LAMBDA {
+        return cg_fnval_tag(e.col);
+    }
+    return 0;
+}
+
+// the tag of a local or a global, by its name
+fn cg_vtag_of_name(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    if i != -1 {
+        return cg_q(&var_vtag, i);
+    }
+    i = cg_find_global(t);
+    if i != -1 {
+        return cg_q(&g_vtag, i);
+    }
+    return 0;
+}
+
+// 1 when the expression is a text or a "..."
+fn cg_is_textish(e: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_STRING_LIT {
+        return 1;
+    }
+    if cg_expr_vtag(e) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+// 1 when a '+' joins texts: the left side is a text, or a "..." outside
+// raw { } (inside, it is address arithmetic)
+fn cg_is_concat(e: ptr<Ast>) -> i64 {
+    var l: ptr<Ast> = e.left;
+    if cg_expr_vtag(l) == 1 {
+        return 1;
+    }
+    if l == 0 {
+        return 0;
+    }
+    if l.node_type == AST_STRING_LIT && cg_in_raw == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// 1 when '==' or '!=' compares texts: one side a text, the other a text or
+// a "..."
+fn cg_is_textcmp(e: ptr<Ast>) -> i64 {
+    if e.data != TOK_EQ && e.data != TOK_NEQ {
+        return 0;
+    }
+    if cg_expr_vtag(e.left) == 1 {
+        return cg_is_textish(e.right);
+    }
+    if cg_expr_vtag(e.right) == 1 {
+        return cg_is_textish(e.left);
+    }
+    return 0;
+}
+
+// the tag of a declared variable: the declared one, or for 'var x = value'
+// with no type, the value's (an array's tag belongs to the array)
+fn cg_decl_vtag(d: ptr<Ast>) -> i64 {
+    var t: i64 = d.col >> 8;
+    if t != 0 {
+        return t;
+    }
+    if (d.col & 8) != 0 {
+        return 0;                            // a type was written: no tag
+    }
+    if d.type_info != 0 {
+        return 0;
+    }
+    if d.right == 0 {
+        return 0;
+    }
+    t = cg_expr_vtag(d.right);
+    if (t & 15) == 4 {
+        return 0;
+    }
+    return t;
+}
+
+// At the start of main: every global whose value is not a number written
+// out -- an expression, a "..." for a text -- gets it, in the order they
+// are declared; a list<T> or map<T> with no value starts empty. Plain
+// numbers are in the data section already.
+fn cg_emit_global_inits() -> i64 {
+    var p: ptr<Ast> = cg_root;
+    var d: ptr<Ast> = 0;
+    var v: ptr<Ast> = 0;
+    var tt: ptr<Tok> = 0;
+    var tag: i64 = 0;
+    var k: i64 = 0;
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            return 0;
+        }
+        d = p.left;
+        if d != 0 {
+            if d.node_type == AST_VAR_DECL || d.node_type == AST_CONST_DECL {
+                cg_global_init_one(d);
+            }
+        }
+        p = p.right;
+    }
+    return 0;
+}
+
+fn cg_global_init_one(d: ptr<Ast>) -> i64 {
+    var v: ptr<Ast> = 0;
+    var tt: ptr<Tok> = 0;
+    var tag: i64 = 0;
+    var k: i64 = 0;
+    if d.type_info != 0 {
+        return 0;                            // an array
+    }
+    if d.left != 0 {
+        tt = d.left;
+        if tt.kind == KW_STR {
+            return 0;                        // a stream
+        }
+        if cg_find_struct(tt) != -1 {
+            return 0;                        // a struct
+        }
+    }
+    tag = cg_decl_vtag(d);
+    v = d.right;
+    if v == 0 {
+        k = tag & 15;
+        if k == 2 {
+            cg_lib_call(cg_tok(CT_LIST_NEW));
+        } else if k == 3 {
+            cg_lib_call(cg_tok(CT_MAP_NEW));
+        } else {
+            return 0;
+        }
+    } else {
+        k = v.node_type;
+        if k == AST_INTEGER_LIT || k == AST_FLOAT_LIT || k == AST_BOOL_LIT {
+            return 0;
+        }
+        if (d.col & 1) != 0 {
+            cg_emit_float(v);
+            cg_emit_gpre("    movsd [rel __g_");
+            emit_tok(d.data);
+            return emit_cstr("], xmm0\n");
+        }
+        cg_emit_for(v, tag);
+    }
+    cg_emit_gpre("    mov [rel __g_");
+    emit_tok(d.data);
+    return emit_cstr("], rax\n");
+}
+
+// the call of a library function, its arguments already in their registers
+fn cg_lib_call(t: i64) -> i64 {
+    cg_note_call(t);
+    emit_cstr("    sub rsp, 32\n");
+    kt_flush();
+    emit_cstr("    call ");
+    emit_tok(t);
+    emit_cstr("\n");
+    return emit_cstr("    add rsp, 32\n");
+}
+
+// cg_emit_for(value, tag of where it goes): the value in rax. A "..." going
+// into a text becomes a new text; [a, b] going into a list<T> a new list.
+fn cg_emit_for(v: ptr<Ast>, tag: i64) -> i64 {
+    var e: ptr<Ast> = 0;
+    var el: i64 = 0;
+    if v != 0 {
+        if (tag & 15) == 1 && v.node_type == AST_STRING_LIT {
+            cg_emit(v);
+            emit_cstr("    mov rcx, rax\n");
+            return cg_lib_call(cg_tok(CT_TEXT));
+        }
+        if (tag & 15) == 2 && v.node_type == AST_ARRAY_LIT {
+            cg_lib_call(cg_tok(CT_LIST_NEW));
+            emit_cstr("    push rax\n");
+            e = v.right;
+            while e != 0 {
+                el = (tag >> 4) & 15;
+                if el == 2 {
+                    cg_emit_float(e.left);
+                    emit_cstr("    movaps xmm1, xmm0\n");
+                    emit_cstr("    pop rcx\n    push rcx\n");
+                    cg_lib_call(cg_tok(CT_LIST_ADD_REAL));
+                } else {
+                    // a text element from "..." is a text too
+                    cg_emit_for(e.left, el);
+                    emit_cstr("    mov rdx, rax\n");
+                    emit_cstr("    pop rcx\n    push rcx\n");
+                    cg_lib_call(cg_tok(CT_LIST_ADD));
+                }
+                e = e.right;
+            }
+            return emit_cstr("    pop rax\n");
+        }
+    }
+    return cg_emit(v);
+}
+
+// '==' / '!=' of two texts: text_same, turned around for !=; rax
+fn cg_emit_textcmp(e: ptr<Ast>) -> i64 {
+    cg_emit(e.left);
+    emit_cstr("    push rax\n");
+    cg_emit(e.right);
+    emit_cstr("    mov rdx, rax\n");
+    emit_cstr("    pop rcx\n");
+    cg_lib_call(cg_tok(CT_TEXT_SAME));
+    if e.data == TOK_NEQ {
+        emit_cstr("    xor rax, 1\n");
+    }
+    return 0;
+}
+
+// a '+' that joins texts: a new text with the left side, then the right
+// side added -- text_add, text_add_int or text_add_real as it is a text, an
+// integer or a real; rax
+fn cg_emit_concat(e: ptr<Ast>) -> i64 {
+    cg_emit(e.left);
+    emit_cstr("    mov rcx, rax\n");
+    cg_lib_call(cg_tok(CT_TEXT));
+    emit_cstr("    push rax\n");
+    if cg_is_textish(e.right) != 0 {
+        cg_emit(e.right);
+        emit_cstr("    mov rdx, rax\n");
+        emit_cstr("    pop rcx\n    push rcx\n");
+        cg_lib_call(cg_tok(CT_TEXT_ADD));
+    } else if cg_expr_is_float(e.right) != 0 {
+        cg_emit_float(e.right);
+        emit_cstr("    movaps xmm1, xmm0\n");
+        emit_cstr("    pop rcx\n    push rcx\n");
+        emit_cstr("    mov r8, -1\n");
+        cg_lib_call(cg_tok(CT_TEXT_ADD_REAL));
+    } else {
+        cg_emit(e.right);
+        emit_cstr("    mov rdx, rax\n");
+        emit_cstr("    pop rcx\n    push rcx\n");
+        cg_lib_call(cg_tok(CT_TEXT_ADD_INT));
+    }
+    return emit_cstr("    pop rax\n");
+}
+
+// cg_emit_print_tagged(value, its tag) -> 1 when print was done here: a
+// text by say, a list by list_show, a map by map_show
+fn cg_emit_print_tagged(v: ptr<Ast>, tag: i64) -> i64 {
+    var k: i64 = tag & 15;
+    if k == 1 {
+        cg_emit(v);
+        emit_cstr("    mov rcx, rax\n");
+        cg_lib_call(cg_tok(CT_SAY));
+        return 1;
+    }
+    if k == 2 {
+        if cg_find_func(cg_tok(CT_LIST_SHOW)) == -1 {
+            // std_list alone has no way to write: the list printer is in
+            // std_text
+            cg_err_tok = 0;
+            if v.node_type == AST_IDENTIFIER {
+                cg_err_tok = v.data;
+            }
+            cg_err_msg = "printing a list needs std_text.kr, which is not imported ";
+            cg_err_hint = "  hint: add  acquire_domain \"std_text.kr\";  to the header\r\n";
+            cg_had_error = 1;
+            return 1;
+        }
+    }
+    if k != 2 && k != 3 {
+        return 0;
+    }
+    cg_emit(v);
+    emit_cstr("    mov rcx, rax\n");
+    emit_cstr("    mov rdx, ");
+    emit_u32((tag >> 4) & 15);
+    emit_cstr("\n");
+    if k == 3 {
+        cg_lib_call(cg_tok(CT_MAP_SHOW));
+    } else {
+        cg_lib_call(cg_tok(CT_LIST_SHOW));
+    }
+    return 1;
+}
+
+// =========================================================================
+// SEVERAL RESULTS
+//
+//   fn divide(a: i64, b: i64) -> (i64, i64) { return a / b, a % b; }
+//   var q, r = divide(17, 5);
+//
+// The results leave in rax, rdx, r8 and r9; a real travels as its bits.
+// When the first is a real it is also in xmm0, so a single use of the call
+// reads it like any real result. A function's description: the count, then
+// a bit per result that is a real from bit 4, then two bits of kind and two
+// of element per result from bit 8.
+// =========================================================================
+
+// 1 when result w of a description is a real
+fn cg_multi_float(desc: i64, w: i64) -> i64 {
+    return (cg_u32(desc) >> ((w + 4) & 31)) & 1;
+}
+
+// the type tag of result w
+fn cg_multi_vtag(desc: i64, w: i64) -> i64 {
+    var v: i64 = cg_u32(desc) >> ((w * 4 + 8) & 31);
+    return (((v >> 2) & 3) << 4) | (v & 3);
+}
+
+// return a, b, ...: each value as the result it is declared, pushed in
+// order, then popped into r9, r8, rdx, rax
+fn cg_emit_return_multi(r: ptr<Ast>) -> i64 {
+    var w: i64 = 0;
+    var v: ptr<Ast> = r.right;
+    var rest: ptr<Ast> = r.left;
+    while v != 0 && w < 4 {
+        if cg_multi_float(cur_fn_multi, w) != 0 {
+            cg_emit_float(v);
+            emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");        // the bits go on the stack as they are
+        } else {
+            if cg_expr_is_float(v) != 0 {
+                cg_emit_float(v);
+                emit_cstr("    cvttsd2si rax, xmm0\n");
+            } else {
+                cg_emit(v);
+            }
+            emit_cstr("    push rax\n");
+        }
+        w += 1;
+        if rest != 0 {
+            v = rest.left;
+            rest = rest.right;
+        } else {
+            v = 0;
+        }
+    }
+    if w >= 4 {
+        emit_cstr("    pop r9\n");
+    }
+    if w >= 3 {
+        emit_cstr("    pop r8\n");
+    }
+    if w >= 2 {
+        emit_cstr("    pop rdx\n");
+    }
+    emit_cstr("    pop rax\n");
+    // a real first result is in xmm0 too
+    if cg_multi_float(cur_fn_multi, 0) != 0 {
+        emit_cstr("    push rax\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+    }
+    return 0;
+}

@@ -1,0 +1,425 @@
+kron_program
+kron_domain cg_titan;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE TITAN MODULES: isa, boot, mmu, isr, config, sched, sys, and the
+// identity of a hardware block -- real, exported data and routines
+// =========================================================================
+
+// the prefix and the block's name: __isa_<name>, __mmu_<name>...
+fn cg_titan_base(pre: i64, n: ptr<Ast>) -> i64 {
+    emit_cstr(pre);
+    return emit_tok(n.data);
+}
+
+// global <base><suffix> / <base><suffix>: dq <count>
+fn cg_titan_count(pre: i64, n: ptr<Ast>, count: i64) -> i64 {
+    emit_cstr("global ");
+    cg_titan_base(pre, n);
+    emit_cstr("_count");
+    emit_cstr("\n");
+    cg_titan_base(pre, n);
+    emit_cstr("_count");
+    emit_cstr(":");
+    emit_cstr(" dq ");
+    emit_u32(count);
+    return emit_cstr("\n");
+}
+
+// global <base><suffix> / <base><suffix>:
+fn cg_titan_table(pre: i64, n: ptr<Ast>, suffix: i64) -> i64 {
+    emit_cstr("global ");
+    cg_titan_base(pre, n);
+    emit_cstr(suffix);
+    emit_cstr("\n");
+    cg_titan_base(pre, n);
+    emit_cstr(suffix);
+    return emit_cstr(":\n");
+}
+
+// how many nodes a chain through right holds
+fn cg_chain_len(e: ptr<Ast>) -> i64 {
+    var n: i64 = 0;
+    while e != 0 {
+        n += 1;
+        e = e.right;
+    }
+    return n;
+}
+
+// the frame of a routine: a slot per local, the shadow space, 16-aligned
+fn cg_routine_frame(body: i64) -> i64 {
+    return (cg_count_vars(body) * 8 + 32 + 15) & 0xFFFFFFF0;
+}
+
+// M01 - the opcode table of an isa block, as exported data:
+//   __isa_s<N>: db "<opcode>",0   __isa_<ISA>_count, _opcodes, _names
+fn cg_isa(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    emit_cstr("section .data\n");
+    // the name strings, each with a label of its own, kept in the node
+    e = n.right;
+    while e != 0 {
+        e.type_info = new_label() & 0xFFFFFFFF;
+        emit_cstr("__isa_s");
+        emit_u32(e.type_info);
+        emit_cstr(":\n");
+        emit_cstr("    db \"");
+        emit_tok(e.data);
+        emit_cstr("\",0\n");
+        e = e.right;
+    }
+    cg_titan_count("__isa_", n, cg_chain_len(n.right));
+    cg_titan_table("__isa_", n, "_opcodes");
+    e = n.right;
+    while e != 0 {
+        emit_cstr("    dq ");
+        emit_tok(e.left);
+        emit_cstr("\n");
+        e = e.right;
+    }
+    cg_titan_table("__isa_", n, "_names");
+    e = n.right;
+    while e != 0 {
+        emit_cstr("    dq ");
+        emit_cstr("__isa_s");
+        emit_u32(e.type_info);
+        emit_cstr("\n");
+        e = e.right;
+    }
+    return 0;
+}
+
+// cg_is_sysreg(token) -> 1 for a control or debug register: cr or dr and
+// one digit. Those take no immediate, so cg_boot writes them through rax.
+fn cg_is_sysreg(t: ptr<Tok>) -> i64 {
+    var p: i64 = 0;
+    var c: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    if t.length != 3 {
+        return 0;
+    }
+    p = t.value;
+    if p == 0 {
+        return 0;
+    }
+    c = cg_b(p) | 32;
+    if c != 99 && c != 100 {
+        return 0;
+    }
+    if (cg_b(p + 1) | 32) != 114 {
+        return 0;
+    }
+    c = cg_b(p + 2);
+    if c < 48 || c > 57 {
+        return 0;
+    }
+    return 1;
+}
+
+// M02 - the initial CPU state as an exported routine:
+//   global __boot_<name> / __boot_<name>: mov <reg>, <value>... ret
+fn cg_boot(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    emit_cstr("section .text\n");
+    emit_cstr("global ");
+    emit_cstr("__boot_");
+    emit_tok(n.data);
+    emit_cstr("\n");
+    emit_cstr("__boot_");
+    emit_tok(n.data);
+    emit_cstr(":\n");
+    e = n.right;
+    while e != 0 {
+        if cg_is_sysreg(e.data) != 0 {
+            // mov cr4, 0x6A0 is no x86 instruction: through rax
+            emit_cstr("    mov rax, ");
+            emit_tok(e.left);
+            emit_cstr("\n");
+            emit_cstr("    mov ");
+            emit_tok(e.data);
+            emit_cstr(", rax\n");
+        } else {
+            emit_cstr("    mov ");
+            emit_tok(e.data);
+            emit_cstr(", ");
+            emit_tok(e.left);
+            emit_cstr("\n");
+        }
+        e = e.right;
+    }
+    return emit_cstr("    ret\n");
+}
+
+// M03 - the paging hierarchy as exported data:
+//   __mmu_<name>_levels: dq <level>, <entries>   __mmu_<name>_count: dq n
+fn cg_mmu(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    emit_cstr("section .data\n");
+    cg_titan_count("__mmu_", n, cg_chain_len(n.right));
+    cg_titan_table("__mmu_", n, "_levels");
+    e = n.right;
+    while e != 0 {
+        emit_cstr("    dq ");
+        emit_tok(e.data);
+        emit_cstr(", ");
+        emit_tok(e.left);
+        emit_cstr("\n");
+        e = e.right;
+    }
+    return 0;
+}
+
+// the head of a routine: push rbp / mov rbp, rsp / sub rsp, <frame>
+fn cg_routine_head(frame: i64) -> i64 {
+    emit_cstr("    push rbp\n");
+    emit_cstr("    mov rbp, rsp\n");
+    emit_cstr("    sub rsp, ");
+    emit_u32(frame);
+    return emit_cstr("\n");
+}
+
+// M04 - an interrupt handler, executable: global __isr_<name> /
+// __isr_<name>: push rbp ... body ... iretq, and its vector exported as
+// __isrvec_<name>
+fn cg_isr_routine(n: ptr<Ast>) -> i64 {
+    var ret: i64 = 0;
+    var frame: i64 = 0;
+    if n.left != 0 {
+        emit_cstr("section .data\n");
+        emit_cstr("global ");
+        emit_cstr("__isrvec_");
+        emit_tok(n.data);
+        emit_cstr("\n");
+        emit_cstr("__isrvec_");
+        emit_tok(n.data);
+        emit_cstr(":");
+        emit_cstr(" dq ");
+        emit_tok(n.left);
+        emit_cstr("\n");
+    }
+    emit_cstr("section .text\n");
+    var_count = 0;
+    ret = new_label();
+    cur_ret_id = ret;
+    frame = cg_routine_frame(n.right);
+    emit_cstr("global ");
+    emit_cstr("__isr_");
+    emit_tok(n.data);
+    emit_cstr("\n");
+    emit_cstr("__isr_");
+    emit_tok(n.data);
+    emit_cstr(":\n");
+    cg_routine_head(frame);
+    cg_emit(n.right);
+    ir_ctl(IR_RETLBL, ret);
+    emit_cstr("    mov rsp, rbp\n");
+    emit_cstr("    pop rbp\n");
+    return emit_cstr("    iretq\n");
+}
+
+// the declarative modules: __cfg_<name>_count, _keys (the property names),
+// _texts (each value as text), _nums (the value when it is a number, else
+// 0); and each on_* handler as an exported routine __cfg_<name>_<handler>
+fn cg_config(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var count: i64 = 0;
+    var ret: i64 = 0;
+    var frame: i64 = 0;
+    var lbl: i64 = 0;
+    emit_cstr("section .data\n");
+    // the key and value strings, each pair with a label of its own (kept
+    // in the node, over child_count, line and col)
+    e = n.right;
+    while e != 0 {
+        if e.type_info != CFG_HANDLER_MARK {
+            lbl = new_label() & 0xFFFFFFFF;
+            e.child_count = lbl;
+            e.line = 0;
+            e.col = 0;
+            emit_cstr("__cfgk");
+            emit_u32(lbl);
+            emit_cstr(":\n");
+            emit_cstr("    db \"");
+            emit_tok(e.data);
+            emit_cstr("\",0\n");
+            emit_cstr("__cfgv");
+            emit_u32(lbl);
+            emit_cstr(":\n");
+            emit_cstr("    db \"");
+            emit_tok(e.left);
+            emit_cstr("\",0\n");
+            count += 1;
+        }
+        e = e.right;
+    }
+    cg_titan_count("__cfg_", n, count);
+    cg_titan_table("__cfg_", n, "_keys");
+    e = n.right;
+    while e != 0 {
+        if e.type_info != CFG_HANDLER_MARK {
+            emit_cstr("    dq ");
+            emit_cstr("__cfgk");
+            emit_u32(e.child_count);
+            emit_cstr("\n");
+        }
+        e = e.right;
+    }
+    cg_titan_table("__cfg_", n, "_texts");
+    e = n.right;
+    while e != 0 {
+        if e.type_info != CFG_HANDLER_MARK {
+            emit_cstr("    dq ");
+            emit_cstr("__cfgv");
+            emit_u32(e.child_count);
+            emit_cstr("\n");
+        }
+        e = e.right;
+    }
+    cg_titan_table("__cfg_", n, "_nums");
+    e = n.right;
+    while e != 0 {
+        if e.type_info != CFG_HANDLER_MARK {
+            emit_cstr("    dq ");
+            if e.type_info == TOK_HEX || e.type_info == TOK_NUMBER {
+                emit_tok(e.left);
+            } else {
+                emit_cstr("0");
+            }
+            emit_cstr("\n");
+        }
+        e = e.right;
+    }
+    // the on_* handlers
+    e = n.right;
+    while e != 0 {
+        if e.type_info == CFG_HANDLER_MARK {
+            emit_cstr("section .text\n");
+            var_count = 0;
+            ret = new_label();
+            cur_ret_id = ret;
+            frame = cg_routine_frame(e.left);
+            emit_cstr("global ");
+            cg_config_hbase(n, e);
+            emit_cstr("\n");
+            cg_config_hbase(n, e);
+            emit_cstr(":\n");
+            cg_routine_head(frame);
+            cg_emit(e.left);
+            ir_ctl(IR_RETLBL, ret);
+            emit_cstr("    mov rsp, rbp\n");
+            emit_cstr("    pop rbp\n");
+            emit_cstr("    ret\n");
+        }
+        e = e.right;
+    }
+    return 0;
+}
+
+// __cfg_<module>_<handler>
+fn cg_config_hbase(n: ptr<Ast>, h: ptr<Ast>) -> i64 {
+    emit_cstr("__cfg_");
+    emit_tok(n.data);
+    emit_cstr("_");
+    return emit_tok(h.data);
+}
+
+// M08 - a scheduler: its parameters as cg_config lays them out, and the
+// context switch as an exported routine __sched_<name>_switch
+fn cg_sched(n: ptr<Ast>) -> i64 {
+    var ret: i64 = 0;
+    var frame: i64 = 0;
+    cg_config(n);
+    if n.left == 0 {
+        return 0;
+    }
+    emit_cstr("section .text\n");
+    var_count = 0;
+    ret = new_label();
+    cur_ret_id = ret;
+    frame = cg_routine_frame(n.left);
+    cg_titan_table("__sched_", n, "_switch");
+    cg_routine_head(frame);
+    cg_emit(n.left);
+    ir_ctl(IR_RETLBL, ret);
+    emit_cstr("    mov rsp, rbp\n");
+    emit_cstr("    pop rbp\n");
+    return emit_cstr("    ret\n");
+}
+
+// M09 - the system call table: __sys_<name>_count, __sys_<name>_table of
+// __svc_<name>_<call>, and each handler as an interrupt routine (sysretq
+// when the entry is the syscall instruction)
+fn cg_sys(n: ptr<Ast>) -> i64 {
+    var e: ptr<Ast> = 0;
+    var ret: i64 = 0;
+    var frame: i64 = 0;
+    emit_cstr("section .data\n");
+    cg_titan_count("__sys_", n, cg_chain_len(n.right));
+    cg_titan_table("__sys_", n, "_table");
+    e = n.right;
+    while e != 0 {
+        emit_cstr("    dq ");
+        emit_cstr("__svc_");
+        emit_tok(n.data);
+        emit_cstr("_");
+        emit_tok(e.data);
+        emit_cstr("\n");
+        e = e.right;
+    }
+    e = n.right;
+    while e != 0 {
+        emit_cstr("section .text\n");
+        var_count = 0;
+        ret = new_label();
+        cur_ret_id = ret;
+        frame = cg_routine_frame(e.right);
+        emit_cstr("__svc_");
+        emit_tok(n.data);
+        emit_cstr("_");
+        emit_tok(e.data);
+        emit_cstr(":\n");
+        cg_routine_head(frame);
+        cg_emit(e.right);
+        ir_ctl(IR_RETLBL, ret);
+        emit_cstr("    mov rsp, rbp\n");
+        emit_cstr("    pop rbp\n");
+        if n.type_info == 1 {
+            emit_cstr("    o64 sysret\n");
+        } else {
+            emit_cstr("    iretq\n");
+        }
+        e = e.right;
+    }
+    return 0;
+}
+
+// the identity of a TITAN module, as real bytes a runtime can read:
+//   __mod_<id>_<name>: db "<module type>",0 / db "<name>",0
+fn cg_module(n: ptr<Ast>) -> i64 {
+    emit_cstr("section .data\n");
+    emit_cstr("__mod_");
+    emit_u32(new_label());
+    emit_cstr("_");
+    if n.left != 0 {
+        emit_tok(n.left);
+    } else {
+        emit_cstr("anon");
+    }
+    emit_cstr(":\n");
+    emit_cstr("    db \"");
+    emit_tok(n.data);
+    emit_cstr("\",0\n");
+    emit_cstr("    db \"");
+    if n.left != 0 {
+        emit_tok(n.left);
+    } else {
+        emit_cstr("anon");
+    }
+    emit_cstr("\",0\n");
+    return emit_cstr("section .text\n");
+}

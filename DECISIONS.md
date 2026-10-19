@@ -977,7 +977,54 @@ bases and making targets something that cannot be assigned to -- and
 program's chain of declarations are walked in a loop, not one call deeper
 per statement.
 
+Part 4, the code generator (done 19-10-2026): `codegen/codegen.kr` and the
+files it imports -- `cg_state.kr` (every global and constant),
+`cg_ir.kr` (the output, the records of a function, the register
+allocator), `cg_hdr.kr` (the preambles: Windows, Linux, bare metal, a
+library), `cg_run.kr` (the pre-pass, the walk, the thread check),
+`cg_titan.kr` (isa, boot, mmu, isr, config, sched, sys), `cg_fn.kr` (a
+function: its frame, parameters and results), `cg_vars.kr` (locals,
+loops, arrays and literals written in place), `cg_types.kr` (texts, lists
+and maps; several results), `cg_fnval.kr` (functions as values, extern
+blocks), `cg_ext.kr` (calls into system libraries, a library's exports),
+`cg_kt.kr` (intrinsics, failure traces, debugger hooks, structs and
+enums), `cg_expr.kr` (conditions, leaves, globals, reals), `cg_struct.kr`
+(struct fields and values, `list<S>`) and `cg_emit.kr` (one function per
+kind of node) -- with `include/defs.kr` (the constants of
+include/kron_types.inc it needs that tokens.kr and ast.kr do not hold)
+and `codegen/codegen.asm` as its door. The 20,559 lines of assembly are
+gone; the door is 270. `kronc -S` writes the same text, byte for byte, as
+the assembly code generator did: on every `.kr` file of the repository,
+for every target (windows, linux, linux-arm64, web, macos, bare, krn),
+with `--debug`, with `--lib` and with `--check`, on the 6,000 programs of
+parts 2 and 3, and for the four parts of the compiler compiled with
+`--module`.
+
+- main.asm sets `cg_debug`, `cg_as_module` and `cg_mod_tag` and reads
+  `dbg_which`: they stay in the door, which hands them over at
+  `jup_codegen_run`. Three small routines of the door go the other way:
+  the line map (`lmap_lookup`, in main.asm), the bits of a real literal
+  (kasm's `parse_float`, so the two always agree) and the parser's tables
+  of `ptr<S>` and `list<S>` declarations.
+- `cg_emit`, one jump over 71 kinds of node in the assembly, is one
+  function per kind; a chain of blocks is walked in a loop.
+- Every table holds 64-bit slots, whatever width the assembly gave it;
+  where the assembly kept a value in 32 bits and wrote it out as a number,
+  `emit_u32` writes it the same way.
+- The tokens the code generator makes itself (`list_get_n`, `text_add`,
+  `__kron_lib_init`, the fields of `stream`...) are built at its start, in
+  one table.
+- A file imports 16 others at most: `cg_state.kr` imports the three
+  headers, so `codegen.kr` stays within it.
+
 ## Fixed 19-10-2026
+
+- A global or a constant given a hexadecimal number with an E among its
+  digits (`const M: i64 = 0x1E;`) was written as a real -- `0x1.0E` --
+  which the assembler read as 0, without a word; a global given `true` or
+  `false` stopped the compiler. Found while the code generator in Kron was
+  being built: its own constant 0x464E56 came out as 0. Test:
+  `test_gconst`.
 
 - A function's parameter after a `ptr<T>` one -- and the parameters of
   the functions after it, up to the next `var` -- kept
@@ -991,6 +1038,17 @@ per statement.
   after it, crashed the compiler in the semantic pass: each statement
   opens a block there, past 255 open at once the table of blocks emptied,
   and the next name declared read far outside it. Test: `test_longfn`.
+- The VS Code extension (0.6.3): a `'` closed itself and `'a'` was
+  coloured as a character, though Kron has no `'`; a new line was not
+  indented after a `{` followed by a comment with `'` or `"` in it, was
+  indented after a `{` inside a comment or a text, and not after a `[` or
+  `(` left open at the end of a line; `1e5` and `2.5e-1` were not coloured
+  as numbers, and a hex number with `_` was, which Kron does not read. The
+  compiler is found with no path written in: the open folder, the folders
+  above the file being built, the repository the extension is installed
+  from (it lives in `kron-vscode/kron-lang` under the repository's root),
+  then `kron.compilerPath`, `kronc` on PATH by default; a `kronc` missing
+  from PATH now says so instead of failing without a word.
 
 - A global array given values (`var t: [i64; 4] = [1, 2, 3, 4];`) started
   at zero: the values were dropped without a word. They are data now, at
@@ -999,8 +1057,13 @@ per statement.
 - kasm: `resb`/`resq` outside `.bss` reserved the space in `.bss` while
   the label stayed where it was; they are zeros in place now, as in NASM.
   A real with an exponent and no point (`1e5`) was read as 1.
-- An internal error of the code generator (its output buffer full) was
-  taken for success, and the truncated program went on to be assembled.
+- An internal error of the code generator (its output buffer full, or a
+  function with too many locals) was taken for success, and the truncated
+  program went on to be assembled. A first fix the same morning did not
+  hold: the error came back as a negative number in 32 bits, which the
+  64-bit test in main read as positive. It is negative in 64 bits now,
+  and a function with more than 1024 locals is reported at the name that
+  did not fit, with its line.
 
 ## Fixed 13 to 18-10-2026
 

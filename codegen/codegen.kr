@@ -1,0 +1,305 @@
+kron_program
+kron_domain codegen;
+kron_imports
+acquire_domain "cg_state.kr";
+acquire_domain "cg_ir.kr";
+acquire_domain "cg_hdr.kr";
+acquire_domain "cg_run.kr";
+acquire_domain "cg_titan.kr";
+acquire_domain "cg_fn.kr";
+acquire_domain "cg_vars.kr";
+acquire_domain "cg_types.kr";
+acquire_domain "cg_fnval.kr";
+acquire_domain "cg_ext.kr";
+acquire_domain "cg_kt.kr";
+acquire_domain "cg_expr.kr";
+acquire_domain "cg_struct.kr";
+acquire_domain "cg_emit.kr";
+kron_definitions
+
+// =========================================================================
+// THE CODE GENERATOR
+//
+// The fourth part of the compiler written in Kron. It walks the tree the
+// parser built and the semantic pass checked, and writes the program as
+// x86-64 assembly text, which kasm assembles. kronc --module turns it, with
+// the files it imports, into codegen_kr.asm; codegen.asm beside it is the
+// small hand-written door the rest of the compiler calls through.
+//
+//   codegen.kr      the door's side in Kron, and the helpers every file uses
+//   cg_state.kr     the state: every global, before what uses it
+//   cg_ir.kr        the output, a function's records, register allocation
+//   cg_hdr.kr       the preambles: Windows, Linux, bare metal, a library
+//   cg_run.kr       the program: the pre-pass, the walk, the thread check
+//   cg_titan.kr     the TITAN modules: isa, boot, mmu, isr, config, sched
+//   cg_fn.kr        a function: frame, parameters, results
+//   cg_vars.kr      locals, loops, arrays and literals written in place
+//   cg_types.kr     type tags: texts, lists, maps; several results
+//   cg_fnval.kr     functions as values, lambdas, extern blocks
+//   cg_ext.kr       calls into system libraries, a library's exports
+//   cg_kt.kr        intrinsics, failure traces, debugger hooks, structs
+//   cg_expr.kr      conditions, leaves, globals, reals
+//   cg_struct.kr    struct fields and values, list<S>
+//   cg_emit.kr      cg_emit: one function per kind of node
+//
+// Like every part, it runs with no runtime underneath: memory through
+// ptr<Ast> and ptr<Tok> fields and peek / poke, its tables through their
+// address. Its output is byte for byte the output of the assembly it
+// replaces.
+// =========================================================================
+
+// the door's helpers, in codegen.asm: the line map of main.asm, a real
+// literal's bits through kasm's parse_float, and the parser's tables of
+// ptr<S> and list<S> declarations
+extern "kronc" {
+    fn cg_lmap(line: i64) -> i64;
+    fn cg_float_bits(text: i64, single: i64) -> i64;
+    fn cg_parser_q(which: i64, i: i64) -> i64;
+}
+
+// =========================================================================
+// memory, by address
+// =========================================================================
+
+fn cg_q(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn cg_qs(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+fn cg_b(p: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(p);
+    }
+    return r;
+}
+
+fn cg_bs(p: i64, v: i64) -> i64 {
+    raw {
+        poke8(p, v);
+    }
+    return 0;
+}
+
+// the low 32 bits, as the assembly's dword tables kept them
+fn cg_u32(v: i64) -> i64 {
+    return v & 0xFFFFFFFF;
+}
+
+// the low 32 bits, sign-extended
+fn cg_i32(v: i64) -> i64 {
+    v = v & 0xFFFFFFFF;
+    if v >= 0x80000000 {
+        v = v - 0x100000000;
+    }
+    return v;
+}
+
+// a < b, unsigned
+fn cg_ult(a: i64, b: i64) -> i64 {
+    var top: i64 = 1;
+    top = top << 63;
+    if (a ^ top) < (b ^ top) {
+        return 1;
+    }
+    return 0;
+}
+
+// the n bytes at a and at b are the same: 1, else 0
+fn cg_memeq(a: i64, b: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if cg_b(a + i) != cg_b(b + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// =========================================================================
+// the tokens the code generator makes itself, 24 bytes each in cg_toks:
+// kind, where the text is, its length (line and column 0)
+// =========================================================================
+
+fn cg_tok(i: i64) -> i64 {
+    return &cg_toks + i * 24;
+}
+
+fn cg_tok_set(i: i64, kind: i64, text: i64, n: i64) -> i64 {
+    var t: ptr<Tok> = cg_tok(i);
+    t.kind = kind;
+    t.value = text;
+    t.length = n;
+    t.line = 0;
+    t.col = 0;
+    return 0;
+}
+
+fn cg_tok_init() -> i64 {
+    cg_tok_set(CT_TMP, TOK_IDENT, " $t", 3);
+    cg_tok_set(CT_LN0, TOK_IDENT, "list_get_n", 10);
+    cg_tok_set(CT_LN1, TOK_IDENT, "list_set_n", 10);
+    cg_tok_set(CT_LN2, TOK_IDENT, "list_add_n", 10);
+    cg_tok_set(CT_LN3, TOK_IDENT, "list_insert_n", 13);
+    cg_tok_set(CT_LN4, TOK_IDENT, "list_remove_n", 13);
+    cg_tok_set(CT_LN5, TOK_IDENT, "list_pop_n", 10);
+    cg_tok_set(CT_LN6, TOK_IDENT, "list_last_n", 11);
+    cg_tok_set(CT_LN7, TOK_IDENT, "list_len_n", 10);
+    cg_tok_set(CT_LN8, TOK_IDENT, "list_reverse_n", 14);
+    cg_tok_set(CT_TEXT, TOK_IDENT, "text", 4);
+    cg_tok_set(CT_TEXT_ADD, TOK_IDENT, "text_add", 8);
+    cg_tok_set(CT_TEXT_ADD_INT, TOK_IDENT, "text_add_int", 12);
+    cg_tok_set(CT_TEXT_ADD_REAL, TOK_IDENT, "text_add_real", 13);
+    cg_tok_set(CT_TEXT_SAME, TOK_IDENT, "text_same", 9);
+    cg_tok_set(CT_SAY, TOK_IDENT, "say", 3);
+    cg_tok_set(CT_LIST_NEW, TOK_IDENT, "list_new", 8);
+    cg_tok_set(CT_MAP_NEW, TOK_IDENT, "map_new", 7);
+    cg_tok_set(CT_LIST_ADD, TOK_IDENT, "list_add", 8);
+    cg_tok_set(CT_LIST_ADD_REAL, TOK_IDENT, "list_add_real", 13);
+    cg_tok_set(CT_LIST_SHOW, TOK_IDENT, "list_show", 9);
+    cg_tok_set(CT_MAP_SHOW, TOK_IDENT, "map_show", 8);
+    cg_tok_set(CT_VEC4_LOAD, TOK_IDENT, "vec4_load", 9);
+    cg_tok_set(CT_VEC4_STORE, TOK_IDENT, "vec4_store", 10);
+    cg_tok_set(CT_VEC4_ADD, TOK_IDENT, "vec4_add", 8);
+    cg_tok_set(CT_VEC4_SUB, TOK_IDENT, "vec4_sub", 8);
+    cg_tok_set(CT_VEC4_MUL, TOK_IDENT, "vec4_mul", 8);
+    cg_tok_set(CT_VEC4_DIV, TOK_IDENT, "vec4_div", 8);
+    cg_tok_set(CT_VEC4_SUM, TOK_IDENT, "vec4_sum", 8);
+    cg_tok_set(CT_VEC4_FILL, TOK_IDENT, "vec4_fill", 9);
+    cg_tok_set(CT_VEC2_DIV, TOK_IDENT, "vec2_div", 8);
+    cg_tok_set(CT_LIBINIT, TOK_IDENT, "__kron_lib_init", 15);
+    cg_tok_set(CT_USERINIT, TOK_IDENT, "lib_init", 8);
+    cg_tok_set(CT_MAINNAME, TOK_IDENT, "main", 4);
+    cg_tok_set(CT_ENV, TOK_IDENT, "__env", 5);
+    cg_tok_set(CT_STREAM, 0, "stream", 6);
+    cg_tok_set(CT_SPTR, 0, "bytes", 5);
+    cg_tok_set(CT_SLEN, 0, "len", 3);
+    return 0;
+}
+
+// =========================================================================
+// the door's side: what codegen.asm calls
+// =========================================================================
+
+// the output buffer and its size; struct 0 is always 'stream', the pair
+// { bytes, len }, both u64
+fn cgk_init(buf: i64, cap: i64) -> i64 {
+    cg_tok_init();
+    cg_out = buf;
+    cg_ptr = buf;
+    cg_end = buf + cap;
+    cg_label = 0;
+    var_count = 0;
+    cur_ret_id = 0;
+    cg_had_error = 0;
+    cg_err_msg = 0;
+    cg_err_tok = 0;
+    cg_err_hint = 0;
+    struct_count = 1;
+    field_count = 2;
+    cg_qs(&struct_toks, 0, cg_tok(CT_STREAM));
+    cg_qs(&struct_first, 0, 0);
+    cg_qs(&struct_bytes, 0, 16);             // cg_struct_size divides by 8
+    cg_qs(&struct_nfield, 0, 2);
+    cg_qs(&field_toks, 0, cg_tok(CT_SPTR));
+    cg_qs(&field_toks, 1, cg_tok(CT_SLEN));
+    cg_qs(&field_sizes, 0, 8);
+    cg_qs(&field_sizes, 1, 8);
+    cg_qs(&field_offs, 0, 0);
+    cg_qs(&field_offs, 1, 8);
+    cg_qs(&field_isfloat, 0, 0);
+    cg_qs(&field_isfloat, 1, 0);
+    cg_qs(&field_struct, 0, -1);
+    cg_qs(&field_struct, 1, -1);
+    cg_qs(&field_unsigned, 0, 1);
+    cg_qs(&field_unsigned, 1, 1);
+    stream_struct_id = 0;
+    return 0;
+}
+
+// what main set before the run: --debug, --module and the module's tag
+fn cgk_flags(dbg: i64, mdl: i64) -> i64 {
+    cg_debug = dbg;
+    cg_as_module = mdl;
+    return &cg_mod_tag;
+}
+
+// the freestanding header is for bare metal and KRN system images
+fn cgk_set_target(t: i64) -> i64 {
+    cg_target = t;
+    if t == TARGET_BARE || t == TARGET_KRN {
+        cg_bare = 1;
+    } else {
+        cg_bare = 0;
+    }
+    return 0;
+}
+
+fn cgk_set_lib(v: i64) -> i64 {
+    cg_lib = v;
+    return 0;
+}
+
+fn cgk_run(root: ptr<Ast>) -> i64 {
+    return cg_run(root);
+}
+
+fn cgk_code() -> i64 {
+    return cg_out;
+}
+
+fn cgk_code_size() -> i64 {
+    return cg_ptr - cg_out;
+}
+
+fn cgk_uses_extern() -> i64 {
+    return cg_u32(cg_ext_any);
+}
+
+// some function is marked export, or the output is a library
+fn cgk_has_exports() -> i64 {
+    return cg_u32(cg_has_exp) | (cg_lib & 255);
+}
+
+fn cgk_export_count() -> i64 {
+    return cg_u32(cg_exp_count);
+}
+
+fn cgk_export_name(i: i64) -> i64 {
+    return cg_q(&cg_exp_name, i);
+}
+
+fn cgk_export_nlen(i: i64) -> i64 {
+    return cg_u32(cg_q(&cg_exp_nlen, i));
+}
+
+fn cgk_thread_tok() -> i64 {
+    return cg_thread_tok;
+}
+
+fn cgk_err_msg() -> i64 {
+    return cg_err_msg;
+}
+
+fn cgk_err_tok() -> i64 {
+    return cg_err_tok;
+}
+
+fn cgk_err_hint() -> i64 {
+    return cg_err_hint;
+}
+
+fn cgk_dbg_which() -> i64 {
+    return dbg_which & 255;
+}

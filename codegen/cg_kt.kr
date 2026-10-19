@@ -1,0 +1,777 @@
+kron_program
+kron_domain cg_kt;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// FOUR REALS AT A TIME, FAILURE TRACES, DEBUG BUILDS, STRUCTS AND ENUMS
+// =========================================================================
+
+// =========================================================================
+// FOUR REALS AT A TIME: vec4 of f32
+//
+//   vec4_load(&a[i])            four f32 from an [f32; N] (movups)
+//   vec4_store(&a[i], v)        and back
+//   vec4_add / sub / mul / div(v, w)   all four at once (addps ...)
+//   vec4_fill(x)                x in all four
+//   vec4_sum(v)                 the four added up, as an f64
+//   vec2_div(v, w)              the f64 pair's missing division
+//
+// Written as calls; none of them is a function. The four floats live in
+// xmm0 and only compose by nesting, like the vec2 family.
+// =========================================================================
+
+// which of the nine a name is, -1 for none
+fn cg_intrinsic_index(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < 9 {
+        if tok_equal(t, cg_tok(CT_VEC4_LOAD + i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the instruction of a two-vector one: addps, subps, mulps, divps, divpd
+fn cg_intrinsic_op(i: i64) -> i64 {
+    if i == 2 {
+        return "    addps xmm1, xmm0\n    movaps xmm0, xmm1\n";
+    }
+    if i == 3 {
+        return "    subps xmm1, xmm0\n    movaps xmm0, xmm1\n";
+    }
+    if i == 4 {
+        return "    mulps xmm1, xmm0\n    movaps xmm0, xmm1\n";
+    }
+    if i == 5 {
+        return "    divps xmm1, xmm0\n    movaps xmm0, xmm1\n";
+    }
+    return "    divpd xmm1, xmm0\n    movaps xmm0, xmm1\n";
+}
+
+// cg_intrinsic(call) -> 1 when it was one of them, emitted
+fn cg_intrinsic(c: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    var a: ptr<Ast> = 0;
+    var b: ptr<Ast> = 0;
+    if c.data == 0 {
+        return 0;
+    }
+    i = cg_intrinsic_index(c.data);
+    if i == -1 {
+        return 0;
+    }
+    a = c.right;                             // the first argument
+    if a == 0 {
+        return 0;
+    }
+    if i == 0 {
+        cg_emit(a.left);                     // the address
+        emit_cstr("    movups xmm0, [rax]\n");
+        return 1;
+    }
+    if i == 1 {
+        b = a.right;
+        if b == 0 {
+            return 0;
+        }
+        cg_emit(b.left);                     // the vector
+        emit_cstr("    sub rsp, 16\n    movups [rsp], xmm0\n");
+        cg_emit(a.left);                     // the address
+        emit_cstr("    movups xmm1, [rsp]\n    add rsp, 16\n");
+        emit_cstr("    movups [rax], xmm1\n");
+        return 1;
+    }
+    if i == 6 {
+        cg_emit(a.left);
+        emit_cstr("    sub rsp, 16\n    movups [rsp], xmm0\n    mov rax, rsp\n    movss xmm0, [rax]\n    cvtss2sd xmm0, xmm0\n    add rax, 4\n    movss xmm1, [rax]\n    cvtss2sd xmm1, xmm1\n    addsd xmm0, xmm1\n    add rax, 4\n    movss xmm1, [rax]\n    cvtss2sd xmm1, xmm1\n    addsd xmm0, xmm1\n    add rax, 4\n    movss xmm1, [rax]\n    cvtss2sd xmm1, xmm1\n    addsd xmm0, xmm1\n    add rsp, 16\n");
+        return 1;
+    }
+    if i == 7 {
+        cg_emit_float(a.left);
+        emit_cstr("    cvtsd2ss xmm0, xmm0\n    sub rsp, 16\n    mov rax, rsp\n    movss [rax], xmm0\n    add rax, 4\n    movss [rax], xmm0\n    add rax, 4\n    movss [rax], xmm0\n    add rax, 4\n    movss [rax], xmm0\n    movups xmm0, [rsp]\n    add rsp, 16\n");
+        return 1;
+    }
+    // two vectors: the left in xmm0, parked, the right in xmm0, the
+    // operation into xmm1
+    cg_emit(a.left);
+    emit_cstr("    sub rsp, 16\n    movups [rsp], xmm0\n");
+    b = a.right;
+    if b == 0 {
+        return 0;
+    }
+    cg_emit(b.left);
+    emit_cstr("    movups xmm1, [rsp]\n    add rsp, 16\n");
+    emit_cstr(cg_intrinsic_op(i));
+    return 1;
+}
+
+// 1 for one of their names
+fn cg_is_intrinsic(t: i64) -> i64 {
+    if cg_intrinsic_index(t) != -1 {
+        return 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// FAILURE TRACES
+//
+// Every statement that calls a function or can fail gets a local label
+// .klN for its line, written only when a call or a failure site needs it
+// (kt_flush); at the end of the function a record in .data lists those
+// labels with their lines, and the records are chained. When something
+// fails the runtime keeps the return addresses, and print_fail turns them
+// back into function names and lines through the records.
+// =========================================================================
+
+// a function starts; lines are marked only for the hosted targets, where
+// print_fail exists
+fn kt_fn_begin(n: i64) -> i64 {
+    kt_on = 0;
+    if cg_bare == 0 {
+        kt_on = 1;
+    }
+    kt_cnt = 0;
+    kt_last = 0;
+    kt_pend = 0;
+    kt_file = 0;
+    kt_first = kt_n;
+    return 0;
+}
+
+// the statement's line becomes the pending one
+fn kt_mark(s: ptr<Ast>) -> i64 {
+    if kt_on == 0 || s == 0 {
+        return 0;
+    }
+    if s.line != 0 {
+        kt_pend = s.line;
+    }
+    return 0;
+}
+
+// a label for the pending line, when it is not the line labelled last
+fn kt_flush() -> i64 {
+    var file: i64 = 0;
+    var ln: i64 = kt_pend;
+    if kt_on == 0 {
+        return 0;
+    }
+    if ln == 0 || ln == kt_last {
+        return 0;
+    }
+    if kt_cnt >= KT_MAX_MARKS {
+        return 0;
+    }
+    kt_last = ln;
+    file = cg_lmap(ln);
+    if kt_cnt == 0 {
+        kt_file = file;
+    }
+    cg_qs(&kt_lines, kt_cnt, cg_u32(cg_lmap_line));
+    kt_cnt += 1;
+    emit_cstr(".kl");
+    emit_u32(kt_n);
+    emit_cstr(":\n");
+    kt_n += 1;
+    return 0;
+}
+
+// the call to __fail_raise, with r8 = the address just after it, so the
+// trace knows the line that failed
+fn kt_failcall() -> i64 {
+    kt_flush();
+    emit_cstr("    lea r8, [rel .kx");
+    emit_u32(kt_x);
+    emit_cstr("]\n    call __fail_raise\n.kx");
+    emit_u32(kt_x);
+    emit_cstr(":\n");
+    kt_x += 1;
+    return 0;
+}
+
+// a function's label, as cg_function wrote it, without the colon
+fn kt_fn_name(f: ptr<Ast>) -> i64 {
+    if name_is_main(f.data) == 1 {
+        return emit_cstr("main");
+    }
+    return emit_tok(f.data);
+}
+
+// a file's number in __kron_file_N (0 when the table is full)
+fn kt_file_index(file: i64) -> i64 {
+    var i: i64 = 0;
+    while i < kt_nfiles {
+        if cg_q(&kt_files, i) == file {
+            return i;
+        }
+        i += 1;
+    }
+    if i >= KT_MAX_FILES {
+        return 0;
+    }
+    cg_qs(&kt_files, i, file);
+    kt_nfiles = i + 1;
+    return i;
+}
+
+// The function has been written out: its record
+//   .kft: dq previous record, .kfe, .kfn, file name, count
+//         dq .klN, line   (count times)
+//   .kfn: db the name, 0
+// A function with inline assembly gets none: its labels may sit under a
+// scope of the assembly's own, where the record could not name them.
+fn kt_fn_end(f: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    if kt_on == 0 {
+        return 0;
+    }
+    kt_on = 0;
+    if kt_cnt == 0 || ra_asm != 0 {
+        return 0;
+    }
+    emit_cstr(".kfe:\nsection .data\n.kft: dq ");
+    if kt_prev != 0 {
+        kt_fn_name(kt_prev);
+        emit_cstr(".kft");
+    } else {
+        emit_cstr("0");
+    }
+    emit_cstr(", .kfe, .kfn, __kron_file_");
+    emit_u32(kt_file_index(kt_file));
+    emit_cstr(",");
+    emit_u32(kt_cnt);
+    emit_cstr("\n");
+    while i < kt_cnt {
+        emit_cstr("    dq .kl");
+        emit_u32(kt_first + i);
+        emit_cstr(",");
+        emit_u32(cg_q(&kt_lines, i));
+        emit_cstr("\n");
+        i += 1;
+    }
+    emit_cstr(".kfn: db \"");
+    kt_fn_name(f);
+    emit_cstr("\", 0\nsection .text\n");
+    kt_prev = f;
+    return 0;
+}
+
+// before the first function: the low end of the code the trace can name
+fn kt_program_begin() -> i64 {
+    kdb_prev = 0;
+    kt_n = 0;
+    kt_x = 0;
+    kt_nfiles = 0;
+    kt_prev = 0;
+    kt_on = 0;
+    if cg_bare == 0 {
+        emit_cstr("section .text\n__kron_lo:\n");
+    }
+    return 0;
+}
+
+// after the last function: the high end, the head of the chain and the
+// file names
+fn kt_program_end() -> i64 {
+    var i: i64 = 0;
+    var p: i64 = 0;
+    var c: i64 = 0;
+    if cg_bare != 0 {
+        return 0;
+    }
+    emit_cstr("section .text\n__kron_hi:\nsection .data\n__kron_trace: dq ");
+    if kt_prev != 0 {
+        kt_fn_name(kt_prev);
+        emit_cstr(".kft");
+    } else {
+        emit_cstr("0");
+    }
+    emit_cstr("\n");
+    while i < kt_nfiles {
+        emit_cstr("__kron_file_");
+        emit_u32(i);
+        emit_cstr(": db ");
+        p = cg_q(&kt_files, i);
+        c = cg_b(p);
+        while c != 0 {
+            emit_uint(c);
+            emit_cstr(",");
+            p += 1;
+            c = cg_b(p);
+        }
+        emit_cstr("0\n");
+        i += 1;
+    }
+    return emit_cstr("section .text\n");
+}
+
+// =========================================================================
+// DEBUG BUILDS (--debug)
+//
+// Every statement of the program's own files (not the std_*.kr modules) is
+// preceded by
+//       mov r11, file << 20 | line
+//       call __dbg_stmt
+// and every such function gets a record of its locals:
+//   .kdr: dq previous record, start, .kde (its end), .kdn (its name), file,
+//            count
+//         dq offset, flags, array length, element width, struct + 1, tag,
+//            .kdvN (the name)          (count times)
+// flags: 1 a real, 2 unsigned, 4 the slot holds an address, 8 a pointer.
+// __dbg_stmt keeps every register and calls kdbg_hook (std_debug.kr, which
+// a debug build imports by itself) with the line, the frame, the address
+// and __kdbg_info: the last record, the files, the structs with their
+// fields and the globals. The register allocator is off in a debug build:
+// every local lives in its slot, where the debugger reads it.
+// =========================================================================
+
+// 1 when the last part of a file's path starts with std_
+fn kdb_is_std(file: i64) -> i64 {
+    var p: i64 = file;
+    var last: i64 = file;
+    var c: i64 = cg_b(p);
+    while c != 0 {
+        p += 1;
+        if c == 47 || c == 92 {
+            last = p;
+        }
+        c = cg_b(p);
+    }
+    if cg_b(last) == 115 && cg_b(last + 1) == 116 && cg_b(last + 2) == 100 && cg_b(last + 3) == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+// a line of the joined source: 1 in a std_*.kr module, 0 in the program's
+// own files, 2 unknown
+fn kdb_line_std(ln: i64) -> i64 {
+    var file: i64 = 0;
+    if cg_u32(ln) == 0 {
+        return 2;
+    }
+    file = cg_lmap(ln);
+    if file == 0 {
+        return 2;
+    }
+    return kdb_is_std(file);
+}
+
+// does this function get the hooks? (the line of its name: a function's
+// own line can be where it ends)
+fn kdb_fn_begin(f: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = 0;
+    var ln: i64 = 0;
+    kdb_on = 0;
+    if cg_debug == 0 || cg_bare != 0 {
+        return 0;
+    }
+    t = f.data;
+    if t != 0 {
+        ln = t.line;
+    }
+    if kdb_line_std(ln) == 0 {
+        kdb_on = 1;
+    }
+    return 0;
+}
+
+// the hook before a statement
+fn kdb_stmt(s: ptr<Ast>) -> i64 {
+    var file: i64 = 0;
+    var v: i64 = 0;
+    if kdb_on == 0 || s == 0 {
+        return 0;
+    }
+    if s.line == 0 {
+        return 0;
+    }
+    file = cg_lmap(s.line);
+    if file == 0 {
+        return 0;
+    }
+    v = (cg_u32(kt_file_index(file)) << 20) | (cg_lmap_line & 0xFFFFF);
+    emit_cstr("    mov r11, ");
+    emit_uint(v);
+    return emit_cstr("\n    call __dbg_stmt\n");
+}
+
+// 1 for a name the program wrote (not a temporary of the compiler's)
+fn kdb_name_ok(t: ptr<Tok>) -> i64 {
+    var c: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    if t.value == 0 || t.length == 0 {
+        return 0;
+    }
+    c = cg_b(t.value);
+    if c == 95 {
+        return 1;
+    }
+    if c < 65 || c > 122 {
+        return 0;
+    }
+    if c <= 90 || c >= 97 {
+        return 1;
+    }
+    return 0;
+}
+
+// ", number"
+fn kdb_dq(v: i64) -> i64 {
+    emit_cstr(",");
+    return emit_u32(v);
+}
+
+// the flags of a local, a field or a global: 1 a real, 2 unsigned, 4 an
+// address, 8 a pointer
+fn kdb_flags(fl: i64, un: i64, rf: i64, el: i64) -> i64 {
+    var r: i64 = 0;
+    if fl != 0 {
+        r = r | 1;
+    }
+    if un != 0 {
+        r = r | 2;
+    }
+    if rf != 0 {
+        r = r | 4;
+    }
+    if el != 0 {
+        r = r | 8;
+    }
+    return r;
+}
+
+// the record of the function just written
+fn kdb_fn_end(f: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = 0;
+    var i: i64 = 0;
+    var n: i64 = 0;
+    if kdb_on == 0 {
+        return 0;
+    }
+    emit_cstr(".kde:\nsection .data\n.kdr: dq ");
+    if kdb_prev != 0 {
+        kt_fn_name(kdb_prev);
+        emit_cstr(".kdr");
+    } else {
+        emit_cstr("0");
+    }
+    emit_cstr(",");
+    kt_fn_name(f);
+    emit_cstr(", .kde, .kdn, ");
+    t = f.data;
+    emit_u32(kt_file_index(cg_lmap(t.line)));
+    // how many locals have a name of their own
+    while i < var_count {
+        n += kdb_name_ok(cg_q(&var_toks, i));
+        i += 1;
+    }
+    kdb_dq(n);
+    emit_cstr("\n");
+    i = 0;
+    while i < var_count {
+        if kdb_name_ok(cg_q(&var_toks, i)) != 0 {
+            emit_cstr("    dq ");
+            emit_u32(cg_q(&var_offs, i));
+            kdb_dq(kdb_flags(cg_q(&var_isfloat, i), cg_q(&var_unsigned, i), cg_q(&var_isref, i), cg_q(&var_elemsz, i)));
+            kdb_dq(cg_q(&var_arrlen, i));
+            kdb_dq(cg_q(&var_aw, i));
+            kdb_dq(cg_q(&var_structs, i) + 1);
+            kdb_dq(cg_q(&var_vtag, i));
+            emit_cstr(", .kdv");
+            emit_u32(i);
+            emit_cstr("\n");
+        }
+        i += 1;
+    }
+    emit_cstr(".kdn: db \"");
+    emit_tok(f.data);
+    emit_cstr("\", 0\n");
+    i = 0;
+    while i < var_count {
+        if kdb_name_ok(cg_q(&var_toks, i)) != 0 {
+            emit_cstr(".kdv");
+            emit_u32(i);
+            emit_cstr(": db \"");
+            emit_tok(cg_q(&var_toks, i));
+            emit_cstr("\", 0\n");
+        }
+        i += 1;
+    }
+    emit_cstr("section .text\n");
+    kdb_prev = f;
+    kdb_on = 0;
+    return 0;
+}
+
+// 1 for global i of the program's own files, with a name of its own
+fn kdb_global_ok(i: i64) -> i64 {
+    var t: ptr<Tok> = cg_q(&g_toks, i);
+    if kdb_name_ok(t) == 0 {
+        return 0;
+    }
+    if kdb_line_std(t.line) != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the tables of a debug build, and __dbg_stmt
+fn kdb_program_end() -> i64 {
+    var i: i64 = 0;
+    var n: i64 = 0;
+    if cg_debug == 0 || cg_bare != 0 {
+        return 0;
+    }
+    emit_cstr("section .data\n__kdbg_info: dq ");
+    if kdb_prev != 0 {
+        kt_fn_name(kdb_prev);
+        emit_cstr(".kdr");
+    } else {
+        emit_cstr("0");
+    }
+    kdb_dq(kt_nfiles);
+    emit_cstr(", __kdbg_files, ");
+    emit_u32(struct_count);
+    emit_cstr(", __kdbg_structs, __kdbg_fields, ");
+    // the globals of the program's own files
+    while i < g_count {
+        n += kdb_global_ok(i);
+        i += 1;
+    }
+    emit_u32(n);
+    emit_cstr(", __kdbg_globals\n");
+    // files
+    emit_cstr("__kdbg_files:\n");
+    i = 0;
+    while i < kt_nfiles {
+        emit_cstr("    dq __kron_file_");
+        emit_u32(i);
+        emit_cstr("\n");
+        i += 1;
+    }
+    // structs: name, first field, fields, bytes
+    emit_cstr("__kdbg_structs:\n");
+    i = 0;
+    while i < struct_count {
+        emit_cstr("    dq __kdbg_sn_");
+        emit_u32(i);
+        kdb_dq(cg_q(&struct_first, i));
+        kdb_dq(cg_q(&struct_nfield, i));
+        kdb_dq(cg_q(&struct_bytes, i));
+        emit_cstr("\n");
+        i += 1;
+    }
+    // fields: name, offset, width, flags, struct + 1, tag
+    emit_cstr("__kdbg_fields:\n");
+    i = 0;
+    while i < field_count {
+        emit_cstr("    dq __kdbg_fn_");
+        emit_u32(i);
+        kdb_dq(cg_q(&field_offs, i));
+        kdb_dq(cg_q(&field_sizes, i));
+        kdb_dq(kdb_flags(cg_q(&field_isfloat, i), cg_q(&field_unsigned, i), 0, 0));
+        kdb_dq(cg_q(&field_struct, i) + 1);
+        kdb_dq(cg_q(&field_vtag, i));
+        emit_cstr("\n");
+        i += 1;
+    }
+    // globals: address, flags, array length, element width, struct + 1,
+    // tag, name
+    emit_cstr("__kdbg_globals:\n");
+    i = 0;
+    while i < g_count {
+        if kdb_global_ok(i) != 0 {
+            cg_emit_gpre("    dq __g_");
+            emit_tok(cg_q(&g_toks, i));
+            kdb_dq(kdb_flags(cg_q(&g_isfloat, i), cg_q(&g_unsigned, i), 0, 0));
+            kdb_dq(cg_q(&g_arrlen, i));
+            kdb_dq(cg_q(&g_aw, i));
+            kdb_dq(cg_q(&g_structs, i) + 1);
+            kdb_dq(cg_q(&g_vtag, i));
+            emit_cstr(", __kdbg_gn_");
+            emit_u32(i);
+            emit_cstr("\n");
+        }
+        i += 1;
+    }
+    // the names
+    i = 0;
+    while i < struct_count {
+        emit_cstr("__kdbg_sn_");
+        emit_u32(i);
+        emit_cstr(": db \"");
+        emit_tok(cg_q(&struct_toks, i));
+        emit_cstr("\", 0\n");
+        i += 1;
+    }
+    i = 0;
+    while i < field_count {
+        emit_cstr("__kdbg_fn_");
+        emit_u32(i);
+        emit_cstr(": db \"");
+        emit_tok(cg_q(&field_toks, i));
+        emit_cstr("\", 0\n");
+        i += 1;
+    }
+    i = 0;
+    while i < g_count {
+        if kdb_global_ok(i) != 0 {
+            emit_cstr("__kdbg_gn_");
+            emit_u32(i);
+            emit_cstr(": db \"");
+            emit_tok(cg_q(&g_toks, i));
+            emit_cstr("\", 0\n");
+        }
+        i += 1;
+    }
+    // s_kd_name2 left us in .text; the hook itself
+    return emit_cstr("section .text\n__dbg_stmt:\n    push rbp\n    mov rbp, rsp\n    push rax\n    push rbx\n    push rcx\n    push rdx\n    push rsi\n    push rdi\n    push r8\n    push r9\n    push r10\n    push r11\n    push r12\n    push r13\n    push r14\n    push r15\n    sub rsp, 128\n    movsd [rbp-240], xmm0\n    movsd [rbp-232], xmm1\n    movsd [rbp-224], xmm2\n    movsd [rbp-216], xmm3\n    movsd [rbp-208], xmm4\n    movsd [rbp-200], xmm5\n    movsd [rbp-192], xmm6\n    movsd [rbp-184], xmm7\n    movsd [rbp-176], xmm8\n    movsd [rbp-168], xmm9\n    movsd [rbp-160], xmm10\n    movsd [rbp-152], xmm11\n    movsd [rbp-144], xmm12\n    movsd [rbp-136], xmm13\n    movsd [rbp-128], xmm14\n    movsd [rbp-120], xmm15\n    and rsp, -16\n    sub rsp, 32\n    mov rcx, r11\n    mov rdx, [rbp]\n    mov r8, [rbp+8]\n    lea r9, [rel __kdbg_info]\n    call kdbg_hook\n    lea rsp, [rbp-240]\n    movsd xmm0, [rbp-240]\n    movsd xmm1, [rbp-232]\n    movsd xmm2, [rbp-224]\n    movsd xmm3, [rbp-216]\n    movsd xmm4, [rbp-208]\n    movsd xmm5, [rbp-200]\n    movsd xmm6, [rbp-192]\n    movsd xmm7, [rbp-184]\n    movsd xmm8, [rbp-176]\n    movsd xmm9, [rbp-168]\n    movsd xmm10, [rbp-160]\n    movsd xmm11, [rbp-152]\n    movsd xmm12, [rbp-144]\n    movsd xmm13, [rbp-136]\n    movsd xmm14, [rbp-128]\n    movsd xmm15, [rbp-120]\n    add rsp, 128\n    pop r15\n    pop r14\n    pop r13\n    pop r12\n    pop r11\n    pop r10\n    pop r9\n    pop r8\n    pop rdi\n    pop rsi\n    pop rdx\n    pop rcx\n    pop rbx\n    pop rax\n    pop rbp\n    ret\n");
+}
+
+// =========================================================================
+// STRUCTS AND ENUMS
+// =========================================================================
+
+// an enum: its members are compile-time integers, resolved wherever they
+// are written as Name.Member
+fn cg_register_enum(n: ptr<Ast>) -> i64 {
+    var id: i64 = enum_count;
+    var m: ptr<Ast> = 0;
+    var cnt: i64 = 0;
+    if id >= CG_MAX_STRUCTS {
+        return 0;
+    }
+    cg_qs(&enum_toks, id, n.data);
+    cg_qs(&enum_first, id, emem_count);
+    m = n.right;
+    while m != 0 {
+        if emem_count >= CG_MAX_FIELDS {
+            break;
+        }
+        cg_qs(&emem_toks, emem_count, m.data);
+        cg_qs(&emem_vals, emem_count, m.type_info);
+        emem_count += 1;
+        cnt += 1;
+        m = m.right;
+    }
+    cg_qs(&enum_nmem, id, cnt);
+    enum_count = id + 1;
+    return 0;
+}
+
+// cg_enum_value(enum name, member) -> 1 when found, its value in
+// cg_enum_found
+fn cg_enum_value(et: i64, mt: i64) -> i64 {
+    var i: i64 = 0;
+    var first: i64 = 0;
+    var n: i64 = 0;
+    var j: i64 = 0;
+    cg_enum_found = 0;
+    while i < enum_count {
+        if tok_equal(et, cg_q(&enum_toks, i)) == 1 {
+            first = cg_q(&enum_first, i);
+            n = cg_q(&enum_nmem, i);
+            while j < n {
+                if tok_equal(mt, cg_q(&emem_toks, first + j)) == 1 {
+                    cg_enum_found = cg_q(&emem_vals, first + j);
+                    return 1;
+                }
+                j += 1;
+            }
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// the first sub-pass: only the name, so every struct exists before any
+// field width is computed
+fn cg_register_struct_name(n: ptr<Ast>) -> i64 {
+    if struct_count >= CG_MAX_STRUCTS {
+        return 0;
+    }
+    cg_qs(&struct_toks, struct_count, n.data);
+    struct_count += 1;
+    return 0;
+}
+
+// the fields of a struct, measured: packed, each at the running offset; a
+// field whose type names another struct takes that struct's whole size
+fn cg_register_struct(n: ptr<Ast>) -> i64 {
+    var sid: i64 = cg_find_struct(n.data);
+    var f: ptr<Ast> = 0;
+    var cnt: i64 = 0;
+    var off: i64 = 0;
+    var i: i64 = 0;
+    var ty: i64 = 0;
+    var w: i64 = 0;
+    var fs: i64 = 0;
+    var un: i64 = 0;
+    if sid == -1 {
+        return 0;
+    }
+    cg_qs(&struct_first, sid, field_count);
+    f = n.right;
+    while f != 0 {
+        i = field_count;
+        if i >= CG_MAX_FIELDS {
+            break;
+        }
+        cg_qs(&field_toks, i, f.data);
+        ty = cg_u32(f.type_info);
+        pending_fstruct = -1;
+        w = -1;
+        if ty == TOK_IDENT && f.left != 0 {
+            fs = cg_find_struct(f.left);
+            if fs != -1 {
+                pending_fstruct = fs;
+                w = cg_u32(cg_struct_size(fs) * 8);
+            }
+        }
+        if w == -1 {
+            w = cg_type_size(ty);
+        }
+        if ty == KW_F32 || ty == KW_F64 {
+            cg_qs(&field_isfloat, i, 1);
+        } else {
+            cg_qs(&field_isfloat, i, 0);
+        }
+        // the sign travels with the field: a u64 member compares and
+        // divides unsigned like a u64 local does
+        un = 0;
+        if ty == KW_U8 || ty == KW_U16 || ty == KW_U32 || ty == KW_U64 {
+            un = 1;
+        }
+        cg_qs(&field_unsigned, i, un);
+        cg_qs(&field_vtag, i, f.col >> 8);
+        cg_qs(&field_sizes, i, w);
+        cg_qs(&field_offs, i, off);
+        cg_qs(&field_struct, i, pending_fstruct);
+        off = cg_u32(off + w);
+        field_count = i + 1;
+        cnt += 1;
+        f = f.right;
+    }
+    cg_qs(&struct_nfield, sid, cnt);
+    cg_qs(&struct_bytes, sid, off);
+    return 0;
+}
+
+// cg_find_struct(name) -> its id, or -1
+fn cg_find_struct(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < struct_count {
+        if tok_equal(t, cg_q(&struct_toks, i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}

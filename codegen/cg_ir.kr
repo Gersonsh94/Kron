@@ -1,0 +1,1309 @@
+kron_program
+kron_domain cg_ir;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE OUTPUT, THE RECORDS OF A FUNCTION, AND REGISTER ALLOCATION
+//
+// Text goes to the output buffer -- or, while a function is being
+// generated, into its records: raw text as it is, and the loads, stores,
+// labels and jumps the register allocator has to see as records of their
+// own. When the function ends (ir_end) the allocator works out which
+// locals can live in rbx, r12-r15 or xmm6-xmm15, and the records are
+// written out with that applied.
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// the output
+// -------------------------------------------------------------------------
+
+// n bytes: into the function's records while one is captured, else out
+fn emit_bytes(p: i64, n: i64) -> i64 {
+    if ir_on != 0 {
+        return ir_capture(p, n);
+    }
+    return emit_direct(p, n);
+}
+
+fn emit_direct(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    if cg_ptr + n > cg_end {
+        cg_had_error = 1;
+        dbg_which = 1;
+        return 0;
+    }
+    while i < n {
+        cg_bs(cg_ptr + i, cg_b(p + i));
+        i += 1;
+    }
+    cg_ptr += n;
+    return 0;
+}
+
+// Raw text joins the record before it when that one is raw too: a function
+// that is all text is one record.
+fn ir_capture(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var at: i64 = ir_text_len;
+    if at + n > IR_TEXT_SIZE {
+        cg_had_error = 1;
+        dbg_which = 1;
+        return 0;
+    }
+    if ir_count > 0 && cg_q(&ir_kind, ir_count - 1) == IR_RAW {
+        cg_qs(&ir_len, ir_count - 1, cg_q(&ir_len, ir_count - 1) + n);
+    } else {
+        if ir_count >= IR_MAX_RECS {
+            cg_had_error = 1;
+            dbg_which = 1;
+            return 0;
+        }
+        cg_qs(&ir_kind, ir_count, IR_RAW);
+        cg_qs(&ir_len, ir_count, n);
+        cg_qs(&ir_op, ir_count, at);
+        ir_count += 1;
+    }
+    while i < n {
+        cg_bs(&ir_text + at + i, cg_b(p + i));
+        i += 1;
+    }
+    ir_text_len = at + n;
+    return 0;
+}
+
+fn emit_cstr(s: i64) -> i64 {
+    var n: i64 = 0;
+    while cg_b(s + n) != 0 {
+        n += 1;
+    }
+    return emit_bytes(s, n);
+}
+
+// a text ending in '__g_', then -- in a module -- the module's name: two
+// modules built apart may import the same constants, each its own copy
+fn cg_emit_gpre(s: i64) -> i64 {
+    emit_cstr(s);
+    if cg_as_module != 0 {
+        emit_cstr(&cg_mod_tag);
+    }
+    return 0;
+}
+
+// a token's text, as written
+fn emit_tok(t: ptr<Tok>) -> i64 {
+    return emit_bytes(t.value, t.length);
+}
+
+// a real literal as written, but 2e6 comes out as 2.0e6: the assembler
+// reads a real only with a point in it
+fn cg_emit_ftok(t: ptr<Tok>) -> i64 {
+    var p: i64 = t.value;
+    var n: i64 = t.length;
+    var i: i64 = 0;
+    var c: i64 = 0;
+    while i < n {
+        c = cg_b(p + i);
+        if c == 46 {
+            break;
+        }
+        if c == 101 || c == 69 {
+            emit_bytes(p, i);
+            emit_cstr(".0");
+            return emit_bytes(p + i, n - i);
+        }
+        i += 1;
+    }
+    return emit_bytes(p, n);
+}
+
+// a "..." literal without its quotes (asm blocks)
+fn emit_tok_raw(t: ptr<Tok>) -> i64 {
+    var p: i64 = t.value;
+    var n: i64 = t.length;
+    if n <= 2 {
+        return 0;
+    }
+    if cg_b(p) == 34 {
+        return emit_bytes(p + 1, n - 2);
+    }
+    return emit_bytes(p, n);
+}
+
+// a number, read as unsigned
+fn emit_uint(v: i64) -> i64 {
+    var at: i64 = 31;
+    var q: i64 = 0;
+    var b: i64 = &cg_numbuf;
+    cg_bs(b + at, 0);
+    if v == 0 {
+        at -= 1;
+        cg_bs(b + at, 48);
+        return emit_cstr(b + at);
+    }
+    if v < 0 {
+        // the top bit set: halve it first, unsigned, then it divides as a
+        // positive number
+        q = (v >>> 1) / 5;
+        at -= 1;
+        cg_bs(b + at, 48 + (v - q * 10));
+        v = q;
+    }
+    while v != 0 {
+        q = v / 10;
+        at -= 1;
+        cg_bs(b + at, 48 + (v - q * 10));
+        v = q;
+    }
+    return emit_cstr(b + at);
+}
+
+// a number the assembly held in 32 bits, written as it wrote one
+fn emit_u32(v: i64) -> i64 {
+    return emit_uint(v & 0xFFFFFFFF);
+}
+
+fn new_label() -> i64 {
+    var r: i64 = cg_label;
+    cg_label += 1;
+    return r;
+}
+
+// -------------------------------------------------------------------------
+// records
+// -------------------------------------------------------------------------
+
+fn ir_add_rec(kind: i64, op: i64) -> i64 {
+    if ir_count >= IR_MAX_RECS {
+        cg_had_error = 1;
+        dbg_which = 1;
+        return 0;
+    }
+    cg_qs(&ir_kind, ir_count, kind);
+    cg_qs(&ir_len, ir_count, 0);
+    cg_qs(&ir_op, ir_count, op);
+    ir_count += 1;
+    return 0;
+}
+
+// a record whose length field carries data -- a condition, an argument
+// register -- or its text straight out when nothing is captured
+fn ir_withlen(kind: i64, op: i64, len: i64) -> i64 {
+    if ir_on != 0 {
+        ir_add_rec(kind, op);
+        cg_qs(&ir_len, ir_count - 1, len);
+        return 0;
+    }
+    return ir_emit_kind(kind, op, len);
+}
+
+// one record, or its text straight out
+fn ir_ctl(kind: i64, op: i64) -> i64 {
+    if ir_on != 0 {
+        return ir_add_rec(kind, op);
+    }
+    return ir_emit_kind(kind, op, 0);
+}
+
+fn ir_ldloc(off: i64) -> i64 { return ir_ctl(IR_LDLOC, off); }
+fn ir_stloc(off: i64) -> i64 { return ir_ctl(IR_STLOC, off); }
+fn ir_fldloc(off: i64) -> i64 { return ir_ctl(IR_FLDLOC, off); }
+fn ir_fstloc(off: i64) -> i64 { return ir_ctl(IR_FSTLOC, off); }
+fn ir_fldx1(off: i64) -> i64 { return ir_ctl(IR_FLDX1, off); }
+fn ir_ldrcx(off: i64) -> i64 { return ir_ctl(IR_LDRCX, off); }
+fn ir_jcc(label: i64, cc: i64) -> i64 { return ir_withlen(IR_JCC, label, cc); }
+fn ir_stparam(off: i64, reg: i64) -> i64 { return ir_withlen(IR_STPARAM, off, reg); }
+
+// the text of one record: the one place that knows what each kind looks
+// like as assembly, for the flush and for text written straight out
+fn ir_emit_kind(kind: i64, op: i64, len: i64) -> i64 {
+    var r: i64 = 0;
+    var v: i64 = 0;
+    var b: i64 = 0;
+    if kind == IR_LDLOC {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    mov rax, ");
+            ra_emit_reg(r);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    mov rax, [rbp-");
+        emit_uint(op);
+        return emit_cstr("]\n");
+    }
+    if kind == IR_LDRCX {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    mov rcx, ");
+            ra_emit_reg(r);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    mov rcx, [rbp-");
+        emit_uint(op);
+        return emit_cstr("]\n");
+    }
+    if kind == IR_STLOC {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    mov ");
+            ra_emit_reg(r);
+            return emit_cstr(", rax\n");
+        }
+        emit_cstr("    mov [rbp-");
+        emit_uint(op);
+        return emit_cstr("], rax\n");
+    }
+    if kind == IR_LABEL {
+        emit_cstr(".L");
+        emit_uint(op);
+        return emit_cstr(":\n");
+    }
+    if kind == IR_JMP {
+        emit_cstr("    jmp ");
+        return ir_emit_tolabel(op);
+    }
+    if kind == IR_JZ {
+        emit_cstr("    test rax, rax\n    jz ");
+        return ir_emit_tolabel(op);
+    }
+    if kind == IR_JNZ {
+        emit_cstr("    test rax, rax\n    jnz ");
+        return ir_emit_tolabel(op);
+    }
+    if kind == IR_JCC {
+        emit_cstr(cg_jcc_text(len));
+        return ir_emit_tolabel(op);
+    }
+    if kind == IR_FLDLOC {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    movaps xmm0, ");
+            ra_emit_freg(r);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    movsd xmm0, [rbp-");
+        emit_uint(op);
+        return emit_cstr("]\n");
+    }
+    if kind == IR_FLDX1 {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    movaps xmm1, ");
+            ra_emit_freg(r);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    movsd xmm1, [rbp-");
+        emit_uint(op);
+        return emit_cstr("]\n");
+    }
+    if kind == IR_FSTLOC {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    movaps ");
+            ra_emit_freg(r);
+            return emit_cstr(", xmm0\n");
+        }
+        emit_cstr("    movsd [rbp-");
+        emit_uint(op);
+        return emit_cstr("], xmm0\n");
+    }
+    if kind == IR_FSTPARAM {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    movaps ");
+            ra_emit_freg(r);
+            emit_cstr(", xmm");
+            emit_uint(len);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    movsd [rbp-");
+        emit_uint(op);
+        emit_cstr("], xmm");
+        emit_uint(len);
+        return emit_cstr("\n");
+    }
+    if kind == IR_LDARG {
+        // mov <argument register>, REG | [rbp-N]
+        emit_cstr("    mov ");
+        ra_emit_argreg(len);
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr(", ");
+            ra_emit_reg(r);
+            return emit_cstr("\n");
+        }
+        emit_cstr(", [rbp-");
+        emit_uint(op);
+        return emit_cstr("]\n");
+    }
+    if kind == IR_IMMARG {
+        // mov <argument register>, <constant>
+        emit_cstr("    mov ");
+        ra_emit_argreg(len);
+        emit_cstr(", ");
+        cg_emit_tok_or_zero(op);
+        return emit_cstr("\n");
+    }
+    if kind == IR_STPARAM {
+        r = ra_reg_of(op);
+        if r != -1 {
+            emit_cstr("    mov ");
+            ra_emit_reg(r);
+            emit_cstr(", ");
+            ra_emit_argreg(len);
+            return emit_cstr("\n");
+        }
+        emit_cstr("    mov [rbp-");
+        emit_uint(op);
+        emit_cstr("], ");
+        ra_emit_argreg(len);
+        return emit_cstr("\n");
+    }
+    if kind == IR_ALU {
+        emit_cstr("    ");
+        ra_emit_mnem(op);
+        return emit_cstr(" rax, rcx\n");
+    }
+    if kind == IR_IMMRCX {
+        emit_cstr("    mov rcx, ");
+        cg_emit_tok_or_zero(op);
+        return emit_cstr("\n");
+    }
+    if kind == IR_RETLBL {
+        emit_cstr(".__ret_");
+        emit_uint(op);
+        emit_cstr(":\n");
+        // every way out of the function comes through here: the one place
+        // the saved registers are put back
+        if ra_active != 0 {
+            ra_emit_saves(1);
+        }
+        return 0;
+    }
+    if kind == IR_FRAME {
+        emit_cstr("    sub rsp, ");
+        v = op;
+        if ra_active != 0 {
+            v += ra_grow;                // room for the registers it saves
+        }
+        emit_uint(v);
+        emit_cstr("\n");
+        // Windows commits a stack a page at a time, through a guard page:
+        // a frame bigger than a page touches its pages from the top down,
+        // with a store of rbp (nothing in the frame holds a value yet)
+        if cg_target == TARGET_PE && cg_ugt(v, 4096) == 1 {
+            b = 4096;
+            while cg_ugt(b, v) == 0 {
+                emit_cstr("    mov [rbp-");
+                emit_uint(b);
+                emit_cstr("], rbp\n");
+                b += 4096;
+            }
+        }
+        if ra_active != 0 {
+            ra_emit_saves(0);
+        }
+        return 0;
+    }
+    if kind == IR_JMPRET {
+        emit_cstr("    jmp .__ret_");
+        emit_uint(op);
+        return emit_cstr("\n");
+    }
+    return 0;
+}
+
+fn ir_emit_tolabel(op: i64) -> i64 {
+    emit_cstr(".L");
+    emit_uint(op);
+    return emit_cstr("\n");
+}
+
+// a constant's token as written, or 0 for none
+fn cg_emit_tok_or_zero(t: i64) -> i64 {
+    if t == 0 {
+        return emit_uint(0);
+    }
+    return emit_tok(t);
+}
+
+fn cg_jcc_text(cc: i64) -> i64 {
+    if cc == CC_E { return "    je "; }
+    if cc == CC_NE { return "    jne "; }
+    if cc == CC_L { return "    jl "; }
+    if cc == CC_GE { return "    jge "; }
+    if cc == CC_G { return "    jg "; }
+    if cc == CC_LE { return "    jle "; }
+    if cc == CC_B { return "    jb "; }
+    if cc == CC_AE { return "    jae "; }
+    if cc == CC_A { return "    ja "; }
+    return "    jbe ";
+}
+
+// a > b, both read as unsigned
+fn cg_ugt(a: i64, b: i64) -> i64 {
+    var top: i64 = 1;
+    top = top << 63;
+    if (a ^ top) > (b ^ top) {
+        return 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// REGISTER ALLOCATION -- analysis
+//
+// For every local that can be a candidate for a register: read and written
+// only through IR_LDLOC / IR_STLOC records (and their float and argument
+// kin), never named in raw text as [rbp-N]. The basic blocks are split at
+// labels and after every jump; liveness is iterated to a fixed point; then
+// the conflict graph is coloured (Chaitin) with rbx, r12-r15 for integers
+// and xmm6-xmm15 for reals. A function with inline asm, too many blocks or
+// labels, a jump to a label it does not define, or not exactly one frame and
+// one way out, keeps every local in memory.
+// =========================================================================
+
+fn ra_bit(i: i64) -> i64 {
+    return 1 << i;
+}
+
+// the kinds that name a local's slot
+fn ra_is_slot(k: i64) -> i64 {
+    if k == IR_LDLOC || k == IR_LDRCX || k == IR_STPARAM || k == IR_LDARG {
+        return 1;
+    }
+    if k == IR_FLDLOC || k == IR_FSTLOC || k == IR_FSTPARAM || k == IR_FLDX1 {
+        return 1;
+    }
+    if k == IR_STLOC {
+        return 1;
+    }
+    return 0;
+}
+
+// the kinds that write it
+fn ra_is_def(k: i64) -> i64 {
+    if k == IR_STLOC || k == IR_STPARAM || k == IR_FSTLOC || k == IR_FSTPARAM {
+        return 1;
+    }
+    return 0;
+}
+
+fn ra_is_float(k: i64) -> i64 {
+    if k == IR_FLDLOC || k == IR_FSTLOC || k == IR_FSTPARAM || k == IR_FLDX1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn ra_analyze() -> i64 {
+    var b: i64 = 0;
+    var k: i64 = 0;
+    var i: i64 = 0;
+    var off: i64 = 0;
+    var p: i64 = 0;
+    var n: i64 = 0;
+    var d: i64 = 0;
+    var c: i64 = 0;
+    var t: i64 = &ir_text;
+    var blk: i64 = 0;
+    var s1: i64 = 0;
+    var s2: i64 = 0;
+    var ft: i64 = 0;
+    var last: i64 = 0;
+    var use: i64 = 0;
+    var def: i64 = 0;
+    var bit: i64 = 0;
+    var passes: i64 = 0;
+    var changed: i64 = 0;
+    var out: i64 = 0;
+    var nin: i64 = 0;
+    ra_gen += 1;
+    ra_skip = 0;
+    ra_ncand = 0;
+    ra_exmask = 0;
+    ra_nblk = 0;
+    ra_retblk = -1;
+    ra_nframe = 0;
+    ra_nret = 0;
+    ra_used = 0;
+    ra_fused = 0;
+    ra_imask = 0;
+    ra_fmask = 0;
+    ra_grow = 0;
+    // a function with inline asm, or a debug build: every local in its slot
+    if ra_asm != 0 || cg_debug != 0 {
+        ra_skip = 1;
+        return 0;
+    }
+
+    // --- 1. candidates ---
+    b = 0;
+    while b < ir_count {
+        k = cg_q(&ir_kind, b);
+        if k == IR_FRAME {
+            ra_nframe += 1;
+            ra_frame = cg_q(&ir_op, b);
+        } else if k == IR_RETLBL {
+            ra_nret += 1;
+        } else if ra_is_slot(k) == 1 {
+            off = cg_q(&ir_op, b);
+            i = ra_cand_index(off);
+            if i == -1 && ra_ncand < RA_MAXCAND {
+                i = ra_ncand;
+                cg_qs(&ra_cand, i, off);
+                ra_ncand += 1;
+            }
+            if i != -1 {
+                // which register file it belongs to
+                if ra_is_float(k) == 1 {
+                    ra_fmask = ra_fmask | ra_bit(i);
+                } else {
+                    ra_imask = ra_imask | ra_bit(i);
+                }
+            }
+        }
+        b += 1;
+    }
+    // read as an integer somewhere and as a real elsewhere: memory
+    ra_exmask = ra_exmask | (ra_imask & ra_fmask);
+
+    // --- 2. exclusions: every 'rbp-N' in the raw text ---
+    n = ir_text_len;
+    p = 0;
+    while n - p >= 5 {
+        if cg_b(t + p) == 114 && cg_b(t + p + 1) == 98 && cg_b(t + p + 2) == 112 && cg_b(t + p + 3) == 45 {
+            d = 0;
+            i = p + 4;
+            while i < n {
+                c = cg_b(t + i);
+                if c < 48 || c > 57 {
+                    break;
+                }
+                d = d * 10 + (c - 48);
+                i += 1;
+            }
+            i = ra_cand_index(d);
+            if i != -1 {
+                ra_exmask = ra_exmask | ra_bit(i);
+            }
+        }
+        p += 1;
+    }
+
+    // --- 3. basic blocks ---
+    ra_cur = -1;
+    b = 0;
+    while b < ir_count {
+        if ra_cur == -1 {
+            ra_open_block(b);
+            if ra_skip != 0 {
+                return 0;
+            }
+        }
+        k = cg_q(&ir_kind, b);
+        if k == IR_LABEL || k == IR_RETLBL {
+            // a label starts a block, unless the current one is still empty
+            if cg_q(&ra_bstart, ra_cur) != b {
+                ra_close_block(b);
+                ra_open_block(b);
+                if ra_skip != 0 {
+                    return 0;
+                }
+            }
+            if k == IR_RETLBL {
+                ra_retblk = ra_cur;
+            } else {
+                d = cg_q(&ir_op, b);
+                if d < 0 || d >= RA_MAXLBL {
+                    ra_skip = 1;
+                    return 0;
+                }
+                cg_qs(&ra_lblblk, d, ra_cur);
+                cg_qs(&ra_lblgen, d, ra_gen);
+            }
+        } else if k == IR_JMP || k == IR_JZ || k == IR_JNZ || k == IR_JCC || k == IR_JMPRET {
+            // a jump ends its block
+            ra_close_block(b + 1);
+            ra_cur = -1;
+        }
+        b += 1;
+    }
+    if ra_cur != -1 {
+        ra_close_block(ir_count);
+    }
+
+    // --- 4. successors ---
+    blk = 0;
+    while blk < ra_nblk {
+        s1 = -1;
+        s2 = -1;
+        ft = blk + 1;
+        if ft >= ra_nblk {
+            ft = -1;
+        }
+        last = cg_q(&ra_bend, blk);
+        k = 0;
+        if last > cg_q(&ra_bstart, blk) {
+            k = cg_q(&ir_kind, last - 1);
+        }
+        if k == IR_JMP {
+            s1 = ra_label_block(cg_q(&ir_op, last - 1));
+            if ra_skip != 0 {
+                return 0;
+            }
+        } else if k == IR_JZ || k == IR_JNZ || k == IR_JCC {
+            s2 = ft;
+            s1 = ra_label_block(cg_q(&ir_op, last - 1));
+            if ra_skip != 0 {
+                return 0;
+            }
+        } else if k == IR_JMPRET {
+            s1 = ra_retblk;
+        } else {
+            s1 = ft;
+        }
+        cg_qs(&ra_succ1, blk, s1);
+        cg_qs(&ra_succ2, blk, s2);
+        blk += 1;
+    }
+
+    // --- 5. use and def per block ---
+    blk = 0;
+    while blk < ra_nblk {
+        use = 0;
+        def = 0;
+        b = cg_q(&ra_bstart, blk);
+        n = cg_q(&ra_bend, blk);
+        while b < n {
+            k = cg_q(&ir_kind, b);
+            if ra_is_slot(k) == 1 {
+                i = ra_cand_index(cg_q(&ir_op, b));
+                if i != -1 {
+                    bit = ra_bit(i);
+                    if (ra_exmask & bit) == 0 {
+                        if ra_is_def(k) == 1 {
+                            def = def | bit;
+                        } else if (def & bit) == 0 {
+                            use = use | bit;     // read before any write here
+                        }
+                    }
+                }
+            }
+            b += 1;
+        }
+        cg_qs(&ra_use, blk, use);
+        cg_qs(&ra_def, blk, def);
+        cg_qs(&ra_in, blk, 0);
+        cg_qs(&ra_out, blk, 0);
+        blk += 1;
+    }
+
+    // --- 6. liveness, backwards, until nothing changes ---
+    passes = 0;
+    changed = 1;
+    while changed != 0 {
+        passes += 1;
+        if passes >= 100000 {
+            ra_skip = 1;                 // a guard against a bug
+            return 0;
+        }
+        changed = 0;
+        blk = ra_nblk;
+        while blk > 0 {
+            blk -= 1;
+            out = ra_in_of(cg_q(&ra_succ1, blk)) | ra_in_of(cg_q(&ra_succ2, blk));
+            nin = cg_q(&ra_use, blk) | (out & ~cg_q(&ra_def, blk));
+            if cg_q(&ra_out, blk) != out {
+                cg_qs(&ra_out, blk, out);
+                changed = 1;
+            }
+            if cg_q(&ra_in, blk) != nin {
+                cg_qs(&ra_in, blk, nin);
+                changed = 1;
+            }
+        }
+    }
+    // saving and restoring need exactly one frame and one way out
+    if ra_nframe == 1 && ra_nret == 1 {
+        return ra_colorize();
+    }
+    ra_skip = 1;
+    return 0;
+}
+
+// the analysis as comments in the output, when RA_TRACE is set
+fn ra_trace_head() -> i64 {
+    var b: i64 = 0;
+    ra_tblk = 0;
+    if RA_TRACE == 0 {
+        return 0;
+    }
+    if ra_skip != 0 {
+        return emit_cstr("    ; ra: not allocated\n");
+    }
+    while b < ra_ncand {
+        emit_cstr("    ; ra cand ");
+        emit_uint(b);
+        emit_cstr(" = [rbp-");
+        emit_uint(cg_q(&ra_cand, b));
+        emit_cstr("]");
+        if (ra_exmask & ra_bit(b)) != 0 {
+            emit_cstr("  excluded");
+        } else {
+            emit_cstr("  -> ");
+            if cg_q(&ra_color, b) == -1 {
+                emit_cstr("memory");
+            } else if (ra_fmask & ra_bit(b)) != 0 {
+                ra_emit_freg(cg_q(&ra_color, b));
+            } else {
+                ra_emit_reg(cg_q(&ra_color, b));
+            }
+        }
+        emit_cstr("\n");
+        b += 1;
+    }
+    return 0;
+}
+
+// a header for every block starting at record r
+fn ra_trace_blk(r: i64) -> i64 {
+    var k: i64 = 0;
+    if RA_TRACE == 0 || ra_skip != 0 {
+        return 0;
+    }
+    while ra_tblk < ra_nblk && cg_q(&ra_bstart, ra_tblk) == r {
+        k = ra_tblk;
+        emit_cstr("    ; ra blk ");
+        emit_uint(k);
+        emit_cstr("  in=");
+        emit_uint(cg_q(&ra_in, k));
+        emit_cstr("  out=");
+        emit_uint(cg_q(&ra_out, k));
+        emit_cstr("  use=");
+        emit_uint(cg_q(&ra_use, k));
+        emit_cstr("  def=");
+        emit_uint(cg_q(&ra_def, k));
+        emit_cstr("  succ=");
+        ra_trace_blkno(cg_q(&ra_succ1, k));
+        emit_cstr(",");
+        ra_trace_blkno(cg_q(&ra_succ2, k));
+        emit_cstr("\n");
+        ra_tblk += 1;
+    }
+    return 0;
+}
+
+fn ra_trace_blkno(b: i64) -> i64 {
+    if b == -1 {
+        return emit_cstr("-");
+    }
+    return emit_u32(b);
+}
+
+// -------------------------------------------------------------------------
+// conflicts and colouring
+// -------------------------------------------------------------------------
+
+// Two candidates conflict when one is written while the other is live. Each
+// block is walked backwards from its out set. Then each register file is
+// coloured on its own, and the frame grows by the room the saves take.
+fn ra_colorize() -> i64 {
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var all: i64 = 0;
+    var blk: i64 = 0;
+    var live: i64 = 0;
+    var start: i64 = 0;
+    var r: i64 = 0;
+    var k: i64 = 0;
+    var bit: i64 = 0;
+    var after: i64 = 0;
+    var size: i64 = 0;
+    while i < RA_MAXCAND {
+        cg_qs(&ra_wt, i, 0);
+        cg_qs(&ra_color, i, -1);
+        cg_qs(&ra_adj, i, 0);
+        i += 1;
+    }
+    // the candidates that may take a register
+    i = 0;
+    while i < ra_ncand {
+        all = all | ra_bit(i);
+        i += 1;
+    }
+    all = all & ~ra_exmask;
+    if all != 0 {
+        blk = 0;
+        while blk < ra_nblk {
+            live = cg_q(&ra_out, blk) & all;
+            start = cg_q(&ra_bstart, blk);
+            r = cg_q(&ra_bend, blk);
+            while r > start {
+                r -= 1;
+                k = cg_q(&ir_kind, r);
+                if ra_is_slot(k) == 1 {
+                    i = ra_cand_index(cg_q(&ir_op, r));
+                    if i != -1 {
+                        bit = ra_bit(i);
+                        if (bit & all) != 0 {
+                            cg_qs(&ra_wt, i, cg_q(&ra_wt, i) + 1);
+                            if ra_is_def(k) == 1 {
+                                // conflicts with everything live after it
+                                after = live & ~bit;
+                                cg_qs(&ra_adj, i, cg_q(&ra_adj, i) | after);
+                                j = 0;
+                                while j < 64 {
+                                    if (after & ra_bit(j)) != 0 {
+                                        cg_qs(&ra_adj, j, cg_q(&ra_adj, j) | bit);
+                                    }
+                                    j += 1;
+                                }
+                                live = live & ~bit;
+                            } else {
+                                live = live | bit;
+                            }
+                        }
+                    }
+                }
+            }
+            blk += 1;
+        }
+        // integers take rbx and r12-r15, reals xmm6-xmm15
+        ra_used = ra_color_class(~ra_fmask & all, RA_REGS);
+        ra_fused = ra_color_class(ra_fmask & all, RA_FREGS);
+    }
+    // 8 bytes per integer register saved, 16 per xmm (Windows keeps all 128
+    // bits of xmm6-xmm15), rounded up to keep the frame 16-aligned
+    size = ra_popcnt(ra_used) * 8 + ra_popcnt(ra_fused) * 16;
+    ra_grow = (size + 15) & -16;
+    return 0;
+}
+
+// Chaitin on one register file: take out a node with fewer than K
+// neighbours left, the least touched when none has; then put them back in
+// reverse order, each with the first colour no neighbour of this class
+// holds. A node that finds none stays in memory. -> a bit per colour used.
+fn ra_color_class(cls: i64, kk: i64) -> i64 {
+    var used: i64 = 0;
+    var left: i64 = cls;
+    var depth: i64 = 0;
+    var i: i64 = 0;
+    var pick: i64 = 0;
+    var best: i64 = 0;
+    var found: i64 = 0;
+    var nb: i64 = 0;
+    var taken: i64 = 0;
+    var c: i64 = 0;
+    var node: i64 = 0;
+    while left != 0 {
+        pick = -1;
+        found = -1;
+        best = 0x7fffffff;
+        i = 0;
+        while i < 64 {
+            if (left & ra_bit(i)) != 0 {
+                if ra_popcnt(cg_q(&ra_adj, i) & left) < kk {
+                    pick = i;
+                    break;
+                }
+                if cg_q(&ra_wt, i) < best {
+                    best = cg_q(&ra_wt, i);
+                    found = i;
+                }
+            }
+            i += 1;
+        }
+        if pick == -1 {
+            pick = found;
+        }
+        cg_qs(&ra_stk, depth, pick);
+        depth += 1;
+        left = left & ~ra_bit(pick);
+    }
+    while depth > 0 {
+        depth -= 1;
+        node = cg_q(&ra_stk, depth);
+        nb = cg_q(&ra_adj, node) & cls;
+        taken = 0;
+        i = 0;
+        while i < 64 {
+            if (nb & ra_bit(i)) != 0 && cg_q(&ra_color, i) != -1 {
+                taken = taken | ra_bit(cg_q(&ra_color, i));
+            }
+            i += 1;
+        }
+        c = 0;
+        while c < kk {
+            if (taken & ra_bit(c)) == 0 {
+                cg_qs(&ra_color, node, c);
+                used = used | ra_bit(c);
+                break;
+            }
+            c += 1;
+        }
+    }
+    return used;
+}
+
+fn ra_popcnt(v: i64) -> i64 {
+    var n: i64 = 0;
+    while v != 0 {
+        v = v & (v - 1);
+        n += 1;
+    }
+    return n;
+}
+
+// the register a local was given, or -1: memory, or no allocation applied
+fn ra_reg_of(off: i64) -> i64 {
+    var i: i64 = 0;
+    if ra_active == 0 {
+        return -1;
+    }
+    i = ra_cand_index(off);
+    if i == -1 {
+        return -1;
+    }
+    return cg_q(&ra_color, i);
+}
+
+// an argument register, in the order the prologue assigns them
+fn ra_emit_argreg(r: i64) -> i64 {
+    if r == 1 { return emit_cstr("rdx"); }
+    if r == 2 { return emit_cstr("r8"); }
+    if r == 3 { return emit_cstr("r9"); }
+    if r == 4 { return emit_cstr("r10"); }
+    if r == 5 { return emit_cstr("rax"); }
+    return emit_cstr("rcx");
+}
+
+fn ra_emit_freg(c: i64) -> i64 {
+    emit_cstr("xmm");
+    return emit_u32(c + 6);
+}
+
+fn ra_emit_reg(c: i64) -> i64 {
+    if c == 1 { return emit_cstr("r12"); }
+    if c == 2 { return emit_cstr("r13"); }
+    if c == 3 { return emit_cstr("r14"); }
+    if c == 4 { return emit_cstr("r15"); }
+    return emit_cstr("rbx");
+}
+
+// One mov per register in use (restore: 1 puts them back). They live just
+// above the shadow space of the grown frame, relative to rbp.
+fn ra_emit_saves(restore: i64) -> i64 {
+    var at: i64 = ra_frame + ra_grow - 32;
+    var c: i64 = 0;
+    while c < RA_REGS {
+        if (ra_used & ra_bit(c)) != 0 {
+            if restore == 0 {
+                emit_cstr("    mov [rbp-");
+                emit_uint(at);
+                emit_cstr("], ");
+                ra_emit_reg(c);
+                emit_cstr("\n");
+            } else {
+                emit_cstr("    mov ");
+                ra_emit_reg(c);
+                emit_cstr(", [rbp-");
+                emit_uint(at);
+                emit_cstr("]\n");
+            }
+            at -= 8;
+        }
+        c += 1;
+    }
+    // then the xmm registers, 16 bytes each, straight after the integers
+    c = 0;
+    while c < RA_FREGS {
+        if (ra_fused & ra_bit(c)) != 0 {
+            if restore == 0 {
+                emit_cstr("    movups [rbp-");
+                emit_uint(at);
+                emit_cstr("], ");
+                ra_emit_freg(c);
+                emit_cstr("\n");
+            } else {
+                emit_cstr("    movups ");
+                ra_emit_freg(c);
+                emit_cstr(", [rbp-");
+                emit_uint(at);
+                emit_cstr("]\n");
+            }
+            at -= 16;
+        }
+        c += 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the flush's folding, while an allocation is applied
+//
+//   LDLOC a  LDRCX b|IMMRCX k  ALU op  STLOC a   ->  op A, B|k       (4)
+//   LDLOC a  LDRCX b|IMMRCX k  ALU cmp JCC       ->  cmp A, B|k      (3)
+//   LDRCX b|IMMRCX k  ALU op                     ->  op rax, B|k     (2)
+//
+// -> how many records were folded, 0 for none. imul takes no immediate
+// here, and only constants that surely fit 32 bits are folded.
+// -------------------------------------------------------------------------
+fn ra_peep(b: i64) -> i64 {
+    var n: i64 = ir_count;
+    var k: i64 = 0;
+    var dst: i64 = 0;
+    var op: i64 = 0;
+    var k3: i64 = 0;
+    var r: i64 = 0;
+    var t: i64 = 0;
+    if b + 2 > n {
+        return 0;
+    }
+    k = cg_q(&ir_kind, b);
+    if k == IR_LDLOC {
+        if b + 4 > n {
+            return 0;
+        }
+        dst = ra_reg_of(cg_q(&ir_op, b));
+        if dst == -1 {
+            return 0;
+        }
+        if ra_peep_src(b) == 0 {
+            return 0;
+        }
+        if cg_q(&ir_kind, b + 2) != IR_ALU {
+            return 0;
+        }
+        op = cg_q(&ir_op, b + 2);
+        k3 = cg_q(&ir_kind, b + 3);
+        if k3 == IR_STLOC {
+            if cg_q(&ir_op, b + 3) != cg_q(&ir_op, b) {
+                return 0;                // stored somewhere else
+            }
+            if op == ALU_CMP {
+                return 0;
+            }
+            if op == ALU_IMUL && pp_src_reg == -1 {
+                return 0;
+            }
+            ra_emit_alu(op, dst, pp_src_reg, pp_src_tok);
+            return 4;
+        }
+        if k3 == IR_JCC && op == ALU_CMP {
+            ra_emit_alu(op, dst, pp_src_reg, pp_src_tok);
+            return 3;
+        }
+        return 0;
+    }
+    if k == IR_LDRCX {
+        if cg_q(&ir_kind, b + 1) != IR_ALU {
+            return 0;
+        }
+        op = cg_q(&ir_op, b + 1);
+        r = ra_reg_of(cg_q(&ir_op, b));
+        if r == -1 {
+            return 0;
+        }
+        ra_emit_alu(op, -1, r, 0);
+        return 2;
+    }
+    if k == IR_IMMRCX {
+        if cg_q(&ir_kind, b + 1) != IR_ALU {
+            return 0;
+        }
+        op = cg_q(&ir_op, b + 1);
+        if op == ALU_IMUL {
+            return 0;
+        }
+        t = cg_q(&ir_op, b);
+        if ra_imm_ok(t) == 0 {
+            return 0;
+        }
+        ra_emit_alu(op, -1, -1, t);
+        return 2;
+    }
+    return 0;
+}
+
+// record b+1 as the source: LDRCX with a register (pp_src_reg), or IMMRCX
+// with a constant that fits (pp_src_reg -1, pp_src_tok). 1 when usable.
+fn ra_peep_src(b: i64) -> i64 {
+    var k: i64 = cg_q(&ir_kind, b + 1);
+    var r: i64 = 0;
+    if k == IR_LDRCX {
+        r = ra_reg_of(cg_q(&ir_op, b + 1));
+        if r == -1 {
+            return 0;
+        }
+        pp_src_reg = r;
+        pp_src_tok = 0;
+        return 1;
+    }
+    if k == IR_IMMRCX {
+        if ra_imm_ok(cg_q(&ir_op, b + 1)) == 0 {
+            return 0;
+        }
+        pp_src_tok = cg_q(&ir_op, b + 1);
+        pp_src_reg = -1;
+        return 1;
+    }
+    return 0;
+}
+
+// the constant surely fits a signed 32-bit immediate: at most nine
+// characters, starting with a digit, of digits, hex letters and the x of 0x
+fn ra_imm_ok(t: ptr<Tok>) -> i64 {
+    var p: i64 = 0;
+    var n: i64 = 0;
+    var c: i64 = 0;
+    if t == 0 {
+        return 1;
+    }
+    p = t.value;
+    n = t.length;
+    if n == 0 || n > 9 {
+        return 0;
+    }
+    c = cg_b(p);
+    if c < 48 || c > 57 {
+        return 0;
+    }
+    while n > 0 {
+        c = cg_b(p);
+        if c < 48 {
+            return 0;
+        }
+        if c > 57 && c != 120 && c != 88 {
+            c = c | 32;
+            if c < 97 || c > 102 {
+                return 0;
+            }
+        }
+        p += 1;
+        n -= 1;
+    }
+    return 1;
+}
+
+fn ra_emit_mnem(op: i64) -> i64 {
+    if op == ALU_ADD { return emit_cstr("add"); }
+    if op == ALU_SUB { return emit_cstr("sub"); }
+    if op == ALU_IMUL { return emit_cstr("imul"); }
+    if op == ALU_AND { return emit_cstr("and"); }
+    if op == ALU_OR { return emit_cstr("or"); }
+    if op == ALU_XOR { return emit_cstr("xor"); }
+    return emit_cstr("cmp");
+}
+
+// "    op DST, SRC": dst -1 is rax, src -1 the constant t (0 for zero)
+fn ra_emit_alu(op: i64, dst: i64, src: i64, t: i64) -> i64 {
+    emit_cstr("    ");
+    ra_emit_mnem(op);
+    emit_cstr(" ");
+    if dst == -1 {
+        emit_cstr("rax");
+    } else {
+        ra_emit_reg(dst);
+    }
+    emit_cstr(", ");
+    if src == -1 {
+        cg_emit_tok_or_zero(t);
+    } else {
+        ra_emit_reg(src);
+    }
+    return emit_cstr("\n");
+}
+
+fn ra_cand_index(off: i64) -> i64 {
+    var i: i64 = 0;
+    while i < ra_ncand {
+        if cg_q(&ra_cand, i) == off {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+fn ra_open_block(b: i64) -> i64 {
+    if ra_nblk >= RA_MAXBLK {
+        ra_skip = 1;
+        return 0;
+    }
+    cg_qs(&ra_bstart, ra_nblk, b);
+    cg_qs(&ra_bend, ra_nblk, b);
+    ra_cur = ra_nblk;
+    ra_nblk += 1;
+    return 0;
+}
+
+fn ra_close_block(b: i64) -> i64 {
+    if ra_cur != -1 {
+        cg_qs(&ra_bend, ra_cur, b);
+    }
+    return 0;
+}
+
+// the block of a label, or -1 with ra_skip set: the stamp says whether the
+// entry belongs to this function
+fn ra_label_block(id: i64) -> i64 {
+    if id < 0 || id >= RA_MAXLBL || cg_q(&ra_lblgen, id) != ra_gen {
+        ra_skip = 1;
+        return -1;
+    }
+    return cg_q(&ra_lblblk, id);
+}
+
+fn ra_in_of(b: i64) -> i64 {
+    if b == -1 {
+        return 0;
+    }
+    return cg_q(&ra_in, b);
+}
+
+// -------------------------------------------------------------------------
+// a function: begin capturing, and end -- analyse, then write it out
+// -------------------------------------------------------------------------
+
+fn ir_begin() -> i64 {
+    ra_asm = 0;
+    ir_count = 0;
+    ir_text_len = 0;
+    ir_on = 1;
+    return 0;
+}
+
+fn ir_end() -> i64 {
+    var b: i64 = 0;
+    var n: i64 = 0;
+    var k: i64 = 0;
+    ir_on = 0;
+    ra_analyze();
+    // the allocation applies to this flush only: ir_emit_kind also writes
+    // text straight out, where it must not
+    ra_active = 0;
+    if ra_skip == 0 && RA_ENABLE != 0 {
+        ra_active = 1;
+    }
+    ra_trace_head();
+    while b < ir_count {
+        ra_trace_blk(b);
+        if ra_active != 0 {
+            n = ra_peep(b);
+            if n != 0 {
+                b += n;
+                continue;
+            }
+        }
+        k = cg_q(&ir_kind, b);
+        if k == IR_RAW {
+            emit_direct(&ir_text + cg_q(&ir_op, b), cg_q(&ir_len, b));
+        } else {
+            ir_emit_kind(k, cg_q(&ir_op, b), cg_q(&ir_len, b));
+        }
+        b += 1;
+    }
+    ra_active = 0;
+    return 0;
+}

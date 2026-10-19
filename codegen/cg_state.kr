@@ -1,0 +1,311 @@
+kron_program
+kron_domain cg_state;
+kron_imports
+acquire_domain "include/tokens.kr";
+acquire_domain "include/ast.kr";
+acquire_domain "include/defs.kr";
+kron_definitions
+
+// =========================================================================
+// The code generator's state: every global and constant of its files, in
+// one place, before anything that uses them (the semantic pass reads a file
+// in order, and a call may not name a global declared further down).
+//
+// The tables are reached through their address (cg_q / cg_qs and the
+// like, in codegen.kr): there is no runtime under the compiler, so nothing
+// may call a bounds check. Every table holds i64 slots, whatever width the
+// assembly gave them; a value the assembly kept in 32 bits and wrote out
+// as a number goes through emit_u32, which prints it the way the assembly
+// did.
+// =========================================================================
+
+const KT_MAX_FILES: i64 = 128;
+const CG_POOL_NODES: i64 = 16384;
+const LQ_MAX: i64 = 1024;
+const LQ_CAPS: i64 = 16;
+const FNVAL_MARK: i64 = 4607574;         // 0x464E56, AST.owner_type of a call through a value
+const KT_MAX_MARKS: i64 = 65536;
+const CG_TOK_N: i64 = 48;                // tokens the code generator makes itself
+
+// the tokens the code generator makes itself, by number in cg_toks
+const CT_TMP: i64 = 0;
+const CT_LN0: i64 = 1;
+const CT_LN1: i64 = 2;
+const CT_LN2: i64 = 3;
+const CT_LN3: i64 = 4;
+const CT_LN4: i64 = 5;
+const CT_LN5: i64 = 6;
+const CT_LN6: i64 = 7;
+const CT_LN7: i64 = 8;
+const CT_LN8: i64 = 9;
+const CT_TEXT: i64 = 10;
+const CT_TEXT_ADD: i64 = 11;
+const CT_TEXT_ADD_INT: i64 = 12;
+const CT_TEXT_ADD_REAL: i64 = 13;
+const CT_TEXT_SAME: i64 = 14;
+const CT_SAY: i64 = 15;
+const CT_LIST_NEW: i64 = 16;
+const CT_MAP_NEW: i64 = 17;
+const CT_LIST_ADD: i64 = 18;
+const CT_LIST_ADD_REAL: i64 = 19;
+const CT_LIST_SHOW: i64 = 20;
+const CT_MAP_SHOW: i64 = 21;
+const CT_VEC4_LOAD: i64 = 22;
+const CT_VEC4_STORE: i64 = 23;
+const CT_VEC4_ADD: i64 = 24;
+const CT_VEC4_SUB: i64 = 25;
+const CT_VEC4_MUL: i64 = 26;
+const CT_VEC4_DIV: i64 = 27;
+const CT_VEC4_SUM: i64 = 28;
+const CT_VEC4_FILL: i64 = 29;
+const CT_VEC2_DIV: i64 = 30;
+const CT_LIBINIT: i64 = 31;
+const CT_USERINIT: i64 = 32;
+const CT_MAINNAME: i64 = 33;
+const CT_ENV: i64 = 34;
+const CT_STREAM: i64 = 35;
+const CT_SPTR: i64 = 36;
+const CT_SLEN: i64 = 37;
+
+// --- the output ---
+var cg_out: i64;
+var cg_ptr: i64;
+var cg_end: i64;
+var cg_label: i64;
+var dbg_which: i64;                      // why the output failed: 1 full, 2 locals
+var cg_had_error: i64;
+
+// --- what main sets ---
+var cg_target: i64;                      // TARGET_*
+var cg_bare: i64;                        // no runtime: bare metal, a system image
+var cg_debug: i64;                       // --debug
+var cg_as_module: i64;                   // --module
+var cg_mod_tag: [u8; 72];                // '<name>_', what a module's labels carry
+var cg_lib: i64;                         // --lib
+
+// --- the intermediate representation of the function being generated:
+// records of a kind, a length (or a condition, or an argument register)
+// and an operand; raw text lives in ir_text ---
+var ir_on: i64;
+var ir_count: i64;
+var ir_text_len: i64;
+var ir_kind: [i64; 262144];
+var ir_len: [i64; 262144];
+var ir_op: [i64; 262144];
+var ir_text: [u8; 4194304];
+
+// --- register allocation ---
+var ra_asm: i64;                         // the function holds inline asm
+var ra_skip: i64;                        // the function cannot be allocated
+var ra_ncand: i64;
+var ra_cand: [i64; 64];                  // frame offset of each candidate
+var ra_exmask: i64;                      // candidates seen in raw text
+var ra_gen: i64;                         // stamps the label map, per function
+var ra_tblk: i64;
+var ra_nframe: i64;
+var ra_nret: i64;
+var ra_active: i64;                      // the flush applies an allocation
+var ra_wt: [i64; 64];                    // how often each candidate is touched
+var ra_adj: [i64; 64];                   // conflict graph: neighbours, one qword each
+var ra_color: [i64; 64];                 // register 0..4 (or xmm), -1 memory
+var ra_stk: [i64; 64];
+var ra_used: i64;                        // a bit per register handed out
+var ra_fused: i64;                       // the same for xmm6..xmm15
+var ra_imask: i64;
+var ra_fmask: i64;
+var ra_frame: i64;
+var ra_grow: i64;
+var ra_nblk: i64;
+var ra_cur: i64;
+var ra_retblk: i64;
+var ra_bstart: [i64; 4096];
+var ra_bend: [i64; 4096];
+var ra_succ1: [i64; 4096];
+var ra_succ2: [i64; 4096];
+var ra_use: [i64; 4096];
+var ra_def: [i64; 4096];
+var ra_in: [i64; 4096];
+var ra_out: [i64; 4096];
+var ra_lblblk: [i64; 65536];
+var ra_lblgen: [i64; 65536];
+var pp_src_reg: i64;                     // ra_peep_src's answer: a register,
+var pp_src_tok: i64;                     // or -1 and the constant's token
+
+// --- the locals of the function being generated ---
+var var_count: i64;
+var var_toks: [i64; 1024];               // name token
+var var_offs: [i64; 1024];               // offset below rbp
+var var_structs: [i64; 1024];            // struct id, -1 none
+var var_elemsz: [i64; 1024];             // a pointer's element width, 0 none
+var var_isfloat: [i64; 1024];
+var var_unsigned: [i64; 1024];
+var var_isref: [i64; 1024];              // the slot holds an address
+var var_arrlen: [i64; 1024];             // element count, 0 not an array
+var var_stride: [i64; 1024];             // elements per row of a 2-D array
+var var_aw: [i64; 1024];                 // bytes per element, 0 = 8
+var var_vtag: [i64; 1024];               // type tag: 1 text, 2 list, 3 map, 4 texts,
+                                         // 5 a function value; the element above
+// what the next cg_add_var attaches
+var pending_struct: i64;
+var pending_elem: i64;
+var pending_float: i64;
+var pending_unsigned: i64;
+var pending_ref: i64;
+var pending_arrlen: i64;
+var pending_stride: i64;
+var pending_aw: i64;
+var pending_vtag: i64;
+var pending_fstruct: i64;
+var cg_add_fresh: i64;                   // a new slot, never one reused
+var cur_lit_aw: i64;                     // element width for cg_emit_array_lit
+var cur_ret_float: i64;
+var cur_ret_id: i64;
+var cur_fn_multi: i64;
+var last_strlit_len: i64;                // bytes of the last "..." emitted
+
+// --- structs and enums ---
+var struct_count: i64;
+var struct_toks: [i64; 256];
+var struct_first: [i64; 256];
+var struct_nfield: [i64; 256];
+var struct_bytes: [i64; 256];
+var struct_rounds: i64;
+var stream_struct_id: i64;
+var field_count: i64;
+var field_toks: [i64; 4096];
+var field_sizes: [i64; 4096];
+var field_isfloat: [i64; 4096];
+var field_unsigned: [i64; 4096];
+var field_vtag: [i64; 4096];
+var field_offs: [i64; 4096];
+var field_struct: [i64; 4096];
+var enum_count: i64;
+var enum_toks: [i64; 256];
+var enum_first: [i64; 256];
+var enum_nmem: [i64; 256];
+var emem_count: i64;
+var emem_toks: [i64; 4096];
+var emem_vals: [i64; 4096];
+// a member chain, as cg_member_resolve leaves it
+var mem_off: i64;
+var mem_sid: i64;
+var mem_width: i64;
+var mem_isfloat: i64;
+var mem_unsigned: i64;
+var mem_vtag: i64;
+var cg_enum_found: i64;                  // cg_enum_value's value
+var cg_mo_width: i64;                    // cg_member_offset: the field's width
+
+// --- globals of the program ---
+var g_count: i64;
+var g_toks: [i64; 4096];
+var g_isfloat: [i64; 4096];
+var g_unsigned: [i64; 4096];
+var g_arrlen: [i64; 4096];
+var g_aw: [i64; 4096];
+var g_vtag: [i64; 4096];
+var g_structs: [i64; 4096];
+
+// --- loops ---
+var loop_depth: i64;
+var loop_brk: [i64; 64];
+var loop_cont: [i64; 64];
+
+// --- functions ---
+var fn_count: i64;
+var fn_toks: [i64; 4096];
+var fn_nodes: [i64; 4096];
+var fn_ret_float: [i64; 4096];
+var fn_ret_vtag: [i64; 4096];
+var fn_ret_unsig: [i64; 4096];
+var fn_multi: [i64; 4096];               // count | reals << 4 | tags << 8
+var cg_in_raw: i64;
+var cg_root: i64;
+var cg_err_tok: i64;                     // a type error found while emitting:
+var cg_err_msg: i64;                     // where, what, and a hint (or 0)
+var cg_err_hint: i64;
+var binop_unsigned: i64;
+var extra_args: i64;
+var v2_op: i64;
+var garr_ok: i64;                        // cg_garr_value: the value is known
+var tok_u64_ok: i64;                     // cg_tok_u64: the token is a number
+var lk_width: i64;                       // cg_lib_kind: the width code
+var lk_signed: i64;                      // and 1 when signed
+
+// --- struct results ---
+var cg_sret_kind: i64;
+var cg_sret_off: i64;
+var cg_sret_pend: i64;
+var cg_cur_sret: i64;
+var cg_sret_slot: i64;
+var cg_lop_n: i64;                       // cg_list_op: which _n function
+var cg_lop_s: i64;                       // and the struct
+
+// --- extern functions ---
+var cg_ext_count: i64;
+var cg_ext_any: i64;
+var cg_ext_toks: [i64; 1024];
+var cg_ext_nodes: [i64; 1024];
+var cg_ext_used: [i64; 1024];
+
+// --- a library: what it exports ---
+var cg_exp_count: i64;
+var cg_exp_used: i64;
+var cg_has_exp: i64;
+var cg_exp_toks: [i64; 4096];
+var cg_exp_name: [i64; 4096];
+var cg_exp_nlen: [i64; 4096];
+var cg_exp_buf: [u8; 65536];
+var cg_main_idx: i64;
+
+// --- the thread check ---
+var gs_count: i64;
+var gs_toks: [i64; 4096];
+var gs_shared: [i64; 4096];
+var cg_cur_fn: i64;
+var fn_gtok: [i64; 4096];                // first access to a non-shared global
+var fn_root: [i64; 4096];                // passed to thread_start
+var fn_addr: [i64; 4096];                // its address is taken
+var fn_asval: [i64; 4096];               // used as a value: needs its __fnrec_
+var fn_indir: [i64; 4096];               // it makes an indirect call
+var fn_reach: [i64; 4096];               // can run in a thread
+var ce_count: i64;
+var ce_from: [i64; 65536];
+var ce_to: [i64; 65536];
+var cg_dyn_thread: i64;
+var cg_thread_tok: i64;
+
+// --- functions as values ---
+var cg_pool_n: i64;
+var cg_pool: [u8; 917504];               // CG_POOL_NODES nodes of 56 bytes
+var lq_n: i64;
+var lq_done: i64;
+var cg_lam_cur: i64;
+var lq_node: [i64; 1024];
+var lq_ncap: [i64; 1024];
+var lq_cap: [i64; 16384];                // LQ_CAPS names per entry
+var lq_cflag: [i64; 16384];              // and their flags: real | tag << 8
+var lx_n: i64;
+var lx_toks: [i64; 256];
+
+// --- failure traces ---
+var kt_on: i64;
+var kt_n: i64;
+var kt_x: i64;
+var kt_first: i64;
+var kt_cnt: i64;
+var kt_last: i64;
+var kt_pend: i64;
+var kt_file: i64;
+var kt_prev: i64;
+var kt_nfiles: i64;
+var kt_files: [i64; 128];
+var kt_lines: [i64; 65536];
+var kdb_on: i64;
+var kdb_prev: i64;
+
+// --- the tokens the code generator makes itself (24 bytes each), their
+// texts, and a scratch for numbers ---
+var cg_toks: [u8; 1152];
+var cg_numbuf: [u8; 32];
+var cg_lmap_line: i64;                   // the line lmap_lookup gave back

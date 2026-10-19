@@ -1,0 +1,801 @@
+kron_program
+kron_domain cg_struct;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// STRUCT FIELDS, STRUCT VALUES, list<S>
+// =========================================================================
+
+// cg_member_resolve(member node): the chain walked inward first, so a.b.c
+// resolves b before c and each field is looked up in the struct the one
+// before landed in. Leaves the byte offset in mem_off, the struct reached
+// in mem_sid, and the last field's width, realness, sign and tag.
+fn cg_member_resolve(m: ptr<Ast>) -> i64 {
+    var inner: ptr<Ast> = m.right;
+    var i: i64 = 0;
+    var s: i64 = 0;
+    var f: i64 = 0;
+    var deeper: i64 = 0;
+    if inner != 0 {
+        if inner.node_type == AST_MEMBER {
+            deeper = 1;
+        }
+    }
+    if deeper == 1 {
+        cg_member_resolve(inner);
+    } else {
+        mem_off = 0;
+        mem_sid = -1;
+        i = cg_find_var_idx(m.data);
+        if i != -1 {
+            s = cg_q(&var_structs, i);
+            mem_sid = s;
+            if s == -1 {
+                mem_sid = cg_var_pstruct(i);     // p: ptr<S> -- p.x is a field of S
+            }
+        } else {
+            // a struct global
+            i = cg_find_global(m.data);
+            if i != -1 {
+                s = cg_q(&g_structs, i);
+                mem_sid = s;
+                if s == -1 {
+                    mem_sid = cg_glob_pstruct(i);
+                }
+            }
+        }
+    }
+    mem_width = 8;
+    mem_isfloat = 0;
+    mem_unsigned = 0;
+    mem_vtag = 0;
+    if mem_sid == -1 {
+        return 0;
+    }
+    f = cg_field_index(mem_sid, m.left);
+    if f == -1 {
+        mem_sid = -1;
+        return 0;
+    }
+    f = cg_u32(f + cg_q(&struct_first, mem_sid));
+    mem_off = cg_u32(mem_off + cg_q(&field_offs, f));
+    mem_width = cg_q(&field_sizes, f);
+    mem_isfloat = cg_q(&field_isfloat, f);
+    mem_unsigned = cg_q(&field_unsigned, f);
+    mem_vtag = cg_q(&field_vtag, f);
+    mem_sid = cg_q(&field_struct, f);        // a nested struct, or -1
+    return 0;
+}
+
+// cg_member_enum(member node) -> 1 when it is really Enum.Member, its value
+// in cg_enum_found
+fn cg_member_enum(m: ptr<Ast>) -> i64 {
+    if cg_find_var_idx(m.data) != -1 {
+        return 0;                            // a variable: an ordinary access
+    }
+    return cg_enum_value(m.data, m.left);
+}
+
+// cg_member_global(member node) -> 1 when the base is a global, or a
+// pointer to a struct: then the field's address is in rdx; 0 for a local
+// struct, nothing emitted. mem_* describe the field either way.
+fn cg_member_global(m: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    var off: i64 = 0;
+    cg_member_resolve(m);
+    i = cg_find_var_idx(m.data);
+    if i != -1 {
+        // a local ptr<S>: mov rdx, [rbp-N], then the offset
+        if cg_q(&var_structs, i) != -1 {
+            return 0;
+        }
+        off = cg_q(&var_offs, i);
+        if cg_var_pstruct(i) == -1 {
+            return 0;
+        }
+        emit_cstr("    mov rdx, [rbp-");
+        emit_u32(off);
+        emit_cstr("]\n");
+        return cg_member_ptr_off(m);
+    }
+    i = cg_find_global(m.data);
+    if i == -1 {
+        return 0;
+    }
+    if cg_q(&g_structs, i) == -1 {
+        if cg_glob_pstruct(i) != -1 {
+            // a global ptr<S>: the field is at the address it holds
+            cg_emit_gpre("    mov rdx, [rel __g_");
+            cg_emit_gtok(m.data);
+            emit_cstr("]\n");
+            return cg_member_ptr_off(m);
+        }
+    }
+    cg_emit_gpre("    lea rdx, [rel __g_");
+    cg_emit_gtok(m.data);
+    if mem_off != 0 {
+        emit_cstr("+");
+        emit_u32(mem_off);
+    }
+    emit_cstr("]\n");
+    return 1;
+}
+
+// add rdx, <offset> after a pointer was loaded, then the chain resolved
+// again: the lookups went through other tables, but the field's
+// description must be the chain's
+fn cg_member_ptr_off(m: ptr<Ast>) -> i64 {
+    if mem_off != 0 {
+        emit_cstr("    add rdx, ");
+        emit_u32(mem_off);
+        emit_cstr("\n");
+    }
+    cg_member_resolve(m);
+    return 1;
+}
+
+// =========================================================================
+// STRUCT VALUES: copies, results, pointers to structs
+//
+// A struct is a run of bytes in the frame (or at __g_NAME). Copying one --
+// a declaration from another struct, an assignment, a parameter, a result
+// -- moves exactly its packed size, so a struct nested inside another never
+// spills into the field after it.
+//
+// A function that returns a struct writes the result where its caller
+// says: the caller puts the address in r11 just before the call, the callee
+// keeps it in a hidden slot of its frame and copies its result there at
+// return, leaving the same address in rax. The caller names its own
+// variable when the result is declared or assigned into one, or a temporary
+// of its frame.
+// =========================================================================
+
+// the struct a variable declared ptr<S> points to, by its name token, -1
+fn cg_pstruct_of(t: i64) -> i64 {
+    var i: i64 = cg_parser_q(1, 0);
+    while i > 0 {
+        i -= 1;
+        if cg_parser_q(2, i) == t {
+            return cg_find_struct(cg_parser_q(3, i));
+        }
+    }
+    return -1;
+}
+
+fn cg_var_pstruct(i: i64) -> i64 {
+    return cg_pstruct_of(cg_q(&var_toks, i));
+}
+
+fn cg_glob_pstruct(i: i64) -> i64 {
+    return cg_pstruct_of(cg_q(&g_toks, i));
+}
+
+// the struct a function returns, by its name, -1
+fn cg_fn_ret_struct(t: i64) -> i64 {
+    var f: i64 = 0;
+    var nd: ptr<Ast> = 0;
+    if t == 0 {
+        return -1;
+    }
+    f = cg_find_func(t);
+    if f == -1 {
+        return -1;
+    }
+    nd = cg_q(&fn_nodes, f);
+    if nd == 0 {
+        return -1;
+    }
+    if nd.node_type != AST_FUNCTION || nd.owner_type == 0 {
+        return -1;
+    }
+    return cg_find_struct(nd.owner_type);
+}
+
+// the frame offset of a new temporary that holds one struct; the frame
+// grows to fit at the end of the function
+fn cg_alloc_temp(sid: i64) -> i64 {
+    var n: i64 = cg_struct_size(sid);
+    var off: i64 = 0;
+    if n == 0 {
+        n = 1;
+    }
+    pending_struct = sid;
+    cg_add_fresh = 1;
+    off = cg_add_var(cg_tok(CT_TMP), n);
+    cg_add_fresh = 0;
+    return off;
+}
+
+// cg_struct_kind(expression) -> the struct it is a value of, or -1; emits
+// nothing
+fn cg_struct_kind(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var i: i64 = 0;
+    var p: ptr<Ast> = 0;
+    if e == 0 {
+        return -1;
+    }
+    k = e.node_type;
+    if k == AST_IDENTIFIER {
+        if e.data == 0 {
+            return -1;
+        }
+        i = cg_find_var_idx(e.data);
+        if i != -1 {
+            if cg_q(&var_arrlen, i) != 0 {
+                return -1;
+            }
+            return cg_q(&var_structs, i);
+        }
+        i = cg_find_global(e.data);
+        if i == -1 {
+            return -1;
+        }
+        if cg_q(&g_arrlen, i) != 0 {
+            return -1;
+        }
+        return cg_q(&g_structs, i);
+    }
+    if k == AST_MEMBER {
+        cg_member_resolve(e);
+        return mem_sid;
+    }
+    if k == AST_CALL {
+        if e.owner_type == FNVAL_MARK {
+            return -1;
+        }
+        if cg_list_op(e) == 1 {
+            return cg_lop_s;                 // l[i] and the like on a list<S>
+        }
+        return cg_fn_ret_struct(e.data);
+    }
+    if k == AST_STRUCT_LIT {
+        if e.data == 0 {
+            return -1;
+        }
+        return cg_find_struct(e.data);
+    }
+    if k == AST_DEREF {
+        // *p with p a ptr<S> variable
+        p = e.right;
+        if p == 0 {
+            return -1;
+        }
+        if p.node_type != AST_IDENTIFIER {
+            return -1;
+        }
+        i = cg_find_var_idx(p.data);
+        if i != -1 {
+            return cg_var_pstruct(i);
+        }
+        i = cg_find_global(p.data);
+        if i == -1 {
+            return -1;
+        }
+        return cg_glob_pstruct(i);
+    }
+    return -1;
+}
+
+// cg_emit_struct_addr(expression) -> its struct, or -1 with nothing
+// emitted; the code leaves the value's address in rax: a variable or field
+// where it is, a call's result or a literal in a temporary of the frame
+fn cg_emit_struct_addr(e: ptr<Ast>) -> i64 {
+    var s: i64 = cg_struct_kind(e);
+    var k: i64 = 0;
+    var i: i64 = 0;
+    var off: i64 = 0;
+    if s == -1 {
+        return -1;
+    }
+    k = e.node_type;
+    if k == AST_IDENTIFIER {
+        i = cg_find_var_idx(e.data);
+        if i != -1 {
+            emit_cstr("    lea rax, [rbp-");
+            emit_u32(cg_q(&var_offs, i));
+            emit_cstr("]\n");
+        } else {
+            cg_emit_gpre("    lea rax, [rel __g_");
+            cg_emit_gtok(e.data);
+            emit_cstr("]\n");
+        }
+    } else if k == AST_MEMBER {
+        if cg_member_global(e) != 0 {
+            emit_cstr("    mov rax, rdx\n");
+        } else {
+            off = cg_member_offset(e);
+            emit_cstr("    lea rax, [rbp-");
+            emit_u32(off);
+            emit_cstr("]\n");
+        }
+    } else if k == AST_CALL {
+        cg_sret_kind = 0;                    // into a temporary
+        cg_emit(e);                          // rax = where the result is
+    } else if k == AST_STRUCT_LIT {
+        off = cg_alloc_temp(s);
+        cg_emit_struct_lit(e, off);
+        emit_cstr("    lea rax, [rbp-");
+        emit_u32(off);
+        emit_cstr("]\n");
+    } else {
+        // *p: the pointer is the address
+        cg_emit(e.right);
+    }
+    return s;
+}
+
+// that many bytes from [rax] to [rdx], through rcx, exactly: eight at a
+// time, then four, two, one
+fn cg_emit_copy(n: i64) -> i64 {
+    var off: i64 = 0;
+    n = cg_u32(n);
+    while n >= 8 {
+        cg_cp_line("    mov rcx, [rax+", off, ", rcx\n");
+        off += 8;
+        n -= 8;
+    }
+    if n >= 4 {
+        cg_cp_line("    mov ecx, dword [rax+", off, ", ecx\n");
+        off += 4;
+        n -= 4;
+    }
+    if n >= 2 {
+        cg_cp_line("    movzx ecx, word [rax+", off, ", cx\n");
+        off += 2;
+        n -= 2;
+    }
+    if n != 0 {
+        cg_cp_line("    movzx ecx, byte [rax+", off, ", cl\n");
+    }
+    return 0;
+}
+
+// '    mov rcx, [rax+N]' then '    mov [rdx+N], <reg>'
+fn cg_cp_line(ld: i64, off: i64, reg: i64) -> i64 {
+    emit_cstr(ld);
+    emit_u32(off);
+    emit_cstr("]\n");
+    emit_cstr("    mov [rdx+");
+    emit_u32(off);
+    emit_cstr("]");
+    return emit_cstr(reg);
+}
+
+// rdx = [rbp-off]'s address (kind 1) or the address [rbp-off] holds (2)
+fn cg_emit_dest_rdx(off: i64, kind: i64) -> i64 {
+    if kind == 2 {
+        emit_cstr("    mov rdx, [rbp-");
+    } else {
+        emit_cstr("    lea rdx, [rbp-");
+    }
+    emit_u32(off);
+    return emit_cstr("]\n");
+}
+
+// a value that is not the struct expected, reported with its name when it
+// has one
+fn cg_struct_mismatch(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    cg_err_tok = 0;
+    if e != 0 {
+        k = e.node_type;
+        if k == AST_IDENTIFIER || k == AST_CALL || k == AST_MEMBER || k == AST_STRUCT_LIT {
+            cg_err_tok = e.data;
+        }
+    }
+    cg_err_msg = "a struct of another type, or no struct, where one is expected ";
+    cg_err_hint = "  hint: a struct is copied, passed and returned whole, as a value of the same struct\r\n";
+    cg_had_error = 1;
+    return 0;
+}
+
+// cg_store_struct(value, kind, offset, struct) -> 1 when the value went
+// into the struct at [rbp-off] (kind 1) or at the address [rbp-off] holds
+// (kind 2); 0 when it is no struct at all (nothing emitted)
+fn cg_store_struct(v: ptr<Ast>, kind: i64, off: i64, sid: i64) -> i64 {
+    var s: i64 = cg_struct_kind(v);
+    if s == -1 {
+        return 0;
+    }
+    if s != sid {
+        cg_struct_mismatch(v);
+        return 1;
+    }
+    if v.node_type == AST_STRUCT_LIT && kind == 1 {
+        cg_emit_struct_lit(v, off);          // a literal writes itself in place
+        return 1;
+    }
+    if v.node_type == AST_CALL {
+        if cg_fn_ret_struct(v.data) != -1 {
+            // the callee writes it there itself
+            cg_sret_kind = kind;
+            cg_sret_off = off;
+            cg_emit(v);
+            return 1;
+        }
+        // an element of a list<S>: copied out
+    }
+    cg_emit_struct_addr(v);                  // rax = the source
+    cg_emit_dest_rdx(off, kind);
+    cg_emit_copy(cg_q(&struct_bytes, sid));
+    return 1;
+}
+
+// cg_assign_struct(destination, value) -> 1 when both are structs and the
+// copy was emitted, 0 otherwise (nothing emitted)
+fn cg_assign_struct(dst: ptr<Ast>, v: ptr<Ast>) -> i64 {
+    var s: i64 = cg_struct_kind(dst);
+    var i: i64 = 0;
+    if s == -1 {
+        return 0;
+    }
+    if cg_struct_kind(v) == -1 {
+        return 0;
+    }
+    if cg_struct_kind(v) != s {
+        cg_struct_mismatch(v);
+        return 1;
+    }
+    // a local by name: straight into its slots
+    if dst.node_type == AST_IDENTIFIER {
+        i = cg_find_var_idx(dst.data);
+        if i != -1 {
+            cg_store_struct(v, 1, cg_q(&var_offs, i), s);
+            return 1;
+        }
+    }
+    // anywhere else: the value's address, then the destination's
+    cg_emit_struct_addr(v);
+    emit_cstr("    push rax\n");
+    cg_emit_struct_addr(dst);
+    emit_cstr("    mov rdx, rax\n    pop rax\n");
+    cg_emit_copy(cg_q(&struct_bytes, s));
+    return 1;
+}
+
+// At a call of a function that returns a struct, before its arguments:
+// where the result goes (cg_sret_kind and _off, a temporary when the kind
+// is 0), as kind << 32 | offset, kept until the call itself; -1 none
+fn cg_sret_setup(t: i64) -> i64 {
+    var kind: i64 = cg_sret_kind;
+    var s: i64 = 0;
+    cg_sret_kind = 0;
+    s = cg_fn_ret_struct(t);
+    if s == -1 {
+        return -1;
+    }
+    if kind == 0 {
+        cg_sret_off = cg_alloc_temp(s);
+        kind = 1;
+    }
+    return cg_u32(cg_sret_off) | (cg_u32(kind) << 32);
+}
+
+// r11 = where the result goes
+fn cg_sret_emit(v: i64) -> i64 {
+    if v == -1 {
+        return 0;
+    }
+    if (v >>> 32) == 2 {
+        emit_cstr("    mov r11, [rbp-");
+    } else {
+        emit_cstr("    lea r11, [rbp-");
+    }
+    emit_u32(v);
+    return emit_cstr("]\n");
+}
+
+// the frame of the function just emitted holds every slot handed out,
+// temporaries included: the IR_FRAME record grows if needed
+fn cg_frame_fit() -> i64 {
+    var need: i64 = 0;
+    var r: i64 = 0;
+    if var_count == 0 {
+        return 0;
+    }
+    need = cg_u32(cg_q(&var_offs, var_count - 1) + 47) & 0xFFFFFFF0;
+    while r < ir_count {
+        if cg_q(&ir_kind, r) == IR_FRAME {
+            if cg_ult(cg_q(&ir_op, r), need) == 1 {
+                cg_qs(&ir_op, r, need);
+            }
+            return 0;
+        }
+        r += 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// list<S> with S a struct. The list holds the struct's slots in a row, k
+// per element (k = its size in slots of eight), and every call that touches
+// an element goes to the _n version in std_list.kr, which moves k values at
+// a time:  l[i] -> list_get_n(l, i, &tmp, k)  l[i] = v -> list_set_n(l, i, &v, k)
+//          list_add(l, v) -> list_add_n(l, &v, k)  list_len(l) -> list_len_n(l, k)
+// and the same for insert, remove, pop, last and reverse. A struct argument
+// is passed by address anyway, so &v is just v.
+// =========================================================================
+
+// 1 when a token reads the NUL-ended name
+fn cg_tok_is(t: ptr<Tok>, name: i64) -> i64 {
+    var n: i64 = 0;
+    var p: i64 = 0;
+    var i: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    n = t.length;
+    p = t.value;
+    while i < n {
+        if cg_b(name + i) != cg_b(p + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    if cg_b(name + n) != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the struct S when an expression names a list<S> variable, else -1
+fn cg_list_struct(e: ptr<Ast>) -> i64 {
+    var t: i64 = 0;
+    var i: i64 = 0;
+    if e == 0 {
+        return -1;
+    }
+    if e.node_type != AST_IDENTIFIER {
+        return -1;
+    }
+    i = cg_find_var_idx(e.data);
+    if i != -1 {
+        t = cg_q(&var_toks, i);
+    } else {
+        i = cg_find_global(e.data);
+        if i == -1 {
+            return -1;
+        }
+        t = cg_q(&g_toks, i);
+    }
+    i = cg_parser_q(4, 0);
+    while i > 0 {
+        i -= 1;
+        if cg_parser_q(5, i) == t {
+            return cg_find_struct(cg_parser_q(6, i));
+        }
+    }
+    return -1;
+}
+
+// one entry of the calls on a list<S>: its name, 1 when it reads an
+// element (a struct value) or 2, and which _n function it becomes
+fn cg_lname(i: i64) -> i64 {
+    if i == 0 { return "list_sget"; }
+    if i == 1 { return "list_get"; }
+    if i == 2 { return "list_sset"; }
+    if i == 3 { return "list_set"; }
+    if i == 4 { return "list_add"; }
+    if i == 5 { return "list_insert"; }
+    if i == 6 { return "list_remove"; }
+    if i == 7 { return "list_pop"; }
+    if i == 8 { return "list_last"; }
+    if i == 9 { return "list_len"; }
+    if i == 10 { return "list_reverse"; }
+    return 0;
+}
+
+fn cg_lname_kind(i: i64) -> i64 {
+    if i == 0 || i == 1 || i == 6 || i == 7 || i == 8 {
+        return 1;
+    }
+    return 2;
+}
+
+fn cg_lname_fn(i: i64) -> i64 {
+    if i <= 1 { return 0; }
+    if i <= 3 { return 1; }
+    return i - 2;
+}
+
+// cg_list_op(call) -> what the call does to a list<S>: 0 nothing special,
+// 1 reads an element (a struct value), 2 anything else with an _n version;
+// the _n function in cg_lop_n, S in cg_lop_s
+fn cg_list_op(c: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var s: i64 = 0;
+    var i: i64 = 0;
+    if a == 0 {
+        return 0;
+    }
+    s = cg_list_struct(a.left);
+    if s == -1 {
+        return 0;
+    }
+    while i < 11 {
+        if cg_tok_is(c.data, cg_lname(i)) == 1 {
+            cg_lop_n = cg_lname_fn(i);
+            cg_lop_s = s;
+            return cg_lname_kind(i);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// cg_list_call(call) -> 1 when it was a call on a list<S>, emitted as its
+// _n version (the address of what it reads in rax): the arguments as
+// written, then &tmp for a read, then k
+fn cg_list_call(c: ptr<Ast>) -> i64 {
+    var kind: i64 = cg_list_op(c);
+    var s: i64 = cg_lop_s;
+    var a: ptr<Ast> = 0;
+    var first: ptr<Ast> = 0;
+    var last: ptr<Ast> = 0;
+    var arg: ptr<Ast> = 0;
+    var x: ptr<Ast> = 0;
+    var cl: ptr<Ast> = 0;
+    var off: i64 = 0;
+    if kind == 0 {
+        return 0;
+    }
+    a = c.right;
+    while a != 0 {
+        arg = cg_node(AST_ARG);
+        if arg == 0 {
+            return 0;
+        }
+        arg.left = a.left;
+        if last == 0 {
+            first = arg;
+        } else {
+            last.right = arg;
+        }
+        last = arg;
+        a = a.right;
+    }
+    if kind == 1 {
+        // a temporary for the element read
+        off = cg_alloc_temp(s);
+        x = cg_node(AST_FRAMEADDR);
+        if x == 0 {
+            return 0;
+        }
+        x.data = off;
+        arg = cg_node(AST_ARG);
+        if arg != 0 {
+            arg.left = x;
+            if last == 0 {
+                first = arg;
+            } else {
+                last.right = arg;
+            }
+            last = arg;
+        }
+    }
+    x = cg_node(AST_IMM);
+    if x == 0 {
+        return 0;
+    }
+    x.data = cg_struct_size(s);
+    arg = cg_node(AST_ARG);
+    if arg != 0 {
+        arg.left = x;
+        if last == 0 {
+            first = arg;
+        } else {
+            last.right = arg;
+        }
+        last = arg;
+    }
+    // the call, to the _n function
+    cl = cg_node(AST_CALL);
+    if cl == 0 {
+        return 0;
+    }
+    cl.right = first;
+    cl.data = cg_tok(CT_LN0 + cg_lop_n);
+    cl.line = c.line;
+    cg_emit(cl);
+    return 1;
+}
+
+// a signed field narrower than eight bytes, just loaded zero-extended into
+// rax, gets its sign (i8, i16, i32 fields read -1 as -1)
+fn cg_member_sext() -> i64 {
+    if mem_unsigned != 0 || mem_isfloat != 0 {
+        return 0;
+    }
+    if mem_width == 1 {
+        return emit_cstr("    shl rax, 56\n    sar rax, 56\n");
+    }
+    if mem_width == 2 {
+        return emit_cstr("    shl rax, 48\n    sar rax, 48\n");
+    }
+    if mem_width == 4 {
+        return emit_cstr("    shl rax, 32\n    sar rax, 32\n");
+    }
+    return 0;
+}
+
+// cg_member_offset(member node) -> the field's offset below rbp; its width
+// in cg_mo_width (8 when the base is no local)
+fn cg_member_offset(m: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    cg_member_resolve(m);
+    i = cg_find_var_idx(m.data);
+    if i == -1 {
+        cg_mo_width = 8;
+        return 0;
+    }
+    cg_mo_width = mem_width;
+    return cg_u32(cg_q(&var_offs, i) - mem_off);
+}
+
+// 1 when the array an index node reads is of reals
+fn cg_index_is_float(e: ptr<Ast>) -> i64 {
+    var i: i64 = cg_find_var_idx(e.data);
+    if i != -1 {
+        if cg_q(&var_isfloat, i) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if cg_global_is_float(e.data) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// 1 when a member's field is a real: the same walk as the offset
+fn cg_member_is_float(m: ptr<Ast>) -> i64 {
+    cg_member_resolve(m);
+    if mem_isfloat != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// the slots the locals of a subtree take: a scalar one, a struct its
+// size, an array its length. A declaration's left is a type token, not a
+// node: only its value is walked. Chains through right are walked in a
+// loop.
+fn cg_count_vars(n: ptr<Ast>) -> i64 {
+    var c: i64 = 0;
+    var k: i64 = 0;
+    var s: i64 = 0;
+    var sz: i64 = 0;
+    while n != 0 {
+        k = n.node_type;
+        if k == AST_VAR_DECL || k == AST_CONST_DECL {
+            if n.type_info != 0 {
+                c = c + n.type_info;         // the array takes N slots
+            } else {
+                sz = 0;
+                if n.left != 0 {
+                    s = cg_find_struct(n.left);
+                    if s != -1 {
+                        sz = cg_struct_size(s);
+                    }
+                }
+                if sz != 0 {
+                    c = c + sz;
+                } else {
+                    c = c + 1;
+                }
+            }
+            c = cg_u32(c);
+            n = n.right;
+        } else if k == AST_MEMBER || k == AST_ADDR_OF || k == AST_LAMBDA {
+            return c;
+        } else if k == AST_INDEX {
+            n = n.right;                     // the index expression only
+        } else {
+            c = cg_u32(c + cg_count_vars(n.left));
+            n = n.right;
+        }
+    }
+    return c;
+}

@@ -1,0 +1,1331 @@
+kron_program
+kron_domain cg_emit;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// cg_emit(node): the code of one statement or expression; the value of an
+// expression is left in rax (xmm0 for a real, through cg_emit_float).
+// One function per kind of node; a chain of blocks is walked in a loop.
+// =========================================================================
+
+fn cg_emit(n: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    if n == 0 {
+        return 0;
+    }
+    k = n.node_type;
+    if k == AST_BLOCK { return cg_e_block(n); }
+    if k == AST_VAR_DECL || k == AST_CONST_DECL { return cg_e_vardecl(n); }
+    if k == AST_ASSIGN { return cg_e_assign(n); }
+    if k == AST_RETURN { return cg_e_return(n); }
+    if k == AST_MULTI { return cg_emit_multi(n); }
+    if k == AST_LAMBDA { return cg_emit_lambda(n); }
+    if k == AST_FRAMEADDR {
+        return cg_e_wrap("    lea rax, [rbp-", n.data, "]\n");
+    }
+    if k == AST_IMM { return cg_e_wrap("    mov rax, ", n.data, "\n"); }
+    if k == AST_PRINT { return cg_e_print(n); }
+    if k == AST_PRINTC { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __print_char\n    add rsp, 32\n"); }
+    if k == AST_OUTB { return cg_e_two(n, "    mov rcx, rax\n    pop rdx\n    mov al, cl\n    out dx, al\n"); }
+    if k == AST_POKE { return cg_e_two(n, "    mov rcx, rax\n    pop rdx\n    mov [rdx], rcx\n"); }
+    if k == AST_BEEP { return cg_e_two(n, "    mov rdx, rax\n    pop rcx\n    sub rsp, 32\n    call __beep\n    add rsp, 32\n"); }
+    if k == AST_SAVEFILE { return cg_e_three(n, "    mov rdx, rax\n    pop rcx\n    pop r8\n    sub rsp, 32\n    call __save_file\n    add rsp, 32\n"); }
+    if k == AST_POKE8 { return cg_e_two(n, "    mov rcx, rax\n    pop rdx\n    mov [rdx], cl\n"); }
+    if k == AST_POKE16 { return cg_e_two(n, "    mov rcx, rax\n    pop rdx\n    mov [rdx], cx\n"); }
+    if k == AST_POKE32 { return cg_e_two(n, "    mov rcx, rax\n    pop rdx\n    mov [rdx], ecx\n"); }
+    if k == AST_ASM { return cg_e_asm(n); }
+    if k == AST_IF { return cg_e_if(n); }
+    if k == AST_WHILE { return cg_e_while(n); }
+    if k == AST_VEC2_LOAD { return cg_e_after(n.right, "    movupd xmm0, [rax]\n"); }
+    if k == AST_VEC2_STORE { return cg_e_v2store(n); }
+    if k == AST_VEC2_ADD { return cg_e_v2op(n, "    addpd xmm1, xmm0\n    movupd xmm0, xmm1\n"); }
+    if k == AST_VEC2_SUB { return cg_e_v2op(n, "    subpd xmm1, xmm0\n    movupd xmm0, xmm1\n"); }
+    if k == AST_VEC2_MUL { return cg_e_v2op(n, "    mulpd xmm1, xmm0\n    movupd xmm0, xmm1\n"); }
+    if k == AST_THREAD_START { return cg_e_thstart(n); }
+    if k == AST_CPU_COUNT { return emit_cstr("    sub rsp, 32\n    call __cpu_count\n    add rsp, 32\n"); }
+    if k == AST_THREAD_YIELD { return emit_cstr("    sub rsp, 32\n    call __thread_yield\n    add rsp, 32\n"); }
+    if k == AST_DLL_LOAD { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __dll_load\n    add rsp, 32\n"); }
+    if k == AST_DLL_PROC { return cg_e_two(n, "    mov rdx, rax\n    pop rcx\n    sub rsp, 32\n    call __dll_proc\n    add rsp, 32\n"); }
+    if k == AST_ARG_COUNT { return emit_cstr("    sub rsp, 32\n    call __arg_count\n    add rsp, 32\n"); }
+    if k == AST_ARG_GET { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __arg_get\n    add rsp, 32\n"); }
+    if k == AST_TARGET_OS { return cg_e_targetos(); }
+    if k == AST_TICKS { return emit_cstr("    sub rsp, 32\n    call __ticks\n    add rsp, 32\n"); }
+    if k == AST_TICKS_PER_SEC { return emit_cstr("    sub rsp, 32\n    call __ticks_per_sec\n    add rsp, 32\n"); }
+    if k == AST_THREAD_WAIT { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __thread_wait\n    add rsp, 32\n"); }
+    if k == AST_LOCK_INIT { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __lock_init\n    add rsp, 32\n"); }
+    if k == AST_LOCK_TAKE { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __lock_take\n    add rsp, 32\n"); }
+    if k == AST_LOCK_GIVE { return cg_e_after(n.right, "    mov rcx, rax\n    sub rsp, 32\n    call __lock_give\n    add rsp, 32\n"); }
+    if k == AST_LOADFILE { return cg_e_three(n, "    mov r8, rax\n    pop rdx\n    pop rcx\n    sub rsp, 32\n    call __load_file\n    add rsp, 32\n"); }
+    if k == AST_SIZEOF { return cg_e_sizeof(n); }
+    if k == AST_FAIL { return cg_e_fail(n); }
+    if k == AST_FAILED { return emit_cstr("    sub rsp, 32\n    call __fail_take\n    add rsp, 32\n"); }
+    if k == AST_PRINTFAIL { return emit_cstr("    sub rsp, 32\n    call __print_fail\n    add rsp, 32\n"); }
+    if k == AST_CAST { return cg_e_cast(n); }
+    if k == AST_BINOP { return cg_e_binop(n); }
+    if k == AST_UNOP { return cg_e_unop(n); }
+    if k == AST_CALL { return cg_e_call(n); }
+    if k == AST_CALL_INDIRECT { return cg_e_call_indirect(n); }
+    if k == AST_SYSCALL { return cg_e_syscall(n); }
+    if k == AST_IDENTIFIER { return cg_e_ident(n); }
+    if k == AST_INB { return cg_e_after(n.right, "    mov rdx, rax\n    xor rax, rax\n    in al, dx\n"); }
+    if k == AST_INDEX { return cg_e_index(n); }
+    if k == AST_MEMBER { return cg_e_member(n); }
+    if k == AST_ADDR_OF { return cg_e_addr(n); }
+    if k == AST_DEREF { return cg_e_after(n.right, "    mov rax, [rax]\n"); }
+    if k == AST_PEEK { return cg_e_after(n.right, "    mov rax, [rax]\n"); }
+    if k == AST_READKEY { return emit_cstr("    sub rsp, 32\n    call __read_key\n    add rsp, 32\n"); }
+    if k == AST_STRING_LIT { return cg_e_strlit(n); }
+    if k == AST_READMOUSE { return emit_cstr("    sub rsp, 32\n    call __read_mouse\n    add rsp, 32\n"); }
+    if k == AST_MOUSEX { return emit_cstr("    sub rsp, 32\n    call __mousex_fn\n    add rsp, 32\n"); }
+    if k == AST_MOUSEY { return emit_cstr("    sub rsp, 32\n    call __mousey_fn\n    add rsp, 32\n"); }
+    if k == AST_TRUNC {
+        cg_emit_float(n.right);              // value in xmm0
+        return emit_cstr("    cvttsd2si rax, xmm0\n");
+    }
+    if k == AST_PEEK8 { return cg_e_after(n.right, "    movzx rax, byte [rax]\n"); }
+    if k == AST_PEEK16 { return cg_e_after(n.right, "    movzx rax, word [rax]\n"); }
+    if k == AST_PEEK32 { return cg_e_after(n.right, "    mov eax, dword [rax]\n"); }
+    if k == AST_INTEGER_LIT { return cg_e_intlit(n); }
+    if k == AST_BOOL_LIT {
+        // the value is in type_info, since 'mov rax, true' is not an
+        // instruction
+        return cg_e_wrap("    mov rax, ", n.type_info, "\n");
+    }
+    if k == AST_BREAK { return cg_e_jump(cg_loop_brk()); }
+    if k == AST_CONTINUE { return cg_e_jump(cg_loop_cont()); }
+    // nodes codegen does not support: skipped
+    return 0;
+}
+
+// text, a number, text
+fn cg_e_wrap(a: i64, v: i64, b: i64) -> i64 {
+    emit_cstr(a);
+    emit_uint(v);
+    return emit_cstr(b);
+}
+
+// an expression, then a fixed sequence
+fn cg_e_after(e: ptr<Ast>, s: i64) -> i64 {
+    cg_emit(e);
+    return emit_cstr(s);
+}
+
+// left, parked; right; then the sequence
+fn cg_e_two(n: ptr<Ast>, s: i64) -> i64 {
+    cg_emit(n.left);
+    emit_cstr("    push rax\n");
+    cg_emit(n.right);
+    return emit_cstr(s);
+}
+
+// data, parked; left, parked; right; then the sequence
+fn cg_e_three(n: ptr<Ast>, s: i64) -> i64 {
+    cg_emit(n.data);
+    emit_cstr("    push rax\n");
+    cg_emit(n.left);
+    emit_cstr("    push rax\n");
+    cg_emit(n.right);
+    return emit_cstr(s);
+}
+
+// a break or continue: nothing outside any loop
+fn cg_e_jump(lbl: i64) -> i64 {
+    if lbl == -1 {
+        return 0;
+    }
+    return ir_ctl(IR_JMP, lbl);
+}
+
+// -------------------------------------------------------------------------
+// blocks and declarations
+// -------------------------------------------------------------------------
+
+// a chain of blocks: each one's statement, then the next. Inside raw { }
+// a "..." is an address: + moves it, it does not join.
+fn cg_e_block(n: ptr<Ast>) -> i64 {
+    var s: ptr<Ast> = 0;
+    while n != 0 {
+        if n.node_type != AST_BLOCK {
+            return cg_emit(n);
+        }
+        s = n.left;
+        if n.type_info == BLOCK_RAW {
+            cg_in_raw += 1;
+            kt_mark(s);
+            kdb_stmt(s);
+            cg_emit(s);
+            cg_in_raw -= 1;
+        } else {
+            kt_mark(s);
+            kdb_stmt(s);
+            cg_emit(s);
+        }
+        n = n.right;
+    }
+    return 0;
+}
+
+// the slots a declaration takes: a struct its size, an array its length
+// (elements narrower than eight bytes packed: [u8; 100] takes 13 slots), a
+// scalar 0 (one slot)
+fn cg_e_decl_slots(n: ptr<Ast>) -> i64 {
+    var col: i64 = n.col;
+    var len: i64 = n.type_info;
+    var aw: i64 = 0;
+    var t: ptr<Tok> = n.left;
+    var s: i64 = 0;
+    var sz: i64 = 0;
+    if len != 0 {
+        aw = (col >> 4) & 15;
+        if aw == 0 || aw > 4 {
+            return len;
+        }
+        return (len * aw + 7) >>> 3;
+    }
+    if t == 0 {
+        return 0;
+    }
+    // 'stream' is the built-in pair {ptr, len}, matched by token type, so
+    // the long spelling 'utf8_stream' resolves the same
+    if t.kind == KW_STR {
+        s = stream_struct_id;
+    } else {
+        s = cg_find_struct(t);
+        if s == -1 {
+            return 0;
+        }
+    }
+    pending_struct = s;
+    sz = cg_struct_size(s);
+    return sz;
+}
+
+fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
+    var col: i64 = n.col;
+    var slots: i64 = 0;
+    var off: i64 = 0;
+    var r: ptr<Ast> = n.right;
+    var t: ptr<Tok> = n.left;
+    var s: i64 = 0;
+    pending_vtag = cg_decl_vtag(n);
+    pending_struct = -1;
+    pending_elem = n.child_count;            // pointer element width, 0 if none
+    pending_unsigned = (col >> 1) & 1;       // the type was u8..u64
+    pending_float = col & 1;                 // the type is a real
+    slots = cg_e_decl_slots(n);
+    pending_aw = (col >> 4) & 15;            // bytes per element, 0 not an array
+    // set just before the call that takes them: a module-level declaration
+    // never reaches cg_add_var and must not leave them armed
+    pending_arrlen = cg_u32(n.type_info);
+    pending_stride = cg_u32(n.owner_type);   // row stride, 0 when flat
+    off = cg_add_var(n.data, slots);
+    if r != 0 {
+        // an array literal writes itself into the slots -- unless the
+        // variable is a list<T>, which makes a list of it
+        if ((col >> 8) & 15) != 2 && r.node_type == AST_ARRAY_LIT {
+            cur_lit_aw = (col >> 4) & 15;
+            return cg_emit_array_lit(r, off, col & 1);
+        }
+        // a struct literal writes itself into the slots
+        if r.node_type == AST_STRUCT_LIT {
+            return cg_emit_struct_lit(r, off);
+        }
+    }
+    if r == 0 {
+        return cg_e_decl_noinit(n, off);
+    }
+    // var v: S = <a struct value>: copied whole (a call writes it in place)
+    if n.type_info == 0 && t != 0 {
+        if t.kind == TOK_IDENT {
+            s = cg_find_struct(t);
+            if s != -1 {
+                if cg_store_struct(r, 1, off, s) != 0 {
+                    return 0;
+                }
+            }
+        }
+    }
+    if (col & 1) != 0 {
+        cg_emit_float(r);                    // xmm0
+        return ir_fstloc(off);
+    }
+    cg_emit_for(r, cg_decl_vtag(n));         // "..." into a text is a text
+    ir_stloc(off);
+    // a 'stream' from a literal is a PAIR: the address went into the first
+    // slot, the byte count goes into the second
+    if t == 0 {
+        return 0;
+    }
+    if t.kind != KW_STR || r.node_type != AST_STRING_LIT {
+        return 0;
+    }
+    emit_cstr("    mov qword [rbp-");
+    emit_u32(off - 8);
+    emit_cstr("], ");
+    emit_u32(last_strlit_len);
+    return emit_cstr("\n");
+}
+
+// declared without a value: a list<T> or map<T> starts empty; anything else
+// starts at zero, as a global does (an array keeps what the frame held)
+fn cg_e_decl_noinit(n: ptr<Ast>, off: i64) -> i64 {
+    var lk: i64 = (n.col >> 8) & 15;
+    var t: ptr<Tok> = n.left;
+    var s: i64 = 0;
+    var cnt: i64 = 0;
+    var j: i64 = 0;
+    if ir_on != 0 {
+        if lk == 2 {
+            cg_lib_call(cg_tok(CT_LIST_NEW));
+            return ir_stloc(off);
+        }
+        if lk == 3 {
+            cg_lib_call(cg_tok(CT_MAP_NEW));
+            return ir_stloc(off);
+        }
+    }
+    if n.type_info != 0 {
+        return 0;
+    }
+    s = -1;
+    if t != 0 {
+        if t.kind == TOK_IDENT {
+            s = cg_find_struct(t);
+        }
+    }
+    if s != -1 {
+        cnt = cg_u32(cg_struct_size(s));
+        while j < cnt {
+            emit_cstr("    mov qword [rbp-");
+            emit_u32(off - (j << 3));
+            emit_cstr("], ");
+            emit_cstr("0\n");
+            j += 1;
+        }
+        return 0;
+    }
+    if (n.col & 1) != 0 {
+        emit_cstr("    xorps xmm0, xmm0\n");
+        return ir_fstloc(off);
+    }
+    emit_cstr("    mov rax, 0\n");
+    return ir_stloc(off);
+}
+
+// -------------------------------------------------------------------------
+// assignments
+// -------------------------------------------------------------------------
+
+fn cg_e_assign(n: ptr<Ast>) -> i64 {
+    var r: ptr<Ast> = n.right;
+    var l: ptr<Ast> = n.left;
+    var i: i64 = 0;
+    var k: i64 = 0;
+    // a struct literal into a local writes straight into its slots
+    if r != 0 {
+        if r.node_type == AST_STRUCT_LIT && l.node_type == AST_IDENTIFIER {
+            i = cg_find_var_idx(l.data);
+            if i != -1 {
+                return cg_emit_struct_lit(r, cg_q(&var_offs, i));
+            }
+        }
+    }
+    // a struct into a struct: copied whole
+    if cg_assign_struct(l, r) != 0 {
+        return 0;
+    }
+    k = l.node_type;
+    if k == AST_INDEX { return cg_e_assign_idx(n); }
+    if k == AST_DEREF {
+        cg_emit(l.right);                    // the pointer
+        emit_cstr("    push rax\n");
+        cg_emit(r);
+        return emit_cstr("    mov rcx, rax\n    pop rdx\n    mov [rdx], rcx\n");
+    }
+    if k == AST_MEMBER { return cg_e_assign_member(n); }
+    if k == AST_IDENTIFIER {
+        if cg_expr_is_float_ident(l.data) != 0 {
+            return cg_e_assign_float(n);
+        }
+    }
+    cg_emit_for(r, cg_expr_vtag(l));         // "..." into a text is a text
+    if l.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    if cg_find_var_idx(l.data) != -1 {
+        return ir_stloc(cg_find_var(l.data));
+    }
+    cg_emit_gpre("    mov [rel __g_");
+    cg_emit_gtok(l.data);
+    return emit_cstr("], rax\n");
+}
+
+// x = value with x a real
+fn cg_e_assign_float(n: ptr<Ast>) -> i64 {
+    var l: ptr<Ast> = n.left;
+    cg_emit_float(n.right);
+    if cg_find_var_idx(l.data) != -1 {
+        return ir_fstloc(cg_find_var(l.data));
+    }
+    // a file-scope real lives at its own label, not in the frame
+    cg_emit_gpre("    movsd [rel __g_");
+    cg_emit_gtok(l.data);
+    return emit_cstr("], xmm0\n");
+}
+
+// p.field = value: at the field's width
+fn cg_e_assign_member(n: ptr<Ast>) -> i64 {
+    var m: ptr<Ast> = n.left;
+    var w: i64 = 0;
+    var off: i64 = 0;
+    var s: i64 = 0;
+    if cg_member_is_float(m) != 0 {
+        return cg_e_assign_mfloat(n);
+    }
+    cg_emit(n.right);
+    if cg_member_global(m) != 0 {
+        w = mem_width;
+        s = "    mov [rdx], rax\n";
+        if w == 4 { s = "    mov [rdx], eax\n"; }
+        if w == 2 { s = "    mov [rdx], ax\n"; }
+        if w == 1 { s = "    mov [rdx], al\n"; }
+        return emit_cstr(s);
+    }
+    off = cg_member_offset(m);
+    w = cg_mo_width;
+    emit_cstr("    mov [rbp-");
+    emit_u32(off);
+    s = "], rax\n";
+    if w == 1 { s = "], al\n"; }
+    if w == 2 { s = "], ax\n"; }
+    if w == 4 { s = "], eax\n"; }
+    return emit_cstr(s);
+}
+
+// a real field: the value in xmm0, then stored at the field's width
+fn cg_e_assign_mfloat(n: ptr<Ast>) -> i64 {
+    var m: ptr<Ast> = n.left;
+    var off: i64 = 0;
+    var s: i64 = 0;
+    cg_emit_float(n.right);
+    if cg_member_global(m) != 0 {
+        if mem_width == 4 {
+            return emit_cstr("    cvtsd2ss xmm0, xmm0\n    movss [rdx], xmm0\n");    // f32: narrowed to four bytes
+        }
+        return emit_cstr("    movsd [rdx], xmm0\n");
+    }
+    off = cg_member_offset(m);
+    s = "    movsd [rbp-";
+    if cg_mo_width == 4 {
+        emit_cstr("    cvtsd2ss xmm0, xmm0\n");
+        s = "    movss [rbp-";
+    }
+    emit_cstr(s);
+    emit_u32(off);
+    return emit_cstr("], xmm0\n");
+}
+
+// buf[i] = value: at the element's own width
+fn cg_e_assign_idx(n: ptr<Ast>) -> i64 {
+    var x: ptr<Ast> = n.left;
+    var reals: i64 = cg_index_is_float(x);
+    cg_emit_index_value(x);                  // both subscripts when 2-D
+    emit_cstr("    push rax\n");
+    if reals != 0 {
+        cg_emit_float(n.right);
+    } else {
+        cg_emit(n.right);
+    }
+    emit_cstr("    pop rcx\n");
+    cg_emit_idx_base(x.data);
+    if reals == 0 {
+        return cg_emit_elem_write(x.data);
+    }
+    if cg_arr_aw(x.data) == 4 {
+        return emit_cstr("    cvtsd2ss xmm0, xmm0\n    movss [rdx+rcx*4], xmm0\n");        // [f32; N]: four bytes
+    }
+    return emit_cstr("    movsd [rdx+rcx*8], xmm0\n");
+}
+
+// -------------------------------------------------------------------------
+// return
+// -------------------------------------------------------------------------
+
+fn cg_e_return(n: ptr<Ast>) -> i64 {
+    var r: ptr<Ast> = n.right;
+    if n.left != 0 && (cur_fn_multi & 7) >= 2 {
+        cg_emit_return_multi(n);
+    } else if r != 0 {
+        if cg_cur_sret != -1 {
+            // a struct result goes where the caller said, which goes back
+            // in rax
+            if cg_store_struct(r, 2, cg_sret_slot, cg_cur_sret) == 0 {
+                cg_err_tok = 0;
+                cg_err_msg = "this function returns a struct, and this is not one of that struct ";
+                cg_err_hint = "  hint: a struct is copied, passed and returned whole, as a value of the same struct\r\n";
+                cg_had_error = 1;
+            }
+            emit_cstr("    mov rax, [rbp-");
+            emit_u32(cg_sret_slot);
+            emit_cstr("]\n");
+        } else if cg_expr_is_float(r) != 0 {
+            cg_emit_float(r);
+            // the maths happened in xmm0, but an i64 function returns rax
+            if cur_ret_float == 0 {
+                emit_cstr("    cvttsd2si rax, xmm0\n");
+            }
+        } else {
+            cg_emit(r);
+            // an integer returned from a real function reaches the caller
+            // in xmm0
+            if cur_ret_float != 0 {
+                emit_cstr("    cvtsi2sd xmm0, rax\n");
+            }
+        }
+    }
+    return ir_ctl(IR_JMPRET, cur_ret_id);
+}
+
+// -------------------------------------------------------------------------
+// reads
+// -------------------------------------------------------------------------
+
+// p.field at its declared width; Enum.Member is the constant
+fn cg_e_member(n: ptr<Ast>) -> i64 {
+    var w: i64 = 0;
+    var off: i64 = 0;
+    var s: i64 = 0;
+    if cg_member_enum(n) != 0 {
+        return cg_e_wrap("    mov rax, ", cg_enum_found, "\n");
+    }
+    if cg_member_global(n) != 0 {
+        w = mem_width;
+        s = "    mov rax, [rdx]\n";
+        if w == 4 { s = "    mov eax, dword [rdx]\n"; }
+        if w == 2 { s = "    movzx eax, word [rdx]\n"; }
+        if w == 1 { s = "    movzx eax, byte [rdx]\n"; }
+        emit_cstr(s);
+        return cg_member_sext();
+    }
+    off = cg_member_offset(n);
+    w = cg_mo_width;
+    s = "    mov rax, [rbp-";
+    if w == 1 { s = "    movzx rax, byte [rbp-"; }
+    if w == 2 { s = "    movzx rax, word [rbp-"; }
+    if w == 4 { s = "    mov eax, dword [rbp-"; }
+    emit_cstr(s);
+    emit_u32(off);
+    emit_cstr("]\n");
+    return cg_member_sext();
+}
+
+// &x: the address of a local, a global or a function; &v[i] adds i times
+// the element width
+fn cg_e_addr(n: ptr<Ast>) -> i64 {
+    var i: i64 = cg_find_var_idx(n.data);
+    var f: i64 = 0;
+    var sc: i64 = 0;
+    if i != -1 {
+        // an array parameter's slot holds the array's address: that value
+        if cg_q(&var_isref, i) != 0 {
+            emit_cstr("    mov rax, [rbp-");
+        } else {
+            emit_cstr("    lea rax, [rbp-");
+        }
+        emit_u32(cg_find_var(n.data));
+        emit_cstr("]\n");
+    } else {
+        f = cg_find_func(n.data);
+        if f != -1 {
+            cg_note_addr(f);
+            emit_cstr("    lea rax, [rel ");          // functions: their bare name
+            emit_tok(n.data);
+            return emit_cstr("]\n");
+        }
+        cg_emit_gpre("    lea rax, [rel __g_");
+        cg_emit_gtok(n.data);
+        emit_cstr("]\n");
+    }
+    if n.right == 0 {
+        return 0;
+    }
+    emit_cstr("    push rax\n");                // park the base
+    cg_emit(n.right);                        // the index
+    // a pointer's element width, else the array's
+    i = cg_find_var_idx(n.data);
+    if i != -1 {
+        sc = cg_q(&var_elemsz, i);
+    }
+    if sc == 0 {
+        sc = cg_arr_aw(n.data);
+    }
+    emit_cstr("    imul rax, rax, ");
+    emit_u32(sc);
+    emit_cstr("\n");
+    return emit_cstr("    pop rcx\n    add rax, rcx\n");
+}
+
+// buf[i]: at the element's own width
+fn cg_e_index(n: ptr<Ast>) -> i64 {
+    cg_emit_index_value(n);                  // flat element index in rax
+    emit_cstr("    mov rcx, rax\n");
+    cg_emit_idx_base(n.data);
+    return cg_emit_elem_read(n.data);
+}
+
+// a name: a local, a function used as a value (its record), a global
+fn cg_e_ident(n: ptr<Ast>) -> i64 {
+    var f: i64 = 0;
+    if cg_find_var_idx(n.data) != -1 {
+        return ir_ldloc(cg_find_var(n.data));
+    }
+    if cg_find_global(n.data) == -1 {
+        f = cg_find_func(n.data);
+        if f != -1 {
+            cg_note_addr(f);
+            cg_qs(&fn_asval, f, 1);
+            emit_cstr("    lea rax, [rel __fnrec_");
+            emit_tok(n.data);
+            return emit_cstr("]\n");
+        }
+    }
+    cg_emit_gpre("    mov rax, [rel __g_");
+    cg_emit_gtok(n.data);
+    return emit_cstr("]\n");
+}
+
+fn cg_e_intlit(n: ptr<Ast>) -> i64 {
+    emit_cstr("    mov rax, ");
+    if n.data != 0 {
+        emit_tok(n.data);
+    } else {
+        emit_uint(0);
+    }
+    return emit_cstr("\n");
+}
+
+// "...": the bytes in .data, NUL-ended, rax = their address. \n \t \r \0
+// are resolved, any other escape is the character itself. 64 bytes a line:
+// the assemblers' line buffers cut a long one silently.
+fn cg_e_strlit(n: ptr<Ast>) -> i64 {
+    var lbl: i64 = 0;
+    var t: ptr<Tok> = n.data;
+    var p: i64 = 0;
+    var left: i64 = 0;
+    var c: i64 = 0;
+    var e: i64 = 0;
+    last_strlit_len = 0;
+    lbl = new_label();
+    emit_cstr("section .data\n");
+    emit_cstr(".str");
+    emit_u32(lbl);
+    emit_cstr(": db ");
+    if t != 0 {
+        p = t.value + 1;                     // past the opening quote
+        left = t.length - 2;                 // both quotes dropped
+        if left < 0 {
+            left = 0;
+        }
+        while left != 0 {
+            c = cg_b(p);
+            if c == 92 && left != 1 {
+                e = cg_b(p + 1);
+                c = e;
+                if e == 110 { c = 10; }
+                if e == 116 { c = 9; }
+                if e == 114 { c = 13; }
+                if e == 48 { c = 0; }
+                p += 2;
+                left -= 2;
+            } else {
+                p += 1;
+                left -= 1;
+            }
+            last_strlit_len += 1;
+            emit_uint(c);
+            if (last_strlit_len & 63) != 0 {
+                emit_cstr(",");
+            } else {
+                emit_cstr("\n    db ");
+            }
+        }
+    }
+    emit_cstr("0\n");
+    emit_cstr("section .text\n");
+    emit_cstr("    lea rax, [rel .str");
+    emit_u32(lbl);
+    return emit_cstr("]\n");
+}
+
+// sizeof(T): a scalar's size, a struct's bytes, 8 for a name it does not
+// know; an array type times its count (its element width when given)
+fn cg_e_sizeof(n: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = n.data;
+    var sz: i64 = 0;
+    var s: i64 = 0;
+    var cnt: i64 = n.type_info;
+    if t.kind == TOK_IDENT {
+        s = cg_find_struct(t);
+        if s == -1 {
+            sz = 8;
+        } else {
+            sz = cg_u32(cg_struct_size(s) << 3);
+        }
+    } else {
+        sz = cg_type_size(t.kind);
+    }
+    if cnt != 0 {
+        if n.child_count != 0 {
+            sz = n.child_count;
+        }
+        sz = sz * cnt;
+    }
+    return cg_e_wrap("    mov rax, ", sz, "\n");
+}
+
+// a constant: the runtime never has to ask
+fn cg_e_targetos() -> i64 {
+    if cg_target == TARGET_ELF {
+        return emit_cstr("    mov rax, 2\n");
+    }
+    if cg_target == TARGET_KRN {
+        return emit_cstr("    mov rax, 3\n");
+    }
+    if cg_target == TARGET_BARE {
+        return emit_cstr("    mov rax, 4\n");
+    }
+    return emit_cstr("    mov rax, 1\n");
+}
+
+// -------------------------------------------------------------------------
+// statements of the language and the machine
+// -------------------------------------------------------------------------
+
+fn cg_e_print(n: ptr<Ast>) -> i64 {
+    var r: ptr<Ast> = n.right;
+    var tag: i64 = 0;
+    if r != 0 {
+        if r.node_type == AST_STRING_LIT {
+            cg_emit(r);                      // the address in rax
+            return emit_cstr("    mov rcx, rax\n    sub rsp, 32\n    call __print_str\n    add rsp, 32\n");
+        }
+    }
+    tag = cg_expr_vtag(r);
+    if tag != 0 {
+        if cg_emit_print_tagged(r, tag) != 0 {
+            return 0;
+        }
+    }
+    if cg_expr_is_float(r) != 0 {
+        cg_emit_float(r);
+        return emit_cstr("    call __print_float\n");
+    }
+    cg_emit(r);
+    return emit_cstr("    mov rcx, rax\n    sub rsp, 32\n    call __print_int\n    add rsp, 32\n");
+}
+
+// asm { "..." }: the lines verbatim; the register allocator leaves a
+// function that holds one exactly as it is
+fn cg_e_asm(n: ptr<Ast>) -> i64 {
+    var x: ptr<Ast> = n.right;
+    ra_asm = 1;
+    while x != 0 {
+        emit_cstr("    ");
+        emit_tok_raw(x.data);
+        emit_cstr("\n");
+        x = x.right;
+    }
+    return 0;
+}
+
+// data = the condition, left = then, right = else
+fn cg_e_if(n: ptr<Ast>) -> i64 {
+    var le: i64 = 0;
+    var lend: i64 = 0;
+    kt_mark(n);                              // an 'else if' is no statement
+    le = new_label();
+    lend = new_label();
+    cg_cond_jz(n.data, le);
+    cg_emit(n.left);
+    ir_ctl(IR_JMP, lend);
+    ir_ctl(IR_LABEL, le);
+    cg_emit(n.right);
+    return ir_ctl(IR_LABEL, lend);
+}
+
+// data = the condition (0 loops forever), right = the body, left = the step
+// of a 'for'; continue lands just before the step
+fn cg_e_while(n: ptr<Ast>) -> i64 {
+    var top: i64 = new_label();
+    var lend: i64 = new_label();
+    var cont: i64 = new_label();
+    cg_loop_push(lend, cont);
+    ir_ctl(IR_LABEL, top);
+    if n.data != 0 {
+        cg_cond_jz(n.data, lend);
+    }
+    cg_emit(n.right);
+    ir_ctl(IR_LABEL, cont);
+    if n.left != 0 {
+        kt_mark(n.left);
+        cg_emit(n.left);
+    }
+    ir_ctl(IR_JMP, top);
+    ir_ctl(IR_LABEL, lend);
+    return cg_loop_pop();
+}
+
+// the value first, parked: a call inside the address would disturb xmm0;
+// it comes back in xmm1
+fn cg_e_v2store(n: ptr<Ast>) -> i64 {
+    cg_emit(n.right);
+    emit_cstr("    sub rsp, 16\n    movupd [rsp], xmm0\n");
+    cg_emit(n.left);
+    emit_cstr("    movupd xmm1, [rsp]\n    add rsp, 16\n");
+    return emit_cstr("    movupd [rax], xmm1\n");
+}
+
+fn cg_e_v2op(n: ptr<Ast>, op: i64) -> i64 {
+    cg_emit(n.left);
+    emit_cstr("    sub rsp, 16\n    movupd [rsp], xmm0\n");
+    cg_emit(n.right);                        // right operand in xmm0
+    emit_cstr("    movupd xmm1, [rsp]\n    add rsp, 16\n");                 // left back in xmm1
+    return emit_cstr(op);
+}
+
+// thread_start(worker, x): a function's bare name means &worker, the code
+fn cg_e_thstart(n: ptr<Ast>) -> i64 {
+    var l: ptr<Ast> = n.left;
+    if l != 0 {
+        if l.node_type == AST_IDENTIFIER {
+            if cg_find_var_idx(l.data) == -1 {
+                if cg_find_func(l.data) != -1 {
+                    l.node_type = AST_ADDR_OF;
+                }
+            }
+        }
+    }
+    cg_note_thread(n.left);                  // which function starts a thread
+    cg_emit(n.left);
+    emit_cstr("    push rax\n");
+    cg_emit(n.right);
+    return emit_cstr("    mov rdx, rax\n    pop rcx\n    sub rsp, 32\n    call __thread_start\n    add rsp, 32\n");
+}
+
+// fail "cause", "hint": recorded, and the function leaves with zero and the
+// flag set -- no unwinding, safe inside an interrupt handler
+fn cg_e_fail(n: ptr<Ast>) -> i64 {
+    cg_emit(n.data);
+    emit_cstr("    push rax\n");
+    if n.left != 0 {
+        cg_emit(n.left);
+        emit_cstr("    mov rdx, rax\n    pop rcx\n    sub rsp, 32\n");
+    } else {
+        emit_cstr("    xor rdx, rdx\n    pop rcx\n    sub rsp, 32\n");
+    }
+    kt_failcall();
+    emit_cstr("    add rsp, 32\n");
+    emit_cstr("");
+    emit_cstr("    xor rax, rax\n");
+    return ir_ctl(IR_JMPRET, cur_ret_id);
+}
+
+// an integer target: from a real, truncated; then narrowed to its width
+fn cg_e_cast(n: ptr<Ast>) -> i64 {
+    var w: i64 = n.type_info;
+    if cg_expr_is_float(n.right) != 0 {
+        cg_emit_float(n.right);
+        emit_cstr("    cvttsd2si rax, xmm0\n");
+    } else {
+        cg_emit(n.right);
+    }
+    if w < 0 || w >= 8 {
+        return 0;
+    }
+    if ((n.col >> 1) & 1) != 0 {
+        if w == 1 { return emit_cstr("    and rax, 255\n"); }
+        if w == 2 { return emit_cstr("    and rax, 65535\n"); }
+        if w == 4 { return emit_cstr("    mov eax, eax\n"); }
+        return 0;
+    }
+    if w == 1 { return emit_cstr("    shl rax, 56\n    sar rax, 56\n"); }
+    if w == 2 { return emit_cstr("    shl rax, 48\n    sar rax, 48\n"); }
+    if w == 4 { return emit_cstr("    shl rax, 32\n    sar rax, 32\n"); }
+    return 0;
+}
+
+fn cg_e_unop(n: ptr<Ast>) -> i64 {
+    var op: i64 = n.data;
+    cg_emit(n.right);
+    if op == TOK_TILDE { return emit_cstr("    not rax\n"); }
+    if op == TOK_NOT { return emit_cstr("    test rax, rax\n    sete al\n    movzx rax, al\n"); }
+    // the cache ops leave rax alone: the expression is the address
+    if op == KW_INVCACHE { return emit_cstr("    clflush [rax]\n"); }
+    if op == KW_PREFETCH0 { return emit_cstr("    prefetcht0 [rax]\n"); }
+    return emit_cstr("    neg rax\n");
+}
+
+// syscall(num, a1..a6): every value pushed in order, popped into rax, rdi,
+// rsi, rdx, r10, r8, r9 in reverse. On Windows the kernel's numbers are
+// private: it becomes a fail with a cause.
+fn cg_e_syscall(n: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = n.right;
+    var i: i64 = 0;
+    while a != 0 {
+        cg_emit(a.left);
+        emit_cstr("    push rax\n");
+        a = a.right;
+    }
+    i = n.data - 1;
+    while i >= 0 {
+        cg_syscall_pop(i);
+        i -= 1;
+    }
+    if cg_target == TARGET_PE {
+        kt_flush();
+        return emit_cstr("    sub rsp, 32\n    call __no_syscall\n    add rsp, 32\n");
+    }
+    return emit_cstr("    syscall\n");
+}
+
+fn cg_syscall_pop(i: i64) -> i64 {
+    if i == 0 { return emit_cstr("    pop rax\n"); }
+    if i == 1 { return emit_cstr("    pop rdi\n"); }
+    if i == 2 { return emit_cstr("    pop rsi\n"); }
+    if i == 3 { return emit_cstr("    pop rdx\n"); }
+    if i == 4 { return emit_cstr("    pop r10\n"); }
+    if i == 5 { return emit_cstr("    pop r8\n"); }
+    if i == 6 { return emit_cstr("    pop r9\n"); }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// binary operators
+// -------------------------------------------------------------------------
+
+fn cg_e_is_cmp(op: i64) -> i64 {
+    if op == TOK_EQ || op == TOK_NEQ || op == TOK_LT || op == TOK_GT {
+        return 1;
+    }
+    if op == TOK_LTE || op == TOK_GTE {
+        return 1;
+    }
+    return 0;
+}
+
+fn cg_e_binop(n: ptr<Ast>) -> i64 {
+    var op: i64 = n.data;
+    // texts: == and != compare the bytes, + joins
+    if op == TOK_PLUS {
+        if cg_is_concat(n) != 0 {
+            return cg_emit_concat(n);
+        }
+    }
+    if op == TOK_EQ || op == TOK_NEQ {
+        if cg_is_textcmp(n) != 0 {
+            return cg_emit_textcmp(n);
+        }
+    }
+    if op == TOK_AND {
+        return cg_e_logic(n, IR_JZ, "    mov rax, 1\n", "    mov rax, 0\n");
+    }
+    if op == TOK_OR {
+        return cg_e_logic(n, IR_JNZ, "    mov rax, 0\n", "    mov rax, 1\n");
+    }
+    if cg_e_is_cmp(op) != 0 {
+        if cg_expr_is_float(n.left) != 0 || cg_expr_is_float(n.right) != 0 {
+            return cg_e_fcompare(n);
+        }
+    }
+    return cg_e_int_binop(n);
+}
+
+// && and ||: short-circuit. Both sides jump to the label when they settle
+// it; falling through gives the other answer.
+fn cg_e_logic(n: ptr<Ast>, jk: i64, through: i64, at: i64) -> i64 {
+    var lbl: i64 = new_label();
+    var lend: i64 = new_label();
+    cg_emit(n.left);
+    ir_ctl(jk, lbl);
+    cg_emit(n.right);
+    ir_ctl(jk, lbl);
+    emit_cstr(through);
+    ir_ctl(IR_JMP, lend);
+    ir_ctl(IR_LABEL, lbl);
+    emit_cstr(at);
+    return ir_ctl(IR_LABEL, lend);
+}
+
+// a comparison with a real on either side: ucomisd and a set
+fn cg_e_fcompare(n: ptr<Ast>) -> i64 {
+    var op: i64 = n.data;
+    cg_emit_float(n.left);
+    emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+    cg_emit_float(n.right);
+    emit_cstr("    movaps xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n");                // xmm0 = left, xmm1 = right
+    emit_cstr("    ucomisd xmm0, xmm1\n");
+    if op == TOK_LT { return emit_cstr("    setb al\n    movzx rax, al\n"); }
+    if op == TOK_GT { return emit_cstr("    seta al\n    movzx rax, al\n"); }
+    if op == TOK_LTE { return emit_cstr("    setbe al\n    movzx rax, al\n"); }
+    if op == TOK_GTE { return emit_cstr("    setae al\n    movzx rax, al\n"); }
+    if op == TOK_EQ { return emit_cstr("    sete al\n    movzx rax, al\n"); }
+    return emit_cstr("    setne al\n    movzx rax, al\n");
+}
+
+// 1 when either side is unsigned
+fn cg_binop_is_unsigned(n: ptr<Ast>) -> i64 {
+    if cg_expr_is_unsigned(n.left) != 0 {
+        return 1;
+    }
+    if cg_expr_is_unsigned(n.right) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn cg_e_int_binop(n: ptr<Ast>) -> i64 {
+    var op: i64 = n.data;
+    var k: i64 = 0;
+    var s: i64 = 0;
+    // x << 3, x >> 3, x >>> 3: the count is part of the instruction
+    if op == TOK_LSHIFT || op == TOK_RSHIFT || op == TOK_URSHIFT {
+        k = cg_lit_small(n.right);
+        if k != -1 {
+            cg_emit(n.left);
+            s = "    sar rax, ";
+            if cg_binop_is_unsigned(n) != 0 {
+                s = "    shr rax, ";
+            }
+            if op == TOK_URSHIFT {
+                s = "    shr rax, ";
+            }
+            if op == TOK_LSHIFT {
+                s = "    shl rax, ";
+            }
+            return cg_e_wrap(s, k, "\n");
+        }
+    }
+    // A constant or a variable on the left and no calls on the right: the
+    // right first, into rcx, then the left straight into rax -- no push and
+    // pop. When the right is a constant or a local it goes straight into
+    // rcx after the left.
+    if cg_is_leafish(n.right) == 0 && cg_is_leafish(n.left) != 0 && cg_expr_pure(n.right) != 0 {
+        cg_emit(n.right);
+        cg_ptr_scale(n);
+        emit_cstr("    mov rcx, rax\n");
+        cg_emit(n.left);
+    } else {
+        cg_emit(n.left);
+        if cg_leaf_to_rcx(n.right, n) == 0 {
+            emit_cstr("    push rax\n");
+            cg_emit(n.right);
+            cg_ptr_scale(n);                 // pointer arithmetic: scaled
+            emit_cstr("    mov rcx, rax\n");
+            emit_cstr("    pop rax\n");
+        }
+    }
+    // the sign decided BEFORE emitting: div/idiv, shr/sar, setb/setl
+    binop_unsigned = cg_binop_is_unsigned(n);
+    return cg_emit_binop_op(op);
+}
+
+// the operation on rax (left) and rcx (right)
+fn cg_emit_binop_op(op: i64) -> i64 {
+    var u: i64 = binop_unsigned;
+    if op == TOK_PLUS { return ir_ctl(IR_ALU, ALU_ADD); }
+    if op == TOK_MINUS { return ir_ctl(IR_ALU, ALU_SUB); }
+    if op == TOK_STAR { return ir_ctl(IR_ALU, ALU_IMUL); }
+    if op == TOK_SLASH {
+        // idiv on a u64 above 2^63 gives the wrong quotient and can fault
+        if u != 0 { return emit_cstr("    xor rdx, rdx\n    div rcx\n"); }
+        return emit_cstr("    cqo\n    idiv rcx\n");
+    }
+    if op == TOK_PERCENT {
+        if u != 0 { return emit_cstr("    xor rdx, rdx\n    div rcx\n    mov rax, rdx\n"); }
+        return emit_cstr("    cqo\n    idiv rcx\n    mov rax, rdx\n");
+    }
+    if op == TOK_LSHIFT { return emit_cstr("    shl rax, cl\n"); }
+    if op == TOK_RSHIFT {
+        // '>>' on an unsigned value is a logical shift
+        if u != 0 { return emit_cstr("    shr rax, cl\n"); }
+        return emit_cstr("    sar rax, cl\n");
+    }
+    if op == TOK_URSHIFT { return emit_cstr("    shr rax, cl\n"); }
+    if op == TOK_CARET { return ir_ctl(IR_ALU, ALU_XOR); }
+    if op == TOK_AMPERSAND { return ir_ctl(IR_ALU, ALU_AND); }
+    if op == TOK_PIPE { return ir_ctl(IR_ALU, ALU_OR); }
+    if op == KW_ROTL { return emit_cstr("    rol rax, cl\n"); }
+    if op == KW_ROTR { return emit_cstr("    ror rax, cl\n"); }
+    if cg_e_is_cmp(op) == 0 {
+        return 0;
+    }
+    emit_cstr("    cmp rax, rcx\n");
+    if op == TOK_EQ { return emit_cstr("    sete al\n    movzx rax, al\n"); }
+    if op == TOK_NEQ { return emit_cstr("    setne al\n    movzx rax, al\n"); }
+    if op == TOK_LT {
+        if u != 0 { return emit_cstr("    setb al\n    movzx rax, al\n"); }
+        return emit_cstr("    setl al\n    movzx rax, al\n");
+    }
+    if op == TOK_GT {
+        if u != 0 { return emit_cstr("    seta al\n    movzx rax, al\n"); }
+        return emit_cstr("    setg al\n    movzx rax, al\n");
+    }
+    if op == TOK_LTE {
+        if u != 0 { return emit_cstr("    setbe al\n    movzx rax, al\n"); }
+        return emit_cstr("    setle al\n    movzx rax, al\n");
+    }
+    if u != 0 { return emit_cstr("    setae al\n    movzx rax, al\n"); }
+    return emit_cstr("    setge al\n    movzx rax, al\n");
+}
+
+// -------------------------------------------------------------------------
+// calls
+// -------------------------------------------------------------------------
+
+// the i-th node of a list
+fn cg_e_nth(a: ptr<Ast>, i: i64) -> ptr<Ast> {
+    while i > 0 {
+        a = a.right;
+        i -= 1;
+    }
+    return a;
+}
+
+fn cg_e_poparg(i: i64) -> i64 {
+    if i == 0 { return emit_cstr("    pop rcx\n"); }
+    if i == 1 { return emit_cstr("    pop rdx\n"); }
+    if i == 2 { return emit_cstr("    pop r8\n"); }
+    if i == 3 { return emit_cstr("    pop r9\n"); }
+    if i == 4 { return emit_cstr("    pop r10\n"); }
+    return emit_cstr("    pop rax\n");
+}
+
+fn cg_e_call(n: ptr<Ast>) -> i64 {
+    var kind: i64 = 0;
+    var sv: i64 = -1;
+    if cg_c_fn(n) != 0 { return 0; }         // c_fn(f): the C entry of an export
+    if cg_c_call(n) != 0 { return 0; }       // c_call(p, ...): C at an address
+    if cg_list_call(n) != 0 { return 0; }    // on a list<S>: the _n versions
+    if cg_intrinsic(n) != 0 { return 0; }    // vec4_add(...) and the like
+    kind = cg_call_kind(n);                  // 0 a function, 1 through a value
+    if kind == 2 {
+        return 0;                            // no such function: reported
+    }
+    if kind == 3 {
+        return cg_call_extern(n);            // a function of a system library
+    }
+    if kind == 1 {
+        cg_note_indirect();
+        cg_fnval_args(n);                    // the record goes along, last
+    }
+    cg_note_call(n.data);                    // for the thread check
+    // a struct result: where it goes is settled before the arguments (which
+    // may call such functions themselves), and set in r11 last
+    if n.owner_type != FNVAL_MARK {
+        sv = cg_sret_setup(n.data);
+    }
+    cg_e_call_args(n);
+    cg_sret_pend = sv;
+    emit_cstr("    sub rsp, 32\n");
+    kt_flush();
+    cg_sret_emit(cg_sret_pend);
+    if n.owner_type == FNVAL_MARK {
+        cg_emit_fnval_target(n.data);        // the record's first word: code
+    } else {
+        emit_cstr("    call ");
+        if n.data != 0 {
+            emit_tok(n.data);
+        }
+        emit_cstr("\n");
+    }
+    emit_cstr("    add rsp, 32\n");
+    // the stack arguments dropped
+    if extra_args != 0 {
+        emit_cstr("    add rsp, ");
+        emit_u32(extra_args << 3);
+        emit_cstr("\n");
+    }
+    return 0;
+}
+
+// The arguments: integers in rcx, rdx, r8, r9, r10, rax, reals in xmm0..
+// by position. Seven and up are pushed FIRST, in reverse, so the seventh
+// is nearest the return address. The rest are pushed in order and popped
+// in reverse into their registers; a constant or a local is not pushed at
+// all but loaded at the very end, after every pop.
+fn cg_e_call_args(n: ptr<Ast>) -> i64 {
+    var cnt: i64 = cg_count_list(n.right);
+    var i: i64 = 0;
+    var a: ptr<Ast> = 0;
+    var x: ptr<Ast> = 0;
+    extra_args = 0;
+    if cnt > 6 {
+        extra_args = cnt - 6;
+        i = cnt - 1;
+        while i >= 6 {
+            a = cg_e_nth(n.right, i);
+            x = a.left;
+            if cg_expr_is_float(x) != 0 {
+                cg_emit_float(x);
+                emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+            } else {
+                cg_emit(x);
+                emit_cstr("    push rax\n");
+            }
+            i -= 1;
+        }
+    }
+    a = n.right;
+    i = 0;
+    while a != 0 && i < 6 {
+        cg_e_push_arg(n, a, i);
+        i += 1;
+        a = a.right;
+    }
+    while i > 0 {
+        i -= 1;
+        a = cg_e_nth(n.right, i);
+        x = a.left;
+        if cg_arg_struct_id(x) == -1 && cg_expr_is_float(x) != 0 {
+            emit_cstr("    movsd xmm");
+            emit_u32(i);
+            emit_cstr(", [rsp]\n    add rsp, 8\n");
+        } else if cg_arg_leaf_here(a, i) == 0 {
+            cg_e_poparg(i);
+        }
+    }
+    a = n.right;
+    i = 0;
+    while a != 0 && i < 6 {
+        if cg_arg_leaf_here(a, i) != 0 {
+            cg_emit_leaf_arg(a.left, i);
+        }
+        i += 1;
+        a = a.right;
+    }
+    return 0;
+}
+
+// one register argument, onto the stack (a leaf: nothing yet). A struct
+// is passed by address, which the callee's prologue copies in; a slot that
+// already holds an address (an array parameter handed on) is forwarded.
+fn cg_e_push_arg(n: ptr<Ast>, a: ptr<Ast>, i: i64) -> i64 {
+    var x: ptr<Ast> = a.left;
+    var j: i64 = 0;
+    if cg_arg_struct_id(x) != -1 {
+        if x.node_type == AST_IDENTIFIER {
+            j = cg_find_var_idx(x.data);
+            if j != -1 {
+                if cg_q(&var_isref, j) != 0 {
+                    emit_cstr("    mov rax, [rbp-");
+                } else {
+                    emit_cstr("    lea rax, [rbp-");
+                }
+                emit_u32(cg_q(&var_offs, j));
+                emit_cstr("]\n");
+                return emit_cstr("    push rax\n");
+            }
+        }
+        cg_emit_struct_addr(x);
+        return emit_cstr("    push rax\n");
+    }
+    if cg_expr_is_float(x) != 0 {
+        cg_emit_float(x);
+        return emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+    }
+    if cg_arg_leaf_here(a, i) != 0 {
+        return 0;
+    }
+    cg_emit_for(x, cg_param_vtag(n, i));     // [a, b] for a list<T> is a list
+    return emit_cstr("    push rax\n");
+}
+
+// call p(args): through a pointer, evaluated FIRST and parked so a nested
+// call among the arguments cannot lose it
+fn cg_e_call_indirect(n: ptr<Ast>) -> i64 {
+    var cnt: i64 = cg_count_list(n.right);
+    var a: ptr<Ast> = 0;
+    var i: i64 = 0;
+    cg_note_indirect();                      // its target cannot be known
+    cg_emit(n.left);
+    emit_cstr("    push rax\n");
+    // more than four: the fifth goes on at [rsp+32], above the shadow space
+    if cnt > 4 {
+        return cg_e_ci_many(n, cnt);
+    }
+    a = n.right;
+    while a != 0 && i < 4 {
+        cg_emit(a.left);
+        emit_cstr("    push rax\n");
+        i += 1;
+        a = a.right;
+    }
+    while i > 0 {
+        i -= 1;
+        cg_e_poparg(i);
+    }
+    emit_cstr("    pop r11\n");                 // r11 = the pointer
+    // a system library wants rsp 16-aligned at the call: aligned, the old
+    // rsp kept on the stack
+    emit_cstr("    mov rax, rsp\n    and rsp, -16\n    sub rsp, 8\n    push rax\n");
+    emit_cstr("    sub rsp, 32\n");
+    kt_flush();
+    emit_cstr("    call r11\n");
+    emit_cstr("    add rsp, 32\n");
+    return emit_cstr("    pop rsp\n");
+}
+
+// every argument pushed, the first deepest, the pointer under them; rax
+// keeps that place: argument i (1-based) is [rax + 8*(n-i)], the pointer
+// [rax + 8*n]. A frame of 32 + 8*(n-4) bytes, rounded up to 16, takes the
+// fifth argument on at [rsp+32].
+fn cg_e_ci_many(n: ptr<Ast>, cnt: i64) -> i64 {
+    var a: ptr<Ast> = n.right;
+    var fr: i64 = 0;
+    var i: i64 = 0;
+    while a != 0 {
+        cg_emit(a.left);
+        emit_cstr("    push rax\n");
+        a = a.right;
+    }
+    emit_cstr("    mov rax, rsp\n    and rsp, -16\n    sub rsp, 8\n    push rax\n");
+    fr = cg_u32(((cnt - 4) << 3) + 47) & 0xFFFFFFF0;
+    cg_e_wrap("    sub rsp, ", fr, "\n");
+    i = 5;
+    while i <= cnt {
+        emit_cstr("    mov r10, [rax+");
+        emit_u32((cnt - i) << 3);
+        emit_cstr("]\n");
+        emit_cstr("    mov [rsp+");
+        emit_u32(((i - 5) << 3) + 32);
+        emit_cstr("], r10\n");
+        i += 1;
+    }
+    i = 0;
+    while i < 4 {
+        if i == 0 {
+            emit_cstr("    mov rcx, [rax+");
+        } else if i == 1 {
+            emit_cstr("    mov rdx, [rax+");
+        } else if i == 2 {
+            emit_cstr("    mov r8, [rax+");
+        } else {
+            emit_cstr("    mov r9, [rax+");
+        }
+        emit_u32((cnt - i - 1) << 3);
+        emit_cstr("]\n");
+        i += 1;
+    }
+    emit_cstr("    mov r11, [rax+");
+    emit_u32(cnt << 3);
+    emit_cstr("]\n");
+    kt_flush();
+    emit_cstr("    call r11\n");
+    cg_e_wrap("    add rsp, ", fr, "\n");
+    emit_cstr("    pop rsp\n");
+    // the arguments and the pointer dropped
+    emit_cstr("    add rsp, ");
+    emit_u32((cnt << 3) + 8);
+    return emit_cstr("\n");
+}

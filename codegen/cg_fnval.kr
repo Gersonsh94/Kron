@@ -1,0 +1,584 @@
+kron_program
+kron_domain cg_fnval;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// SEVERAL RESULTS (the receiving side), FUNCTIONS AS VALUES, EXTERN BLOCKS
+// =========================================================================
+
+// a, b = f(): the call, its results parked on the stack, then taken off one
+// by one into the targets. With 'var' (data 1) each target first takes the
+// type of its result. Results nobody named are never pushed.
+fn cg_emit_multi(m: ptr<Ast>) -> i64 {
+    var desc: i64 = 0;
+    var c: ptr<Ast> = m.right;
+    var f: i64 = 0;
+    var n: i64 = 0;
+    var e: ptr<Ast> = 0;
+    var w: i64 = 0;
+    var tv: ptr<Ast> = 0;
+    var nm: i64 = 0;
+    var i: i64 = 0;
+    var off: i64 = 0;
+    if c.data != 0 {
+        f = cg_find_func(c.data);
+        if f != -1 {
+            desc = cg_q(&fn_multi, f);
+        }
+    }
+    cg_emit(c);                              // rax, rdx, r8, r9
+    n = cg_chain_len(m.left);
+    if n > 4 {
+        n = 4;
+    }
+    if n >= 4 {
+        emit_cstr("    push r9\n");
+    }
+    if n >= 3 {
+        emit_cstr("    push r8\n");
+    }
+    if n >= 2 {
+        emit_cstr("    push rdx\n");
+    }
+    emit_cstr("    push rax\n");
+    e = m.left;
+    w = 0;
+    while e != 0 && w < n {
+        emit_cstr("    pop rax\n");
+        tv = e.left;
+        if tv != 0 {                         // '_' takes nothing
+            nm = tv.data;
+            i = cg_find_var_idx(nm);
+            if i == -1 {
+                cg_emit_gpre("    mov [rel __g_");
+                cg_emit_gtok(nm);
+                emit_cstr("], rax\n");
+            } else {
+                if m.data != 0 {
+                    cg_qs(&var_isfloat, i, cg_multi_float(desc, w));
+                    cg_qs(&var_vtag, i, cg_multi_vtag(desc, w));
+                }
+                off = cg_q(&var_offs, i);
+                if cg_q(&var_isfloat, i) != 0 {
+                    emit_cstr("    push rax\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+                    ir_fstloc(off);
+                } else {
+                    ir_stloc(off);
+                }
+            }
+        }
+        w += 1;
+        e = e.right;
+    }
+    return 0;
+}
+
+// =========================================================================
+// FUNCTIONS AS VALUES
+//
+//     var add = fn(a: i64, b: i64) -> i64 { return a + b + k; };
+//     print(add(2, 3));
+//     var g: fn(i64, i64) -> i64 = max;      // a function's name is a value too
+//
+// A function value is the address of a record: [code][the values it keeps].
+// A named function has a fixed record, __fnrec_NAME: dq NAME. A fn written
+// as a value gets one made when the expression runs (__clo_alloc), with the
+// values of the variables around it that it uses -- kept by value, as they
+// were at that moment. Calling through a value passes the record as a
+// last, hidden argument: a named function never looks at it, a fn value
+// reads what it keeps out of it at its start.
+// =========================================================================
+
+// cg_node(type) -> a zeroed node made here, 0 when the pool is full
+fn cg_node(kind: i64) -> ptr<Ast> {
+    var a: i64 = 0;
+    var i: i64 = 0;
+    var nd: ptr<Ast> = 0;
+    if cg_pool_n >= CG_POOL_NODES {
+        return 0;
+    }
+    a = &cg_pool + cg_pool_n * AST_NODE_SIZE;
+    cg_pool_n += 1;
+    while i < AST_NODE_SIZE / 8 {
+        cg_qs(a, i, 0);
+        i += 1;
+    }
+    nd = a;
+    nd.node_type = kind;
+    return nd;
+}
+
+// the tag of a value of a function whose result flags are these (as a
+// fn node's col): 5, with 2 for a real result and 1 for a text one as the
+// element
+fn cg_fnval_tag(flags: i64) -> i64 {
+    if (flags & 1) != 0 {
+        return 0x25;
+    }
+    if cg_u32(flags) >> 8 == 1 {
+        return 0x15;
+    }
+    return 5;
+}
+
+// the type tag of argument w of the function a call names, 0 when unknown
+fn cg_param_vtag(c: ptr<Ast>, w: i64) -> i64 {
+    var f: i64 = 0;
+    var fnode: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    if c.data == 0 {
+        return 0;
+    }
+    f = cg_find_func(c.data);
+    if f == -1 {
+        return 0;
+    }
+    fnode = cg_q(&fn_nodes, f);
+    p = fnode.left;
+    while p != 0 {
+        if w == 0 {
+            return p.col >> 8;
+        }
+        w -= 1;
+        p = p.right;
+    }
+    return 0;
+}
+
+// cg_call_kind(call) -> 0 a function, 1 through a variable holding a
+// function value, 2 nothing by that name (an error), 3 an extern function
+// (in a module an extern block names functions of the compiler's other
+// parts: they are called as Kron calls, by name)
+fn cg_call_kind(c: ptr<Ast>) -> i64 {
+    var t: i64 = c.data;
+    if t == 0 {
+        return 0;
+    }
+    if cg_find_var_idx(t) != -1 {
+        return 1;
+    }
+    if cg_find_func(t) != -1 {
+        return 0;
+    }
+    if cg_find_global(t) != -1 {
+        return 1;
+    }
+    if cg_is_intrinsic(t) != 0 {
+        return 0;
+    }
+    if cg_find_extern(t) != -1 {
+        if cg_as_module != 0 {
+            return 0;
+        }
+        return 3;
+    }
+    // no function, no variable: said, instead of jumping to address zero
+    cg_err_tok = t;
+    cg_err_msg = "unknown function ";
+    cg_err_hint = 0;
+    cg_had_error = 1;
+    return 2;
+}
+
+// 1 when a call's result is a real: a function declared so, a value whose
+// fn type returns f64, an extern function returning f64 or f32
+fn cg_call_ret_float(c: ptr<Ast>) -> i64 {
+    var t: i64 = c.data;
+    var f: i64 = 0;
+    var tag: i64 = 0;
+    var x: ptr<Ast> = 0;
+    if t == 0 {
+        return 0;
+    }
+    if tok_equal(t, cg_tok(CT_VEC4_SUM)) == 1 {
+        return 1;
+    }
+    if cg_find_var_idx(t) == -1 {
+        f = cg_find_func(t);
+        if f != -1 {
+            return cg_q(&fn_ret_float, f);
+        }
+        if cg_find_global(t) == -1 {
+            f = cg_find_extern(t);
+            if f == -1 {
+                return 0;
+            }
+            x = cg_q(&cg_ext_nodes, f);
+            if cg_u32(x.child_count) >= 8 {
+                return 1;
+            }
+            return 0;
+        }
+    }
+    tag = cg_vtag_of_name(t);
+    if (tag & 15) == 5 && ((tag >> 4) & 15) == 2 {
+        return 1;
+    }
+    return 0;
+}
+
+// a call through a value: the variable itself goes on the end of the
+// arguments, and the call is marked
+fn cg_fnval_args(c: ptr<Ast>) -> i64 {
+    var id: ptr<Ast> = 0;
+    var arg: ptr<Ast> = 0;
+    var tl: ptr<Ast> = 0;
+    if c.owner_type == FNVAL_MARK {
+        return 0;                            // already done
+    }
+    c.owner_type = FNVAL_MARK;
+    id = cg_node(AST_IDENTIFIER);
+    if id == 0 {
+        return 0;
+    }
+    id.data = c.data;
+    arg = cg_node(AST_ARG);
+    if arg == 0 {
+        return 0;
+    }
+    arg.left = id;
+    tl = c.right;
+    if tl == 0 {
+        c.right = arg;
+        return 0;
+    }
+    while tl.right != 0 {
+        tl = tl.right;
+    }
+    tl.right = arg;
+    return 0;
+}
+
+// r11 = the value, then a call of the code its record starts with; the
+// arguments are already in their registers
+fn cg_emit_fnval_target(t: i64) -> i64 {
+    if cg_find_var_idx(t) != -1 {
+        emit_cstr("    mov r11, [rbp-");
+        emit_u32(cg_find_var(t));
+    } else {
+        cg_emit_gpre("    mov r11, [rel __g_");
+        cg_emit_gtok(t);
+    }
+    emit_cstr("]\n");
+    return emit_cstr("    mov r11, [r11]\n    call r11\n");
+}
+
+// the names a fn value declares inside itself: its own, not kept
+fn cg_lam_excl(n: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    if n == 0 {
+        return 0;
+    }
+    k = n.node_type;
+    if k == AST_VAR_DECL || k == AST_CONST_DECL {
+        cg_lx_add(n.data);
+        return cg_lam_excl(n.right);
+    }
+    if k == AST_MEMBER || k == AST_ADDR_OF || k == AST_LAMBDA {
+        return 0;
+    }
+    if k == AST_INDEX {
+        return cg_lam_excl(n.right);
+    }
+    cg_lam_excl(n.left);
+    return cg_lam_excl(n.right);
+}
+
+fn cg_lx_add(t: i64) -> i64 {
+    if lx_n < 256 {
+        cg_qs(&lx_toks, lx_n, t);
+        lx_n += 1;
+    }
+    return 0;
+}
+
+// 1 when the fn value declares this name itself
+fn cg_lx_has(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < lx_n {
+        if tok_equal(t, cg_q(&lx_toks, i)) == 1 {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// a name a fn value uses, kept when it is a plain local of the function
+// around (not an array or a struct), not one of its own, not kept already
+fn cg_cap_consider(t: i64, q: i64) -> i64 {
+    var i: i64 = 0;
+    var n: i64 = 0;
+    var j: i64 = 0;
+    var base: i64 = q * LQ_CAPS;
+    if t == 0 {
+        return 0;
+    }
+    if cg_lx_has(t) != 0 {
+        return 0;
+    }
+    i = cg_find_var_idx(t);
+    if i == -1 {
+        return 0;
+    }
+    if cg_q(&var_arrlen, i) != 0 {
+        return 0;
+    }
+    if cg_q(&var_structs, i) != -1 {
+        return 0;
+    }
+    n = cg_q(&lq_ncap, q);
+    while j < n {
+        if tok_equal(t, cg_q(&lq_cap, base + j)) == 1 {
+            return 0;
+        }
+        j += 1;
+    }
+    if n >= LQ_CAPS {
+        cg_err_tok = t;
+        cg_err_msg = "too many fn values, or one keeping too many names (16) ";
+        cg_err_hint = 0;
+        cg_had_error = 1;
+        return 0;
+    }
+    cg_qs(&lq_cap, base + n, t);
+    cg_qs(&lq_cflag, base + n, cg_u32(cg_q(&var_isfloat, i) | (cg_q(&var_vtag, i) << 8)));
+    cg_qs(&lq_ncap, q, n + 1);
+    return 0;
+}
+
+// every name a fn value's body uses
+fn cg_cap_walk(n: ptr<Ast>, q: i64) -> i64 {
+    var k: i64 = 0;
+    if n == 0 {
+        return 0;
+    }
+    k = n.node_type;
+    if k == AST_IDENTIFIER {
+        return cg_cap_consider(n.data, q);
+    }
+    if k == AST_CALL {
+        cg_cap_consider(n.data, q);          // a variable holding a function
+        return cg_cap_walk(n.right, q);
+    }
+    if k == AST_VAR_DECL || k == AST_CONST_DECL || k == AST_INDEX {
+        return cg_cap_walk(n.right, q);
+    }
+    if k == AST_MEMBER || k == AST_ADDR_OF {
+        return 0;
+    }
+    if k == AST_LAMBDA {
+        // what an inner one keeps has to pass through this one
+        return cg_cap_walk(n.right, q);
+    }
+    if k == AST_IF || k == AST_WHILE {
+        cg_cap_walk(n.data, q);
+    }
+    cg_cap_walk(n.left, q);
+    return cg_cap_walk(n.right, q);
+}
+
+// a fn written as a value: queued, what it keeps worked out, its record
+// made; the record in rax
+fn cg_emit_lambda(n: ptr<Ast>) -> i64 {
+    var q: i64 = lq_n;
+    var p: ptr<Ast> = 0;
+    var ncap: i64 = 0;
+    var w: i64 = 0;
+    var id: ptr<Ast> = 0;
+    if q >= LQ_MAX {
+        cg_err_tok = n.data;
+        cg_err_msg = "too many fn values, or one keeping too many names (16) ";
+        cg_had_error = 1;
+        return 0;
+    }
+    lq_n += 1;
+    cg_qs(&lq_node, q, n);
+    cg_qs(&lq_ncap, q, 0);
+    // its own names: the parameters and what it declares
+    lx_n = 0;
+    p = n.left;
+    while p != 0 {
+        cg_lx_add(p.data);
+        p = p.right;
+    }
+    cg_lam_excl(n.right);
+    cg_cap_walk(n.right, q);
+    // the record: [code][kept values]
+    ncap = cg_q(&lq_ncap, q);
+    emit_cstr("    mov rcx, ");
+    emit_u32(ncap * 8 + 8);
+    emit_cstr("\n");
+    emit_cstr("    sub rsp, 32\n    call __clo_alloc\n    add rsp, 32\n");
+    emit_cstr("    lea rdx, [rel ");
+    emit_tok(n.data);
+    emit_cstr("]\n    mov [rax], rdx\n    push rax\n");
+    while w < ncap {
+        id = cg_node(AST_IDENTIFIER);
+        if id == 0 {
+            break;
+        }
+        id.data = cg_q(&lq_cap, q * LQ_CAPS + w);
+        if (cg_q(&lq_cflag, q * LQ_CAPS + w) & 1) != 0 {
+            cg_emit_float(id);
+            emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");        // the bits, as they are
+        } else {
+            cg_emit(id);
+            emit_cstr("    push rax\n");
+        }
+        emit_cstr("    pop rax\n    pop rcx\n    push rcx\n    mov [rcx+");
+        emit_u32(w * 8 + 8);
+        emit_cstr("], rax\n");
+        w += 1;
+    }
+    return emit_cstr("    pop rax\n");
+}
+
+// every fn value queued so far, as a function of its own -- after the one
+// it sits in, never inside it; one may queue more
+fn cg_drain_lambdas() -> i64 {
+    var q: i64 = 0;
+    var lam: ptr<Ast> = 0;
+    var env: ptr<Ast> = 0;
+    var tl: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    while lq_done < lq_n {
+        q = lq_done;
+        lq_done += 1;
+        lam = cg_q(&lq_node, q);
+        // its hidden last parameter: the record
+        env = cg_node(AST_PARAM);
+        if env == 0 {
+            return 0;
+        }
+        env.data = cg_tok(CT_ENV);
+        tl = lam.left;
+        if tl == 0 {
+            lam.left = env;
+        } else {
+            while tl.right != 0 {
+                tl = tl.right;
+            }
+            tl.right = env;
+        }
+        f = cg_node(AST_FUNCTION);
+        if f == 0 {
+            return 0;
+        }
+        f.data = lam.data;
+        f.left = lam.left;
+        f.right = lam.right;
+        f.col = lam.col;
+        cg_lam_cur = q;
+        cg_function(f);
+        cg_lam_cur = -1;
+    }
+    return 0;
+}
+
+// at the start of a fn value, after its parameters: each kept name a local,
+// filled from the record
+fn cg_lam_prologue() -> i64 {
+    var q: i64 = cg_lam_cur;
+    var rec: i64 = cg_find_var(cg_tok(CT_ENV));
+    var n: i64 = cg_q(&lq_ncap, q);
+    var w: i64 = 0;
+    var fl: i64 = 0;
+    var off: i64 = 0;
+    while w < n {
+        fl = cg_q(&lq_cflag, q * LQ_CAPS + w);
+        pending_float = fl & 1;
+        pending_vtag = cg_u32(fl) >> 8;
+        off = cg_add_var(cg_q(&lq_cap, q * LQ_CAPS + w), 1);
+        ir_ldloc(rec);                       // rax = the record
+        emit_cstr("    mov rax, [rax+");
+        emit_u32(w * 8 + 8);
+        emit_cstr("]\n");
+        if (fl & 1) != 0 {
+            emit_cstr("    push rax\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+            ir_fstloc(off);
+        } else {
+            ir_stloc(off);
+        }
+        w += 1;
+    }
+    return 0;
+}
+
+// the fixed record of every named function used as a value
+fn cg_emit_fnrecs() -> i64 {
+    var i: i64 = 0;
+    while i < fn_count {
+        if cg_q(&fn_asval, i) != 0 {
+            emit_cstr("section .data\n");
+            emit_cstr("__fnrec_");
+            emit_tok(cg_q(&fn_toks, i));
+            emit_cstr(": dq ");
+            emit_tok(cg_q(&fn_toks, i));
+            emit_cstr("\n");
+            emit_cstr("section .text\n");
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// EXTERN FUNCTIONS: the system's libraries
+//
+//   extern "libm.so.6", "libm.dylib", "msvcrt.dll" {
+//       fn cos(x: f64) -> f64;
+//       fn printf(format: ptr<u8>, ...) -> i32;
+//   }
+//
+// A call pushes its arguments in order, each where its declaration says --
+// a real as an f64, an integer as 64 bits -- and hands __ccall the record
+// of the function and the shape of the call; __ccall, in the preamble of
+// each system, finds the function the first time and puts the arguments
+// where that system's C convention wants them. The record:
+//   __xr_K: dq address (0 until found), __xn_K (its name), __xl_K (the
+//           names of its libraries, each ending in 0, an empty one last)
+// =========================================================================
+
+// the functions of an extern block (the first of its AST_EXTERN nodes)
+fn cg_register_externs(x: ptr<Ast>) -> i64 {
+    while x != 0 {
+        if x.data != 0 {                     // an empty block has none
+            if cg_ext_count >= CG_MAX_EXTERN {
+                cg_err_tok = x.data;
+                cg_err_msg = "too many extern functions (1024): ";
+                cg_err_hint = 0;
+                cg_had_error = 1;
+                return 0;
+            }
+            cg_qs(&cg_ext_toks, cg_ext_count, x.data);
+            cg_qs(&cg_ext_nodes, cg_ext_count, x);
+            cg_qs(&cg_ext_used, cg_ext_count, 0);
+            cg_ext_count += 1;
+        }
+        x = x.right;
+    }
+    return 0;
+}
+
+// the index of an extern function, -1 when the name is none
+fn cg_find_extern(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < cg_ext_count {
+        if tok_equal(t, cg_q(&cg_ext_toks, i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// an error at a call
+fn cg_ext_error(msg: i64, hn: i64, c: ptr<Ast>) -> i64 {
+    cg_err_tok = c.data;
+    cg_err_msg = msg;
+    cg_err_hint = hn;
+    cg_had_error = 1;
+    return 0;
+}

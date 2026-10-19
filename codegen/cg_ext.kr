@@ -1,0 +1,501 @@
+kron_program
+kron_domain cg_ext;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// CALLS INTO C: extern functions, c_call, c_fn, and a library's exports
+// =========================================================================
+
+// how many nodes a chain through right holds (the arguments of a call, the
+// parameters of a declaration)
+fn cg_count_list(e: ptr<Ast>) -> i64 {
+    return cg_chain_len(e);
+}
+
+// a call of an extern function. Only inside raw { }, and not on bare metal;
+// the arguments are pushed in order, each as its declaration says, and
+// __ccall gets the record's number in r10, the shape in rax (the count,
+// the result's kind << 24, where variadic arguments start << 48, a bit per
+// real from bit 8, per f32 from bit 32) and the widths in rdx (two bits an
+// argument: 1 four bytes, 2 two, 3 one).
+fn cg_call_extern(c: ptr<Ast>) -> i64 {
+    var x: i64 = cg_find_extern(c.data);
+    var decl: ptr<Ast> = cg_q(&cg_ext_nodes, x);
+    var np: i64 = 0;
+    var na: i64 = 0;
+    var shape: i64 = 0;
+    var widths: i64 = 0;
+    var a: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var kw: i64 = 0;
+    var wc: i64 = 0;
+    var real: i64 = 0;
+    var tt: i64 = 0;
+    if cg_bare != 0 {
+        return cg_ext_error("no system library to call without an operating system: ", "  hint: extern calls need --target=windows, linux, linux-arm64 or macos\r\n", c);
+    }
+    if cg_in_raw == 0 {
+        return cg_ext_error("an extern fn is called outside raw { }: ", "  hint: its code is C, which Kron does not check -- raw { n = strlen(s); }\r\n", c);
+    }
+    np = cg_count_list(decl.left);
+    na = cg_count_list(c.right);
+    if na > 16 {
+        return cg_ext_error("an extern call takes at most 16 arguments: ", 0, c);
+    }
+    if na != np {
+        // more only after '...'
+        if na < np || decl.col == 0 {
+            return cg_ext_error("another number of arguments than its extern declaration has: ", "  hint: count the parameters in the extern block; ... takes any number more\r\n", c);
+        }
+    }
+    cg_qs(&cg_ext_used, x, 1);
+    cg_ext_any = 1;
+    shape = na | (cg_u32(decl.child_count) << 24);
+    if decl.col != 0 {
+        shape = shape | (np << 48);
+    }
+    a = c.right;
+    p = decl.left;
+    k = 0;
+    while a != 0 {
+        real = 0;
+        if p != 0 {
+            kw = p.owner_type;               // the type keyword of the parameter
+            if kw == TOK_IDENT {
+                // a name: str and text are addresses; a struct is refused
+                tt = p.left;
+                if tt != 0 {
+                    if cg_find_struct(tt) != -1 {
+                        return cg_ext_error("a struct cannot go to an extern fn by value: ", "  hint: declare the parameter ptr<T> and pass &s\r\n", c);
+                    }
+                }
+            } else if kw == KW_F64 {
+                real = 1;
+            } else if kw == KW_F32 {
+                shape = shape | (1 << ((k + 32) & 63));
+                widths = widths | (1 << ((k * 2) & 63));
+                real = 1;
+            } else {
+                wc = 0;
+                if kw == KW_I32 || kw == KW_U32 {
+                    wc = 1;
+                } else if kw == KW_I16 || kw == KW_U16 {
+                    wc = 2;
+                } else if kw == KW_I8 || kw == KW_U8 || kw == KW_BOOL {
+                    wc = 3;
+                }
+                if wc != 0 {
+                    widths = widths | (wc << ((k * 2) & 63));
+                }
+            }
+        } else {
+            // past '...': as the expression is, 64 bits or an f64
+            if cg_expr_is_float(a.left) != 0 {
+                real = 1;
+            }
+        }
+        if real != 0 {
+            shape = shape | (1 << ((k + 8) & 63));
+            cg_emit_float(a.left);           // an integer is converted
+            emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+        } else if cg_expr_is_float(a.left) != 0 {
+            cg_emit_float(a.left);
+            emit_cstr("    cvttsd2si rax, xmm0\n    push rax\n");
+        } else {
+            cg_emit(a.left);
+            emit_cstr("    push rax\n");
+        }
+        k += 1;
+        a = a.right;
+        if p != 0 {
+            p = p.right;
+        }
+    }
+    emit_cstr("    mov r10, rsp\n    lea r11, [rel __xr_");
+    emit_uint(x);
+    emit_cstr("]\n    mov rax, ");
+    emit_uint(shape);
+    emit_cstr("\n    mov rdx, ");
+    emit_uint(widths);
+    emit_cstr("\n");
+    kt_flush();
+    emit_cstr("    call __ccall\n");
+    if na != 0 {
+        emit_cstr("    add rsp, ");
+        emit_u32(na * 8);
+        emit_cstr("\n");
+    }
+    return 0;
+}
+
+// cg_c_call(call) -> 1 when it was c_call(ptr, args...): C code at an
+// address -- from a library's table, a callback C handed over -- called in
+// the system's C convention. The pointer, then the arguments, pushed; a
+// record for __ccall made on the stack around the pointer ([rsp] the
+// function, never 0, so never looked up) and the shape: reals where the
+// arguments are reals, the result a 64-bit integer.
+fn cg_c_call(c: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = c.data;
+    var p: i64 = 0;
+    var a: ptr<Ast> = 0;
+    var shape: i64 = 0;
+    var k: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    if t.length != 6 {
+        return 0;
+    }
+    p = t.value;
+    if cg_memeq(p, "c_call", 6) == 0 {
+        return 0;
+    }
+    if cg_in_raw == 0 {
+        cg_ext_error("c_call runs C code at an address: inside raw { } only: ", 0, c);
+        return 1;
+    }
+    if c.right == 0 {
+        cg_ext_error("c_call takes the address of the C function first: ", 0, c);
+        return 1;
+    }
+    cg_note_indirect();
+    a = c.right;
+    cg_emit(a.left);                         // the pointer
+    emit_cstr("    push rax\n");
+    a = a.right;
+    while a != 0 {
+        if cg_expr_is_float(a.left) != 0 {
+            shape = shape | (1 << ((k + 8) & 63));
+            cg_emit_float(a.left);
+            emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+        } else {
+            cg_emit(a.left);
+            emit_cstr("    push rax\n");
+        }
+        k += 1;
+        a = a.right;
+    }
+    shape = shape | k;                       // the count
+    emit_cstr("    mov r10, rsp\n    mov rax, [r10 + ");
+    emit_u32(k * 8);
+    emit_cstr("]\n    sub rsp, 24\n    mov [rsp], rax\n    mov r11, rsp\n    xor edx, edx\n    mov rax, ");
+    emit_uint(shape);
+    emit_cstr("\n");
+    kt_flush();
+    emit_cstr("    call __ccall\n    add rsp, ");
+    emit_u32(k * 8 + 32);                    // the record, the pointer, the arguments
+    emit_cstr("\n");
+    return 1;
+}
+
+// each byte of a text as a number and a comma
+fn cg_emit_dbytes(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        emit_uint(cg_b(p + i));
+        emit_cstr(", ");
+        i += 1;
+    }
+    return 0;
+}
+
+// the record of every extern function a call reached
+fn cg_emit_extrecs() -> i64 {
+    var i: i64 = 0;
+    var t: ptr<Tok> = 0;
+    var x: ptr<Ast> = 0;
+    var l: ptr<Ast> = 0;
+    var lt: ptr<Tok> = 0;
+    var n: i64 = 0;
+    while i < cg_ext_count {
+        if cg_q(&cg_ext_used, i) != 0 {
+            emit_cstr("section .data\n");
+            emit_cstr("__xr_");
+            emit_u32(i);
+            emit_cstr(":\n    dq 0\n    dq __xn_");
+            emit_u32(i);
+            emit_cstr("\n    dq __xl_");
+            emit_u32(i);
+            emit_cstr("\n__xn_");
+            emit_u32(i);
+            emit_cstr(": db ");
+            t = cg_q(&cg_ext_toks, i);
+            cg_emit_dbytes(t.value, t.length);
+            emit_cstr("0\n__xl_");
+            emit_u32(i);
+            emit_cstr(": db ");
+            x = cg_q(&cg_ext_nodes, i);
+            l = x.owner_type;                // the names of its libraries
+            while l != 0 {
+                lt = l.data;                 // "name", quotes included
+                n = cg_i32(lt.length - 2);
+                if n > 0 {
+                    cg_emit_dbytes(lt.value + 1, n);
+                    emit_uint(0);
+                    emit_cstr(", ");
+                }
+                l = l.right;
+            }
+            emit_cstr("0, 0\n");
+            emit_cstr("section .text\n");
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// A LIBRARY (--lib)
+//
+//   fn export add(a: i32, b: i32) -> i32 { return a + b; }
+//
+// Every function marked export gets a record and an entry C can call, the
+// name exported from the .dll, .so or .dylib:
+//   __xe_K:      dq the function, its shape, its widths, which are signed
+//   __ce_<name>: lea r11, [rel __xe_K] / jmp __centry
+// __kron_lib_init gives the globals their first values, as main does in a
+// program; the first call into the library runs it (__lib_ready).
+// =========================================================================
+
+// 1 for main, or for a library's init: what starts the runtime and gives
+// the globals their values
+fn cg_is_entry(t: i64) -> i64 {
+    if t == cg_tok(CT_LIBINIT) {
+        return 1;
+    }
+    return name_is_main(t);
+}
+
+// a parameter's kind for a library entry: 0 an integer or an address, 1 an
+// f64, 2 an f32, 3 a struct; lk_width the width code (0 eight bytes, 1
+// four, 2 two, 3 one) and lk_signed 1 when signed
+
+fn cg_lib_kind(kw: i64, t: i64) -> i64 {
+    lk_width = 0;
+    lk_signed = 0;
+    if kw == KW_F64 {
+        return 1;
+    }
+    if kw == KW_F32 {
+        lk_width = 1;                        // four bytes, where they are packed
+        return 2;
+    }
+    if kw == TOK_IDENT {
+        // str and text are addresses; a struct is not
+        if t != 0 {
+            if cg_find_struct(t) != -1 {
+                return 3;
+            }
+        }
+        return 0;
+    }
+    if kw == KW_I32 {
+        lk_signed = 1;
+        lk_width = 1;
+    } else if kw == KW_I16 {
+        lk_signed = 1;
+        lk_width = 2;
+    } else if kw == KW_I8 {
+        lk_signed = 1;
+        lk_width = 3;
+    } else if kw == KW_U32 {
+        lk_width = 1;
+    } else if kw == KW_U16 {
+        lk_width = 2;
+    } else if kw == KW_U8 || kw == KW_BOOL {
+        lk_width = 3;
+    } else if kw == KW_I64 {
+        lk_signed = 1;
+    }
+    return 0;
+}
+
+// cg_c_fn(call) -> 1 when it was c_fn(f), emitted: the address of f's C
+// entry, for C to call back -- qsort's comparison, a window system's
+// callbacks. f is marked export.
+fn cg_c_fn(c: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = c.data;
+    var a: ptr<Ast> = 0;
+    var v: ptr<Ast> = 0;
+    var f: i64 = 0;
+    var fnode: ptr<Ast> = 0;
+    if t == 0 {
+        return 0;
+    }
+    if t.length != 4 {
+        return 0;
+    }
+    if cg_memeq(t.value, "c_fn", 4) == 0 {
+        return 0;
+    }
+    if cg_in_raw == 0 {
+        cg_ext_error("c_fn gives the address of code C calls: inside raw { } only: ", 0, c);
+        return 1;
+    }
+    // one argument, the name of an exported function
+    a = c.right;
+    if a != 0 {
+        v = a.left;
+        if v.node_type == AST_IDENTIFIER {
+            f = cg_find_func(v.data);
+            if f != -1 {
+                fnode = cg_q(&fn_nodes, f);
+                if (fnode.type_info & 0xFFFF) == VIS_EXPORTED {
+                    emit_cstr("    lea rax, [rel __ce_");
+                    emit_tok(v.data);
+                    emit_cstr("]\n");
+                    return 1;
+                }
+            }
+        }
+    }
+    cg_ext_error("c_fn takes the name of a function marked export: ", "  hint: fn export name(...) -- C then calls it in its own convention\r\n", c);
+    return 1;
+}
+
+// After every function of a library: its init, the record and the entry of
+// each export, and a main for the preamble's _start. A program with
+// exports (callbacks for C) has main set everything up.
+fn cg_emit_lib() -> i64 {
+    var blk: ptr<Ast> = 0;
+    var cl: ptr<Ast> = 0;
+    var f: ptr<Ast> = 0;
+    var p: ptr<Ast> = cg_root;
+    var d: ptr<Ast> = 0;
+    if cg_lib == 0 {
+        emit_cstr("__kron_lib_init:\n    ret\n");
+    } else {
+        // __kron_lib_init: no parameters; its body calls the library's own
+        // lib_init(), when it has one
+        blk = cg_node(AST_BLOCK);
+        if cg_find_func(cg_tok(CT_USERINIT)) != -1 {
+            cl = cg_node(AST_CALL);
+            cl.data = cg_tok(CT_USERINIT);
+            blk.left = cl;
+        }
+        f = cg_node(AST_FUNCTION);
+        f.data = cg_tok(CT_LIBINIT);
+        f.right = blk;
+        cg_function(f);
+        // a main for _start, unless the library has a function of that name
+        if cg_find_func(cg_tok(CT_MAINNAME)) == -1 {
+            emit_cstr("main:\n    xor eax, eax\n    ret\n");
+        }
+    }
+    cg_exp_count = 0;
+    cg_exp_used = 0;
+    while p != 0 {
+        if p.node_type != AST_PROGRAM {
+            return 0;
+        }
+        d = p.left;
+        if d != 0 {
+            if d.node_type == AST_FUNCTION && (d.type_info & 0xFFFF) == VIS_EXPORTED {
+                cg_lib_export(d);
+            }
+        }
+        p = p.right;
+    }
+    return 0;
+}
+
+// one exported function: its record, its entry, its name for the writer
+fn cg_lib_export(d: ptr<Ast>) -> i64 {
+    var shape: i64 = 0;
+    var widths: i64 = 0;
+    var sgn: i64 = 0;
+    var prm: ptr<Ast> = 0;
+    var k: i64 = 0;
+    var kind: i64 = 0;
+    var rk: i64 = 0;
+    var x: i64 = 0;
+    var t: ptr<Tok> = 0;
+    var n: i64 = 0;
+    var at: i64 = 0;
+    var dst: i64 = 0;
+    var i: i64 = 0;
+    var f: i64 = 0;
+    if d.owner_type != 0 {
+        return cg_ext_error("a method cannot be exported to C: ", "  hint: export a plain fn that calls it\r\n", d);
+    }
+    if d.child_count != 0 {
+        return cg_ext_error("an exported fn gives C one result: ", 0, d);
+    }
+    // the shape: count, reals, the result, f32s; widths; signed
+    prm = d.left;
+    while prm != 0 {
+        kind = cg_lib_kind(prm.owner_type, prm.left);
+        if kind == 3 {
+            return cg_ext_error("an exported fn takes numbers and pointers, not a struct by value: ", "  hint: declare the parameter ptr<T> and pass &s\r\n", d);
+        }
+        if kind != 0 {
+            // a real: bit 8+k, and 32+k for an f32
+            shape = shape | (1 << ((k + 8) & 63));
+            if kind == 2 {
+                shape = shape | (1 << ((k + 32) & 63));
+            }
+        }
+        widths = widths | (lk_width << ((k * 2) & 63));
+        sgn = sgn | (lk_signed << (k & 63));
+        k += 1;
+        prm = prm.right;
+    }
+    // the count, and the result: 8 an f64, 9 an f32
+    shape = shape | k;
+    rk = d.type_info >>> 16;
+    if rk == KW_F64 {
+        shape = shape | (8 << 24);
+    } else if rk == KW_F32 {
+        shape = shape | (9 << 24);
+    }
+    x = cg_exp_count;
+    if x >= CG_MAX_FUNCS {
+        return 0;
+    }
+    cg_qs(&cg_exp_toks, x, d.data);
+    // C may call it from any of its threads: for the thread check it is
+    // where a thread starts, so the globals it touches have to be shared
+    f = cg_find_func(d.data);
+    if f != -1 {
+        cg_qs(&fn_root, f, 1);
+    }
+    // its name, copied: the source text is gone by the time the writer asks
+    t = d.data;
+    n = t.length;
+    at = cg_exp_used;
+    if at + n >= 65000 {
+        return 0;
+    }
+    dst = &cg_exp_buf + at;
+    cg_qs(&cg_exp_name, x, dst);
+    cg_qs(&cg_exp_nlen, x, n);
+    cg_exp_used = at + n + 1;
+    while i < n {
+        cg_bs(dst + i, cg_b(t.value + i));
+        i += 1;
+    }
+    cg_bs(dst + n, 0);
+    cg_exp_count += 1;
+    // __xe_K: dq the function, shape, widths, signed
+    emit_cstr("section .data\n");
+    emit_cstr("__xe_");
+    emit_u32(x);
+    emit_cstr(":\n    dq ");
+    emit_tok(d.data);
+    emit_cstr("\n    dq ");
+    emit_uint(shape);
+    emit_cstr("\n    dq ");
+    emit_uint(widths);
+    emit_cstr("\n    dq ");
+    emit_uint(sgn);
+    emit_cstr("\n");
+    // __ce_<name>: its entry
+    emit_cstr("section .text\n");
+    emit_cstr("__ce_");
+    emit_tok(d.data);
+    emit_cstr(":\n    lea r11, [rel __xe_");
+    emit_u32(x);
+    return emit_cstr("]\n    jmp __centry\n");
+}

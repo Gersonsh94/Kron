@@ -1,0 +1,1032 @@
+kron_program
+kron_domain cg_expr;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// CONDITIONS, LEAVES, GLOBALS, TYPES AND REALS
+// =========================================================================
+
+// cg_cond_jz(condition, label): a jump to the label when the condition is
+// false. A comparison of two integers is cmp and ONE conditional jump, the
+// inverse of the test; anything else, reals included, the general path.
+fn cg_cond_jz(c: ptr<Ast>, lbl: i64) -> i64 {
+    var op: i64 = 0;
+    var cc: i64 = 0;
+    var cmp: i64 = 0;
+    if c != 0 {
+        if c.node_type == AST_BINOP {
+            op = c.data;
+            if op == TOK_LT || op == TOK_GT || op == TOK_LTE || op == TOK_GTE || op == TOK_EQ || op == TOK_NEQ {
+                cmp = 1;
+            }
+        }
+    }
+    if cmp == 1 {
+        if cg_is_textcmp(c) != 0 || cg_expr_is_float(c.left) != 0 || cg_expr_is_float(c.right) != 0 {
+            cmp = 0;
+        }
+    }
+    if cmp == 0 {
+        cg_emit(c);
+        return ir_ctl(IR_JZ, lbl);
+    }
+    // the operands: the left in rax, the right in rcx
+    cg_emit(c.left);
+    if cg_leaf_to_rcx(c.right, c) == 0 {
+        emit_cstr("    push rax\n");
+        cg_emit(c.right);
+        emit_cstr("    mov rcx, rax\n");
+        emit_cstr("    pop rax\n");
+    }
+    ir_ctl(IR_ALU, ALU_CMP);
+    // the jump taken when the test FAILS, signed or unsigned
+    op = c.data;
+    if cg_binop_is_unsigned(c) != 0 {
+        if op == TOK_LT {
+            cc = CC_AE;
+        } else if op == TOK_GT {
+            cc = CC_BE;
+        } else if op == TOK_LTE {
+            cc = CC_A;
+        } else if op == TOK_GTE {
+            cc = CC_B;
+        } else if op == TOK_EQ {
+            cc = CC_NE;
+        } else {
+            cc = CC_E;
+        }
+    } else {
+        if op == TOK_LT {
+            cc = CC_GE;
+        } else if op == TOK_GT {
+            cc = CC_LE;
+        } else if op == TOK_LTE {
+            cc = CC_G;
+        } else if op == TOK_GTE {
+            cc = CC_L;
+        } else if op == TOK_EQ {
+            cc = CC_NE;
+        } else {
+            cc = CC_E;
+        }
+    }
+    return ir_jcc(lbl, cc);
+}
+
+// 1 when an argument can skip the stack: an integer constant, or a local
+// that is neither a struct nor an array (passed by address) nor a real
+fn cg_arg_is_leaf(a: ptr<Ast>) -> i64 {
+    if a == 0 {
+        return 0;
+    }
+    if cg_arg_struct_id(a) != -1 {
+        return 0;
+    }
+    if cg_expr_is_float(a) != 0 {
+        return 0;
+    }
+    if a.node_type == AST_INTEGER_LIT {
+        return 1;
+    }
+    if a.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    if cg_find_var_idx(a.data) == -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// 1 when this argument and every register argument after it are leaves.
+// Loading a leaf late -- after the pops -- moves its read past what the
+// later arguments do: in f(x, g(&x)) x would carry g's change. With leaves
+// only after it, nothing runs in between.
+fn cg_arg_leaf_here(a: ptr<Ast>, i: i64) -> i64 {
+    while a != 0 && i < 6 {
+        if cg_arg_is_leaf(a.left) == 0 {
+            return 0;
+        }
+        i += 1;
+        a = a.right;
+    }
+    return 1;
+}
+
+// mov <argument register>, <constant | local>, as a record
+fn cg_emit_leaf_arg(a: ptr<Ast>, reg: i64) -> i64 {
+    if a.node_type == AST_INTEGER_LIT {
+        return ir_withlen(IR_IMMARG, a.data, reg);
+    }
+    return ir_withlen(IR_LDARG, cg_u32(cg_find_var(a.data)), reg);
+}
+
+// 1 when the expression is a real local: what cg_fleaf_to_xmm1 would take
+fn cg_fleaf_is(e: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    if cg_expr_is_float_ident(e.data) == 0 {
+        return 0;
+    }
+    if cg_find_var_idx(e.data) == -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// a real local straight into xmm1: 1 done, 0 the general path
+fn cg_fleaf_to_xmm1(e: ptr<Ast>) -> i64 {
+    if cg_fleaf_is(e) == 0 {
+        return 0;
+    }
+    ir_fldx1(cg_u32(cg_find_var(e.data)));
+    return 1;
+}
+
+// The right operand of a binary node straight into rcx: 1 done, 0 the
+// general path. Only an integer constant (mov rcx, <token>) and a local
+// (mov rcx, [rbp-N], or its register) qualify -- read with no side effect
+// -- and not where pointer scaling multiplies the right operand.
+fn cg_leaf_to_rcx(e: ptr<Ast>, bin: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if cg_ptr_would_scale(bin) != 0 {
+        return 0;
+    }
+    if e.node_type == AST_INTEGER_LIT {
+        ir_ctl(IR_IMMRCX, e.data);           // the token, 0 for a literal zero
+        return 1;
+    }
+    if e.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    if cg_find_var_idx(e.data) == -1 {
+        return 0;
+    }
+    ir_ldrcx(cg_u32(cg_find_var(e.data)));
+    return 1;
+}
+
+// the value of a decimal integer literal from 0 to 63, else -1
+fn cg_lit_small(e: ptr<Ast>) -> i64 {
+    var t: ptr<Tok> = 0;
+    var n: i64 = 0;
+    var p: i64 = 0;
+    var v: i64 = 0;
+    var d: i64 = 0;
+    if e == 0 {
+        return -1;
+    }
+    if e.node_type != AST_INTEGER_LIT {
+        return -1;
+    }
+    if e.data == 0 {
+        return 0;                            // a literal zero has no token
+    }
+    t = e.data;
+    n = t.length;
+    p = t.value;
+    if n == 0 || n > 2 {
+        return -1;
+    }
+    while n > 0 {
+        d = cg_u32(cg_b(p) - 48);
+        if d > 9 {
+            return -1;
+        }
+        v = v * 10 + d;
+        p += 1;
+        n -= 1;
+    }
+    if v > 63 {
+        return -1;
+    }
+    return v;
+}
+
+// 1 for an integer literal or a plain integer variable, local or global:
+// loading it touches rax alone
+fn cg_is_leafish(e: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_INTEGER_LIT {
+        return 1;
+    }
+    if e.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    if cg_expr_is_float(e) != 0 {
+        return 0;
+    }
+    if e.data == 0 {
+        return 0;
+    }
+    i = cg_find_var_idx(e.data);
+    if i != -1 {
+        if cg_q(&var_arrlen, i) != 0 || cg_q(&var_structs, i) != -1 {
+            return 0;
+        }
+        return 1;
+    }
+    i = cg_find_global(e.data);
+    if i == -1 {
+        return 0;
+    }
+    if cg_q(&g_arrlen, i) != 0 || cg_q(&g_structs, i) != -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// 1 when the expression is integer literals, variables and integer
+// operators only: nothing it runs can change a variable
+fn cg_expr_pure(e: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_INTEGER_LIT || e.node_type == AST_IDENTIFIER {
+        return 1;
+    }
+    if e.node_type != AST_BINOP {
+        return 0;
+    }
+    if e.data == TOK_AND || e.data == TOK_OR {
+        return 0;
+    }
+    if cg_expr_is_float(e) != 0 || cg_is_concat(e) != 0 || cg_is_textcmp(e) != 0 {
+        return 0;
+    }
+    if cg_expr_pure(e.left) == 0 {
+        return 0;
+    }
+    if cg_expr_pure(e.right) == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the element width when a binary + or - has a ptr<T> local of more than
+// one byte on its left, else 0
+fn cg_ptr_width(b: ptr<Ast>) -> i64 {
+    var l: ptr<Ast> = 0;
+    var i: i64 = 0;
+    var w: i64 = 0;
+    if b.data != TOK_PLUS && b.data != TOK_MINUS {
+        return 0;
+    }
+    l = b.left;
+    if l == 0 {
+        return 0;
+    }
+    if l.node_type != AST_IDENTIFIER {
+        return 0;
+    }
+    i = cg_find_var_idx(l.data);
+    if i == -1 {
+        return 0;
+    }
+    w = cg_u32(cg_q(&var_elemsz, i));
+    if w <= 1 {
+        return 0;
+    }
+    return w;
+}
+
+// 1 when cg_ptr_scale would multiply the right operand
+fn cg_ptr_would_scale(b: ptr<Ast>) -> i64 {
+    if cg_ptr_width(b) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// pointer arithmetic: the right operand, in rax, counts elements
+fn cg_ptr_scale(b: ptr<Ast>) -> i64 {
+    var w: i64 = cg_ptr_width(b);
+    if w == 0 {
+        return 0;
+    }
+    emit_cstr("    imul rax, rax, ");
+    emit_u32(w);
+    return emit_cstr("\n");
+}
+
+// =========================================================================
+// FILE-SCOPE GLOBALS
+// A declaration outside any function becomes a labelled cell in .data,
+// reachable from every function and persistent across calls:
+//   __g_<name>: dq <literal or 0>
+// =========================================================================
+
+// A global's name, sign, float flag, element count and width, and struct
+// type, recorded for every global in the pre-pass, before any function is
+// emitted: a function may use a global declared further down.
+fn cg_global_note(d: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    var c: i64 = d.col;
+    var tt: ptr<Tok> = 0;
+    var s: i64 = 0;
+    if cg_find_global(d.data) != -1 {
+        return 0;                            // already recorded
+    }
+    i = g_count;
+    if i >= CG_MAX_GLOBALS {
+        return 0;
+    }
+    cg_qs(&g_toks, i, d.data);
+    cg_qs(&g_unsigned, i, (c >> 1) & 1);
+    cg_qs(&g_isfloat, i, c & 1);
+    cg_qs(&g_arrlen, i, cg_u32(d.type_info));
+    cg_qs(&g_aw, i, (c >> 4) & 15);
+    cg_qs(&g_vtag, i, c >> 8);
+    cg_qs(&g_structs, i, -1);
+    g_count = i + 1;
+    // a struct-typed global (not an array of them)
+    if d.type_info != 0 || d.left == 0 {
+        return 0;
+    }
+    tt = d.left;
+    if tt.kind == KW_STR {
+        s = stream_struct_id;
+    } else {
+        s = cg_find_struct(tt);
+        if s == -1 {
+            return 0;
+        }
+    }
+    cg_qs(&g_structs, i, s);
+    return 0;
+}
+
+// a global's cell: .bss for an array or a struct (all zero), .data for a
+// scalar with its literal, or an array given its values (cg_global_arrlit)
+fn cg_global_decl(d: ptr<Ast>) -> i64 {
+    var n: i64 = d.type_info;
+    var tt: ptr<Tok> = 0;
+    var s: i64 = 0;
+    var w: i64 = 0;
+    var v: ptr<Ast> = 0;
+    var agg: i64 = 0;
+    var k: i64 = 0;
+    cg_global_note(d);
+    if n != 0 {
+        agg = 1;
+    } else if d.left != 0 {
+        tt = d.left;
+        if tt.kind == KW_STR {
+            s = stream_struct_id;
+        } else {
+            s = cg_find_struct(tt);
+        }
+        if s != -1 {
+            n = cg_struct_size(s);
+            if n != 0 {
+                agg = 1;
+            }
+        }
+    }
+    if agg == 1 {
+        // an array given its first values: data, written out
+        v = d.right;
+        if v != 0 {
+            if v.node_type == AST_ARRAY_LIT && d.type_info != 0 {
+                return cg_global_arrlit(d);
+            }
+        }
+        // packed elements: [u8; 4096] reserves 512 qwords, not 4096
+        w = (d.col >> 4) & 15;
+        if w != 0 && w <= 4 {
+            n = (n * w + 7) >>> 3;
+        }
+        emit_cstr("section .bss\n");
+        cg_emit_gpre("__g_");
+        emit_tok(d.data);
+        emit_cstr(": resq ");
+        emit_uint(n);
+        emit_cstr("\n");
+        return emit_cstr("section .text\n");
+    }
+    emit_cstr("section .data\n");
+    cg_emit_gpre("__g_");
+    emit_tok(d.data);
+    emit_cstr(": dq ");                  // ": dq "
+    // a literal is written as it is (a real with a point in it), a true or
+    // false as 1 or 0; anything else starts at zero
+    v = d.right;
+    k = 0;
+    if v != 0 {
+        k = v.node_type;
+    }
+    if k == AST_INTEGER_LIT {
+        emit_tok(v.data);
+    } else if k == AST_FLOAT_LIT {
+        cg_emit_ftok(v.data);
+    } else if k == AST_BOOL_LIT {
+        emit_uint(v.type_info);
+    } else {
+        emit_cstr("0");
+    }
+    emit_cstr("\n");
+    return emit_cstr("section .text\n");
+}
+
+// An array given its values, in .data: its elements as numbers of their
+// width, sixteen to a line, the rest zeros, then up to a whole qword, as
+// .bss would. Only numbers written out are taken (a '-' in front
+// included); each becomes an unsigned number -- a real its IEEE bits -- so
+// every assembler and translator reads the same thing.
+//   __g_v: dq 10, 20, 30
+//       resq 97
+fn cg_global_arrlit(d: ptr<Ast>) -> i64 {
+    var tt: ptr<Tok> = 0;
+    var c: i64 = d.col;
+    var reals: i64 = c & 1;
+    var w: i64 = (c >> 4) & 15;
+    var e: ptr<Ast> = 0;
+    var lit: ptr<Ast> = d.right;
+    var k: i64 = 0;
+    var rest: i64 = 0;
+    var pad: i64 = 0;
+    var bad: i64 = 0;
+    if d.left != 0 {
+        tt = d.left;
+        // a struct or stream element has no number to be
+        if tt.kind == KW_STR || cg_find_struct(tt) != -1 {
+            bad = 1;
+        }
+    }
+    if w == 0 {
+        w = 8;
+    }
+    // every element first: a number written out
+    if bad == 0 {
+        e = lit.right;
+        while e != 0 {
+            cg_garr_value(e.left, w, reals);
+            if garr_ok == 0 {
+                bad = 1;
+                break;
+            }
+            e = e.right;
+        }
+    }
+    if bad == 1 {
+        cg_err_tok = d.data;
+        cg_err_msg = "a global array starts from numbers written out: ";
+        cg_err_hint = "  hint: give it the other values in a function, element by element\r\n";
+        cg_had_error = 1;
+        return emit_cstr("section .text\n");
+    }
+    emit_cstr("section .data\n");
+    cg_emit_gpre("__g_");
+    emit_tok(d.data);
+    emit_cstr(":\n");
+    e = lit.right;
+    while e != 0 {
+        if cg_ult(k, d.type_info) == 0 {
+            break;                           // past the length: dropped
+        }
+        if (k & 15) == 0 {
+            if k != 0 {
+                emit_cstr("\n");
+            }
+            cg_garr_dir(w);
+        } else {
+            emit_cstr(",");
+        }
+        emit_uint(cg_garr_value(e.left, w, reals));
+        k += 1;
+        e = e.right;
+    }
+    if k != 0 {
+        emit_cstr("\n");
+    }
+    // the elements not given
+    rest = d.type_info - k;
+    if cg_ult(k, d.type_info) == 1 {
+        emit_cstr("    ");
+        if w == 4 {
+            emit_cstr("resd ");
+        } else if w == 2 {
+            emit_cstr("resw ");
+        } else if w == 1 {
+            emit_cstr("resb ");
+        } else {
+            emit_cstr("resq ");
+        }
+        emit_uint(rest);
+        emit_cstr("\n");
+    }
+    // then up to a whole qword
+    pad = (0 - d.type_info * w) & 7;
+    if pad != 0 {
+        emit_cstr("    ");
+        emit_cstr("resb ");
+        emit_uint(pad);
+        emit_cstr("\n");
+    }
+    return emit_cstr("section .text\n");
+}
+
+// '    dq ' and its narrower kin
+fn cg_garr_dir(w: i64) -> i64 {
+    if w == 4 {
+        return emit_cstr("    dd ");
+    }
+    if w == 2 {
+        return emit_cstr("    dw ");
+    }
+    if w == 1 {
+        return emit_cstr("    db ");
+    }
+    return emit_cstr("    dq ");
+}
+
+// cg_garr_value(element, width, reals) -> its bits; garr_ok 1 when it is a
+// number written out, 0 when not
+
+fn cg_garr_value(e: ptr<Ast>, w: i64, reals: i64) -> i64 {
+    var neg: i64 = 0;
+    var t: ptr<Tok> = 0;
+    var v: i64 = 0;
+    var p: i64 = 0;
+    var top: i64 = 1;
+    garr_ok = 0;
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_UNOP {
+        if e.data != TOK_MINUS {
+            return 0;
+        }
+        neg = 1;
+        e = e.right;
+        if e == 0 {
+            return 0;
+        }
+    }
+    if reals == 0 {
+        if e.node_type != AST_INTEGER_LIT {
+            return 0;
+        }
+        v = cg_tok_u64(e.data);
+        if tok_u64_ok == 0 {
+            return 0;
+        }
+        if neg != 0 {
+            v = 0 - v;
+        }
+        if w != 8 {
+            v = v & ((1 << ((w * 8) & 63)) - 1);
+        }
+        garr_ok = 1;
+        return v;
+    }
+    if e.node_type != AST_FLOAT_LIT && e.node_type != AST_INTEGER_LIT {
+        return 0;
+    }
+    t = e.data;
+    p = t.value;
+    if cg_b(p) == 48 && cg_u32(t.length) > 1 {
+        if (cg_b(p + 1) | 32) == 120 {
+            return 0;                        // a hex real is not written that way
+        }
+    }
+    if w == 4 {
+        v = cg_float_bits(p, 1);
+        if neg != 0 {
+            v = v ^ 0x80000000;
+        }
+    } else {
+        v = cg_float_bits(p, 0);
+        if neg != 0 {
+            top = top << 63;
+            v = v ^ top;
+        }
+    }
+    garr_ok = 1;
+    return v;
+}
+
+// cg_tok_u64(integer token) -> its value; tok_u64_ok 0 when the text is no
+// number (decimal, or hex after 0x)
+
+fn cg_tok_u64(t: ptr<Tok>) -> i64 {
+    var p: i64 = t.value;
+    var n: i64 = t.length;
+    var v: i64 = 0;
+    var i: i64 = 0;
+    var c: i64 = 0;
+    tok_u64_ok = 0;
+    if n == 0 {
+        return 0;
+    }
+    if n > 2 && cg_b(p) == 48 && (cg_b(p + 1) | 32) == 120 {
+        i = 2;
+        while i < n {
+            c = cg_b(p + i);
+            if c < 48 {
+                return v;
+            }
+            if c > 57 {
+                c = c | 32;
+                if c < 97 || c > 102 {
+                    return v;
+                }
+                c = c - 39;
+            }
+            v = (v << 4) + (c - 48);
+            i += 1;
+        }
+        tok_u64_ok = 1;
+        return v;
+    }
+    while i < n {
+        c = cg_b(p + i);
+        if c < 48 || c > 57 {
+            return v;
+        }
+        v = v * 10 + (c - 48);
+        i += 1;
+    }
+    tok_u64_ok = 1;
+    return v;
+}
+
+// the index of a global, -1 when the name is none
+fn cg_find_global(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < g_count {
+        if tok_equal(t, cg_q(&g_toks, i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the index of a function, -1 when the name is none. The names are the
+// pre-pass's, so a function can be taken by address before it is defined.
+fn cg_find_func(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < fn_count {
+        if tok_equal(t, cg_q(&fn_toks, i)) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the index of a local, from the last declared backwards, -1 when none
+fn cg_find_var_idx(t: i64) -> i64 {
+    var i: i64 = var_count - 1;
+    while i >= 0 {
+        if tok_equal(t, cg_q(&var_toks, i)) == 1 {
+            return i;
+        }
+        i -= 1;
+    }
+    return -1;
+}
+
+fn cg_global_is_float(t: i64) -> i64 {
+    var i: i64 = cg_find_global(t);
+    if i == -1 {
+        return 0;
+    }
+    return cg_q(&g_isfloat, i);
+}
+
+fn cg_global_is_unsigned(t: i64) -> i64 {
+    var i: i64 = cg_find_global(t);
+    if i == -1 {
+        return 0;
+    }
+    return cg_q(&g_unsigned, i);
+}
+
+// 1 when that variable, local or global, is a real
+fn cg_expr_is_float_ident(t: i64) -> i64 {
+    var i: i64 = cg_find_var_idx(t);
+    if i != -1 {
+        return cg_q(&var_isfloat, i);
+    }
+    return cg_global_is_float(t);
+}
+
+// cg_expr_is_unsigned(expression) -> 1 when the value is unsigned: locals,
+// globals, array elements, struct fields and function results; unsigned is
+// contagious through operators
+fn cg_expr_is_unsigned(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var i: i64 = 0;
+    if e == 0 {
+        return 0;
+    }
+    k = e.node_type;
+    if k == AST_CAST {
+        return (e.col >> 1) & 1;
+    }
+    if k == AST_MEMBER {
+        cg_member_resolve(e);
+        if mem_unsigned != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_CALL {
+        if e.data == 0 {
+            return 0;
+        }
+        i = cg_find_func(e.data);
+        if i == -1 {
+            return 0;
+        }
+        if cg_q(&fn_ret_unsig, i) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_INDEX {
+        // an element carries the sign of the array it belongs to
+        e = e.left;
+        if e == 0 {
+            return 0;
+        }
+        if e.node_type != AST_IDENTIFIER {
+            return 0;
+        }
+        k = AST_IDENTIFIER;
+    }
+    if k == AST_IDENTIFIER {
+        i = cg_find_var_idx(e.data);
+        if i != -1 {
+            if cg_q(&var_unsigned, i) != 0 {
+                return 1;
+            }
+            return 0;
+        }
+        if cg_global_is_unsigned(e.data) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_BINOP {
+        if cg_expr_is_unsigned(e.left) != 0 {
+            return 1;
+        }
+        return cg_expr_is_unsigned(e.right);
+    }
+    if k == AST_UNOP {
+        return cg_expr_is_unsigned(e.right);
+    }
+    return 0;
+}
+
+// cg_expr_is_float(expression) -> 1 when the value is a real. Decided
+// before emitting, so the whole subtree uses one register set.
+fn cg_expr_is_float(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var i: i64 = 0;
+    if e == 0 {
+        return 0;
+    }
+    k = e.node_type;
+    if k == AST_CAST {
+        // a cast reports its target type, which is the point of writing one
+        return e.col & 1;
+    }
+    if k == AST_FLOAT_LIT {
+        return 1;
+    }
+    if k == AST_MEMBER {
+        return cg_member_is_float(e);
+    }
+    if k == AST_INDEX {
+        return cg_index_is_float(e);
+    }
+    if k == AST_CALL {
+        return cg_call_ret_float(e);
+    }
+    if k == AST_IDENTIFIER {
+        i = cg_find_var_idx(e.data);
+        if i != -1 {
+            if cg_q(&var_isfloat, i) != 0 {
+                return 1;
+            }
+            return 0;
+        }
+        if cg_global_is_float(e.data) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_BINOP {
+        if e.data == TOK_PLUS && cg_is_concat(e) != 0 {
+            return 0;                        // text + 2.5 is a text
+        }
+        if cg_expr_is_float(e.left) != 0 {
+            return 1;
+        }
+        return cg_expr_is_float(e.right);
+    }
+    if k == AST_UNOP {
+        return cg_expr_is_float(e.right);
+    }
+    return 0;
+}
+
+// cg_emit_float(expression): the value in xmm0. An integer part is
+// converted with cvtsi2sd, so mixed arithmetic works.
+fn cg_emit_float(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var op: i64 = 0;
+    var lbl: i64 = 0;
+    var off: i64 = 0;
+    var w: i64 = 0;
+    if e == 0 {
+        return emit_cstr("    xorps xmm0, xmm0\n");
+    }
+    k = e.node_type;
+    if k == AST_CAST {
+        // a real target: from an integer convert, from a real it is there
+        if cg_expr_is_float(e.right) != 0 {
+            return cg_emit_float(e.right);
+        }
+        cg_emit(e.right);
+        return emit_cstr("    cvtsi2sd xmm0, rax\n");
+    }
+    if k == AST_FLOAT_LIT {
+        // the literal's text in .data: the assembler builds the double
+        lbl = new_label();
+        emit_cstr("section .data\n");
+        emit_cstr(".flt");
+        emit_u32(lbl);
+        emit_cstr(": dq ");
+        cg_emit_ftok(e.data);
+        emit_cstr("\n");
+        emit_cstr("section .text\n");
+        emit_cstr("    movsd xmm0, [rel .flt");
+        emit_u32(lbl);
+        return emit_cstr("]\n");
+    }
+    if k == AST_IDENTIFIER {
+        if cg_expr_is_float_ident(e.data) == 0 {
+            cg_emit(e);
+            return emit_cstr("    cvtsi2sd xmm0, rax\n");
+        }
+        if cg_find_var_idx(e.data) != -1 {
+            return ir_fldloc(cg_u32(cg_find_var(e.data)));
+        }
+        cg_emit_gpre("    movsd xmm0, [rel __g_");
+        cg_emit_gtok(e.data);
+        return emit_cstr("]\n");
+    }
+    if k == AST_BINOP {
+        return cg_emit_float_binop(e);
+    }
+    if k == AST_MEMBER {
+        if cg_member_is_float(e) == 0 {
+            // an integer field: loaded as one, converted
+            cg_emit(e);
+            return emit_cstr("    cvtsi2sd xmm0, rax\n");
+        }
+        if cg_member_global(e) != 0 {
+            if mem_width == 4 {
+                return emit_cstr("    movss xmm0, [rdx]\n    cvtss2sd xmm0, xmm0\n");      // f32: four bytes, widened
+            }
+            return emit_cstr("    movsd xmm0, [rdx]\n");
+        }
+        off = cg_member_offset(e);
+        w = cg_mo_width;
+        if w == 4 {
+            emit_cstr("    movss xmm0, [rbp-");
+        } else {
+            emit_cstr("    movsd xmm0, [rbp-");
+        }
+        emit_u32(off);
+        emit_cstr("]\n");
+        if w == 4 {
+            emit_cstr("    cvtss2sd xmm0, xmm0\n");
+        }
+        return 0;
+    }
+    if k == AST_INDEX {
+        if cg_index_is_float(e) == 0 {
+            cg_emit(e);
+            return emit_cstr("    cvtsi2sd xmm0, rax\n");
+        }
+        // index -> rcx, base -> rdx, movsd xmm0, [rdx+rcx*8]
+        cg_emit_index_value(e);
+        emit_cstr("    mov rcx, rax\n");
+        cg_emit_idx_base(e.data);
+        if cg_arr_aw(e.data) == 4 {
+            return emit_cstr("    movss xmm0, [rdx+rcx*4]\n    cvtss2sd xmm0, xmm0\n");          // [f32; N]: widened
+        }
+        return emit_cstr("    movsd xmm0, [rdx+rcx*8]\n");
+    }
+    if k == AST_CALL {
+        // only a real function leaves its result in xmm0; an integer one
+        // answers in rax
+        if cg_call_ret_float(e) != 0 {
+            return cg_emit(e);
+        }
+        cg_emit(e);
+        return emit_cstr("    cvtsi2sd xmm0, rax\n");
+    }
+    if k == AST_UNOP {
+        // -x of a real is computed as a real: 0 - x
+        op = e.data;
+        if op != TOK_TILDE && op != TOK_NOT && op != KW_INVCACHE && op != KW_PREFETCH0 {
+            if cg_expr_is_float(e.right) != 0 {
+                cg_emit_float(e.right);
+                return emit_cstr("    movaps xmm1, xmm0\n    xorps xmm0, xmm0\n    subsd xmm0, xmm1\n");
+            }
+        }
+    }
+    // anything else: evaluated as an integer and converted
+    cg_emit(e);
+    return emit_cstr("    cvtsi2sd xmm0, rax\n");
+}
+
+// a real binary operation. When the right side is a real local it goes
+// straight into xmm1; when the LEFT is the real local and the right is not,
+// the right first, moved to xmm1, then the local into xmm0 (a local's read
+// has no side effect, so the order cannot be seen).
+fn cg_emit_float_binop(e: ptr<Ast>) -> i64 {
+    var op: i64 = e.data;
+    if cg_fleaf_is(e.right) == 0 && cg_fleaf_is(e.left) != 0 {
+        cg_emit_float(e.right);
+        emit_cstr("    movaps xmm1, xmm0\n");
+        cg_emit_float(e.left);
+    } else {
+        cg_emit_float(e.left);
+        if cg_fleaf_to_xmm1(e.right) == 0 {
+            emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+            cg_emit_float(e.right);
+            emit_cstr("    movaps xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+        }
+    }
+    if op == TOK_PLUS {
+        return emit_cstr("    addsd xmm0, xmm1\n");
+    }
+    if op == TOK_MINUS {
+        return emit_cstr("    subsd xmm0, xmm1\n");
+    }
+    if op == TOK_STAR {
+        return emit_cstr("    mulsd xmm0, xmm1\n");
+    }
+    if op == TOK_SLASH {
+        return emit_cstr("    divsd xmm0, xmm1\n");
+    }
+    return 0;
+}
+
+// the width of a declared type, packed: what the type declares
+fn cg_type_size(ty: i64) -> i64 {
+    if ty == KW_U8 || ty == KW_I8 || ty == KW_BOOL {
+        return 1;
+    }
+    if ty == KW_U16 || ty == KW_I16 {
+        return 2;
+    }
+    if ty == KW_U32 || ty == KW_I32 || ty == KW_F32 {
+        return 4;
+    }
+    return 8;                                // u64/i64/f64/str/pointers
+}
+
+// the slots of eight bytes a struct needs
+fn cg_struct_size(sid: i64) -> i64 {
+    if cg_i32(sid) < 0 {
+        return 0;
+    }
+    return cg_u32(cg_q(&struct_bytes, sid) + 7) >> 3;
+}
+
+// cg_field_index(struct, field name) -> its index in the struct, or -1
+fn cg_field_index(sid: i64, t: i64) -> i64 {
+    var first: i64 = 0;
+    var n: i64 = 0;
+    var i: i64 = 0;
+    if cg_i32(sid) < 0 {
+        return -1;
+    }
+    first = cg_q(&struct_first, sid);
+    n = cg_q(&struct_nfield, sid);
+    while i < n {
+        if tok_equal(t, cg_q(&field_toks, cg_u32(first + i))) == 1 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
