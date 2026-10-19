@@ -346,6 +346,14 @@
 %define AST_LAMBDA          1102    ; fn(x: T) -> R { ... } as a value: data = its
                                     ; name token (__lambda_N), left = params, right
                                     ; = body, col = return flags as a function's
+%define AST_FRAMEADDR       1104    ; made by codegen: data = an offset, the value is rbp-data
+%define AST_IMM             1105    ; made by codegen: data = a number
+%define AST_EXTERN          1103    ; a function of a system library: data = name
+                                    ; token (0 for an empty block), left = params,
+                                    ; right = the next of its block, owner_type = the
+                                    ; names of its libraries (AST_ARG, data = string
+                                    ; token), col = 1 when variadic, child_count = the
+                                    ; kind of its result (see __ccall)
 %define AST_MULTI           1101    ; a, b = f(): left = targets (AST_ARG, left 0
                                     ; for '_'), right = the call
 %define BLOCK_SPLICE        0x53504C ; AST.type_info of a statement list the parser
@@ -447,6 +455,7 @@
 %define KW_ARG_COUNT        581     ; arg_count(): how many command-line arguments, program included
 %define KW_ARG_GET          582     ; arg_get(i): address of argument i, NUL-terminated
 %define KW_TARGET_OS        583     ; target_os(): 1 Windows, 2 Linux, 3 krn, 4 bare
+%define KW_EXTERN           584     ; extern "lib", ... { fn f(...) -> T; }: the system's libraries
 ; SIMD intrinsics. Two f64 travel in one xmm register, which fits in no
 ; scalar type, so these only compose by nesting: the result of a load or an
 ; operation feeds straight into the next one and never lands in a variable.
@@ -535,7 +544,7 @@
 %define BLOCK_RAW           0x524157 ; AST.type_info of a block written as raw { }
 %define SLICE_GET_MARK      0x534C4943 ; AST.owner_type of a call the parser made from v[i]
 %define SEM_MAX_WARN        64      ; warnings the semantic pass keeps
-%define TOKEN_BUFFER_SIZE   (2  * 1024 * 1024)   ; 2  MB  token table
+%define TOKEN_BUFFER_SIZE   (8  * 1024 * 1024)   ; 8  MB  token table
 %define AST_BUFFER_SIZE     (32 * 1024 * 1024)   ; 32 MB  AST nodes
 %define CODE_BUFFER_SIZE    (8  * 1024 * 1024)   ; 8  MB  generated code
 %define SYM_BUFFER_SIZE     (4  * 1024 * 1024)   ; 4  MB  symbol table
@@ -603,6 +612,7 @@
 %define CG_MAX_GLOBALS      4096   ; file-scope globals
 %define CG_MAX_EDGES        65536  ; call edges recorded for the thread check
 %define CG_MAX_FIELDS       4096   ; struct fields (all structs combined)
+%define CG_MAX_EXTERN       1024   ; extern functions
 
 
 ; --- EXTRA ERROR CODES ---

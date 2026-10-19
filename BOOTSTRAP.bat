@@ -3,6 +3,8 @@ setlocal enabledelayedexpansion
 echo ============================================================
 echo   KRON - BOOTSTRAP FIXPOINT
 echo   Three self-compiled generations, compared byte for byte
+echo   (gen 1 assembles the parts in Kron as they are; gens 2 and 3
+echo   make them again with the compiler before)
 echo ============================================================
 echo.
 
@@ -17,19 +19,23 @@ if not exist kron_all.asm (
 
 del /q kron_all.exe boot1.exe boot2.exe boot3.exe 2>nul
 
-echo [gen 1] kronc.exe (NASM) --^> boot1.exe
+echo [gen 1] kronc.exe (the installed compiler) --^> boot1.exe
 kronc.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nogen1
 copy /y kron_all.exe boot1.exe >nul
 del /q kron_all.exe
 
-echo [gen 2] boot1.exe --^> boot2.exe
+echo [gen 2] boot1.exe makes the parts in Kron again, then --^> boot2.exe
+call KRONPARTS.bat boot1.exe
+if errorlevel 1 goto :noparts
 boot1.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nogen2
 copy /y kron_all.exe boot2.exe >nul
 del /q kron_all.exe
 
-echo [gen 3] boot2.exe --^> boot3.exe
+echo [gen 3] boot2.exe makes the parts in Kron again, then --^> boot3.exe
+call KRONPARTS.bat boot2.exe
+if errorlevel 1 goto :noparts
 boot2.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nogen3
 copy /y kron_all.exe boot3.exe >nul
@@ -41,30 +47,27 @@ fc /b boot2.exe boot3.exe >nul
 if errorlevel 1 goto :nofix
 
 fc /b boot1.exe boot2.exe >nul
-if errorlevel 1 goto :fixnonasm
+if errorlevel 1 goto :fixgen1
 
 echo.
 echo ============================================================
 echo   FIXPOINT REACHED
 echo   gen1 == gen2 == gen3
 echo.
-echo   All three generations are emitted by kasm, so this does NOT say
-echo   kasm and NASM agree byte for byte -- they do not, kasm uses movabs
-echo   and its .text comes out larger. What it does say is stronger:
-echo   the compiler reproduces itself exactly, and the NASM-built and
-echo   kasm-built compilers behave identically.
+echo   The compiler, assembled by its own kasm and written by its own
+echo   pe_writer, reproduces itself exactly: nothing else took part.
 echo ============================================================
 goto :verify
 
-:fixnonasm
+:fixgen1
 echo.
 echo ============================================================
 echo   FIXPOINT REACHED
 echo   gen2 == gen3
 echo.
-echo   gen1 differs, which means the NASM-built compiler and the
-echo   kasm-built one do not emit identical output. The fixpoint still
-echo   holds from gen2 on, but that gap is worth looking into.
+echo   gen1 differs: the installed kronc.exe was built from older sources
+echo   (normal right after an update -- BUILD.bat installs the new one).
+echo   The fixpoint holds from gen2 on.
 echo ============================================================
 goto :verify
 
@@ -85,6 +88,9 @@ echo   OK -- compiles, assembles, and the executable runs
 echo.
 exit /b 0
 
+:noparts
+echo   [FAIL] a part of the compiler written in Kron does not compile
+exit /b 1
 :nogen1
 echo   [FAIL] gen 1 produced no executable
 exit /b 1

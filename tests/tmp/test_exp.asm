@@ -22,11 +22,13 @@ extern TlsSetValue
 extern SwitchToThread
 extern LoadLibraryA
 extern GetProcAddress
+extern GetModuleHandleA
 extern QueryPerformanceCounter
 extern QueryPerformanceFrequency
 extern GetCommandLineA
 extern VirtualAlloc
 section .bss
+__lib_state: resq 1
 __clo_lock: resq 1
 __clo_cur: resq 1
 __clo_end: resq 1
@@ -291,8 +293,9 @@ __main_exit:
     push rbp
     mov rbp, rsp
     push rbx
-    sub rsp, 40
     mov rbx, rcx
+    and rsp, -16
+    sub rsp, 32
     mov rcx, [rel __fail_tls]
     call TlsGetValue
     test rax, rax
@@ -302,8 +305,50 @@ __main_exit:
     jz .me_go
     call __print_fail
 .me_go:
+    call __crt_flush
     mov rcx, rbx
     call ExitProcess
+__crt_flush:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rsi
+    mov rax, rsp
+    sar rax, 4
+    shl rax, 4
+    mov rsp, rax
+    sub rsp, 32
+    lea rbx, [rel __crt_dlls]
+.cf_lib:
+    mov al, [rbx]
+    test al, al
+    jz .cf_out
+    mov rcx, rbx
+    call GetModuleHandleA
+    test rax, rax
+    jz .cf_next
+    mov rcx, rax
+    lea rdx, [rel __crt_flushall]
+    call GetProcAddress
+    test rax, rax
+    jz .cf_next
+    call rax
+.cf_next:
+    mov al, [rbx]
+    inc rbx
+    test al, al
+    jnz .cf_next
+    jmp .cf_lib
+.cf_out:
+    lea rsp, [rbp-16]
+    pop rsi
+    pop rbx
+    pop rbp
+    ret
+section .data
+__crt_dlls: db 'msvcrt.dll', 0, 'ucrtbase.dll', 0, 0
+__crt_flushall: db '_flushall', 0
+section .text
 __print_fail:
     push rbp
     mov rbp, rsp
@@ -988,6 +1033,177 @@ __print_cstr:
     pop rbx
     mov rsp, rbp
     pop rbp
+    ret
+section .data
+__xm_lib: db 'a system library could not be loaded', 0
+__xh_lib: db 'check that it is installed: the names tried are the ones of its extern block', 0
+__xm_fn: db 'the system library has no function of that name', 0
+__xh_fn: db 'check the name, and that the installed version of the library has it', 0
+section .text
+__ccall:
+    mov r9, [r11]
+    test r9, r9
+    jnz .cc_go
+    push rbp
+    mov rbp, rsp
+    push rax
+    push rdx
+    push r10
+    push r11
+    mov rcx, r11
+    call __ext_resolve
+    mov r9, rax
+    pop r11
+    pop r10
+    pop rdx
+    pop rax
+    pop rbp
+    test r9, r9
+    jz .cc_none
+    mov [r11], r9
+.cc_go:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rsi
+    push r12
+    push r13
+    sub rsp, 168
+    and rsp, -16
+    mov r12, r11
+    mov r13, rax
+    mov rbx, r13
+    and rbx, 255
+    xor esi, esi
+.cc_arg:
+    cmp rsi, rbx
+    jae .cc_load
+    mov rax, rbx
+    sub rax, rsi
+    dec rax
+    mov rax, [r10+rax*8]
+    mov rcx, rsi
+    add rcx, 8
+    mov rdx, 1
+    shl rdx, cl
+    test r13, rdx
+    jz .cc_put
+    mov rcx, rsi
+    add rcx, 32
+    mov rdx, 1
+    shl rdx, cl
+    test r13, rdx
+    jz .cc_put
+    movq xmm0, rax
+    cvtsd2ss xmm0, xmm0
+    movq rax, xmm0
+.cc_put:
+    mov [rsp+rsi*8], rax
+    inc rsi
+    jmp .cc_arg
+.cc_load:
+    mov rcx, [rsp]
+    mov rdx, [rsp+8]
+    mov r8, [rsp+16]
+    mov r9, [rsp+24]
+    movq xmm0, rcx
+    movq xmm1, rdx
+    movq xmm2, r8
+    movq xmm3, r9
+    mov r11, [r12]
+    call r11
+    mov rcx, r13
+    shr rcx, 24
+    and rcx, 255
+    cmp rcx, 1
+    jne .cc_r2
+    shl rax, 32
+    sar rax, 32
+    jmp .cc_done
+.cc_r2:
+    cmp rcx, 2
+    jne .cc_r3
+    shl rax, 32
+    shr rax, 32
+    jmp .cc_done
+.cc_r3:
+    cmp rcx, 3
+    jne .cc_r4
+    and rax, 255
+    jmp .cc_done
+.cc_r4:
+    cmp rcx, 4
+    jne .cc_r5
+    and rax, 65535
+    jmp .cc_done
+.cc_r5:
+    cmp rcx, 5
+    jne .cc_r6
+    shl rax, 48
+    sar rax, 48
+    jmp .cc_done
+.cc_r6:
+    cmp rcx, 6
+    jne .cc_r9
+    shl rax, 56
+    sar rax, 56
+    jmp .cc_done
+.cc_r9:
+    cmp rcx, 9
+    jne .cc_done
+    cvtss2sd xmm0, xmm0
+.cc_done:
+    lea rsp, [rbp-32]
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    pop rbp
+    ret
+.cc_none:
+    xor eax, eax
+    xorps xmm0, xmm0
+    ret
+__ext_resolve:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, [rbx+16]
+.xr_lib:
+    mov al, [rsi]
+    test al, al
+    jz .xr_nolib
+    mov rcx, rsi
+    call __dll_load
+    test rax, rax
+    jnz .xr_sym
+.xr_skip:
+    mov al, [rsi]
+    inc rsi
+    test al, al
+    jnz .xr_skip
+    jmp .xr_lib
+.xr_sym:
+    mov rcx, rax
+    mov rdx, [rbx+8]
+    call __dll_proc
+    test rax, rax
+    jnz .xr_out
+    lea rcx, [rel __xm_fn]
+    lea rdx, [rel __xh_fn]
+    jmp .xr_fail
+.xr_nolib:
+    lea rcx, [rel __xm_lib]
+    lea rdx, [rel __xh_lib]
+.xr_fail:
+    xor r8, r8
+    call __fail_raise
+    xor eax, eax
+.xr_out:
+    add rsp, 40
+    pop rsi
+    pop rbx
     ret
 section .data
 __tp_at: db '  at ', 0
@@ -1765,8 +1981,7 @@ section .text
     lea rax, [rbp-16]
     push rax
     mov rax, rbx
-    mov rcx, 1
-    sar rax, cl
+    sar rax, 1
     mov rcx, 2305843009213693952
     add rax, rcx
     mov rcx, 2251799813685248
@@ -2418,6 +2633,584 @@ section .data
     dq .kl12,210
 .kfn: db "ftan", 0
 section .text
+fatan:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 176
+    mov [rbp-144], rbx
+    movups [rbp-136], xmm6
+    movups [rbp-120], xmm7
+    movups [rbp-104], xmm8
+    movups [rbp-88], xmm9
+    movaps xmm6, xmm0
+section .data
+.flt111: dq 1.0
+section .text
+    movsd xmm0, [rel .flt111]
+    movaps xmm9, xmm0
+    movaps xmm0, xmm6
+    movaps xmm6, xmm0
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt114: dq 0.0
+section .text
+    movsd xmm0, [rel .flt114]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L112
+section .data
+.flt115: dq 0.0
+section .text
+    movsd xmm0, [rel .flt115]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt116: dq 1.0
+section .text
+    movsd xmm0, [rel .flt116]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movaps xmm9, xmm0
+section .data
+.flt117: dq 0.0
+section .text
+    movsd xmm0, [rel .flt117]
+    movaps xmm1, xmm6
+    subsd xmm0, xmm1
+    movaps xmm6, xmm0
+    jmp .L113
+.L112:
+.L113:
+section .data
+.flt118: dq 1.0
+section .text
+    movsd xmm0, [rel .flt118]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt119: dq 1.0
+section .text
+    movsd xmm0, [rel .flt119]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm6
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl13:
+    call fsqrt
+    add rsp, 32
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movaps xmm0, xmm6
+    divsd xmm0, xmm1
+    movaps xmm6, xmm0
+section .data
+.flt120: dq 1.0
+section .text
+    movsd xmm0, [rel .flt120]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt121: dq 1.0
+section .text
+    movsd xmm0, [rel .flt121]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm6
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl14:
+    call fsqrt
+    add rsp, 32
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movaps xmm0, xmm6
+    divsd xmm0, xmm1
+    movaps xmm6, xmm0
+    movaps xmm0, xmm6
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    movaps xmm8, xmm0
+    movaps xmm0, xmm6
+    movaps xmm7, xmm0
+    movaps xmm0, xmm6
+    movaps xmm6, xmm0
+    mov rax, 1
+    mov rbx, rax
+.L122:
+    cmp rbx, 12
+    jge .L123
+section .data
+.flt125: dq 0.0
+section .text
+    movsd xmm0, [rel .flt125]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm7
+    movaps xmm1, xmm8
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    movaps xmm7, xmm0
+    mov rax, 2
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    mov rax, rbx
+    cvtsi2sd xmm0, rax
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    mov rax, 1
+    cvtsi2sd xmm0, rax
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movaps xmm0, xmm7
+    divsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movaps xmm0, xmm6
+    addsd xmm0, xmm1
+    movaps xmm6, xmm0
+.L124:
+    add rbx, 1
+    jmp .L122
+.L123:
+section .data
+.flt126: dq 4.0
+section .text
+    movsd xmm0, [rel .flt126]
+    movaps xmm1, xmm0
+    movaps xmm0, xmm9
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    jmp .__ret_110
+.__ret_110:
+    mov rbx, [rbp-144]
+    movups xmm6, [rbp-136]
+    movups xmm7, [rbp-120]
+    movups xmm8, [rbp-104]
+    movups xmm9, [rbp-88]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq ftan.kft, .kfe, .kfn, __kron_file_0,2
+    dq .kl13,223
+    dq .kl14,224
+.kfn: db "fatan", 0
+section .text
+fatan2:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    movups [rbp-48], xmm6
+    movups [rbp-32], xmm7
+    movaps xmm7, xmm0
+    movaps xmm6, xmm1
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt130: dq 0.0
+section .text
+    movsd xmm0, [rel .flt130]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L128
+    movaps xmm0, xmm7
+    movaps xmm1, xmm6
+    divsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl15:
+    call fatan
+    add rsp, 32
+    jmp .__ret_127
+    jmp .L129
+.L128:
+.L129:
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt133: dq 0.0
+section .text
+    movsd xmm0, [rel .flt133]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L131
+    movaps xmm0, xmm7
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt136: dq 0.0
+section .text
+    movsd xmm0, [rel .flt136]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setae al
+    movzx rax, al
+    test rax, rax
+    jz .L134
+    movaps xmm0, xmm7
+    movaps xmm1, xmm6
+    divsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl16:
+    call fatan
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt137: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt137]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    jmp .__ret_127
+    jmp .L135
+.L134:
+.L135:
+    movaps xmm0, xmm7
+    movaps xmm1, xmm6
+    divsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl17:
+    call fatan
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt138: dq 3.14159265358979323846
+section .text
+    movsd xmm0, [rel .flt138]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_127
+    jmp .L132
+.L131:
+.L132:
+    movaps xmm0, xmm7
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt141: dq 0.0
+section .text
+    movsd xmm0, [rel .flt141]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    seta al
+    movzx rax, al
+    test rax, rax
+    jz .L139
+section .data
+.flt142: dq 1.57079632679489661923
+section .text
+    movsd xmm0, [rel .flt142]
+    jmp .__ret_127
+    jmp .L140
+.L139:
+.L140:
+    movaps xmm0, xmm7
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt145: dq 0.0
+section .text
+    movsd xmm0, [rel .flt145]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    ucomisd xmm0, xmm1
+    setb al
+    movzx rax, al
+    test rax, rax
+    jz .L143
+section .data
+.flt146: dq 0.0
+section .text
+    movsd xmm0, [rel .flt146]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt147: dq 1.57079632679489661923
+section .text
+    movsd xmm0, [rel .flt147]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    jmp .__ret_127
+    jmp .L144
+.L143:
+.L144:
+section .data
+.flt148: dq 0.0
+section .text
+    movsd xmm0, [rel .flt148]
+    jmp .__ret_127
+.__ret_127:
+    movups xmm6, [rbp-48]
+    movups xmm7, [rbp-32]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq fatan.kft, .kfe, .kfn, __kron_file_0,3
+    dq .kl15,238
+    dq .kl16,242
+    dq .kl17,244
+.kfn: db "fatan2", 0
+section .text
+fasin:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movups [rbp-32], xmm6
+    movaps xmm6, xmm0
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt150: dq 0.0
+section .text
+    movsd xmm0, [rel .flt150]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt151: dq 1.0
+section .text
+    movsd xmm0, [rel .flt151]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt152: dq 1.0
+section .text
+    movsd xmm0, [rel .flt152]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl18:
+    call fclamp
+    add rsp, 32
+    movaps xmm6, xmm0
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt153: dq 1.0
+section .text
+    movsd xmm0, [rel .flt153]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm6
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl19:
+    call fsqrt
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fatan2
+    add rsp, 32
+    jmp .__ret_149
+.__ret_149:
+    movups xmm6, [rbp-32]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq fatan2.kft, .kfe, .kfn, __kron_file_0,2
+    dq .kl18,257
+    dq .kl19,258
+.kfn: db "fasin", 0
+section .text
+facos:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    movups [rbp-32], xmm6
+    movaps xmm6, xmm0
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt155: dq 0.0
+section .text
+    movsd xmm0, [rel .flt155]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt156: dq 1.0
+section .text
+    movsd xmm0, [rel .flt156]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt157: dq 1.0
+section .text
+    movsd xmm0, [rel .flt157]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm2, [rsp]
+    add rsp, 8
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl20:
+    call fclamp
+    add rsp, 32
+    movaps xmm6, xmm0
+section .data
+.flt158: dq 1.0
+section .text
+    movsd xmm0, [rel .flt158]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm6
+    movaps xmm1, xmm6
+    mulsd xmm0, xmm1
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl21:
+    call fsqrt
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movaps xmm0, xmm6
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fatan2
+    add rsp, 32
+    jmp .__ret_154
+.__ret_154:
+    movups xmm6, [rbp-32]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq fasin.kft, .kfe, .kfn, __kron_file_0,2
+    dq .kl20,262
+    dq .kl21,263
+.kfn: db "facos", 0
+section .text
 fpowi:
     push rbp
     mov rbp, rsp
@@ -2429,26 +3222,26 @@ fpowi:
     movaps xmm7, xmm0
     mov r12, rdx
 section .data
-.flt111: dq 1.0
+.flt160: dq 1.0
 section .text
-    movsd xmm0, [rel .flt111]
+    movsd xmm0, [rel .flt160]
     movaps xmm6, xmm0
     mov rax, 0
     mov rbx, rax
-.L112:
+.L161:
     cmp rbx, r12
-    jge .L113
+    jge .L162
     movaps xmm0, xmm6
     movaps xmm1, xmm7
     mulsd xmm0, xmm1
     movaps xmm6, xmm0
-.L114:
+.L163:
     add rbx, 1
-    jmp .L112
-.L113:
+    jmp .L161
+.L162:
     movaps xmm0, xmm6
-    jmp .__ret_110
-.__ret_110:
+    jmp .__ret_159
+.__ret_159:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     movups xmm6, [rbp-64]
@@ -2463,14 +3256,14 @@ deg_to_rad:
     movups [rbp-32], xmm6
     movaps xmm6, xmm0
 section .data
-.flt116: dq 0.01745329251994329577
+.flt165: dq 0.01745329251994329577
 section .text
-    movsd xmm0, [rel .flt116]
+    movsd xmm0, [rel .flt165]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     mulsd xmm0, xmm1
-    jmp .__ret_115
-.__ret_115:
+    jmp .__ret_164
+.__ret_164:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -2482,14 +3275,14 @@ rad_to_deg:
     movups [rbp-32], xmm6
     movaps xmm6, xmm0
 section .data
-.flt118: dq 57.29577951308232087680
+.flt167: dq 57.29577951308232087680
 section .text
-    movsd xmm0, [rel .flt118]
+    movsd xmm0, [rel .flt167]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     mulsd xmm0, xmm1
-    jmp .__ret_117
-.__ret_117:
+    jmp .__ret_166
+.__ret_166:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -2512,8 +3305,8 @@ flerp:
     movaps xmm1, xmm0
     movaps xmm0, xmm8
     addsd xmm0, xmm1
-    jmp .__ret_119
-.__ret_119:
+    jmp .__ret_168
+.__ret_168:
     movups xmm6, [rbp-80]
     movups xmm7, [rbp-64]
     movups xmm8, [rbp-48]
@@ -2557,8 +3350,8 @@ fdot3:
     movsd xmm0, [rsp]
     add rsp, 8
     addsd xmm0, xmm1
-    jmp .__ret_120
-.__ret_120:
+    jmp .__ret_169
+.__ret_169:
     movups xmm6, [rbp-144]
     movups xmm7, [rbp-128]
     movups xmm8, [rbp-112]
@@ -2573,11 +3366,11 @@ m_e:
     mov rbp, rsp
     sub rsp, 32
 section .data
-.flt122: dq 2.71828182845904523536
+.flt171: dq 2.71828182845904523536
 section .text
-    movsd xmm0, [rel .flt122]
-    jmp .__ret_121
-.__ret_121:
+    movsd xmm0, [rel .flt171]
+    jmp .__ret_170
+.__ret_170:
     mov rsp, rbp
     pop rbp
     ret
@@ -2586,11 +3379,11 @@ m_ln2:
     mov rbp, rsp
     sub rsp, 32
 section .data
-.flt124: dq 0.69314718055994530942
+.flt173: dq 0.69314718055994530942
 section .text
-    movsd xmm0, [rel .flt124]
-    jmp .__ret_123
-.__ret_123:
+    movsd xmm0, [rel .flt173]
+    jmp .__ret_172
+.__ret_172:
     mov rsp, rbp
     pop rbp
     ret
@@ -2599,11 +3392,11 @@ m_log2e:
     mov rbp, rsp
     sub rsp, 32
 section .data
-.flt126: dq 1.44269504088896340736
+.flt175: dq 1.44269504088896340736
 section .text
-    movsd xmm0, [rel .flt126]
-    jmp .__ret_125
-.__ret_125:
+    movsd xmm0, [rel .flt175]
+    jmp .__ret_174
+.__ret_174:
     mov rsp, rbp
     pop rbp
     ret
@@ -2613,9 +3406,9 @@ m_inf:
     sub rsp, 64
     movups [rbp-32], xmm6
 section .data
-.flt128: dq 1000000000.0
+.flt177: dq 1000000000.0
 section .text
-    movsd xmm0, [rel .flt128]
+    movsd xmm0, [rel .flt177]
     movaps xmm6, xmm0
     movaps xmm0, xmm6
     movaps xmm1, xmm6
@@ -2640,8 +3433,8 @@ section .text
     movaps xmm0, xmm6
     movaps xmm1, xmm6
     mulsd xmm0, xmm1
-    jmp .__ret_127
-.__ret_127:
+    jmp .__ret_176
+.__ret_176:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -2661,9 +3454,9 @@ fexp:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt132: dq 709.0
+.flt181: dq 709.0
 section .text
-    movsd xmm0, [rel .flt132]
+    movsd xmm0, [rel .flt181]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -2671,28 +3464,28 @@ section .text
     seta al
     movzx rax, al
     test rax, rax
-    jz .L130
+    jz .L179
     sub rsp, 32
-.kl13:
+.kl22:
     call m_inf
     add rsp, 32
-    jmp .__ret_129
-    jmp .L131
-.L130:
-.L131:
+    jmp .__ret_178
+    jmp .L180
+.L179:
+.L180:
     movaps xmm0, xmm7
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt135: dq 0.0
+.flt184: dq 0.0
 section .text
-    movsd xmm0, [rel .flt135]
+    movsd xmm0, [rel .flt184]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt136: dq 745.0
+.flt185: dq 745.0
 section .text
-    movsd xmm0, [rel .flt136]
+    movsd xmm0, [rel .flt185]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -2704,17 +3497,17 @@ section .text
     setb al
     movzx rax, al
     test rax, rax
-    jz .L133
+    jz .L182
 section .data
-.flt137: dq 0.0
+.flt186: dq 0.0
 section .text
-    movsd xmm0, [rel .flt137]
-    jmp .__ret_129
-    jmp .L134
-.L133:
-.L134:
+    movsd xmm0, [rel .flt186]
+    jmp .__ret_178
+    jmp .L183
+.L182:
+.L183:
     sub rsp, 32
-.kl14:
+.kl23:
     call m_log2e
     add rsp, 32
     movaps xmm1, xmm0
@@ -2732,7 +3525,7 @@ section .text
     cvttsd2si rax, xmm0
     mov rbx, rax
     sub rsp, 32
-.kl15:
+.kl24:
     call m_ln2
     add rsp, 32
     movaps xmm1, xmm0
@@ -2743,25 +3536,25 @@ section .text
     subsd xmm0, xmm1
     movaps xmm9, xmm0
 section .data
-.flt138: dq 1.0
+.flt187: dq 1.0
 section .text
-    movsd xmm0, [rel .flt138]
+    movsd xmm0, [rel .flt187]
     movaps xmm8, xmm0
 section .data
-.flt139: dq 1.0
+.flt188: dq 1.0
 section .text
-    movsd xmm0, [rel .flt139]
+    movsd xmm0, [rel .flt188]
     movaps xmm7, xmm0
 section .data
-.flt140: dq 0.0
+.flt189: dq 0.0
 section .text
-    movsd xmm0, [rel .flt140]
+    movsd xmm0, [rel .flt189]
     movaps xmm6, xmm0
     mov rax, 1
     mov r12, rax
-.L141:
+.L190:
     cmp r12, 11
-    jg .L142
+    jg .L191
     mov rax, r12
     cvtsi2sd xmm0, rax
     movaps xmm6, xmm0
@@ -2775,10 +3568,10 @@ section .text
     movaps xmm1, xmm8
     addsd xmm0, xmm1
     movaps xmm7, xmm0
-.L143:
+.L192:
     add r12, 1
-    jmp .L141
-.L142:
+    jmp .L190
+.L191:
     mov rax, rbx
     push rax
     mov rax, 1022
@@ -2789,99 +3582,98 @@ section .text
     setge al
     movzx rax, al
     test rax, rax
-    jz .L146
+    jz .L195
     mov rax, rbx
     mov rcx, 1023
     cmp rax, rcx
     setle al
     movzx rax, al
     test rax, rax
-    jz .L146
+    jz .L195
     mov rax, 1
-    jmp .L147
-.L146:
+    jmp .L196
+.L195:
     mov rax, 0
-.L147:
+.L196:
     test rax, rax
-    jz .L144
+    jz .L193
     lea rax, [rbp-72]
     push rax
     mov rax, rbx
     add rax, 1023
-    mov rcx, 52
-    shl rax, cl
+    shl rax, 52
     mov rcx, rax
     pop rdx
     mov [rdx], rcx
     mov rax, 0
     cmp rax, 1
-    jb .L148
+    jb .L197
     lea rcx, [rel __bounds_msg]
     lea rdx, [rel __bounds_hint]
     sub rsp, 32
-.kl16:
+.kl25:
     lea r8, [rel .kx2]
     call __fail_raise
 .kx2:
     add rsp, 32
     xor rax, rax
-    jmp .__ret_129
-.L148:
+    jmp .__ret_178
+.L197:
     mov rcx, rax
     lea rdx, [rbp-72]
     movsd xmm0, [rdx+rcx*8]
     movaps xmm1, xmm0
     movaps xmm0, xmm7
     mulsd xmm0, xmm1
-    jmp .__ret_129
-    jmp .L145
-.L144:
-.L145:
+    jmp .__ret_178
+    jmp .L194
+.L193:
+.L194:
     cmp rbx, 0
-    jl .L149
+    jl .L198
     mov rax, 0
     mov r12, rax
-.L151:
+.L200:
     cmp r12, rbx
-    jge .L152
+    jge .L201
 section .data
-.flt154: dq 2.0
+.flt203: dq 2.0
 section .text
-    movsd xmm0, [rel .flt154]
+    movsd xmm0, [rel .flt203]
     movaps xmm1, xmm0
     movaps xmm0, xmm7
     mulsd xmm0, xmm1
     movaps xmm7, xmm0
-.L153:
+.L202:
     add r12, 1
-    jmp .L151
-.L152:
-    jmp .L150
-.L149:
+    jmp .L200
+.L201:
+    jmp .L199
+.L198:
     mov rax, 0
     sub rax, rbx
     mov rbx, rax
     mov rax, 0
     mov r12, rax
-.L155:
+.L204:
     cmp r12, rbx
-    jge .L156
+    jge .L205
 section .data
-.flt158: dq 0.5
+.flt207: dq 0.5
 section .text
-    movsd xmm0, [rel .flt158]
+    movsd xmm0, [rel .flt207]
     movaps xmm1, xmm0
     movaps xmm0, xmm7
     mulsd xmm0, xmm1
     movaps xmm7, xmm0
-.L157:
+.L206:
     add r12, 1
-    jmp .L155
-.L156:
-.L150:
+    jmp .L204
+.L205:
+.L199:
     movaps xmm0, xmm7
-    jmp .__ret_129
-.__ret_129:
+    jmp .__ret_178
+.__ret_178:
     mov rbx, [rbp-176]
     mov r12, [rbp-168]
     movups xmm6, [rbp-160]
@@ -2893,11 +3685,11 @@ section .text
     ret
 .kfe:
 section .data
-.kft: dq ftan.kft, .kfe, .kfn, __kron_file_1,4
-    dq .kl13,46
-    dq .kl14,52
-    dq .kl15,54
-    dq .kl16,71
+.kft: dq facos.kft, .kfe, .kfn, __kron_file_1,4
+    dq .kl22,46
+    dq .kl23,52
+    dq .kl24,54
+    dq .kl25,71
 .kfn: db "fexp", 0
 section .text
 fln:
@@ -2915,9 +3707,9 @@ fln:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt162: dq 0.0
+.flt211: dq 0.0
 section .text
-    movsd xmm0, [rel .flt162]
+    movsd xmm0, [rel .flt211]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -2925,37 +3717,37 @@ section .text
     setbe al
     movzx rax, al
     test rax, rax
-    jz .L160
+    jz .L209
 section .data
-.flt163: dq 0.0
+.flt212: dq 0.0
 section .text
-    movsd xmm0, [rel .flt163]
+    movsd xmm0, [rel .flt212]
     sub rsp, 8
     movsd [rsp], xmm0
     sub rsp, 32
-.kl17:
+.kl26:
     call m_inf
     add rsp, 32
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     subsd xmm0, xmm1
-    jmp .__ret_159
-    jmp .L161
-.L160:
-.L161:
+    jmp .__ret_208
+    jmp .L210
+.L209:
+.L210:
     movaps xmm0, xmm6
     movaps xmm6, xmm0
     mov rax, 0
     mov r12, rax
-.L164:
+.L213:
     movaps xmm0, xmm6
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt167: dq 1.41421356237309504880
+.flt216: dq 1.41421356237309504880
 section .text
-    movsd xmm0, [rel .flt167]
+    movsd xmm0, [rel .flt216]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -2963,27 +3755,27 @@ section .text
     seta al
     movzx rax, al
     test rax, rax
-    jz .L165
+    jz .L214
 section .data
-.flt168: dq 0.5
+.flt217: dq 0.5
 section .text
-    movsd xmm0, [rel .flt168]
+    movsd xmm0, [rel .flt217]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     mulsd xmm0, xmm1
     movaps xmm6, xmm0
     add r12, 1
-.L166:
-    jmp .L164
-.L165:
-.L169:
+.L215:
+    jmp .L213
+.L214:
+.L218:
     movaps xmm0, xmm6
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt172: dq 0.70710678118654752440
+.flt221: dq 0.70710678118654752440
 section .text
-    movsd xmm0, [rel .flt172]
+    movsd xmm0, [rel .flt221]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -2991,32 +3783,32 @@ section .text
     setb al
     movzx rax, al
     test rax, rax
-    jz .L170
+    jz .L219
 section .data
-.flt173: dq 2.0
+.flt222: dq 2.0
 section .text
-    movsd xmm0, [rel .flt173]
+    movsd xmm0, [rel .flt222]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     mulsd xmm0, xmm1
     movaps xmm6, xmm0
     sub r12, 1
-.L171:
-    jmp .L169
-.L170:
+.L220:
+    jmp .L218
+.L219:
 section .data
-.flt174: dq 1.0
+.flt223: dq 1.0
 section .text
-    movsd xmm0, [rel .flt174]
+    movsd xmm0, [rel .flt223]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     subsd xmm0, xmm1
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt175: dq 1.0
+.flt224: dq 1.0
 section .text
-    movsd xmm0, [rel .flt175]
+    movsd xmm0, [rel .flt224]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     addsd xmm0, xmm1
@@ -3034,15 +3826,15 @@ section .text
     movaps xmm0, xmm6
     movaps xmm7, xmm0
 section .data
-.flt176: dq 0.0
+.flt225: dq 0.0
 section .text
-    movsd xmm0, [rel .flt176]
+    movsd xmm0, [rel .flt225]
     movaps xmm6, xmm0
     mov rax, 1
     mov rbx, rax
-.L177:
+.L226:
     cmp rbx, 9
-    jg .L178
+    jg .L227
     movaps xmm0, xmm8
     movaps xmm1, xmm9
     mulsd xmm0, xmm1
@@ -3073,14 +3865,14 @@ section .text
     movaps xmm0, xmm7
     addsd xmm0, xmm1
     movaps xmm7, xmm0
-.L179:
+.L228:
     add rbx, 1
-    jmp .L177
-.L178:
+    jmp .L226
+.L227:
 section .data
-.flt180: dq 2.0
+.flt229: dq 2.0
 section .text
-    movsd xmm0, [rel .flt180]
+    movsd xmm0, [rel .flt229]
     movaps xmm1, xmm0
     movaps xmm0, xmm7
     mulsd xmm0, xmm1
@@ -3089,7 +3881,7 @@ section .text
     cvtsi2sd xmm0, rax
     movaps xmm6, xmm0
     sub rsp, 32
-.kl18:
+.kl27:
     call m_ln2
     add rsp, 32
     movaps xmm1, xmm0
@@ -3098,8 +3890,8 @@ section .text
     movaps xmm1, xmm0
     movaps xmm0, xmm7
     addsd xmm0, xmm1
-    jmp .__ret_159
-.__ret_159:
+    jmp .__ret_208
+.__ret_208:
     mov rbx, [rbp-160]
     mov r12, [rbp-152]
     movups xmm6, [rbp-144]
@@ -3112,8 +3904,8 @@ section .text
 .kfe:
 section .data
 .kft: dq fexp.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl17,94
-    dq .kl18,122
+    dq .kl26,94
+    dq .kl27,122
 .kfn: db "fln", 0
 section .text
 flog10:
@@ -3128,21 +3920,21 @@ flog10:
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl19:
+.kl28:
     call fln
     add rsp, 32
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt182: dq 0.43429448190325182765
+.flt231: dq 0.43429448190325182765
 section .text
-    movsd xmm0, [rel .flt182]
+    movsd xmm0, [rel .flt231]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     mulsd xmm0, xmm1
-    jmp .__ret_181
-.__ret_181:
+    jmp .__ret_230
+.__ret_230:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3150,7 +3942,7 @@ section .text
 .kfe:
 section .data
 .kft: dq fln.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl19,126
+    dq .kl28,126
 .kfn: db "flog10", 0
 section .text
 flog2:
@@ -3165,7 +3957,7 @@ flog2:
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl20:
+.kl29:
     call fln
     add rsp, 32
     sub rsp, 8
@@ -3177,8 +3969,8 @@ flog2:
     movsd xmm0, [rsp]
     add rsp, 8
     mulsd xmm0, xmm1
-    jmp .__ret_183
-.__ret_183:
+    jmp .__ret_232
+.__ret_232:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3186,7 +3978,7 @@ flog2:
 .kfe:
 section .data
 .kft: dq flog10.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl20,130
+    dq .kl29,130
 .kfn: db "flog2", 0
 section .text
 fpow:
@@ -3201,9 +3993,9 @@ fpow:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt187: dq 0.0
+.flt236: dq 0.0
 section .text
-    movsd xmm0, [rel .flt187]
+    movsd xmm0, [rel .flt236]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3211,22 +4003,22 @@ section .text
     setbe al
     movzx rax, al
     test rax, rax
-    jz .L185
+    jz .L234
 section .data
-.flt188: dq 0.0
+.flt237: dq 0.0
 section .text
-    movsd xmm0, [rel .flt188]
-    jmp .__ret_184
-    jmp .L186
-.L185:
-.L186:
+    movsd xmm0, [rel .flt237]
+    jmp .__ret_233
+    jmp .L235
+.L234:
+.L235:
     movaps xmm0, xmm7
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl21:
+.kl30:
     call fln
     add rsp, 32
     movaps xmm1, xmm0
@@ -3239,8 +4031,8 @@ section .text
     sub rsp, 32
     call fexp
     add rsp, 32
-    jmp .__ret_184
-.__ret_184:
+    jmp .__ret_233
+.__ret_233:
     movups xmm6, [rbp-48]
     movups xmm7, [rbp-32]
     mov rsp, rbp
@@ -3249,7 +4041,7 @@ section .text
 .kfe:
 section .data
 .kft: dq flog2.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl21,139
+    dq .kl30,139
 .kfn: db "fpow", 0
 section .text
 sigmoid:
@@ -3262,9 +4054,9 @@ sigmoid:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt192: dq 0.0
+.flt241: dq 0.0
 section .text
-    movsd xmm0, [rel .flt192]
+    movsd xmm0, [rel .flt241]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3272,11 +4064,11 @@ section .text
     setae al
     movzx rax, al
     test rax, rax
-    jz .L190
+    jz .L239
 section .data
-.flt193: dq 0.0
+.flt242: dq 0.0
 section .text
-    movsd xmm0, [rel .flt193]
+    movsd xmm0, [rel .flt242]
     movaps xmm1, xmm6
     subsd xmm0, xmm1
     sub rsp, 8
@@ -3284,51 +4076,51 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl22:
+.kl31:
     call fexp
     add rsp, 32
     movaps xmm6, xmm0
 section .data
-.flt194: dq 1.0
+.flt243: dq 1.0
 section .text
-    movsd xmm0, [rel .flt194]
+    movsd xmm0, [rel .flt243]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt195: dq 1.0
+.flt244: dq 1.0
 section .text
-    movsd xmm0, [rel .flt195]
+    movsd xmm0, [rel .flt244]
     movaps xmm1, xmm6
     addsd xmm0, xmm1
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     divsd xmm0, xmm1
-    jmp .__ret_189
-    jmp .L191
-.L190:
-.L191:
+    jmp .__ret_238
+    jmp .L240
+.L239:
+.L240:
     movaps xmm0, xmm6
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl23:
+.kl32:
     call fexp
     add rsp, 32
     movaps xmm6, xmm0
 section .data
-.flt196: dq 1.0
+.flt245: dq 1.0
 section .text
-    movsd xmm0, [rel .flt196]
+    movsd xmm0, [rel .flt245]
     movaps xmm1, xmm6
     addsd xmm0, xmm1
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     divsd xmm0, xmm1
-    jmp .__ret_189
-.__ret_189:
+    jmp .__ret_238
+.__ret_238:
     movups xmm6, [rbp-48]
     mov rsp, rbp
     pop rbp
@@ -3336,8 +4128,8 @@ section .text
 .kfe:
 section .data
 .kft: dq fpow.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl22,148
-    dq .kl23,151
+    dq .kl31,148
+    dq .kl32,151
 .kfn: db "sigmoid", 0
 section .text
 sigmoid_d:
@@ -3347,16 +4139,16 @@ sigmoid_d:
     movups [rbp-32], xmm6
     movaps xmm6, xmm0
 section .data
-.flt198: dq 1.0
+.flt247: dq 1.0
 section .text
-    movsd xmm0, [rel .flt198]
+    movsd xmm0, [rel .flt247]
     movaps xmm1, xmm6
     subsd xmm0, xmm1
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     mulsd xmm0, xmm1
-    jmp .__ret_197
-.__ret_197:
+    jmp .__ret_246
+.__ret_246:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3371,9 +4163,9 @@ ftanh:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt202: dq 20.0
+.flt251: dq 20.0
 section .text
-    movsd xmm0, [rel .flt202]
+    movsd xmm0, [rel .flt251]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3381,28 +4173,28 @@ section .text
     seta al
     movzx rax, al
     test rax, rax
-    jz .L200
+    jz .L249
 section .data
-.flt203: dq 1.0
+.flt252: dq 1.0
 section .text
-    movsd xmm0, [rel .flt203]
-    jmp .__ret_199
-    jmp .L201
-.L200:
-.L201:
+    movsd xmm0, [rel .flt252]
+    jmp .__ret_248
+    jmp .L250
+.L249:
+.L250:
     movaps xmm0, xmm6
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt206: dq 0.0
+.flt255: dq 0.0
 section .text
-    movsd xmm0, [rel .flt206]
+    movsd xmm0, [rel .flt255]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt207: dq 20.0
+.flt256: dq 20.0
 section .text
-    movsd xmm0, [rel .flt207]
+    movsd xmm0, [rel .flt256]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3414,29 +4206,29 @@ section .text
     setb al
     movzx rax, al
     test rax, rax
-    jz .L204
+    jz .L253
 section .data
-.flt208: dq 0.0
+.flt257: dq 0.0
 section .text
-    movsd xmm0, [rel .flt208]
+    movsd xmm0, [rel .flt257]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt209: dq 1.0
+.flt258: dq 1.0
 section .text
-    movsd xmm0, [rel .flt209]
+    movsd xmm0, [rel .flt258]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     subsd xmm0, xmm1
-    jmp .__ret_199
-    jmp .L205
-.L204:
-.L205:
+    jmp .__ret_248
+    jmp .L254
+.L253:
+.L254:
 section .data
-.flt210: dq 2.0
+.flt259: dq 2.0
 section .text
-    movsd xmm0, [rel .flt210]
+    movsd xmm0, [rel .flt259]
     movaps xmm1, xmm6
     mulsd xmm0, xmm1
     sub rsp, 8
@@ -3444,23 +4236,23 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl24:
+.kl33:
     call fexp
     add rsp, 32
     movaps xmm6, xmm0
 section .data
-.flt211: dq 1.0
+.flt260: dq 1.0
 section .text
-    movsd xmm0, [rel .flt211]
+    movsd xmm0, [rel .flt260]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     subsd xmm0, xmm1
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt212: dq 1.0
+.flt261: dq 1.0
 section .text
-    movsd xmm0, [rel .flt212]
+    movsd xmm0, [rel .flt261]
     movaps xmm1, xmm0
     movaps xmm0, xmm6
     addsd xmm0, xmm1
@@ -3468,8 +4260,8 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     divsd xmm0, xmm1
-    jmp .__ret_199
-.__ret_199:
+    jmp .__ret_248
+.__ret_248:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3477,7 +4269,7 @@ section .text
 .kfe:
 section .data
 .kft: dq sigmoid.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl24,168
+    dq .kl33,168
 .kfn: db "ftanh", 0
 section .text
 tanh_d:
@@ -3487,9 +4279,9 @@ tanh_d:
     movups [rbp-32], xmm6
     movaps xmm6, xmm0
 section .data
-.flt214: dq 1.0
+.flt263: dq 1.0
 section .text
-    movsd xmm0, [rel .flt214]
+    movsd xmm0, [rel .flt263]
     sub rsp, 8
     movsd [rsp], xmm0
     movaps xmm0, xmm6
@@ -3499,8 +4291,8 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     subsd xmm0, xmm1
-    jmp .__ret_213
-.__ret_213:
+    jmp .__ret_262
+.__ret_262:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3515,9 +4307,9 @@ relu:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt218: dq 0.0
+.flt267: dq 0.0
 section .text
-    movsd xmm0, [rel .flt218]
+    movsd xmm0, [rel .flt267]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3525,18 +4317,18 @@ section .text
     seta al
     movzx rax, al
     test rax, rax
-    jz .L216
+    jz .L265
     movaps xmm0, xmm6
-    jmp .__ret_215
-    jmp .L217
-.L216:
-.L217:
+    jmp .__ret_264
+    jmp .L266
+.L265:
+.L266:
 section .data
-.flt219: dq 0.0
+.flt268: dq 0.0
 section .text
-    movsd xmm0, [rel .flt219]
-    jmp .__ret_215
-.__ret_215:
+    movsd xmm0, [rel .flt268]
+    jmp .__ret_264
+.__ret_264:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3551,9 +4343,9 @@ relu_d:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt223: dq 0.0
+.flt272: dq 0.0
 section .text
-    movsd xmm0, [rel .flt223]
+    movsd xmm0, [rel .flt272]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3561,21 +4353,21 @@ section .text
     seta al
     movzx rax, al
     test rax, rax
-    jz .L221
+    jz .L270
 section .data
-.flt224: dq 1.0
+.flt273: dq 1.0
 section .text
-    movsd xmm0, [rel .flt224]
-    jmp .__ret_220
-    jmp .L222
-.L221:
-.L222:
+    movsd xmm0, [rel .flt273]
+    jmp .__ret_269
+    jmp .L271
+.L270:
+.L271:
 section .data
-.flt225: dq 0.0
+.flt274: dq 0.0
 section .text
-    movsd xmm0, [rel .flt225]
-    jmp .__ret_220
-.__ret_220:
+    movsd xmm0, [rel .flt274]
+    jmp .__ret_269
+.__ret_269:
     movups xmm6, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3592,15 +4384,15 @@ cross_entropy:
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt227: dq 0.0000000001
+.flt276: dq 0.0000000001
 section .text
-    movsd xmm0, [rel .flt227]
+    movsd xmm0, [rel .flt276]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt228: dq 0.9999999999
+.flt277: dq 0.9999999999
 section .text
-    movsd xmm0, [rel .flt228]
+    movsd xmm0, [rel .flt277]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm2, [rsp]
@@ -3610,14 +4402,14 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl25:
+.kl34:
     call fclamp
     add rsp, 32
     movaps xmm6, xmm0
 section .data
-.flt229: dq 0.0
+.flt278: dq 0.0
 section .text
-    movsd xmm0, [rel .flt229]
+    movsd xmm0, [rel .flt278]
     sub rsp, 8
     movsd [rsp], xmm0
     movaps xmm0, xmm6
@@ -3626,7 +4418,7 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl26:
+.kl35:
     call fln
     add rsp, 32
     movaps xmm1, xmm0
@@ -3635,17 +4427,17 @@ section .text
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt230: dq 1.0
+.flt279: dq 1.0
 section .text
-    movsd xmm0, [rel .flt230]
+    movsd xmm0, [rel .flt279]
     movaps xmm1, xmm7
     subsd xmm0, xmm1
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt231: dq 1.0
+.flt280: dq 1.0
 section .text
-    movsd xmm0, [rel .flt231]
+    movsd xmm0, [rel .flt280]
     movaps xmm1, xmm6
     subsd xmm0, xmm1
     sub rsp, 8
@@ -3667,8 +4459,8 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     subsd xmm0, xmm1
-    jmp .__ret_226
-.__ret_226:
+    jmp .__ret_275
+.__ret_275:
     movups xmm6, [rbp-64]
     movups xmm7, [rbp-48]
     mov rsp, rbp
@@ -3677,8 +4469,8 @@ section .text
 .kfe:
 section .data
 .kft: dq ftanh.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl25,193
-    dq .kl26,194
+    dq .kl34,193
+    dq .kl35,194
 .kfn: db "cross_entropy", 0
 section .text
 squared_error:
@@ -3696,8 +4488,8 @@ squared_error:
     movaps xmm0, xmm6
     movaps xmm1, xmm6
     mulsd xmm0, xmm1
-    jmp .__ret_232
-.__ret_232:
+    jmp .__ret_281
+.__ret_281:
     movups xmm6, [rbp-64]
     movups xmm7, [rbp-48]
     mov rsp, rbp
@@ -3711,67 +4503,67 @@ main:
     call __rt_init
     add rsp, 32
 section .data
-.flt234: dq 0.0
+.flt283: dq 0.0
 section .text
-    movsd xmm0, [rel .flt234]
+    movsd xmm0, [rel .flt283]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl27:
+.kl36:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt235: dq 1.0
+.flt284: dq 1.0
 section .text
-    movsd xmm0, [rel .flt235]
+    movsd xmm0, [rel .flt284]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl28:
+.kl37:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt236: dq 2.0
+.flt285: dq 2.0
 section .text
-    movsd xmm0, [rel .flt236]
+    movsd xmm0, [rel .flt285]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl29:
+.kl38:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt237: dq 0.5
+.flt286: dq 0.5
 section .text
-    movsd xmm0, [rel .flt237]
+    movsd xmm0, [rel .flt286]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl30:
+.kl39:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt238: dq 0.0
+.flt287: dq 0.0
 section .text
-    movsd xmm0, [rel .flt238]
+    movsd xmm0, [rel .flt287]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt239: dq 1.0
+.flt288: dq 1.0
 section .text
-    movsd xmm0, [rel .flt239]
+    movsd xmm0, [rel .flt288]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -3781,38 +4573,38 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl31:
+.kl40:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt240: dq 10.0
+.flt289: dq 10.0
 section .text
-    movsd xmm0, [rel .flt240]
+    movsd xmm0, [rel .flt289]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl32:
+.kl41:
     call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt241: dq 1.0
+.flt290: dq 1.0
 section .text
-    movsd xmm0, [rel .flt241]
+    movsd xmm0, [rel .flt290]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl33:
+.kl42:
     call fln
     add rsp, 32
     call __print_float
     sub rsp, 32
-.kl34:
+.kl43:
     call m_e
     add rsp, 32
     sub rsp, 8
@@ -3824,297 +4616,209 @@ section .text
     add rsp, 32
     call __print_float
 section .data
-.flt242: dq 10.0
+.flt291: dq 10.0
 section .text
-    movsd xmm0, [rel .flt242]
+    movsd xmm0, [rel .flt291]
     sub rsp, 8
     movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl35:
-    call fln
-    add rsp, 32
-    call __print_float
-section .data
-.flt243: dq 0.5
-section .text
-    movsd xmm0, [rel .flt243]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl36:
-    call fln
-    add rsp, 32
-    call __print_float
-section .data
-.flt244: dq 100.0
-section .text
-    movsd xmm0, [rel .flt244]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl37:
-    call fln
-    add rsp, 32
-    call __print_float
-section .data
-.flt245: dq 3.7
-section .text
-    movsd xmm0, [rel .flt245]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl38:
-    call fexp
-    add rsp, 32
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-    call fln
-    add rsp, 32
-    call __print_float
-section .data
-.flt246: dq 5.5
-section .text
-    movsd xmm0, [rel .flt246]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl39:
-    call fln
-    add rsp, 32
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-    call fexp
-    add rsp, 32
-    call __print_float
-section .data
-.flt247: dq 1000.0
-section .text
-    movsd xmm0, [rel .flt247]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl40:
-    call flog10
-    add rsp, 32
-    call __print_float
-section .data
-.flt248: dq 1024.0
-section .text
-    movsd xmm0, [rel .flt248]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl41:
-    call flog2
-    add rsp, 32
-    call __print_float
-section .data
-.flt249: dq 2.0
-section .text
-    movsd xmm0, [rel .flt249]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt250: dq 10.0
-section .text
-    movsd xmm0, [rel .flt250]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl42:
-    call fpow
-    add rsp, 32
-    call __print_float
-section .data
-.flt251: dq 9.0
-section .text
-    movsd xmm0, [rel .flt251]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt252: dq 0.5
-section .text
-    movsd xmm0, [rel .flt252]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl43:
-    call fpow
-    add rsp, 32
-    call __print_float
-section .data
-.flt253: dq 2.0
-section .text
-    movsd xmm0, [rel .flt253]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt254: dq 0.5
-section .text
-    movsd xmm0, [rel .flt254]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl44:
-    call fpow
+    call fln
     add rsp, 32
     call __print_float
 section .data
-.flt255: dq 0.0
+.flt292: dq 0.5
 section .text
-    movsd xmm0, [rel .flt255]
+    movsd xmm0, [rel .flt292]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl45:
-    call sigmoid
+    call fln
     add rsp, 32
     call __print_float
 section .data
-.flt256: dq 2.0
+.flt293: dq 100.0
 section .text
-    movsd xmm0, [rel .flt256]
+    movsd xmm0, [rel .flt293]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl46:
-    call sigmoid
+    call fln
     add rsp, 32
     call __print_float
 section .data
-.flt257: dq 0.0
+.flt294: dq 3.7
 section .text
-    movsd xmm0, [rel .flt257]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt258: dq 2.0
-section .text
-    movsd xmm0, [rel .flt258]
-    movaps xmm1, xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    subsd xmm0, xmm1
+    movsd xmm0, [rel .flt294]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl47:
-    call sigmoid
+    call fexp
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fln
     add rsp, 32
     call __print_float
 section .data
-.flt259: dq 0.5
+.flt295: dq 5.5
 section .text
-    movsd xmm0, [rel .flt259]
+    movsd xmm0, [rel .flt295]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl48:
-    call sigmoid_d
+    call fln
+    add rsp, 32
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+    call fexp
     add rsp, 32
     call __print_float
 section .data
-.flt260: dq 0.0
+.flt296: dq 1000.0
 section .text
-    movsd xmm0, [rel .flt260]
+    movsd xmm0, [rel .flt296]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl49:
-    call ftanh
+    call flog10
     add rsp, 32
     call __print_float
 section .data
-.flt261: dq 1.0
+.flt297: dq 1024.0
 section .text
-    movsd xmm0, [rel .flt261]
+    movsd xmm0, [rel .flt297]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl50:
-    call ftanh
+    call flog2
     add rsp, 32
     call __print_float
 section .data
-.flt262: dq 0.0
+.flt298: dq 2.0
 section .text
-    movsd xmm0, [rel .flt262]
+    movsd xmm0, [rel .flt298]
     sub rsp, 8
     movsd [rsp], xmm0
+section .data
+.flt299: dq 10.0
+section .text
+    movsd xmm0, [rel .flt299]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl51:
-    call tanh_d
+    call fpow
     add rsp, 32
     call __print_float
 section .data
-.flt263: dq 3.0
+.flt300: dq 9.0
 section .text
-    movsd xmm0, [rel .flt263]
+    movsd xmm0, [rel .flt300]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt301: dq 0.5
+section .text
+    movsd xmm0, [rel .flt301]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl52:
+    call fpow
+    add rsp, 32
+    call __print_float
+section .data
+.flt302: dq 2.0
+section .text
+    movsd xmm0, [rel .flt302]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt303: dq 0.5
+section .text
+    movsd xmm0, [rel .flt303]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl53:
+    call fpow
+    add rsp, 32
+    call __print_float
+section .data
+.flt304: dq 0.0
+section .text
+    movsd xmm0, [rel .flt304]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl52:
-    call relu
+.kl54:
+    call sigmoid
     add rsp, 32
     call __print_float
 section .data
-.flt264: dq 0.0
+.flt305: dq 2.0
 section .text
-    movsd xmm0, [rel .flt264]
+    movsd xmm0, [rel .flt305]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl55:
+    call sigmoid
+    add rsp, 32
+    call __print_float
+section .data
+.flt306: dq 0.0
+section .text
+    movsd xmm0, [rel .flt306]
     sub rsp, 8
     movsd [rsp], xmm0
 section .data
-.flt265: dq 3.0
+.flt307: dq 2.0
 section .text
-    movsd xmm0, [rel .flt265]
+    movsd xmm0, [rel .flt307]
     movaps xmm1, xmm0
     movsd xmm0, [rsp]
     add rsp, 8
@@ -4124,89 +4828,177 @@ section .text
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
-.kl53:
-    call relu
-    add rsp, 32
-    call __print_float
-section .data
-.flt266: dq 3.0
-section .text
-    movsd xmm0, [rel .flt266]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl54:
-    call relu_d
-    add rsp, 32
-    call __print_float
-section .data
-.flt267: dq 1.0
-section .text
-    movsd xmm0, [rel .flt267]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt268: dq 0.9
-section .text
-    movsd xmm0, [rel .flt268]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
-.kl55:
-    call cross_entropy
-    add rsp, 32
-    call __print_float
-section .data
-.flt269: dq 0.0
-section .text
-    movsd xmm0, [rel .flt269]
-    sub rsp, 8
-    movsd [rsp], xmm0
-section .data
-.flt270: dq 0.1
-section .text
-    movsd xmm0, [rel .flt270]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
-    movsd xmm0, [rsp]
-    add rsp, 8
-    sub rsp, 32
 .kl56:
-    call cross_entropy
+    call sigmoid
     add rsp, 32
     call __print_float
 section .data
-.flt271: dq 3.0
+.flt308: dq 0.5
 section .text
-    movsd xmm0, [rel .flt271]
+    movsd xmm0, [rel .flt308]
     sub rsp, 8
     movsd [rsp], xmm0
-section .data
-.flt272: dq 5.0
-section .text
-    movsd xmm0, [rel .flt272]
-    sub rsp, 8
-    movsd [rsp], xmm0
-    movsd xmm1, [rsp]
-    add rsp, 8
     movsd xmm0, [rsp]
     add rsp, 8
     sub rsp, 32
 .kl57:
+    call sigmoid_d
+    add rsp, 32
+    call __print_float
+section .data
+.flt309: dq 0.0
+section .text
+    movsd xmm0, [rel .flt309]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl58:
+    call ftanh
+    add rsp, 32
+    call __print_float
+section .data
+.flt310: dq 1.0
+section .text
+    movsd xmm0, [rel .flt310]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl59:
+    call ftanh
+    add rsp, 32
+    call __print_float
+section .data
+.flt311: dq 0.0
+section .text
+    movsd xmm0, [rel .flt311]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl60:
+    call tanh_d
+    add rsp, 32
+    call __print_float
+section .data
+.flt312: dq 3.0
+section .text
+    movsd xmm0, [rel .flt312]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl61:
+    call relu
+    add rsp, 32
+    call __print_float
+section .data
+.flt313: dq 0.0
+section .text
+    movsd xmm0, [rel .flt313]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt314: dq 3.0
+section .text
+    movsd xmm0, [rel .flt314]
+    movaps xmm1, xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl62:
+    call relu
+    add rsp, 32
+    call __print_float
+section .data
+.flt315: dq 3.0
+section .text
+    movsd xmm0, [rel .flt315]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl63:
+    call relu_d
+    add rsp, 32
+    call __print_float
+section .data
+.flt316: dq 1.0
+section .text
+    movsd xmm0, [rel .flt316]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt317: dq 0.9
+section .text
+    movsd xmm0, [rel .flt317]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl64:
+    call cross_entropy
+    add rsp, 32
+    call __print_float
+section .data
+.flt318: dq 0.0
+section .text
+    movsd xmm0, [rel .flt318]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt319: dq 0.1
+section .text
+    movsd xmm0, [rel .flt319]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl65:
+    call cross_entropy
+    add rsp, 32
+    call __print_float
+section .data
+.flt320: dq 3.0
+section .text
+    movsd xmm0, [rel .flt320]
+    sub rsp, 8
+    movsd [rsp], xmm0
+section .data
+.flt321: dq 5.0
+section .text
+    movsd xmm0, [rel .flt321]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    sub rsp, 32
+.kl66:
     call squared_error
     add rsp, 32
     call __print_float
     mov rax, 0
-    jmp .__ret_233
-.__ret_233:
+    jmp .__ret_282
+.__ret_282:
     mov rsp, rbp
     pop rbp
     mov rcx, rax
@@ -4215,37 +5007,37 @@ section .text
 .kfe:
 section .data
 .kft: dq cross_entropy.kft, .kfe, .kfn, __kron_file_2,31
-    dq .kl27,13
-    dq .kl28,14
-    dq .kl29,15
-    dq .kl30,16
-    dq .kl31,17
-    dq .kl32,18
-    dq .kl33,21
-    dq .kl34,22
-    dq .kl35,23
-    dq .kl36,24
-    dq .kl37,25
-    dq .kl38,28
-    dq .kl39,29
-    dq .kl40,32
-    dq .kl41,33
-    dq .kl42,36
-    dq .kl43,37
-    dq .kl44,38
-    dq .kl45,41
-    dq .kl46,42
-    dq .kl47,43
-    dq .kl48,44
-    dq .kl49,46
-    dq .kl50,47
-    dq .kl51,48
-    dq .kl52,50
-    dq .kl53,51
-    dq .kl54,52
-    dq .kl55,55
-    dq .kl56,56
-    dq .kl57,57
+    dq .kl36,14
+    dq .kl37,15
+    dq .kl38,16
+    dq .kl39,17
+    dq .kl40,18
+    dq .kl41,19
+    dq .kl42,22
+    dq .kl43,23
+    dq .kl44,24
+    dq .kl45,25
+    dq .kl46,26
+    dq .kl47,29
+    dq .kl48,30
+    dq .kl49,33
+    dq .kl50,34
+    dq .kl51,37
+    dq .kl52,38
+    dq .kl53,39
+    dq .kl54,42
+    dq .kl55,43
+    dq .kl56,44
+    dq .kl57,45
+    dq .kl58,47
+    dq .kl59,48
+    dq .kl60,49
+    dq .kl61,51
+    dq .kl62,52
+    dq .kl63,53
+    dq .kl64,56
+    dq .kl65,57
+    dq .kl66,58
 .kfn: db "main", 0
 section .text
 section .text

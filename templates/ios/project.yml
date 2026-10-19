@@ -1,0 +1,28 @@
+# XcodeGen (https://github.com/yonaskolb/XcodeGen), on a Mac:
+#     xcodegen generate     -> KronDemo.xcodeproj, then open it in Xcode
+# KronApp.framework is the Kron program, built on any system with
+#     kronc templates/app.kr --target=ios --lib -o templates/ios/KronApp.framework/KronApp
+name: KronDemo
+options:
+  bundleIdPrefix: dev.kron
+  deploymentTarget:
+    iOS: "14.0"
+targets:
+  KronDemo:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        ARCHS: arm64
+        FRAMEWORK_SEARCH_PATHS: $(PROJECT_DIR)
+    dependencies:
+      - framework: KronApp.framework
+        embed: true
+        codeSign: true

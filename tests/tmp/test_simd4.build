@@ -15,6 +15,6 @@ Compilation successful!
 GoLink.Exe Version 1.0.4.6  Copyright Jeremy Gordon 2002-2025   info@goprog.com
 
 Warning!
-There was a lot of uninitialised data: 67,179,332 bytes
+There was a lot of uninitialised data: 67,179,340 bytes
 Output file: test_simd4_t.exe
-Format: X64   Size: 15,360 bytes
+Format: X64   Size: 16,384 bytes

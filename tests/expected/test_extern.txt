@@ -1,0 +1,16 @@
+1.000000
+1024.000000
+4.000000
+2.000000
+5
+42
+-7
+2.500000
+printf: 7 seven 3.142 x 1 2 3 4 5 6 7 8 9 10
+45
+16006
+0
+1
+fail: the system library has no function of that name
+hint: check the name, and that the installed version of the library has it
+  at main (test_extern.kr:97)

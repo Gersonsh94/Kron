@@ -68,8 +68,18 @@ nm_map_get:     db "map_get"
 nm_map_set:     db "map_set"
 nm_mapr_get:    db "map_get_real"
 nm_mapr_set:    db "map_set_real"
-coll_get_toks:  dq tok_slice_get, tok_list_get, tok_listr_get, tok_map_get, tok_mapr_get, tok_slicer_get
-coll_set_toks:  dq tok_slice_set, tok_list_set, tok_listr_set, tok_map_set, tok_mapr_set, tok_slicer_set
+; kind 6: a list<S> with S a name -- a struct, copied in and out whole by
+; codegen, or an enum and the like, kept as integers
+tok_lists_get:  dq TOK_IDENT, nm_lists_get
+                dd 9
+                dw 0, 0
+tok_lists_set:  dq TOK_IDENT, nm_lists_set
+                dd 9
+                dw 0, 0
+nm_lists_get:   db "list_sget"
+nm_lists_set:   db "list_sset"
+coll_get_toks:  dq tok_slice_get, tok_list_get, tok_listr_get, tok_map_get, tok_mapr_get, tok_slicer_get, tok_lists_get
+coll_set_toks:  dq tok_slice_set, tok_list_set, tok_listr_set, tok_map_set, tok_mapr_set, tok_slicer_set, tok_lists_set
 tok_list_len:   dq TOK_IDENT, nm_list_len
                 dd 8
                 dw 0, 0
@@ -107,6 +117,8 @@ nm_ty_map:      db "map"
     tn_op      db "an operator", 0
     tn_unknown db "a token", 0
     msg_too_many_params db "a function takes at most 16 parameters", 0
+    msg_ext_dots db "... comes last in the parameters of an extern fn, and only there", 0
+    msg_ext_body db "an extern fn has no body: its code is in the library -- end it with ;", 0
     msg_for_in   db "for x in l: l has to be a list<T> declared before", 0
     msg_multi_call db "a, b = ... takes the results of a function call", 0
     msg_not_decl db "a declaration goes here -- fn, var, const, shared var, struct, enum: is there a } too many above?", 0
@@ -123,6 +135,14 @@ section .bss
                                 ; parsed (1, 2, 4, 8), 0 when not an array
     par_cfg_depth   resq 1
     par_last_ptr_elem resq 1
+    par_last_ptr_tok resq 1      ; ptr<S>: the name token of S, else 0
+    par_fn_rettok  resq 1        ; fn f() -> S: the name token of S, else 0
+    ; Every variable or parameter declared ptr<S> with S a name: the token
+    ; of its name, and of S. Codegen looks a declaration up by its token to
+    ; let p.x reach the field of the struct p points to.
+    par_ps_decl    resq 8192
+    par_ps_type    resq 8192
+    par_ps_n       resd 1
     par_last_is_float resq 1
     par_last_is_unsigned resq 1
     par_custom_msg  resq 1      ; message for an error that is not a token
@@ -140,10 +160,22 @@ section .bss
     par_slice_n  resd 1
     par_gcoll_toks resq 256            ; the same for globals: list<T> and map<T>
     par_gcoll_kind resd 256
+    par_slice_stok resq 64             ; list<S>: the token of S, by entry
+    par_gcoll_stok resq 256
+    par_coll_stok  resq 1              ; S of the next entry made / last found
+    par_fi_stok    resq 1              ; for x in l, l a list<S>: S
+    par_last_coll_stok resq 1          ; list<S> just parsed: S, else 0
+    ; Every declaration of a list<S>: its name token and S. Codegen looks a
+    ; list up here to copy structs in and out of it.
+    par_ls_decl    resq 8192
+    par_ls_type    resq 8192
+    par_ls_n       resd 1
     par_gcoll_n  resd 1
     par_in_fn    resd 1                ; 1 while a function is being parsed
     par_decl_typed resd 1              ; the declaration being parsed named a type
     par_multi    resd 1                ; results of the function being parsed
+    par_extern_mode resd 1             ; 1 while the parameters of an extern fn are read
+    par_variadic resd 1                ; the extern fn just read ends in ...
     par_lam_n    resd 1                ; functions written as values
     par_lam_toks resb 24 * 4096        ; their names, __lambda_N
     par_lam_names resb 16 * 4096
@@ -181,6 +213,12 @@ section .text
     global jup_parser_init
     global jup_parser_run
     global par_used_slice
+    global par_ps_decl
+    global par_ps_type
+    global par_ps_n
+    global par_ls_decl
+    global par_ls_type
+    global par_ls_n
     global par_used_text
     global par_used_list
     global par_used_map
@@ -192,6 +230,7 @@ section .text
     global parser_get_error_len
     global token_name
 extern lexer_keyword_name
+extern arg_input, src_buffer, lmap_out, lmap_file, lmap_count
     global parser_get_position
     global parser_get_ast_root
 
@@ -253,6 +292,7 @@ ast_alloc:
 ; remembered, and their v[i] fall back to an ordinary index.
 par_slice_add:
     push rsi
+    mov  qword [rel par_coll_stok], 0
     xor  esi, esi                    ; kind 0: a slice
     cmp  qword [rel par_last_is_slice], 2
     jne  .ps_int
@@ -276,6 +316,11 @@ par_coll_add:
     mov  [rcx + rax*8], rdi
     lea  rcx, [rel par_slice_kind]
     mov  [rcx + rax*4], esi
+    lea  rcx, [rel par_slice_stok]
+    push rdx
+    mov  rdx, [rel par_coll_stok]
+    mov  [rcx + rax*8], rdx
+    pop  rdx
     inc  eax
     mov  [rel par_slice_n], eax
     jmp  .sa_out
@@ -287,6 +332,11 @@ par_coll_add:
     mov  [rcx + rax*8], rdi
     lea  rcx, [rel par_gcoll_kind]
     mov  [rcx + rax*4], esi
+    lea  rcx, [rel par_gcoll_stok]
+    push rdx
+    mov  rdx, [rel par_coll_stok]
+    mov  [rcx + rax*8], rdx
+    pop  rdx
     inc  eax
     mov  [rel par_gcoll_n], eax
 .sa_out:
@@ -314,6 +364,7 @@ par_coll_of_vtag:
     mov  esi, 3
 .cv_elem:
     ; element: 2 real picks the _real calls, 1 text tags the read
+    mov  qword [rel par_coll_stok], 0
     shr  eax, 4
     and  eax, 15
     cmp  eax, 2
@@ -321,6 +372,32 @@ par_coll_of_vtag:
     inc  esi
     jmp  .cv_add
 .cv_notreal:
+    ; 3: a list<S> with S a name
+    cmp  eax, 3
+    jne  .cv_notnamed
+    cmp  esi, 1
+    jne  .cv_mapnamed
+    mov  esi, 6
+    mov  rax, [rel par_last_coll_stok]
+    mov  [rel par_coll_stok], rax
+    push rcx
+    push rdx
+    mov  ecx, [rel par_ls_n]
+    cmp  ecx, 8192
+    jae  .cv_lsfull
+    lea  rdx, [rel par_ls_decl]
+    mov  [rdx + rcx*8], rdi
+    lea  rdx, [rel par_ls_type]
+    mov  [rdx + rcx*8], rax
+    inc  ecx
+    mov  [rel par_ls_n], ecx
+.cv_lsfull:
+    pop  rdx
+    pop  rcx
+    jmp  .cv_add
+.cv_mapnamed:
+    xor  eax, eax                    ; a map<S>: integers, as before
+.cv_notnamed:
     shl  eax, 8
     or   esi, eax
 .cv_add:
@@ -359,10 +436,15 @@ parse_for_in:
     mov  ebx, eax                    ; what l[i] turns into
     mov  ecx, eax
     and  ecx, 255
+    cmp  ecx, 7                      ; 1 + kind 6: a list<S>
+    je   .fi_islist
     cmp  ecx, 2                      ; 1 + kind: a list or a list of reals
     jb   .fi_notlist
     cmp  ecx, 3
     ja   .fi_notlist
+.fi_islist:
+    mov  rax, [rel par_coll_stok]
+    mov  [rel par_fi_stok], rax
     call par_advance
     call par_cur_type
     mov  qword [rel par_expected], TOK_LBRACE
@@ -439,6 +521,14 @@ parse_for_in:
     jz   .fi_err1
     mov  [rax + AST.data], r12
     mov  [rax + AST.right], rcx
+    ; a list<S>: x is declared an S
+    mov  ecx, ebx
+    and  ecx, 255
+    cmp  ecx, 7
+    jne  .fi_notnamed
+    mov  rcx, [rel par_fi_stok]
+    mov  [rax + AST.left], rcx
+.fi_notnamed:
     ; x's flags: a real for a list<f64>, the element's tag otherwise
     mov  edx, ebx
     and  edx, 0xFF00                 ; tag << 8
@@ -1100,6 +1190,13 @@ par_is_slice:
     jz   .is_globals
     jmp  .is_no
 .is_yes:
+    lea  rax, [rel par_slice_stok]
+    test r12, r12
+    jz   .is_stok
+    lea  rax, [rel par_gcoll_stok]
+.is_stok:
+    mov  rax, [rax + rbx*8]
+    mov  [rel par_coll_stok], rax
     mov  eax, [r11 + rbx*4]
     mov  ecx, eax
     and  ecx, 255
@@ -1198,7 +1295,7 @@ par_make_assign:
     jne  .ma_plain
     mov  rax, [r12 + AST.owner_type]
     sub  rax, SLICE_GET_MARK
-    cmp  rax, 5
+    cmp  rax, 6
     ja   .ma_plain                   ; unsigned: below the mark wraps high
     mov  rdi, AST_ARG                ; third argument: the value
     call ast_alloc
@@ -1342,6 +1439,31 @@ jup_parser_run:
     push r14
     xor  rax, rax
     mov  [rel par_pos], rax
+
+    ; generics and module names first: a pass over the tokens (ng_run)
+    mov  rdi, [rel par_tokens]
+    mov  rsi, [rel par_token_count]
+    call ng_run
+    test rax, rax
+    jnz  .ng_ok
+    ; the error is about a token that may be one of the pass's own copies:
+    ; it is put first, where the error report looks
+    mov  rsi, [rel ng_err_tok]
+    test rsi, rsi
+    jz   .ng_msg
+    mov  rdi, [rel par_tokens]
+    mov  rcx, [rsi]
+    mov  [rdi], rcx
+    mov  rcx, [rsi + 8]
+    mov  [rdi + 8], rcx
+    mov  rcx, [rsi + 16]
+    mov  [rdi + 16], rcx
+.ng_msg:
+    mov  rax, [rel ng_err_msg]
+    mov  [rel par_custom_msg], rax
+    jmp  .err
+.ng_ok:
+    mov  [rel par_token_count], rax
 
     mov  rdi, AST_PROGRAM
     call ast_alloc
@@ -1516,6 +1638,8 @@ parse_top_level:
     je   .sched
     cmp  rax, KW_SYSCALL_DISPATCH
     je   .sys
+    cmp  rax, KW_EXTERN
+    je   .extern
     ; Generic TITAN module declaration: only a module keyword starts one.
     ; Anything else here -- a name, a statement, a stray '}' -- is code
     ; outside a function; taken as a module it swallowed every function
@@ -1634,6 +1758,9 @@ parse_top_level:
     ret
 .sys:
     call parse_sys_ast
+    ret
+.extern:
+    call parse_extern_ast
     ret
 .err:
     xor  rax, rax
@@ -3647,6 +3774,29 @@ parse_param_list:
     je   .done
     cmp  rax, TOK_EOF
     je   .err
+    cmp  rax, TOK_DOT
+    jne  .not_dots
+    ; '...': the rest are variadic, in an extern fn only
+    lea  rax, [rel msg_ext_dots]
+    mov  [rel par_custom_msg], rax
+    cmp  dword [rel par_extern_mode], 0
+    je   .err
+    call par_advance
+    call par_cur_type
+    cmp  rax, TOK_DOT
+    jne  .err
+    call par_advance
+    call par_cur_type
+    cmp  rax, TOK_DOT
+    jne  .err
+    call par_advance
+    call par_cur_type
+    cmp  rax, TOK_RPAREN
+    jne  .err
+    mov  qword [rel par_custom_msg], 0
+    mov  dword [rel par_variadic], 1
+    jmp  .done
+.not_dots:
     mov  qword [rel par_expected], TOK_IDENT
     cmp  rax, TOK_IDENT
     jne  .err
@@ -3699,9 +3849,14 @@ parse_param_list:
     call par_current_token
     mov  [r13 + AST.left], rax
 .no_ptype:
+    ; the type keyword, for an extern fn: how wide the argument is
+    call par_cur_type
+    mov  [r13 + AST.owner_type], rax
     call parse_type
     test rax, rax
     jz   .err
+    mov  rdi, [r13 + AST.data]
+    call par_note_pstruct            ; a parameter p: ptr<S>
     ; AST.col of the param node (r13, the most recently chained one) carries
     ; the same two flags as a declaration: bit0 float, bit1 unsigned. This
     ; site still used the old single-bit form, so a u64 parameter was signed.
@@ -3948,10 +4103,188 @@ parse_isa_ast:
     ret
 
 ; ==============================================================================
+; parse_extern_ast() -> rax = the first AST_EXTERN of the block (or 0)
+;   extern STRING (',' STRING)* '{'
+;       ( fn IDENT '(' params [',' '...'] ')' [ '->' type ] ';' )*
+;   '}'
+; The strings name the library on each system, tried in order until one
+; loads: "libm.so.6", "libm.dylib", "msvcrt.dll". Every function of the
+; block keeps the list.
+; ==============================================================================
+parse_extern_ast:
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbx
+    call par_advance                 ; consume 'extern'
+    xor  r12, r12                    ; the names of the libraries
+    xor  r13, r13                    ; their last
+.lib:
+    call par_cur_type
+    mov  qword [rel par_expected], TOK_STRING
+    cmp  rax, TOK_STRING
+    jne  .err
+    mov  rdi, AST_ARG
+    call ast_alloc
+    test rax, rax
+    jz   .err
+    mov  rbx, rax
+    call par_current_token
+    mov  [rbx + AST.data], rax
+    test r13, r13
+    jnz  .lib_chain
+    mov  r12, rbx
+    jmp  .lib_tail
+.lib_chain:
+    mov  [r13 + AST.right], rbx
+.lib_tail:
+    mov  r13, rbx
+    call par_advance
+    call par_cur_type
+    cmp  rax, TOK_COMMA
+    jne  .open
+    call par_advance
+    jmp  .lib
+.open:
+    mov  qword [rel par_expected], TOK_LBRACE
+    cmp  rax, TOK_LBRACE
+    jne  .err
+    call par_advance
+    xor  r14, r14                    ; the first function
+    xor  r15, r15                    ; the last
+.fn:
+    call par_cur_type
+    cmp  rax, TOK_RBRACE
+    je   .close
+    mov  qword [rel par_expected], TOK_KW_FN
+    cmp  rax, TOK_KW_FN
+    jne  .err
+    call par_advance
+    call par_cur_type
+    mov  qword [rel par_expected], TOK_IDENT
+    cmp  rax, TOK_IDENT
+    jne  .err
+    mov  rdi, AST_EXTERN
+    call ast_alloc
+    test rax, rax
+    jz   .err
+    mov  rbx, rax
+    call par_current_token
+    mov  [rbx + AST.data], rax
+    mov  [rbx + AST.owner_type], r12
+    call par_advance
+    call par_cur_type
+    mov  qword [rel par_expected], TOK_LPAREN
+    cmp  rax, TOK_LPAREN
+    jne  .err
+    mov  dword [rel par_extern_mode], 1
+    mov  dword [rel par_variadic], 0
+    call parse_param_list
+    mov  dword [rel par_extern_mode], 0
+    cmp  rax, -1
+    je   .err
+    mov  [rbx + AST.left], rax
+    mov  eax, [rel par_variadic]
+    mov  [rbx + AST.col], ax
+    mov  dword [rbx + AST.child_count], 0
+    call par_cur_type
+    cmp  rax, TOK_ARROW
+    je   .result
+    cmp  rax, TOK_COLON
+    jne  .semi
+.result:
+    call par_advance
+    call par_cur_type
+    mov  ecx, 1
+    cmp  rax, KW_I32
+    je   .kind
+    mov  ecx, 2
+    cmp  rax, KW_U32
+    je   .kind
+    mov  ecx, 3
+    cmp  rax, KW_U8
+    je   .kind
+    cmp  rax, KW_BOOL
+    je   .kind
+    mov  ecx, 4
+    cmp  rax, KW_U16
+    je   .kind
+    mov  ecx, 5
+    cmp  rax, KW_I16
+    je   .kind
+    mov  ecx, 6
+    cmp  rax, KW_I8
+    je   .kind
+    mov  ecx, 8
+    cmp  rax, KW_F64
+    je   .kind
+    mov  ecx, 9
+    cmp  rax, KW_F32
+    je   .kind
+    xor  ecx, ecx
+.kind:
+    mov  [rbx + AST.child_count], ecx
+    mov  qword [rel par_last_is_float], 0
+    mov  qword [rel par_last_is_unsigned], 0
+    call parse_type
+    test rax, rax
+    jz   .err
+.semi:
+    call par_cur_type
+    cmp  rax, TOK_LBRACE
+    jne  .semi_tok
+    lea  rax, [rel msg_ext_body]
+    mov  [rel par_custom_msg], rax
+    jmp  .err
+.semi_tok:
+    mov  qword [rel par_expected], TOK_SEMICOLON
+    cmp  rax, TOK_SEMICOLON
+    jne  .err
+    call par_advance
+    test r15, r15
+    jnz  .fn_chain
+    mov  r14, rbx
+    jmp  .fn_tail
+.fn_chain:
+    mov  [r15 + AST.right], rbx
+.fn_tail:
+    mov  r15, rbx
+    jmp  .fn
+.close:
+    call par_advance                 ; consume '}'
+    test r14, r14
+    jnz  .have
+    ; an empty block still gives a node: data 0, nothing to declare
+    mov  rdi, AST_EXTERN
+    call ast_alloc
+    test rax, rax
+    jz   .err
+    mov  r14, rax
+.have:
+    mov  rax, r14
+    pop  rbx
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+.err:
+    mov  dword [rel par_extern_mode], 0
+    xor  rax, rax
+    pop  rbx
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+; ==============================================================================
 ; parse_function_ast() -> rax = AST_FUNCTION node (or 0)
 ;   fn IDENT '(' params ')' [ ('->'|':') type ] '{' stmts '}'
 ; ==============================================================================
 parse_function_ast:
+    mov  qword [rel par_fn_rettok], 0
     mov  dword [rel par_slice_n], 0  ; slice names are per function
     mov  dword [rel par_in_fn], 1
     push r12
@@ -4014,6 +4347,19 @@ parse_function_ast:
     jz   .err
     jmp  .ret_have
 .ret_single:
+    ; fn f() -> S with S a name: the token, for a function that returns a
+    ; struct (codegen passes it where to write the result)
+    call par_cur_type
+    cmp  rax, TOK_IDENT
+    jne  .ret_noname
+    call par_current_token
+    mov  [rel par_fn_rettok], rax
+.ret_noname:
+    ; the type keyword, in type_info above the visibility: a library's
+    ; export hands C an f32 as one
+    call par_cur_type
+    shl  rax, 16
+    or   r14, rax
     call parse_type
     test rax, rax
     jz   .err
@@ -4067,6 +4413,9 @@ parse_function_ast:
     mov  ecx, [rel par_multi]
     mov  [rax + AST.child_count], ecx  ; several results: see parse_multi_type
     mov  dword [rel par_multi], 0
+    mov  rcx, [rel par_fn_rettok]
+    mov  [rax + AST.owner_type], rcx   ; the struct it returns, by name
+    mov  qword [rel par_fn_rettok], 0
     mov  dword [rel par_in_fn], 0
     pop  r15
     pop  r14
@@ -4352,6 +4701,8 @@ parse_statement_ast:
     call parse_type
     test rax, rax
     jz   .err
+    mov  rdi, r12
+    call par_note_pstruct            ; var p: ptr<S>
     mov  dword [rel par_decl_typed], 1
     ; any typed declaration may omit the initializer
     call par_cur_type
@@ -5423,10 +5774,38 @@ par_builtin_type:
     pop  rcx
     ret
 
+; par_note_pstruct(rdi = the name token of a declaration just typed): when
+; the type was ptr<S> with S a name, the pair goes in par_ps_*.
+; Preserves every register but rax.
+par_note_pstruct:
+    mov  rax, [rel par_last_ptr_tok]
+    test rax, rax
+    jz   .np_out
+    test rdi, rdi
+    jz   .np_out
+    push rcx
+    push rdx
+    mov  ecx, [rel par_ps_n]
+    cmp  ecx, 8192
+    jae  .np_full
+    lea  rdx, [rel par_ps_decl]
+    mov  [rdx + rcx*8], rdi
+    lea  rdx, [rel par_ps_type]
+    mov  [rdx + rcx*8], rax
+    inc  ecx
+    mov  [rel par_ps_n], ecx
+.np_full:
+    pop  rdx
+    pop  rcx
+.np_out:
+    ret
+
 ; ==============================================================================
 ; parse_type() -> rax = 1/0 (consumes type tokens; builds no node)
 ; ==============================================================================
 parse_type:
+    mov  qword [rel par_last_ptr_tok], 0
+    mov  qword [rel par_last_coll_stok], 0
     mov  qword [rel par_last_is_float], 0
     mov  qword [rel par_last_is_unsigned], 0
     ; Reset the array length too. Only the '[' branch used to clear it, so a
@@ -5529,11 +5908,33 @@ parse_type:
     cmp  rax, TOK_LT
     jne  .coll_err
     call par_advance
+    ; list<S> with S a name that is no built-in type: kept (tag 3)
+    xor  eax, eax
+    push rax
+    call par_cur_type
+    cmp  rax, TOK_IDENT
+    jne  .coll_elem
+    call par_current_token
+    mov  rdi, rax
+    push rax
+    call par_builtin_type
+    pop  rcx
+    test eax, eax
+    jnz  .coll_elem
+    mov  [rsp], rcx
+.coll_elem:
     call parse_type                  ; the element type
     test rax, rax
-    jz   .coll_err
-    ; the element's tag: 2 real, 1 text, 0 an integer or a handle
+    jz   .coll_err_pop
+    ; the element's tag: 2 real, 1 text, 0 an integer or a handle, 3 a name
+    pop  rax
+    mov  [rel par_last_coll_stok], rax
     xor  ecx, ecx
+    test rax, rax
+    jz   .coll_unnamed
+    mov  ecx, 3
+    jmp  .coll_tag
+.coll_unnamed:
     cmp  qword [rel par_last_is_float], 0
     je   .coll_nf
     mov  ecx, 2
@@ -5569,6 +5970,8 @@ parse_type:
     mov  dword [rel par_used_map], 1
     mov  rax, 1
     ret
+.coll_err_pop:
+    pop  rax
 .coll_err:
     pop  rax
     mov  qword [rel par_last_vtag], 0
@@ -5639,23 +6042,43 @@ parse_type:
     cmp  rax, TOK_LT
     jne  .ptr_err
     call par_advance
+    ; ptr<S> with S a name: kept, so a declaration can list it (p.x then
+    ; reaches a field of the S it points to). The inner parse_type clears
+    ; it, so it is set again once that returns.
+    xor  eax, eax
+    push rax
+    call par_cur_type
+    cmp  rax, TOK_IDENT
+    jne  .ptr_noname
+    call par_current_token
+    mov  [rsp], rax
+.ptr_noname:
     ; width of the pointed-to type
     call par_cur_type
     call par_type_width              ; -> rax = bytes (0 if not a known type)
     test rax, rax
-    jz   .ptr_err
+    jz   .ptr_err_pop
     mov  [rel par_last_ptr_elem], rax
     call parse_type                  ; consume the element type
     test rax, rax
-    jz   .ptr_err
+    jz   .ptr_err_pop
+    pop  rax
+    mov  [rel par_last_ptr_tok], rax
+    ; the pointer itself is an address, whatever it points to: ptr<f32>
+    ; is no real, ptr<u8> no unsigned byte
+    mov  qword [rel par_last_is_float], 0
+    mov  qword [rel par_last_is_unsigned], 0
     call par_cur_type
     cmp  rax, TOK_GT
     jne  .ptr_err
     call par_advance
     mov  rax, 1
     ret
+.ptr_err_pop:
+    pop  rax
 .ptr_err:
     mov  qword [rel par_last_ptr_elem], 0
+    mov  qword [rel par_last_ptr_tok], 0
     xor  rax, rax
     ret
 
@@ -7933,4 +8356,1724 @@ token_name:
 
 parser_get_ast_root:
     mov  rax, [rel par_ast_root]
+    ret
+
+; ==============================================================================
+; GENERICS AND MODULE NAMES -- one pass over the tokens, before parsing
+;
+; Generics.  A function or struct written with type parameters
+;     fn biggest<T>(a: T, b: T) -> T { ... }
+;     struct Pair<A, B> { first: A; second: B; }
+; is a template: it produces no code itself. Each use with types,
+; biggest<f64>(x, y) or Pair<i64, text>, names a copy made for those types --
+; biggest__f64, Pair__i64__text -- written where the template stood, with
+; every T replaced by the type given. A copy may use other templates; their
+; copies are made the same way, until nothing new is asked for.
+;
+; Module names.  module.name reaches a declaration of one module: the file
+; name without .kr (std_math.fsqrt), or the name given in the program's
+; header with  acquire_domain "file.kr" as name;  When two modules define
+; a function of the same name, each keeps its own: its calls inside its
+; module go to it, and from anywhere else it is written module.name.
+;
+; ng_run works on the token array the lexer filled and leaves the result in
+; the same array. Tokens it makes point their text into ng_text.
+; ==============================================================================
+
+NG_MAXDECL  equ 16384
+NG_MAXMOD   equ 72
+NG_MAXT     equ 512
+NG_MAXI     equ 4096
+NG_MAXTOK   equ 349500              ; TOKEN_BUFFER_SIZE / TOKEN_SIZE, rounded down
+NG_ARGTOK   equ 65536
+NG_TEXT     equ 1048576
+
+section .data
+ng_gt_text:     db ">"
+ng_msg_notypes: db "a generic function is called with its types: name<T>(...)", 0
+ng_msg_nargs:   db "this generic is used with a different number of types than it declares", 0
+ng_msg_ambig:   db "two modules define a function of this name: write which, module.name", 0
+ng_msg_full:    db "too many generic copies or tokens (more than the compiler's tables hold)", 0
+ng_msg_bad:     db "a generic is used with types, but its <...> is never closed", 0
+ng_acq:         db "acquire_domain"
+
+section .bss
+    ng_tok       resq 1             ; the token array
+    ng_cnt       resq 1             ; and its count, EOF included
+    ng_err_tok   resq 1             ; the token an error is about
+    ng_err_msg   resq 1
+    ; --- modules ---
+    ng_mod_name  resq NG_MAXMOD     ; the file's name without .kr
+    ng_mod_len   resd NG_MAXMOD
+    ng_mod_alias resq NG_MAXMOD     ; the program's name for it, or 0
+    ng_mod_alen  resd NG_MAXMOD
+    ng_nmod      resd 1
+    ng_tokmod    resb NG_MAXTOK     ; which module each token is from
+    ng_tokflag   resd NG_MAXTOK     ; template t starts here: t + 1
+    ; --- declarations at the top of a module ---
+    ng_d_tok     resq NG_MAXDECL    ; the name token
+    ng_d_mod     resd NG_MAXDECL
+    ng_d_kind    resb NG_MAXDECL    ; 1 fn, 2 other, 3 a template
+    ng_d_dup     resb NG_MAXDECL    ; a fn another module defines too
+    ng_nd        resd 1
+    ng_anydup    resd 1
+    ; --- templates ---
+    ng_t_name    resq NG_MAXT       ; the name token
+    ng_t_start   resd NG_MAXT       ; index of 'fn' / 'struct'
+    ng_t_lt      resd NG_MAXT       ; index of its '<'
+    ng_t_body    resd NG_MAXT       ; index just past its '>'
+    ng_t_end     resd NG_MAXT       ; index past its closing '}'
+    ng_t_np      resd NG_MAXT
+    ng_t_par     resq NG_MAXT * 8   ; parameter name tokens
+    ng_t_mod     resd NG_MAXT
+    ng_t_isfn    resb NG_MAXT
+    ng_nt        resd 1
+    ; --- copies (instantiations) ---
+    ng_i_t       resd NG_MAXI
+    ng_i_name    resq NG_MAXI       ; mangled name, in ng_text
+    ng_i_nlen    resd NG_MAXI
+    ng_i_argb    resd NG_MAXI * 8   ; each type: first token in ng_args
+    ng_i_argn    resd NG_MAXI * 8   ; and how many
+    ng_i_bodyb   resd NG_MAXI       ; its tokens in ng_itok
+    ng_i_bodyn   resd NG_MAXI
+    ng_ni        resd 1
+    ; --- token stores ---
+    ng_args      resb TOKEN_SIZE * NG_ARGTOK
+    ng_nargs     resd 1
+    ng_itok      resb TOKEN_SIZE * NG_MAXTOK
+    ng_nitok     resd 1
+    ng_sub       resb TOKEN_SIZE * NG_MAXTOK
+    ng_nsub      resd 1
+    ng_out       resb TOKEN_SIZE * NG_MAXTOK
+    ng_nout      resd 1
+    ng_text      resb NG_TEXT
+    ng_ntext     resd 1
+    ; --- the rewrite in progress ---
+    ng_src       resq 1             ; tokens being read
+    ng_srcn      resd 1
+    ng_main      resd 1             ; 1 the program's own tokens
+    ng_round     resd 1             ; 2 when copies are written out
+    ng_ctxmod    resd 1             ; module of a copy being made
+    ng_dst       resq 1             ; where tokens go
+    ng_dstn      resq 1             ; address of its count (dword)
+    ng_mbuf      resb 512           ; a name being built
+    ng_ab        resd 16            ; where each type of a use starts in ng_args
+    ng_use_at    resd 1             ; index of the name a use starts at
+
+section .text
+
+; ng_tp(eax = index, rsi = array) -> rax = address of that token
+; (inline everywhere as imul; kept for reading)
+
+; ng_teq(rdi = token, rsi = token) -> eax = 1 when their texts are the same
+ng_teq:
+    mov  ecx, [rdi + TOKEN.length]
+    cmp  ecx, [rsi + TOKEN.length]
+    jne  .te_no
+    mov  rdx, [rdi + TOKEN.value]
+    mov  r8, [rsi + TOKEN.value]
+    jmp  ng_memeq
+.te_no:
+    xor  eax, eax
+    ret
+
+; ng_teqs(rdi = token, rsi = text, edx = length) -> eax
+ng_teqs:
+    mov  ecx, [rdi + TOKEN.length]
+    cmp  ecx, edx
+    jne  .ts_no
+    mov  rdx, [rdi + TOKEN.value]
+    mov  r8, rsi
+    jmp  ng_memeq
+.ts_no:
+    xor  eax, eax
+    ret
+
+; ng_memeq(rdx, r8 = texts, ecx = length) -> eax
+ng_memeq:
+    test ecx, ecx
+    jz   .me_yes
+.me_l:
+    mov  al, [rdx]
+    cmp  al, [r8]
+    jne  .me_no
+    inc  rdx
+    inc  r8
+    dec  ecx
+    jnz  .me_l
+.me_yes:
+    mov  eax, 1
+    ret
+.me_no:
+    xor  eax, eax
+    ret
+
+; ng_err(rdi = token, rsi = message): the first error wins
+ng_err:
+    cmp  qword [rel ng_err_msg], 0
+    jne  .er_out
+    mov  [rel ng_err_tok], rdi
+    mov  [rel ng_err_msg], rsi
+.er_out:
+    ret
+
+; ng_basename(rsi = a path, NUL-ended) -> rsi = start of its name, ecx =
+; its length without the extension
+ng_basename:
+    mov  rdx, rsi                    ; start
+    mov  r8, rsi
+.bn_l:
+    mov  al, [r8]
+    test al, al
+    jz   .bn_end
+    cmp  al, '/'
+    je   .bn_sep
+    cmp  al, 92
+    je   .bn_sep
+    inc  r8
+    jmp  .bn_l
+.bn_sep:
+    inc  r8
+    mov  rdx, r8
+    jmp  .bn_l
+.bn_end:
+    ; r8 = the NUL; the last '.' after the start ends the name
+    mov  r9, r8
+.bn_dot:
+    cmp  r9, rdx
+    jbe  .bn_nodot
+    dec  r9
+    cmp  byte [r9], '.'
+    jne  .bn_dot
+    mov  r8, r9
+.bn_nodot:
+    mov  rsi, rdx
+    mov  rcx, r8
+    sub  rcx, rdx
+    ret
+
+; ng_mod_of(rsi = a path) -> eax = its module index (added when new)
+ng_mod_of:
+    push rbx
+    push r12
+    push r13
+    call ng_basename
+    mov  r12, rsi
+    mov  r13d, ecx
+    xor  ebx, ebx
+.mo_l:
+    cmp  ebx, [rel ng_nmod]
+    jae  .mo_new
+    lea  rax, [rel ng_mod_len]
+    mov  r11d, [rax + rbx*4]
+    cmp  r11d, r13d
+    jne  .mo_next
+    lea  rax, [rel ng_mod_name]
+    mov  rdx, [rax + rbx*8]
+    mov  r8, r12
+    mov  ecx, r13d
+    call ng_memeq
+    test eax, eax
+    jnz  .mo_have
+.mo_next:
+    inc  ebx
+    jmp  .mo_l
+.mo_new:
+    cmp  ebx, NG_MAXMOD
+    jae  .mo_full
+    lea  rax, [rel ng_mod_name]
+    mov  [rax + rbx*8], r12
+    lea  rax, [rel ng_mod_len]
+    mov  [rax + rbx*4], r13d
+    lea  rax, [rel ng_mod_alias]
+    mov  r11, 0
+    mov  [rax + rbx*8], r11
+    inc  dword [rel ng_nmod]
+.mo_have:
+    mov  eax, ebx
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+.mo_full:
+    xor  eax, eax
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_modules(): every token's module, from the line map main.asm keeps
+ng_modules:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov  dword [rel ng_nmod], 0
+    lea  rsi, [rel arg_input]
+    call ng_mod_of                   ; module 0: the program
+    mov  r12, [rel lmap_count]
+    xor  ebx, ebx                    ; token
+    xor  r13d, r13d                  ; current run
+    xor  r14d, r14d                  ; its module
+    test r12, r12
+    jz   .md_tokens
+    lea  rax, [rel lmap_file]
+    mov  rsi, [rax]
+    call ng_mod_of
+    mov  r14d, eax
+.md_tokens:
+    cmp  rbx, [rel ng_cnt]
+    jae  .md_alias
+    cmp  ebx, NG_MAXTOK
+    jae  .md_alias
+    test r12, r12
+    jz   .md_put
+    ; the last run that starts at or before this token's line
+    imul rax, rbx, TOKEN_SIZE
+    add  rax, [rel ng_tok]
+    movzx ecx, word [rax + TOKEN.line]
+.md_run:
+    lea  rdx, [r13 + 1]
+    cmp  rdx, r12
+    jae  .md_put
+    lea  rax, [rel lmap_out]
+    mov  rax, [rax + rdx*8]
+    cmp  rax, rcx
+    ja   .md_put
+    mov  r13, rdx
+    push rcx
+    lea  rax, [rel lmap_file]
+    mov  rsi, [rax + r13*8]
+    call ng_mod_of
+    pop  rcx
+    mov  r14d, eax
+    jmp  .md_run
+.md_put:
+    lea  rax, [rel ng_tokmod]
+    mov  ecx, r14d
+    mov  [rax + rbx], cl
+    lea  rax, [rel ng_tokflag]
+    mov  r11d, 0
+    mov  [rax + rbx*4], r11d
+    inc  rbx
+    jmp  .md_tokens
+.md_alias:
+    ; acquire_domain "file.kr" as name;  in the program's own text
+    lea  r12, [rel src_buffer]
+.al_find:
+    mov  al, [r12]
+    test al, al
+    jz   .al_done
+    cmp  al, 'a'
+    jne  .al_next
+    mov  rdx, r12
+    lea  r8, [rel ng_acq]
+    mov  ecx, 14
+    call ng_memeq
+    test eax, eax
+    jz   .al_next
+    add  r12, 14
+.al_q:
+    mov  al, [r12]
+    cmp  al, ' '
+    je   .al_qs
+    cmp  al, 9
+    je   .al_qs
+    cmp  al, 34
+    jne  .al_find
+    inc  r12
+    mov  r13, r12                    ; the file name
+.al_qe:
+    mov  al, [r12]
+    test al, al
+    jz   .al_done
+    cmp  al, 10
+    je   .al_find
+    cmp  al, 34
+    je   .al_qend
+    inc  r12
+    jmp  .al_qe
+.al_qs:
+    inc  r12
+    jmp  .al_q
+.al_qend:
+    mov  r14, r12                    ; the closing quote
+    inc  r12
+.al_sp1:
+    mov  al, [r12]
+    cmp  al, ' '
+    je   .al_sp1n
+    cmp  al, 9
+    je   .al_sp1n
+    jmp  .al_as
+.al_sp1n:
+    inc  r12
+    jmp  .al_sp1
+.al_as:
+    cmp  byte [r12], 'a'
+    jne  .al_find
+    cmp  byte [r12 + 1], 's'
+    jne  .al_find
+    mov  al, [r12 + 2]
+    cmp  al, ' '
+    je   .al_as2
+    cmp  al, 9
+    jne  .al_find
+.al_as2:
+    add  r12, 3
+.al_sp2:
+    mov  al, [r12]
+    cmp  al, ' '
+    je   .al_sp2n
+    cmp  al, 9
+    je   .al_sp2n
+    jmp  .al_name
+.al_sp2n:
+    inc  r12
+    jmp  .al_sp2
+.al_name:
+    mov  rbx, r12                    ; the alias
+.al_nl:
+    mov  al, [r12]
+    cmp  al, '_'
+    je   .al_nc
+    cmp  al, '0'
+    jb   .al_nend
+    cmp  al, '9'
+    jbe  .al_nc
+    cmp  al, 'A'
+    jb   .al_nend
+    cmp  al, 'Z'
+    jbe  .al_nc
+    cmp  al, 'a'
+    jb   .al_nend
+    cmp  al, 'z'
+    ja   .al_nend
+.al_nc:
+    inc  r12
+    jmp  .al_nl
+.al_nend:
+    cmp  r12, rbx
+    je   .al_find
+    ; the module of that file: its base name, compared like ng_mod_of does
+    mov  byte [r14], 0               ; end the name for a moment
+    mov  rsi, r13
+    push r14
+    call ng_basename
+    pop  r14
+    mov  byte [r14], 34
+    mov  r8, rsi                     ; name
+    mov  r9d, ecx
+    xor  r10d, r10d
+.al_mod:
+    cmp  r10d, [rel ng_nmod]
+    jae  .al_find
+    lea  rax, [rel ng_mod_len]
+    mov  r11d, [rax + r10*4]
+    cmp  r11d, r9d
+    jne  .al_modn
+    lea  rax, [rel ng_mod_name]
+    mov  rdx, [rax + r10*8]
+    push r8
+    push r9
+    mov  ecx, r9d
+    call ng_memeq
+    pop  r9
+    pop  r8
+    test eax, eax
+    jz   .al_modn
+    lea  rax, [rel ng_mod_alias]
+    mov  [rax + r10*8], rbx
+    mov  rax, r12
+    sub  rax, rbx
+    lea  rcx, [rel ng_mod_alen]
+    mov  [rcx + r10*4], eax
+    jmp  .al_find
+.al_modn:
+    inc  r10d
+    jmp  .al_mod
+.al_next:
+    inc  r12
+    jmp  .al_find
+.al_done:
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_close(ebx = index of a token at or before a '{') -> eax = index past
+; the matching '}', or the count when there is none
+ng_close:
+    mov  rsi, [rel ng_tok]
+    mov  ecx, ebx
+    xor  edx, edx                    ; depth
+.cl_l:
+    cmp  rcx, [rel ng_cnt]
+    jae  .cl_end
+    imul rax, rcx, TOKEN_SIZE
+    mov  rax, [rsi + rax + TOKEN.type]
+    cmp  rax, TOK_LBRACE
+    jne  .cl_nolb
+    inc  edx
+    jmp  .cl_next
+.cl_nolb:
+    cmp  rax, TOK_RBRACE
+    jne  .cl_next
+    dec  edx
+    jnz  .cl_next
+    lea  rax, [rcx + 1]
+    ret
+.cl_next:
+    inc  ecx
+    jmp  .cl_l
+.cl_end:
+    mov  rax, [rel ng_cnt]
+    ret
+
+; ng_ttype(ecx = index) -> rax = the type of that token of ng_tok (EOF past
+; the end)
+ng_ttype:
+    cmp  rcx, [rel ng_cnt]
+    jae  .tt_eof
+    imul rax, rcx, TOKEN_SIZE
+    add  rax, [rel ng_tok]
+    mov  rax, [rax + TOKEN.type]
+    ret
+.tt_eof:
+    xor  eax, eax
+    ret
+
+; ng_add_decl(rdi = name token, esi = module, dl = kind)
+ng_add_decl:
+    mov  eax, [rel ng_nd]
+    cmp  eax, NG_MAXDECL
+    jae  .ad_out
+    lea  rcx, [rel ng_d_tok]
+    mov  [rcx + rax*8], rdi
+    lea  rcx, [rel ng_d_mod]
+    mov  [rcx + rax*4], esi
+    lea  rcx, [rel ng_d_kind]
+    mov  [rcx + rax], dl
+    lea  rcx, [rel ng_d_dup]
+    mov  byte [rcx + rax], 0
+    inc  eax
+    mov  [rel ng_nd], eax
+.ad_out:
+    ret
+
+; ng_decls(): the declarations at depth 0 of each module, and the templates
+ng_decls:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov  dword [rel ng_nd], 0
+    mov  dword [rel ng_nt], 0
+    mov  dword [rel ng_anydup], 0
+    xor  ebx, ebx                    ; index
+    xor  r12d, r12d                  ; depth
+.dc_l:
+    cmp  rbx, [rel ng_cnt]
+    jae  .dc_dups
+    mov  ecx, ebx
+    call ng_ttype
+    cmp  rax, TOK_LBRACE
+    jne  .dc_nolb
+    inc  r12d
+    jmp  .dc_next
+.dc_nolb:
+    cmp  rax, TOK_RBRACE
+    jne  .dc_norb
+    dec  r12d
+    jmp  .dc_next
+.dc_norb:
+    test r12d, r12d
+    jnz  .dc_next
+    cmp  rax, TOK_KW_FN
+    je   .dc_fn
+    cmp  rax, KW_STRUCT
+    je   .dc_struct
+    cmp  rax, KW_ENUM
+    je   .dc_other
+    cmp  rax, TOK_KW_VAR
+    je   .dc_other
+    cmp  rax, TOK_KW_CONST
+    je   .dc_other
+    jmp  .dc_next
+.dc_fn:
+    mov  r15d, 1                     ; a function
+    jmp  .dc_named
+.dc_struct:
+    mov  r15d, 2
+.dc_named:
+    ; the name: the next IDENT, past one keyword (fn global_visible name)
+    lea  r13, [rbx + 1]
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_IDENT
+    je   .dc_have
+    cmp  rax, 100
+    jb   .dc_next
+    inc  r13d
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_IDENT
+    jne  .dc_next
+.dc_have:
+    lea  rcx, [r13 + 1]
+    call ng_ttype
+    cmp  rax, TOK_LT
+    je   .dc_template
+    imul rdi, r13, TOKEN_SIZE
+    add  rdi, [rel ng_tok]
+    lea  rax, [rel ng_tokmod]
+    movzx esi, byte [rax + rbx]
+    mov  edx, r15d
+    call ng_add_decl
+    jmp  .dc_next
+.dc_other:
+    lea  r13, [rbx + 1]
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_IDENT
+    jne  .dc_next
+    imul rdi, r13, TOKEN_SIZE
+    add  rdi, [rel ng_tok]
+    lea  rax, [rel ng_tokmod]
+    movzx esi, byte [rax + rbx]
+    mov  edx, 2
+    call ng_add_decl
+    jmp  .dc_next
+.dc_template:
+    ; fn NAME < P, Q > ...  /  struct NAME < P > { ... }
+    mov  r14d, [rel ng_nt]
+    cmp  r14d, NG_MAXT
+    jae  .dc_next
+    lea  rax, [rel ng_t_start]
+    mov  [rax + r14*4], ebx
+    lea  rax, [rel ng_t_isfn]
+    xor  ecx, ecx
+    cmp  r15d, 1
+    jne  .dc_notfn
+    mov  ecx, 1
+.dc_notfn:
+    mov  [rax + r14], cl
+    imul rdi, r13, TOKEN_SIZE
+    add  rdi, [rel ng_tok]
+    lea  rax, [rel ng_t_name]
+    mov  [rax + r14*8], rdi
+    lea  rax, [rel ng_tokmod]
+    movzx esi, byte [rax + rbx]
+    lea  rax, [rel ng_t_mod]
+    mov  [rax + r14*4], esi
+    mov  edx, 3
+    call ng_add_decl                 ; module.name reaches a template too
+    lea  rax, [r13 + 1]
+    lea  rcx, [rel ng_t_lt]
+    mov  [rcx + r14*4], eax
+    ; the parameters: IDENT (, IDENT)* >
+    xor  r15d, r15d
+    lea  r13, [r13 + 2]
+.dc_par:
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_IDENT
+    jne  .dc_pend
+    cmp  r15d, 8
+    jae  .dc_pend
+    imul rdi, r13, TOKEN_SIZE
+    add  rdi, [rel ng_tok]
+    mov  eax, r14d
+    shl  eax, 3
+    add  eax, r15d
+    lea  rcx, [rel ng_t_par]
+    mov  [rcx + rax*8], rdi
+    inc  r15d
+    inc  r13d
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_COMMA
+    jne  .dc_pend
+    inc  r13d
+    jmp  .dc_par
+.dc_pend:
+    mov  ecx, r13d
+    call ng_ttype
+    cmp  rax, TOK_GT
+    jne  .dc_next                    ; not a template after all
+    inc  r13d
+    lea  rax, [rel ng_t_np]
+    mov  [rax + r14*4], r15d
+    lea  rax, [rel ng_t_body]
+    mov  [rax + r14*4], r13d
+    push rbx
+    mov  ebx, r13d
+    call ng_close
+    pop  rbx
+    lea  rcx, [rel ng_t_end]
+    mov  [rcx + r14*4], eax
+    lea  rcx, [rel ng_tokflag]
+    lea  rdx, [r14 + 1]
+    mov  [rcx + rbx*4], edx
+    inc  dword [rel ng_nt]
+    ; on past the template: its braces are not counted
+    mov  ebx, eax
+    jmp  .dc_l
+.dc_next:
+    inc  ebx
+    jmp  .dc_l
+.dc_dups:
+    ; a function name two modules define
+    xor  ebx, ebx
+.dd_i:
+    cmp  ebx, [rel ng_nd]
+    jae  .dc_out
+    lea  rax, [rel ng_d_kind]
+    cmp  byte [rax + rbx], 1
+    jne  .dd_inext
+    lea  r12, [rbx + 1]
+.dd_j:
+    cmp  r12d, [rel ng_nd]
+    jae  .dd_inext
+    lea  rax, [rel ng_d_kind]
+    cmp  byte [rax + r12], 1
+    jne  .dd_jnext
+    lea  rax, [rel ng_d_mod]
+    mov  ecx, [rax + rbx*4]
+    cmp  ecx, [rax + r12*4]
+    je   .dd_jnext
+    lea  rax, [rel ng_d_tok]
+    mov  rdi, [rax + rbx*8]
+    mov  rsi, [rax + r12*8]
+    call ng_teq
+    test eax, eax
+    jz   .dd_jnext
+    lea  rax, [rel ng_d_dup]
+    mov  byte [rax + rbx], 1
+    mov  byte [rax + r12], 1
+    mov  dword [rel ng_anydup], 1
+.dd_jnext:
+    inc  r12d
+    jmp  .dd_j
+.dd_inext:
+    inc  ebx
+    jmp  .dd_i
+.dc_out:
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_text_put(rsi = text, ecx = length) -> appended to ng_mbuf at rdi;
+; returns rdi past it. Helpers for building names.
+ng_put:
+    test ecx, ecx
+    jz   .pu_out
+.pu_l:
+    lea  rax, [rel ng_mbuf + 500]
+    cmp  rdi, rax
+    jae  .pu_out
+    mov  al, [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    dec  ecx
+    jnz  .pu_l
+.pu_out:
+    ret
+
+; ng_keep(rdi = end of the name in ng_mbuf) -> rax = the name copied to
+; ng_text, ecx = its length (0 when ng_text is full)
+ng_keep:
+    lea  rsi, [rel ng_mbuf]
+    mov  rcx, rdi
+    sub  rcx, rsi
+    mov  eax, [rel ng_ntext]
+    lea  rdx, [rax + rcx]
+    cmp  edx, NG_TEXT
+    jae  .kp_full
+    mov  [rel ng_ntext], edx
+    lea  rdx, [rel ng_text]
+    add  rdx, rax
+    push rdx
+    push rcx
+.kp_l:
+    test ecx, ecx
+    jz   .kp_done
+    mov  al, [rsi]
+    mov  [rdx], al
+    inc  rsi
+    inc  rdx
+    dec  ecx
+    jmp  .kp_l
+.kp_done:
+    pop  rcx
+    pop  rax
+    ret
+.kp_full:
+    xor  eax, eax
+    xor  ecx, ecx
+    ret
+
+; ng_emit(rsi = a token): copied to the destination
+ng_emit:
+    mov  rdx, [rel ng_dstn]
+    mov  eax, [rdx]
+    cmp  eax, NG_MAXTOK - 2
+    jae  .em_full
+    mov  r11d, [rdx]
+    inc  r11d
+    mov  [rdx], r11d
+    imul rax, rax, TOKEN_SIZE
+    add  rax, [rel ng_dst]
+    mov  rcx, [rsi]
+    mov  [rax], rcx
+    mov  rcx, [rsi + 8]
+    mov  [rax + 8], rcx
+    mov  rcx, [rsi + 16]
+    mov  [rax + 16], rcx
+    ret
+.em_full:
+    mov  rdi, rsi
+    lea  rsi, [rel ng_msg_full]
+    jmp  ng_err
+
+; ng_emit_named(rsi = a token, rdi = text, ecx = length): the token with
+; that text instead of its own
+ng_emit_named:
+    push rdi
+    push rcx
+    call ng_emit
+    pop  rcx
+    pop  rdi
+    mov  rdx, [rel ng_dstn]
+    mov  eax, [rdx]
+    test eax, eax
+    jz   .en_out
+    dec  eax
+    imul rax, rax, TOKEN_SIZE
+    add  rax, [rel ng_dst]
+    mov  qword [rax + TOKEN.type], TOK_IDENT
+    mov  [rax + TOKEN.value], rdi
+    mov  [rax + TOKEN.length], ecx
+.en_out:
+    ret
+
+; ng_emit_gt(rsi = a token, for its place): a '>' of our own
+ng_emit_gt:
+    call ng_emit
+    mov  rdx, [rel ng_dstn]
+    mov  eax, [rdx]
+    dec  eax
+    imul rax, rax, TOKEN_SIZE
+    add  rax, [rel ng_dst]
+    mov  qword [rax + TOKEN.type], TOK_GT
+    lea  rcx, [rel ng_gt_text]
+    mov  [rax + TOKEN.value], rcx
+    mov  dword [rax + TOKEN.length], 1
+    ret
+
+; ng_srct(ecx = index) -> rax = address of that token of the source being
+; rewritten, or 0 past its end
+ng_srct:
+    cmp  ecx, [rel ng_srcn]
+    jae  .st_none
+    imul rax, rcx, TOKEN_SIZE
+    add  rax, [rel ng_src]
+    ret
+.st_none:
+    xor  eax, eax
+    ret
+
+; ng_stype(ecx = index) -> rax = its type, EOF past the end
+ng_stype:
+    call ng_srct
+    test rax, rax
+    jz   .sy_out
+    mov  rax, [rax + TOKEN.type]
+.sy_out:
+    ret
+
+; ng_find_mod(rdi = token) -> eax = the module it names (file or alias), -1
+ng_find_mod:
+    push rbx
+    push r12
+    mov  r12, rdi
+    xor  ebx, ebx
+.fm_l:
+    cmp  ebx, [rel ng_nmod]
+    jae  .fm_no
+    mov  rdi, r12
+    lea  rax, [rel ng_mod_name]
+    mov  rsi, [rax + rbx*8]
+    lea  rax, [rel ng_mod_len]
+    mov  edx, [rax + rbx*4]
+    call ng_teqs
+    test eax, eax
+    jnz  .fm_yes
+    lea  rax, [rel ng_mod_alias]
+    mov  rsi, [rax + rbx*8]
+    test rsi, rsi
+    jz   .fm_next
+    mov  rdi, r12
+    lea  rax, [rel ng_mod_alen]
+    mov  edx, [rax + rbx*4]
+    call ng_teqs
+    test eax, eax
+    jnz  .fm_yes
+.fm_next:
+    inc  ebx
+    jmp  .fm_l
+.fm_yes:
+    mov  eax, ebx
+    jmp  .fm_out
+.fm_no:
+    mov  eax, -1
+.fm_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_find_decl(rdi = name token, esi = module, or -1 for any; dl = 1 for
+; functions only) -> eax = declaration index, or -1
+ng_find_decl:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov  r12, rdi
+    mov  r13d, esi
+    movzx r14d, dl
+    xor  ebx, ebx
+.fd_l:
+    cmp  ebx, [rel ng_nd]
+    jae  .fd_no
+    cmp  r13d, -1
+    je   .fd_anymod
+    lea  rax, [rel ng_d_mod]
+    mov  r11d, [rax + rbx*4]
+    cmp  r11d, r13d
+    jne  .fd_next
+.fd_anymod:
+    test r14d, r14d
+    jz   .fd_anykind
+    lea  rax, [rel ng_d_kind]
+    cmp  byte [rax + rbx], 1
+    jne  .fd_next
+.fd_anykind:
+    mov  rdi, r12
+    lea  rax, [rel ng_d_tok]
+    mov  rsi, [rax + rbx*8]
+    call ng_teq
+    test eax, eax
+    jnz  .fd_yes
+.fd_next:
+    inc  ebx
+    jmp  .fd_l
+.fd_yes:
+    mov  eax, ebx
+    jmp  .fd_out
+.fd_no:
+    mov  eax, -1
+.fd_out:
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_find_t(rdi = name token) -> eax = the template of that name, or -1
+ng_find_t:
+    push rbx
+    push r12
+    mov  r12, rdi
+    xor  ebx, ebx
+.ft_l:
+    cmp  ebx, [rel ng_nt]
+    jae  .ft_no
+    mov  rdi, r12
+    lea  rax, [rel ng_t_name]
+    mov  rsi, [rax + rbx*8]
+    call ng_teq
+    test eax, eax
+    jnz  .ft_yes
+    inc  ebx
+    jmp  .ft_l
+.ft_yes:
+    mov  eax, ebx
+    jmp  .ft_out
+.ft_no:
+    mov  eax, -1
+.ft_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_dupname(esi = module, rdi = name token) -> rax = "module__name" kept
+; in ng_text, ecx = its length
+ng_dupname:
+    push r12
+    mov  r12, rdi
+    lea  rdi, [rel ng_mbuf]
+    lea  rax, [rel ng_mod_name]
+    mov  rdx, rsi
+    mov  rsi, [rax + rdx*8]
+    lea  rax, [rel ng_mod_len]
+    mov  ecx, [rax + rdx*4]
+    call ng_put
+    mov  byte [rdi], '_'
+    mov  byte [rdi + 1], '_'
+    add  rdi, 2
+    mov  rsi, [r12 + TOKEN.value]
+    mov  ecx, [r12 + TOKEN.length]
+    call ng_put
+    call ng_keep
+    pop  r12
+    ret
+
+; ng_use(ebx = index of a template's name in the source, eax = template)
+; -> ebx = index past what was used, eax = 1 done, 0 not a use after all.
+; Reads NAME < T1, T2 >, finds or makes the copy, writes its name.
+ng_use:
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov  r12d, eax                   ; template
+    mov  r13d, [rel ng_nargs]        ; the types start here in ng_args
+    mov  ebp, r13d
+    xor  r14d, r14d                  ; types read
+    lea  rcx, [rbx + 2]              ; past NAME <
+    mov  r15d, 1                     ; depth
+    ; argument starts: kept on ng_mbuf's tail as dwords (8 of them)
+    lea  rax, [rel ng_ab]
+    mov  [rax], r13d
+    xor  r9d, r9d                    ; '>' left over after the close
+.us_l:
+    push rcx
+    call ng_srct
+    pop  rcx
+    test rax, rax
+    jz   .us_bad
+    mov  rdx, [rax + TOKEN.type]
+    cmp  rdx, TOK_SEMICOLON
+    je   .us_bad
+    cmp  rdx, TOK_LBRACE
+    je   .us_bad
+    cmp  rdx, TOK_EOF
+    je   .us_bad
+    cmp  rdx, TOK_LT
+    jne  .us_nolt
+    inc  r15d
+    jmp  .us_keep
+.us_nolt:
+    cmp  rdx, TOK_COMMA
+    jne  .us_nocomma
+    cmp  r15d, 1
+    jne  .us_keep
+    ; the next type
+    inc  r14d
+    cmp  r14d, 8
+    jae  .us_bad
+    lea  rdx, [rel ng_ab]
+    mov  r8d, [rel ng_nargs]
+    mov  [rdx + r14*4], r8d
+    inc  ecx
+    jmp  .us_l
+.us_nocomma:
+    mov  r8d, 1
+    cmp  rdx, TOK_GT
+    je   .us_close
+    mov  r8d, 2
+    cmp  rdx, TOK_RSHIFT
+    je   .us_close
+    mov  r8d, 3
+    cmp  rdx, TOK_URSHIFT
+    je   .us_close
+    jmp  .us_keep
+.us_close:
+    ; r8d '>' at once: each closes one level; the one that closes the
+    ; generic ends the types, the rest come after its name
+.us_cl:
+    test r8d, r8d
+    jz   .us_cl_done
+    dec  r8d
+    cmp  r15d, 1
+    je   .us_end
+    dec  r15d
+    ; a '>' of the type itself
+    push rcx
+    push r8
+    push rax
+    mov  eax, [rel ng_nargs]
+    cmp  eax, NG_ARGTOK - 1
+    jae  .us_full_pop
+    inc  dword [rel ng_nargs]
+    imul rax, rax, TOKEN_SIZE
+    lea  rdx, [rel ng_args]
+    add  rdx, rax
+    pop  rax
+    push rax
+    mov  rcx, [rax + 8]
+    mov  [rdx + 8], rcx
+    mov  rcx, [rax + 16]
+    mov  [rdx + 16], rcx
+    mov  qword [rdx + TOKEN.type], TOK_GT
+    lea  rcx, [rel ng_gt_text]
+    mov  [rdx + TOKEN.value], rcx
+    mov  dword [rdx + TOKEN.length], 1
+    pop  rax
+    pop  r8
+    pop  rcx
+    jmp  .us_cl
+.us_cl_done:
+    inc  ecx
+    jmp  .us_l
+.us_end:
+    mov  r9d, r8d                    ; '>' still to write after the name
+    inc  ecx
+    mov  ebx, ecx                    ; past the generic
+    inc  r14d                        ; types read
+    lea  rdx, [rel ng_ab]
+    mov  r8d, [rel ng_nargs]
+    mov  [rdx + r14*4], r8d          ; end of the last
+    jmp  .us_have
+.us_keep:
+    ; a token of a type: into ng_args
+    mov  r8d, [rel ng_nargs]
+    cmp  r8d, NG_ARGTOK - 1
+    jae  .us_full
+    inc  dword [rel ng_nargs]
+    imul r8, r8, TOKEN_SIZE
+    lea  rdx, [rel ng_args]
+    add  rdx, r8
+    mov  r8, [rax]
+    mov  [rdx], r8
+    mov  r8, [rax + 8]
+    mov  [rdx + 8], r8
+    mov  r8, [rax + 16]
+    mov  [rdx + 16], r8
+    inc  ecx
+    jmp  .us_l
+.us_full_pop:
+    pop  rax
+    pop  r8
+    pop  rcx
+.us_full:
+    mov  rdi, rax
+    lea  rsi, [rel ng_msg_full]
+    call ng_err
+    jmp  .us_no
+.us_bad:
+    mov  [rel ng_nargs], ebp         ; nothing kept
+    jmp  .us_no
+.us_have:
+    push r9
+    ; as many types as the template has parameters
+    lea  rax, [rel ng_t_np]
+    mov  r11d, [rax + r12*4]
+    cmp  r11d, r14d
+    je   .us_count_ok
+    mov  ecx, ebx
+    dec  ecx
+    call ng_srct
+    mov  rdi, rax
+    lea  rsi, [rel ng_msg_nargs]
+    call ng_err
+    pop  r9
+    jmp  .us_no
+.us_count_ok:
+    ; the copy's name: NAME__T1__T2, each type's words joined by '_'
+    lea  rdi, [rel ng_mbuf]
+    lea  rax, [rel ng_t_name]
+    mov  rax, [rax + r12*8]
+    mov  rsi, [rax + TOKEN.value]
+    mov  ecx, [rax + TOKEN.length]
+    call ng_put
+    xor  r10d, r10d                  ; type
+.us_nm_t:
+    cmp  r10d, r14d
+    jae  .us_nm_done
+    mov  byte [rdi], '_'
+    mov  byte [rdi + 1], '_'
+    add  rdi, 2
+    lea  rax, [rel ng_ab]
+    mov  r11d, [rax + r10*4]         ; first token of this type
+.us_nm_tok:
+    lea  rax, [rel ng_ab]
+    cmp  r11d, [rax + r10*4 + 4]
+    jae  .us_nm_next
+    imul rax, r11, TOKEN_SIZE
+    lea  rdx, [rel ng_args]
+    add  rax, rdx
+    mov  rdx, [rax + TOKEN.type]
+    cmp  rdx, TOK_IDENT
+    je   .us_nm_word
+    cmp  rdx, TOK_NUMBER
+    je   .us_nm_word
+    cmp  rdx, 100
+    jae  .us_nm_word
+    mov  byte [rdi], '_'
+    inc  rdi
+    jmp  .us_nm_adv
+.us_nm_word:
+    mov  rsi, [rax + TOKEN.value]
+    mov  ecx, [rax + TOKEN.length]
+    push r10
+    push r11
+    call ng_put
+    pop  r11
+    pop  r10
+.us_nm_adv:
+    inc  r11d
+    jmp  .us_nm_tok
+.us_nm_next:
+    inc  r10d
+    jmp  .us_nm_t
+.us_nm_done:
+    ; an existing copy of that name?
+    lea  rsi, [rel ng_mbuf]
+    mov  r10, rdi
+    sub  r10, rsi                    ; length
+    xor  r11d, r11d
+.us_find:
+    cmp  r11d, [rel ng_ni]
+    jae  .us_new
+    lea  rax, [rel ng_i_nlen]
+    mov  r9d, [rax + r11*4]
+    cmp  r9d, r10d
+    jne  .us_fnext
+    lea  rax, [rel ng_i_name]
+    mov  rdx, [rax + r11*8]
+    lea  r8, [rel ng_mbuf]
+    mov  ecx, r10d
+    push r11
+    call ng_memeq
+    pop  r11
+    test eax, eax
+    jnz  .us_old
+.us_fnext:
+    inc  r11d
+    jmp  .us_find
+.us_old:
+    mov  [rel ng_nargs], ebp         ; its types are kept already
+    lea  rax, [rel ng_i_name]
+    mov  rdi, [rax + r11*8]
+    mov  ecx, r10d
+    jmp  .us_write
+.us_new:
+    cmp  r11d, NG_MAXI
+    jae  .us_full_pop9
+    call ng_keep                     ; rdi = end of the name
+    test ecx, ecx
+    jz   .us_full_pop9
+    lea  rdx, [rel ng_i_name]
+    mov  [rdx + r11*8], rax
+    lea  rdx, [rel ng_i_nlen]
+    mov  [rdx + r11*4], ecx
+    lea  rdx, [rel ng_i_t]
+    mov  [rdx + r11*4], r12d
+    lea  rdx, [rel ng_i_bodyn]
+    mov  r9d, -1
+    mov  [rdx + r11*4], r9d     ; not made yet
+    xor  r10d, r10d
+.us_args:
+    cmp  r10d, r14d
+    jae  .us_args_done
+    lea  rdx, [rel ng_ab]
+    mov  r8d, [rdx + r10*4]
+    mov  r9d, [rdx + r10*4 + 4]
+    sub  r9d, r8d
+    mov  edx, r11d
+    shl  edx, 3
+    add  edx, r10d
+    lea  rsi, [rel ng_i_argb]
+    mov  [rsi + rdx*4], r8d
+    lea  rsi, [rel ng_i_argn]
+    mov  [rsi + rdx*4], r9d
+    inc  r10d
+    jmp  .us_args
+.us_args_done:
+    inc  dword [rel ng_ni]
+    mov  rdi, rax
+.us_write:
+    ; the copy's name, where NAME stood
+    push rdi
+    push rcx
+    mov  ecx, [rel ng_use_at]
+    call ng_srct
+    mov  rsi, rax
+    pop  rcx
+    pop  rdi
+    call ng_emit_named
+    pop  r9
+.us_gts:
+    test r9d, r9d
+    jz   .us_done
+    push r9
+    mov  ecx, [rel ng_use_at]
+    call ng_srct
+    mov  rsi, rax
+    call ng_emit_gt
+    pop  r9
+    dec  r9d
+    jmp  .us_gts
+.us_done:
+    mov  eax, 1
+    jmp  .us_out
+.us_full_pop9:
+    pop  r9
+    mov  rdi, 0
+    lea  rsi, [rel ng_msg_full]
+    call ng_err
+.us_no:
+    xor  eax, eax
+.us_out:
+    pop  rbp
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+; ng_rw(): rewrites the source tokens (ng_src, ng_srcn) into the destination.
+; ng_main says whether they are the program's own (their module per token,
+; templates in place) or a copy being made (module ng_ctxmod).
+ng_rw:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    xor  ebx, ebx
+.rw_l:
+    cmp  ebx, [rel ng_srcn]
+    jae  .rw_out
+    cmp  qword [rel ng_err_msg], 0
+    jne  .rw_out
+    mov  ecx, ebx
+    call ng_srct
+    mov  r12, rax                    ; the token
+    ; its module
+    mov  r13d, [rel ng_ctxmod]
+    cmp  dword [rel ng_main], 0
+    je   .rw_mod
+    lea  rax, [rel ng_tokmod]
+    movzx r13d, byte [rax + rbx]
+    ; a template: skipped, and in the last round its copies written here
+    lea  rax, [rel ng_tokflag]
+    mov  eax, [rax + rbx*4]
+    test eax, eax
+    jz   .rw_mod
+    dec  eax
+    mov  r14d, eax
+    cmp  dword [rel ng_round], 2
+    jne  .rw_tskip
+    call ng_put_copies
+.rw_tskip:
+    lea  rax, [rel ng_t_end]
+    mov  ebx, [rax + r14*4]
+    jmp  .rw_l
+.rw_mod:
+    mov  rax, [r12 + TOKEN.type]
+    cmp  rax, TOK_IDENT
+    jne  .rw_copy
+    ; previous token: after a '.', a name is a field
+    xor  r14d, r14d                  ; previous type
+    test ebx, ebx
+    jz   .rw_noprev
+    lea  rcx, [rbx - 1]
+    call ng_stype
+    mov  r14, rax
+.rw_noprev:
+    cmp  r14, TOK_DOT
+    je   .rw_copy
+    ; module.name
+    lea  rcx, [rbx + 1]
+    call ng_stype
+    cmp  rax, TOK_DOT
+    jne  .rw_notqual
+    lea  rcx, [rbx + 2]
+    call ng_stype
+    cmp  rax, TOK_IDENT
+    jne  .rw_notqual
+    mov  rdi, r12
+    call ng_find_mod
+    cmp  eax, -1
+    je   .rw_notqual
+    mov  r15d, eax                   ; the module
+    lea  rcx, [rbx + 2]
+    call ng_srct
+    mov  rdi, rax
+    mov  esi, r15d
+    xor  edx, edx
+    call ng_find_decl
+    cmp  eax, -1
+    je   .rw_notqual                 ; a variable that happens to share the name
+    lea  rcx, [rel ng_d_kind]
+    cmp  byte [rcx + rax], 3
+    je   .rw_qual_t
+    lea  rcx, [rel ng_d_dup]
+    cmp  byte [rcx + rax], 0
+    jne  .rw_qual_dup
+    lea  rcx, [rbx + 2]
+    call ng_srct
+    mov  rsi, rax
+    call ng_emit
+    add  ebx, 3
+    jmp  .rw_l
+.rw_qual_dup:
+    lea  rcx, [rbx + 2]
+    call ng_srct
+    push rax
+    mov  rdi, rax
+    mov  esi, r15d
+    call ng_dupname
+    mov  rdi, rax
+    pop  rsi
+    call ng_emit_named
+    add  ebx, 3
+    jmp  .rw_l
+.rw_qual_t:
+    add  ebx, 2                      ; the template's name, read next
+    jmp  .rw_l
+.rw_notqual:
+    ; a template's name
+    mov  rdi, r12
+    call ng_find_t
+    cmp  eax, -1
+    je   .rw_notemplate
+    mov  r15d, eax
+    lea  rcx, [rbx + 1]
+    call ng_stype
+    cmp  rax, TOK_LT
+    jne  .rw_t_nolt
+    mov  [rel ng_use_at], ebx
+    mov  eax, r15d
+    push rbx
+    call ng_use
+    mov  ecx, ebx
+    pop  rbx
+    test eax, eax
+    jz   .rw_copy
+    mov  ebx, ecx
+    jmp  .rw_l
+.rw_t_nolt:
+    cmp  rax, TOK_LPAREN
+    jne  .rw_copy
+    lea  rax, [rel ng_t_isfn]
+    cmp  byte [rax + r15], 0
+    je   .rw_copy
+    mov  rdi, r12
+    lea  rsi, [rel ng_msg_notypes]
+    call ng_err
+    jmp  .rw_out
+.rw_notemplate:
+    ; a function two modules define, called or named
+    cmp  dword [rel ng_anydup], 0
+    je   .rw_copy
+    mov  rdi, r12
+    mov  esi, -1
+    mov  dl, 1
+    call ng_find_decl
+    cmp  eax, -1
+    je   .rw_copy
+    lea  rcx, [rel ng_d_dup]
+    cmp  byte [rcx + rax], 0
+    je   .rw_copy
+    ; only where a function is meant: f(...), &f, fn f
+    lea  rcx, [rbx + 1]
+    call ng_stype
+    cmp  rax, TOK_LPAREN
+    je   .rw_dup
+    cmp  r14, TOK_AMPERSAND
+    je   .rw_dup
+    cmp  r14, TOK_KW_FN
+    je   .rw_dup
+    cmp  ebx, 2
+    jb   .rw_copy
+    cmp  r14, 100
+    jb   .rw_copy
+    lea  rcx, [rbx - 2]
+    call ng_stype
+    cmp  rax, TOK_KW_FN
+    jne  .rw_copy
+.rw_dup:
+    ; this module's own, if it has one
+    mov  rdi, r12
+    mov  esi, r13d
+    mov  dl, 1
+    call ng_find_decl
+    cmp  eax, -1
+    jne  .rw_dup_own
+    mov  rdi, r12
+    lea  rsi, [rel ng_msg_ambig]
+    call ng_err
+    jmp  .rw_out
+.rw_dup_own:
+    mov  rdi, r12
+    mov  esi, r13d
+    call ng_dupname
+    mov  rdi, rax
+    mov  rsi, r12
+    call ng_emit_named
+    inc  ebx
+    jmp  .rw_l
+.rw_copy:
+    mov  rsi, r12
+    call ng_emit
+    inc  ebx
+    jmp  .rw_l
+.rw_out:
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_put_copies(r14d = template): its copies, made already, into the
+; destination
+ng_put_copies:
+    push rbx
+    push r12
+    xor  ebx, ebx
+.pc_l:
+    cmp  ebx, [rel ng_ni]
+    jae  .pc_out
+    lea  rax, [rel ng_i_t]
+    mov  r11d, [rax + rbx*4]
+    cmp  r11d, r14d
+    jne  .pc_next
+    lea  rax, [rel ng_i_bodyn]
+    mov  ecx, [rax + rbx*4]
+    cmp  ecx, -1
+    je   .pc_next
+    lea  rax, [rel ng_i_bodyb]
+    mov  r12d, [rax + rbx*4]
+.pc_tok:
+    test ecx, ecx
+    jz   .pc_next
+    push rcx
+    imul rsi, r12, TOKEN_SIZE
+    lea  rax, [rel ng_itok]
+    add  rsi, rax
+    call ng_emit
+    pop  rcx
+    inc  r12d
+    dec  ecx
+    jmp  .pc_tok
+.pc_next:
+    inc  ebx
+    jmp  .pc_l
+.pc_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_make(ebx = a copy): its tokens -- the template's, with each parameter
+; replaced by its type -- rewritten into ng_itok
+ng_make:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    lea  rax, [rel ng_i_t]
+    mov  r12d, [rax + rbx*4]         ; template
+    ; 1. substituted, into ng_sub
+    mov  dword [rel ng_nsub], 0
+    lea  rax, [rel ng_sub]
+    mov  [rel ng_dst], rax
+    lea  rax, [rel ng_nsub]
+    mov  [rel ng_dstn], rax
+    lea  rax, [rel ng_t_start]
+    mov  r13d, [rax + r12*4]         ; fn / struct ... up to the name
+    lea  rax, [rel ng_t_lt]
+    mov  r15d, [rax + r12*4]         ; '<'
+.mk_head:
+    lea  rax, [r15 - 1]
+    cmp  r13d, eax
+    jae  .mk_name
+    imul rsi, r13, TOKEN_SIZE
+    add  rsi, [rel ng_tok]
+    call ng_emit
+    inc  r13d
+    jmp  .mk_head
+.mk_name:
+    imul rsi, r13, TOKEN_SIZE
+    add  rsi, [rel ng_tok]
+    lea  rax, [rel ng_i_name]
+    mov  rdi, [rax + rbx*8]
+    lea  rax, [rel ng_i_nlen]
+    mov  ecx, [rax + rbx*4]
+    call ng_emit_named
+    lea  rax, [rel ng_t_body]
+    mov  r13d, [rax + r12*4]
+    lea  rax, [rel ng_t_end]
+    mov  r15d, [rax + r12*4]
+.mk_body:
+    cmp  r13d, r15d
+    jae  .mk_subst_done
+    imul rsi, r13, TOKEN_SIZE
+    add  rsi, [rel ng_tok]
+    cmp  qword [rsi + TOKEN.type], TOK_IDENT
+    jne  .mk_plain
+    ; one of the parameters?
+    xor  r14d, r14d
+.mk_par:
+    lea  rax, [rel ng_t_np]
+    cmp  r14d, [rax + r12*4]
+    jae  .mk_plain
+    mov  eax, r12d
+    shl  eax, 3
+    add  eax, r14d
+    lea  rcx, [rel ng_t_par]
+    mov  rdi, [rcx + rax*8]
+    push rsi
+    call ng_teq
+    pop  rsi
+    test eax, eax
+    jnz  .mk_type
+    inc  r14d
+    jmp  .mk_par
+.mk_type:
+    mov  eax, ebx
+    shl  eax, 3
+    add  eax, r14d
+    lea  rcx, [rel ng_i_argb]
+    mov  r8d, [rcx + rax*4]
+    lea  rcx, [rel ng_i_argn]
+    mov  r9d, [rcx + rax*4]
+.mk_type_l:
+    test r9d, r9d
+    jz   .mk_next
+    push r8
+    push r9
+    imul rsi, r8, TOKEN_SIZE
+    lea  rax, [rel ng_args]
+    add  rsi, rax
+    call ng_emit
+    pop  r9
+    pop  r8
+    inc  r8d
+    dec  r9d
+    jmp  .mk_type_l
+.mk_plain:
+    call ng_emit
+.mk_next:
+    inc  r13d
+    jmp  .mk_body
+.mk_subst_done:
+    ; 2. rewritten, so the copy's own uses of generics and modules resolve
+    lea  rax, [rel ng_itok]
+    mov  [rel ng_dst], rax
+    lea  rax, [rel ng_nitok]
+    mov  [rel ng_dstn], rax
+    lea  rax, [rel ng_sub]
+    mov  [rel ng_src], rax
+    mov  eax, [rel ng_nsub]
+    mov  [rel ng_srcn], eax
+    mov  dword [rel ng_main], 0
+    lea  rax, [rel ng_t_mod]
+    mov  eax, [rax + r12*4]
+    mov  [rel ng_ctxmod], eax
+    mov  eax, [rel ng_nitok]
+    lea  rcx, [rel ng_i_bodyb]
+    mov  [rcx + rbx*4], eax
+    call ng_rw
+    mov  eax, [rel ng_nitok]
+    lea  rcx, [rel ng_i_bodyb]
+    sub  eax, [rcx + rbx*4]
+    lea  rcx, [rel ng_i_bodyn]
+    mov  [rcx + rbx*4], eax
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ng_main_pass(): the program's tokens rewritten into ng_out
+ng_main_pass:
+    mov  dword [rel ng_nout], 0
+    lea  rax, [rel ng_out]
+    mov  [rel ng_dst], rax
+    lea  rax, [rel ng_nout]
+    mov  [rel ng_dstn], rax
+    mov  rax, [rel ng_tok]
+    mov  [rel ng_src], rax
+    mov  rax, [rel ng_cnt]
+    mov  [rel ng_srcn], eax
+    mov  dword [rel ng_main], 1
+    jmp  ng_rw
+
+; ng_run(rdi = tokens, rsi = count) -> rax = the new count, or 0 with
+; ng_err_tok / ng_err_msg saying why. Nothing changes when the program has
+; no templates and no module names to resolve.
+ng_run:
+    push rbx
+    mov  [rel ng_tok], rdi
+    mov  [rel ng_cnt], rsi
+    mov  qword [rel ng_err_msg], 0
+    mov  qword [rel ng_err_tok], 0
+    mov  dword [rel ng_ni], 0
+    mov  dword [rel ng_nargs], 0
+    mov  dword [rel ng_nitok], 0
+    mov  dword [rel ng_ntext], 0
+    cmp  rsi, NG_MAXTOK - 2
+    jae  .nr_same                    ; too big for the tables: left alone
+    call ng_modules
+    call ng_decls
+    ; 1. the program, for the copies it asks for
+    mov  dword [rel ng_round], 1
+    call ng_main_pass
+    cmp  qword [rel ng_err_msg], 0
+    jne  .nr_err
+    ; 2. each copy, which may ask for more
+    xor  ebx, ebx
+.nr_make:
+    cmp  ebx, [rel ng_ni]
+    jae  .nr_final
+    call ng_make
+    cmp  qword [rel ng_err_msg], 0
+    jne  .nr_err
+    inc  ebx
+    jmp  .nr_make
+.nr_final:
+    ; 3. the program again, the copies written where their templates were
+    mov  dword [rel ng_round], 2
+    call ng_main_pass
+    cmp  qword [rel ng_err_msg], 0
+    jne  .nr_err
+    ; back into the lexer's array
+    mov  ecx, [rel ng_nout]
+    mov  rdi, [rel ng_tok]
+    lea  rsi, [rel ng_out]
+    imul rcx, rcx, TOKEN_SIZE
+.nr_copy:
+    test rcx, rcx
+    jz   .nr_copied
+    mov  al, [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    dec  rcx
+    jmp  .nr_copy
+.nr_copied:
+    mov  eax, [rel ng_nout]
+    pop  rbx
+    ret
+.nr_same:
+    mov  rax, [rel ng_cnt]
+    pop  rbx
+    ret
+.nr_err:
+    xor  eax, eax
+    pop  rbx
     ret

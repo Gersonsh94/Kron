@@ -18,6 +18,11 @@
 //   service       a service worker that adds the two headers shared memory
 //                 needs (COOP, COEP) when the server does not send them
 //
+// 3D (std_gpu.kr, calls from 1200): the page draws with WebGPU. The program
+// sends it its shaders (WGSL, from std_shader.kr), meshes and pictures once,
+// then each frame's draws in one message; the page draws them on a canvas
+// laid over the window's.
+//
 // Files, in a browser, are folders and files in memory: they start empty and
 // go away with the page. Each thread has its own descriptors: a file one
 // thread opened is not open in the others.
@@ -40,11 +45,13 @@ const ENOENT = 2, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EACCES = 13,
 
 // the events the page sends (shared ring, 8 ints each)
 const EV_KEY_DOWN = 1, EV_KEY_UP = 2, EV_MOVE = 3, EV_DOWN = 4, EV_UP = 5,
-      EV_WHEEL = 6, EV_CLOSE = 7, EV_CHAR = 8;
+      EV_WHEEL = 6, EV_CLOSE = 7, EV_CHAR = 8, EV_DELTA = 9;
+const PAD_INTS = 4 * 32;            // four gamepads: 16 buttons, 6 axes (x 10000)
 const RING_SLOTS = 1024;            // events
 const RING_INTS = 8;
 const CTL_INTS = 16;                // head, tail, wake, clip length ...
 const CLIP_BYTES = 65536;
+const SAB_BYTES = (CTL_INTS + RING_SLOTS * RING_INTS) * 4 + CLIP_BYTES + PAD_INTS * 4;
 
 class KronExit {
   constructor(code, all) { this.code = code; this.all = all; }
@@ -370,6 +377,22 @@ class Kron {
       case 1005: return this.clipSet(a, b);                      // clipboard: set
       case 1006: return this.clipGet(a, b);                      // and get
       case 1007: return this.winClose();
+      case 1008: if (this.post) this.post({ kind: 'pointer-lock', on: a }); return 1;
+      case 1009: return this.padState(a, b);                     // a gamepad: index, into b
+      // ---- 3D: WebGPU, drawn by the page (std_gpu.kr) -----------------------
+      case 1200: return this.gpuOpen(a, b);
+      case 1201: return this.gpuProgram(a, b, c, d, e, f);
+      case 1202: return this.gpuMesh(a, b, c, d);
+      case 1203: return this.gpuTexture(a, b, c);
+      case 1204: return this.gpuBegin(a);
+      case 1205: return this.gpuDraw(a, b, c, d, e, f);
+      case 1206: return this.gpuEnd();
+      case 1207: return this.gpuClose();
+      // ---- sound: WebAudio, played by the page (std_audio.kr) ---------------
+      case 1210: return this.audioOpen(a);
+      case 1211: return this.audioWrite(a, b);
+      case 1212: return this.audioQueued();
+      case 1213: if (this.post) this.post({ kind: 'audio-close' }); return 0;
       default: return -ENOSYS;
     }
   }
@@ -671,6 +694,263 @@ class Kron {
     this.win = null;
     return 0;
   }
+
+  // ---- 3D: messages to the page, which draws with WebGPU ------------------
+  // Under node there is no page: with KRON_GPU_RECORD=file the messages go
+  // to that file instead, one JSON line each, for a test to replay.
+  gpuSend(m, transfer) {
+    if (IS_NODE) {
+      const enc = {};
+      for (const k in m) enc[k] = (m[k] instanceof Uint8Array) ? { b64: Buffer.from(m[k]).toString('base64') } : m[k];
+      this.nodefs.appendFileSync(process.env.KRON_GPU_RECORD, JSON.stringify(enc) + '\n');
+      return;
+    }
+    this.post(m, transfer || []);
+  }
+  bytes(p, n) { return this.u8().slice(p, p + n); }
+  gpuOpen(w, h) {
+    this.gpuIds = 0;
+    if (IS_NODE) {
+      if (!process.env.KRON_GPU_RECORD) return -ENOSYS;
+      this.nodefs.writeFileSync(process.env.KRON_GPU_RECORD, '');
+      this.gpuSend({ kind: 'gpu-open', w, h });
+      return 1;
+    }
+    if (!this.post || !this.hasWindow) return -ENOSYS;
+    if (!this.shared) { this.gpuSend({ kind: 'gpu-open', w, h }); return 1; }
+    const ctl = this.shared.ctl;
+    Atomics.store(ctl, 6, 0);
+    Atomics.store(ctl, 7, 0);
+    this.gpuSend({ kind: 'gpu-open', w, h });
+    Atomics.wait(ctl, 6, 0, 20000);                  // the page answers: 1 or -1
+    return Atomics.load(ctl, 6) > 0 ? 1 : -ENOSYS;
+  }
+  gpuProgram(src, n, fmts, nin, usize, flags) {
+    const wgsl = this.decoder.decode(this.bytes(src, n));
+    const dv = this.dv(), comps = [];
+    for (let i = 0; i < nin; i++) comps.push(Number(dv.getBigInt64(fmts + i * 8, true)));
+    const id = ++this.gpuIds;
+    this.gpuSend({ kind: 'gpu-prog', id, wgsl, comps, usize, flags });
+    return id;
+  }
+  gpuMesh(vp, vn, ip, inn) {
+    const id = ++this.gpuIds;
+    const v = this.bytes(vp, vn), i = this.bytes(ip, inn);
+    this.gpuSend({ kind: 'gpu-mesh', id, v, i }, IS_NODE ? [] : [v.buffer, i.buffer]);
+    return id;
+  }
+  gpuTexture(p, w, h) {
+    const id = ++this.gpuIds;
+    const data = this.bytes(p, w * h * 4);
+    this.gpuSend({ kind: 'gpu-tex', id, w, h, data }, IS_NODE ? [] : [data.buffer]);
+    return id;
+  }
+  gpuBegin(p) {
+    const dv = this.dv();
+    const clear = [0, 1, 2, 3].map(i => dv.getFloat32(p + i * 4, true));
+    this.gpuFrame = { clear, draws: [], u: [] };
+    return 1;
+  }
+  gpuDraw(pipe, mesh, count, up, usize, tp) {
+    if (!this.gpuFrame) return 0;
+    const dv = this.dv();
+    const tex = [0, 1, 2, 3].map(i => Number(dv.getBigInt64(tp + i * 8, true)));
+    this.gpuFrame.draws.push({ pipe, mesh, count, tex, u: this.gpuFrame.u.length, usize });
+    this.gpuFrame.u.push(usize > 0 ? this.bytes(up, usize) : new Uint8Array(0));
+    return 1;
+  }
+  gpuEnd() {
+    const f = this.gpuFrame;
+    if (!f) return 0;
+    this.gpuFrame = null;
+    // one frame on its way at a time: wait for the page to draw the last
+    if (this.shared && !IS_NODE) {
+      const ctl = this.shared.ctl;
+      if (Atomics.load(ctl, 7) !== 0) Atomics.wait(ctl, 7, 1, 250);
+      Atomics.store(ctl, 7, 1);
+    }
+    if (IS_NODE) {
+      f.u = f.u.map(b => Buffer.from(b).toString('base64'));
+      this.gpuSend({ kind: 'gpu-frame', frame: f });
+      return 1;
+    }
+    this.gpuSend({ kind: 'gpu-frame', frame: f });
+    return 1;
+  }
+  gpuClose() {
+    this.gpuSend({ kind: 'gpu-close' });
+    return 1;
+  }
+
+  // ---- gamepads: what the page read last, 23 values from index b ---------
+  padState(i, p) {
+    if (!this.shared || !this.shared.pads || i < 0 || i > 3) return 0;
+    const dv = this.dv(), src = this.shared.pads;
+    for (let k = 0; k < 23; k++) dv.setBigInt64(p + k * 8, BigInt(Atomics.load(src, i * 32 + k)), true);
+    return src[i * 32];
+  }
+
+  // ---- sound: stereo 16-bit frames to the page, which schedules them ------
+  audioOpen(rate) {
+    if (IS_NODE || !this.post || !this.hasWindow) return -ENOSYS;
+    this.auRate = rate;
+    this.auStart = this.now();
+    this.auWritten = 0;
+    this.post({ kind: 'audio-open', rate });
+    return 1;
+  }
+  audioWrite(p, frames) {
+    const data = new Int16Array(this.bytes(p, frames * 4).buffer);
+    this.auWritten += frames;
+    this.post({ kind: 'audio', data }, [data.buffer]);
+    return frames;
+  }
+  audioQueued() {
+    // what was sent and has not been played yet, by the clock
+    const played = (this.now() - this.auStart) * this.auRate / 1000;
+    if (played > this.auWritten) { this.auStart = this.now(); this.auWritten = 0; return 0; }
+    return Math.floor(this.auWritten - played);
+  }
+}
+
+// =============================================================================
+// KronGPU: what the page does with those messages -- WebGPU itself. A test
+// under node gives it a WebGPU of its own (the 'webgpu' package) and reads
+// the frame back with readPixels.
+// =============================================================================
+class KronGPU {
+  constructor(gpu) {
+    this.gpu = gpu;
+    this.pipes = new Map();
+    this.meshes = new Map();
+    this.texs = new Map();
+    this.ubuf = null;
+    this.ubufSize = 0;
+  }
+  async open(w, h, canvas) {
+    if (!this.gpu) return false;
+    const adapter = await this.gpu.requestAdapter();
+    if (!adapter) return false;
+    this.device = await adapter.requestDevice();
+    this.w = w; this.h = h;
+    if (canvas) {
+      this.ctx = canvas.getContext('webgpu');
+      this.format = this.gpu.getPreferredCanvasFormat();
+      this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'opaque' });
+    } else {
+      this.format = 'bgra8unorm';
+      this.target = this.device.createTexture({ size: [w, h], format: this.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    }
+    this.depth = this.device.createTexture({ size: [w, h], format: 'depth24plus',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    this.sampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'repeat', addressModeV: 'repeat' });
+    return true;
+  }
+  program(m) {
+    const d = this.device;
+    const module = d.createShaderModule({ code: m.wgsl });
+    const ntex = (m.wgsl.match(/var t\d+: texture_2d/g) || []).length;
+    const g0 = d.createBindGroupLayout({ entries: m.usize > 0 ? [{ binding: 0,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      buffer: { type: 'uniform', hasDynamicOffset: true } }] : [] });
+    const e1 = [];
+    for (let k = 0; k < ntex; k++) {
+      e1.push({ binding: 2 * k, visibility: GPUShaderStage.FRAGMENT, texture: {} });
+      e1.push({ binding: 2 * k + 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+    }
+    const g1 = d.createBindGroupLayout({ entries: e1 });
+    const fmt = ['', 'float32', 'float32x2', 'float32x3', 'float32x4'];
+    let off = 0;
+    const attributes = m.comps.map((c, i) => { const a = { shaderLocation: i, offset: off, format: fmt[c] }; off += c * 4; return a; });
+    const blend = (m.flags & 4) ? { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                                     alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } : undefined;
+    const pipe = d.createRenderPipeline({
+      layout: d.createPipelineLayout({ bindGroupLayouts: [g0, g1] }),
+      vertex: { module, entryPoint: 'vs_main', buffers: attributes.length ? [{ arrayStride: off, attributes }] : [] },
+      fragment: { module, entryPoint: 'fs_main', targets: [{ format: this.format, blend }] },
+      primitive: { topology: 'triangle-list', cullMode: (m.flags & 1) ? 'back' : 'none', frontFace: 'ccw' },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: !!(m.flags & 2),
+                      depthCompare: (m.flags & 2) ? 'less' : 'always' }
+    });
+    this.pipes.set(m.id, { pipe, g0, g1, ntex, usize: m.usize, groups: new Map() });
+  }
+  mesh(m) {
+    const d = this.device;
+    const mk = (bytes, usage) => {
+      const b = d.createBuffer({ size: (bytes.length + 3) & ~3, usage: usage | GPUBufferUsage.COPY_DST });
+      d.queue.writeBuffer(b, 0, bytes.buffer, bytes.byteOffset, (bytes.length + 3) & ~3);
+      return b;
+    };
+    this.meshes.set(m.id, { v: mk(m.v, GPUBufferUsage.VERTEX), i: mk(m.i, GPUBufferUsage.INDEX) });
+  }
+  texture(m) {
+    const t = this.device.createTexture({ size: [m.w, m.h], format: 'bgra8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.device.queue.writeTexture({ texture: t }, m.data, { bytesPerRow: m.w * 4 }, [m.w, m.h]);
+    this.texs.set(m.id, t.createView());
+  }
+  frame(f) {
+    const d = this.device;
+    // every draw's uniforms, 256 bytes apart (more for big blocks)
+    let size = 0;
+    const at = f.draws.map(dr => { const a = size; size += Math.max(256, Math.ceil(dr.usize / 256) * 256); return a; });
+    if (size > this.ubufSize) {
+      this.ubufSize = Math.max(size, 65536);
+      this.ubuf = d.createBuffer({ size: this.ubufSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      for (const p of this.pipes.values()) p.u0 = null;
+    }
+    const staging = new Uint8Array(Math.max(size, 4));
+    f.draws.forEach((dr, i) => { if (dr.usize > 0) staging.set(f.u[dr.u], at[i]); });
+    if (size > 0) d.queue.writeBuffer(this.ubuf, 0, staging, 0, size);
+    const enc = d.createCommandEncoder();
+    const view = this.ctx ? this.ctx.getCurrentTexture().createView() : this.target.createView();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{ view, clearValue: { r: f.clear[0], g: f.clear[1], b: f.clear[2], a: f.clear[3] },
+                           loadOp: 'clear', storeOp: 'store' }],
+      depthStencilAttachment: { view: this.depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
+    });
+    f.draws.forEach((dr, i) => {
+      const p = this.pipes.get(dr.pipe), mesh = this.meshes.get(dr.mesh);
+      if (!p || !mesh) return;
+      pass.setPipeline(p.pipe);
+      if (!p.u0) p.u0 = d.createBindGroup({ layout: p.g0, entries: p.usize > 0 ?
+        [{ binding: 0, resource: { buffer: this.ubuf, offset: 0, size: Math.max(16, p.usize) } }] : [] });
+      pass.setBindGroup(0, p.u0, p.usize > 0 ? [at[i]] : []);
+      const key = dr.tex.slice(0, p.ntex).join(',');
+      let g = p.groups.get(key);
+      if (!g) {
+        const entries = [];
+        for (let k = 0; k < p.ntex; k++) {
+          entries.push({ binding: 2 * k, resource: this.texs.get(dr.tex[k]) });
+          entries.push({ binding: 2 * k + 1, resource: this.sampler });
+        }
+        g = d.createBindGroup({ layout: p.g1, entries });
+        p.groups.set(key, g);
+      }
+      pass.setBindGroup(1, g);
+      pass.setVertexBuffer(0, mesh.v);
+      pass.setIndexBuffer(mesh.i, 'uint32');
+      pass.drawIndexed(dr.count);
+    });
+    pass.end();
+    d.queue.submit([enc.finish()]);
+    return d.queue.onSubmittedWorkDone();
+  }
+  // the frame drawn without a canvas, as B G R A bytes: for tests
+  async readPixels() {
+    const d = this.device, row = Math.ceil(this.w * 4 / 256) * 256;
+    const buf = d.createBuffer({ size: row * this.h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = d.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: this.target }, { buffer: buf, bytesPerRow: row }, [this.w, this.h]);
+    d.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange()), out = new Uint8Array(this.w * this.h * 4);
+    for (let y = 0; y < this.h; y++) out.set(src.subarray(y * row, y * row + this.w * 4), y * this.w * 4);
+    buf.unmap();
+    return out;
+  }
 }
 
 // =============================================================================
@@ -710,7 +990,7 @@ if (IS_NODE) {
       process.exit(70);
     });
   }
-  if (typeof module !== 'undefined') module.exports = { Kron, KronExit };
+  if (typeof module !== 'undefined') module.exports = { Kron, KronExit, KronGPU };
   return;
 }
 
@@ -763,7 +1043,8 @@ if (IS_WORKER) {
       shared = {
         ctl: new Int32Array(m.sab, 0, CTL_INTS),
         ring: new Int32Array(m.sab, CTL_INTS * 4, RING_SLOTS * RING_INTS),
-        clip: new Uint8Array(m.sab, (CTL_INTS + RING_SLOTS * RING_INTS) * 4, CLIP_BYTES)
+        clip: new Uint8Array(m.sab, (CTL_INTS + RING_SLOTS * RING_INTS) * 4, CLIP_BYTES),
+        pads: new Int32Array(m.sab, (CTL_INTS + RING_SLOTS * RING_INTS) * 4 + CLIP_BYTES, PAD_INTS)
       };
     }
     const k = new Kron({
@@ -833,12 +1114,27 @@ if (IS_PAGE) {
             ' that sends Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy.)\n');
       }
       const worker = new Worker(script);
-      let sab = null, ctl = null, ring = null, clip = null;
+      let sab = null, ctl = null, ring = null, clip = null, pads = null;
       if (self.crossOriginIsolated) {
-        sab = new SharedArrayBuffer((CTL_INTS + RING_SLOTS * RING_INTS) * 4 + CLIP_BYTES);
+        sab = new SharedArrayBuffer(SAB_BYTES);
         ctl = new Int32Array(sab, 0, CTL_INTS);
         ring = new Int32Array(sab, CTL_INTS * 4, RING_SLOTS * RING_INTS);
         clip = new Uint8Array(sab, (CTL_INTS + RING_SLOTS * RING_INTS) * 4, CLIP_BYTES);
+        pads = new Int32Array(sab, (CTL_INTS + RING_SLOTS * RING_INTS) * 4 + CLIP_BYTES, PAD_INTS);
+        // the gamepads, read every frame into the shared memory
+        const poll = () => {
+          const gp = navigator.getGamepads ? navigator.getGamepads() : [];
+          for (let i = 0; i < 4; i++) {
+            const g = gp[i], at = i * 32;
+            pads[at] = (g && g.connected) ? 1 : 0;
+            for (let b = 0; b < 16; b++) pads[at + 1 + b] = (g && g.buttons[b] && g.buttons[b].pressed) ? 1 : 0;
+            for (let a = 0; a < 4; a++) pads[at + 17 + a] = g && g.axes[a] !== undefined ? Math.round(g.axes[a] * 10000) : 0;
+            pads[at + 21] = g && g.buttons[6] ? Math.round(g.buttons[6].value * 10000) : 0;
+            pads[at + 22] = g && g.buttons[7] ? Math.round(g.buttons[7].value * 10000) : 0;
+          }
+          requestAnimationFrame(poll);
+        };
+        requestAnimationFrame(poll);
       }
       const send = (type, a = 0, b = 0, c = 0, d = 0, e = 0) => {
         if (!ctl) return;
@@ -859,7 +1155,11 @@ if (IS_PAGE) {
           return [Math.floor((e.clientX - r.left) * canvas.width / r.width),
                   Math.floor((e.clientY - r.top) * canvas.height / r.height)];
         };
-        canvas.addEventListener('mousemove', e => { const [x, y] = pos(e); send(EV_MOVE, x, y, mods(e)); });
+        canvas.addEventListener('mousemove', e => {
+          if (document.pointerLockElement === canvas) { send(EV_DELTA, e.movementX | 0, e.movementY | 0); return; }
+          const [x, y] = pos(e); send(EV_MOVE, x, y, mods(e));
+        });
+        canvas.addEventListener('mousedown', () => { if (wantLock && document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
         canvas.addEventListener('mousedown', e => { canvas.focus(); const [x, y] = pos(e); send(EV_DOWN, e.button, x, y, mods(e)); e.preventDefault(); });
         window.addEventListener('mouseup', e => { const [x, y] = pos(e); send(EV_UP, e.button, x, y, mods(e)); });
         canvas.addEventListener('contextmenu', e => e.preventDefault());
@@ -894,6 +1194,7 @@ if (IS_PAGE) {
       }
       const threads = new Set();
       let ended = false;
+      let gpu3d = null, gcanvas = null, actx = null, acursor = 0, wantLock = false;
       const onmsg = (msg) => {
         const m = msg.data;
         if (m.kind === 'thread') {
@@ -923,6 +1224,69 @@ if (IS_PAGE) {
           if (ctl) Atomics.store(ctl, 5, 0);
         }
         else if (m.kind === 'close') { if (canvas) canvas.style.display = 'none'; }
+        else if (m.kind === 'gpu-open') {
+          // a canvas of its own over the window's: a canvas draws either 2D or 3D
+          (async () => {
+            let ok = false;
+            try {
+              if (canvas && navigator.gpu) {
+                gcanvas = document.createElement('canvas');
+                gcanvas.width = m.w; gcanvas.height = m.h;
+                gcanvas.style.cssText = 'position:absolute;pointer-events:none;';
+                const place = () => { const r = canvas.getBoundingClientRect();
+                  gcanvas.style.left = (r.left + window.scrollX) + 'px'; gcanvas.style.top = (r.top + window.scrollY) + 'px';
+                  gcanvas.style.width = r.width + 'px'; gcanvas.style.height = r.height + 'px'; };
+                document.body.appendChild(gcanvas);
+                place();
+                window.addEventListener('resize', place);
+                setInterval(place, 500);
+                gpu3d = new KronGPU(navigator.gpu);
+                ok = await gpu3d.open(m.w, m.h, gcanvas);
+              }
+            } catch (e) { say('WebGPU: ' + e + '\n'); ok = false; }
+            if (ctl) { Atomics.store(ctl, 6, ok ? 1 : -1); Atomics.notify(ctl, 6); }
+          })();
+        }
+        else if (m.kind === 'gpu-prog') { if (gpu3d) try { gpu3d.program(m); } catch (e) { say('WebGPU: ' + e + '\n'); } }
+        else if (m.kind === 'gpu-mesh') { if (gpu3d) gpu3d.mesh(m); }
+        else if (m.kind === 'gpu-tex') { if (gpu3d) gpu3d.texture(m); }
+        else if (m.kind === 'gpu-frame') {
+          const done = () => { if (ctl) { Atomics.store(ctl, 7, 0); Atomics.notify(ctl, 7); } };
+          if (gpu3d) gpu3d.frame(m.frame).then(done, done); else done();
+        }
+        else if (m.kind === 'pointer-lock') {
+          wantLock = !!m.on;
+          if (!wantLock && document.pointerLockElement) document.exitPointerLock();
+        }
+        else if (m.kind === 'audio-open') {
+          try {
+            actx = new AudioContext({ sampleRate: m.rate });
+            acursor = 0;
+            // a page may only start sound after the user did something
+            const resume = () => { if (actx && actx.state !== 'running') actx.resume(); };
+            window.addEventListener('keydown', resume);
+            window.addEventListener('mousedown', resume);
+            window.addEventListener('touchstart', resume);
+          } catch (e) { say('WebAudio: ' + e + '\n'); actx = null; }
+        }
+        else if (m.kind === 'audio') {
+          // until the user clicks or types, the page may not play: what
+          // comes meanwhile is dropped rather than piled up behind
+          if (actx && actx.state !== 'running') acursor = 0;
+          else if (actx) {
+            const n = m.data.length / 2, buf = actx.createBuffer(2, n, actx.sampleRate);
+            const l = buf.getChannelData(0), r = buf.getChannelData(1);
+            for (let i = 0; i < n; i++) { l[i] = m.data[2 * i] / 32768; r[i] = m.data[2 * i + 1] / 32768; }
+            const src = actx.createBufferSource();
+            src.buffer = buf;
+            src.connect(actx.destination);
+            const t = Math.max(acursor, actx.currentTime + 0.02);
+            src.start(t);
+            acursor = t + n / actx.sampleRate;
+          }
+        }
+        else if (m.kind === 'audio-close') { if (actx) actx.close(); actx = null; }
+        else if (m.kind === 'gpu-close') { if (gcanvas) { gcanvas.remove(); gcanvas = null; } gpu3d = null; }
         else if (m.kind === 'clip') { if (navigator.clipboard) navigator.clipboard.writeText(m.text).catch(() => {}); }
         else if (m.kind === 'exit') { if (m.code) say('\n(the program ended with ' + m.code + ')\n'); if (opts.onexit) opts.onexit(m.code); }
         else if (m.kind === 'error') say('\n' + m.text + '\n');

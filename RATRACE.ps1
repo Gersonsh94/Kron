@@ -26,4 +26,4 @@ if ($new -eq $text -and -not ($text -match "%define RA_TRACE\s+$val")) {
     Write-Host "No RA_TRACE line found in $f"; exit 1
 }
 [IO.File]::WriteAllBytes((Resolve-Path $f), [Text.Encoding]::UTF8.GetBytes($new))
-Write-Host "RA_TRACE = $val. Rebuild with BUILD_NASM.bat."
+Write-Host "RA_TRACE = $val. Rebuild with BOOTSTRAP.bat, then SEED.bat and BUILD.bat."

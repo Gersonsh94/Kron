@@ -26,6 +26,11 @@ kron_definitions
 //   list_add_real(l, x)  list_get_real(l, i)  list_set_real(l, i, x)
 //   list_free(l)                   the list is gone; using it again fails
 //
+// A list<S> with S a struct holds whole structs: l[i] is a copy of one,
+// l[i] = v and list_add(l, v) copy v in; list_len, list_insert,
+// list_remove, list_pop, list_last and list_reverse count and move whole
+// structs (the _n functions below do the work).
+//
 // A list holds i64: numbers, or the handles of texts, maps and other lists.
 // Freeing a list does not free what its values refer to.
 //
@@ -411,6 +416,175 @@ fn list_copy(l: i64) -> i64 {
         }
     }
     return list_end(r);
+}
+
+// ------------------------------------------------- lists of structs ---
+// A list<S> with S a struct keeps each element as k values in a row, k the
+// struct's size in slots of eight. The compiler turns l[i], l[i] = v,
+// list_add(l, v), list_len(l) and the rest into these on such a list; the
+// struct goes in and out by address. Each call is atomic, like the others.
+
+fn list_sget(l: i64, i: i64) -> i64 {
+    return list_get(l, i);
+}
+
+fn list_sset(l: i64, i: i64, v: i64) -> i64 {
+    return list_set(l, i, v);
+}
+
+// the address of element i (k values each), 0 with hp_err set when there
+// is none. The lock is held.
+fn li_at_n(l: i64, i: i64, k: i64) -> i64 {
+    var q: i64 = ob_get(l, OB_LIST);
+    if q == 0 {
+        return 0;
+    }
+    var n: i64 = 0;
+    raw { n = peek(q); }
+    if i < 0 {
+        hp_err = 5;
+        return 0;
+    }
+    if i >= n / k {
+        hp_err = 5;
+        return 0;
+    }
+    return q + 8 + i * k * 8;
+}
+
+fn list_len_n(l: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return list_end(li_len(l) / k);
+}
+
+fn list_add_n(l: i64, src: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var n: i64 = li_len(l);
+    if hp_err == 0 {
+        var q: i64 = li_room(l, n + k);
+        if q != 0 {
+            hp_copy(q + 8 + n * 8, src, k * 8);
+            raw { poke(q, n + k); }
+        }
+    }
+    return list_end(l);
+}
+
+fn list_get_n(l: i64, i: i64, dst: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var a: i64 = li_at_n(l, i, k);
+    if a != 0 {
+        hp_copy(dst, a, k * 8);
+    }
+    return list_end(dst);
+}
+
+fn list_set_n(l: i64, i: i64, src: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var a: i64 = li_at_n(l, i, k);
+    if a != 0 {
+        hp_copy(a, src, k * 8);
+    }
+    return list_end(l);
+}
+
+fn list_insert_n(l: i64, i: i64, src: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var n: i64 = li_len(l);
+    if hp_err == 0 {
+        if i < 0 {
+            hp_err = 5;
+        } else if i > n / k {
+            hp_err = 5;
+        } else {
+            var q: i64 = li_room(l, n + k);
+            if q != 0 {
+                var j: i64 = n - 1;
+                raw {
+                    while j >= i * k {
+                        poke(q + 8 + (j + k) * 8, peek(q + 8 + j * 8));
+                        j = j - 1;
+                    }
+                }
+                hp_copy(q + 8 + i * k * 8, src, k * 8);
+                raw { poke(q, n + k); }
+            }
+        }
+    }
+    return list_end(l);
+}
+
+fn list_remove_n(l: i64, i: i64, dst: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var a: i64 = li_at_n(l, i, k);
+    if a != 0 {
+        hp_copy(dst, a, k * 8);
+        var q: i64 = ob_get(l, OB_LIST);
+        raw {
+            var n: i64 = peek(q);
+            var j: i64 = i * k;
+            while j < n - k {
+                poke(q + 8 + j * 8, peek(q + 8 + (j + k) * 8));
+                j = j + 1;
+            }
+            poke(q, n - k);
+        }
+    }
+    return list_end(dst);
+}
+
+fn list_last_n(l: i64, dst: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var n: i64 = li_len(l) / k;
+    if hp_err == 0 {
+        if n == 0 {
+            hp_err = 10;
+        } else {
+            hp_copy(dst, li_at_n(l, n - 1, k), k * 8);
+        }
+    }
+    return list_end(dst);
+}
+
+fn list_pop_n(l: i64, dst: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var n: i64 = li_len(l) / k;
+    if hp_err == 0 {
+        if n == 0 {
+            hp_err = 10;
+        } else {
+            hp_copy(dst, li_at_n(l, n - 1, k), k * 8);
+            var q: i64 = ob_get(l, OB_LIST);
+            raw { poke(q, (n - 1) * k); }
+        }
+    }
+    return list_end(dst);
+}
+
+fn list_reverse_n(l: i64, k: i64) -> i64 {
+    lock_take(HP_LOCK);
+    var q: i64 = ob_get(l, OB_LIST);
+    if q != 0 {
+        raw {
+            var n: i64 = peek(q) / k;
+            var a: i64 = 0;
+            var b: i64 = n - 1;
+            while a < b {
+                var j: i64 = 0;
+                while j < k {
+                    var pa: i64 = q + 8 + (a * k + j) * 8;
+                    var pb: i64 = q + 8 + (b * k + j) * 8;
+                    var t: i64 = peek(pa);
+                    poke(pa, peek(pb));
+                    poke(pb, t);
+                    j = j + 1;
+                }
+                a = a + 1;
+                b = b - 1;
+            }
+        }
+    }
+    return list_end(l);
 }
 
 fn list_add_real(l: i64, x: f64) -> i64 {

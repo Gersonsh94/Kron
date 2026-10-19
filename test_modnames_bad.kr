@@ -1,0 +1,9 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "mod_sq.kr";
+acquire_domain "mod_tri.kr";
+kron_definitions
+fn main() {
+    print(area(4));
+}

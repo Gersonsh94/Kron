@@ -135,7 +135,21 @@ set LIST=%LIST% test_text test_list test_map test_files test_os
 set LIST=%LIST% test_libthreads
 set LIST=%LIST% test_exp_lit
 set LIST=%LIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
+set LIST=%LIST% test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray
 for %%T in (%LIST%) do call :armtest %%T
+
+REM ---- programs that call the C library (extern): they need the C library
+REM      of ARM64 in WSL, once:  wsl sudo apt install -y libc6-arm64-cross
+set DYNLIST=test_extern test_callback
+wsl -e test -f /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 >nul 2>&1
+if errorlevel 1 (
+    for %%T in (%DYNLIST%) do echo   OMIT  %%T  ^(needs the ARM64 C library: wsl sudo apt install -y libc6-arm64-cross^)
+) else (
+    set "QEMU_PLAIN=!QEMU!"
+    set "QEMU=!QEMU! -L /usr/aarch64-linux-gnu"
+    for %%T in (%DYNLIST%) do call :armtest %%T
+    set "QEMU=!QEMU_PLAIN!"
+)
 
 echo.
 echo ============================================================

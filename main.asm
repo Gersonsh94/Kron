@@ -12,7 +12,7 @@ bits 64
 %include "win64_api.inc"
 %include "web_host.inc"
 
-extern jup_lexer_init, jup_lexer_run
+extern jup_lexer_init, jup_lexer_run, lexer_error_kind, lexer_error_token
 extern jup_parser_init, jup_parser_run
 extern par_used_slice
 extern par_used_text, par_used_list, par_used_map
@@ -27,9 +27,14 @@ extern jup_semantic_error_col, jup_semantic_error_len, jup_semantic_error_name
 
 extern jup_semantic_suggestion
 extern jup_codegen_init, jup_codegen_run, jup_codegen_set_target
+extern cg_debug
+extern cg_as_module, cg_mod_tag
+extern codegen_uses_extern
 extern xarm_translate, xarm_error_line, xarm_error_text, xarm_error_insn
 extern xwasm_translate, xwasm_error_line, xwasm_error_text, xwasm_error_insn
 extern xarm_set_os, karm_set_align, macho_write
+extern mo_dylib, mo_platform, mo_idname
+extern xarm_set_lib
 extern kasm_init, kasm_assemble, kasm_get_code, kasm_get_code_size, kasm_had_error
 extern kasm_get_error_line, kasm_get_error_count, kasm_get_error_line_at
 extern kasm_get_error_dst, kasm_get_error_src
@@ -37,11 +42,15 @@ extern kasm_get_error_mnem
 extern kasm_build_image
 extern kasm_get_data_size, kasm_get_bss_size, kasm_get_fixup_count, kasm_get_fixup_kind
 extern kasm_get_fixup_label, kasm_get_fixup_at, kasm_get_label_section, kasm_label_addr, kasm_find_label
-extern pw_write, pw_gui
+extern pw_write, pw_gui, pw_dll, pw_dll_file
 extern krn_init, krn_build, krn_get_image, krn_get_size
 extern karm_init, karm_set_base, karm_assemble, karm_build_image, karm_get_code
 extern karm_get_bss_size, karm_get_entry, karm_get_error_count, karm_get_error_line_at
 extern karm_get_error_mnem, karm_get_error_text
+extern karm_get_code_len, karm_get_data_len, karm_get_data_off, karm_set_align
+extern karm_label, karm_reloc_count, karm_reloc_at
+extern jup_codegen_set_lib, codegen_export_count, codegen_export_name
+extern codegen_has_exports
 extern jup_runtime_init
 extern jup_linker_run
 extern parser_get_ast_root
@@ -88,12 +97,14 @@ section .data
     dbg_4        db "  [4] writing output", 13, 10, 0
     msg_asm_ok   db "Bytes written: ", 0
     msg_asm_err  db "ERROR: kasm failed to assemble.", 13, 10, 0
+    msg_duplabel db "  -- a label defined twice: two files of the build give the same name", 0
+    msg_nolabel  db "  -- a label defined nowhere: a misspelt name, or an extern not declared", 0
     msg_ok       db " OK", 13, 10, 0
     msg_dumped   db "Expanded text written to: ", 0
     msg_nl       db 13, 10, 0
     dump_suffix  db ".expanded", 0
     msg_done     db 13, 10, "Compilation successful!", 13, 10, 0
-    msg_err_args db "ERROR: usage: kronc.exe file.kr [-o output] [-S] [--check]", 13, 10, 0
+    msg_err_args db "ERROR: usage: kronc.exe file.kr [-o output] [-S] [--check] [--debug]", 13, 10, 0
     msg_checked  db "Check passed: no errors.", 13, 10, 0
     msg_err_target db "ERROR: unknown target", 13, 10
                  db "  hint: use --target=windows, --target=linux, --target=linux-arm64, --target=web, --target=krn or --target=bare", 13, 10, 0
@@ -117,7 +128,11 @@ section .data
     msg_imp_post db "'", 13, 10, 0
     msg_imp_hint1 db "  hint: the file has to be in the program's folder, with its .kr extension", 13, 10, 0
     msg_imp_hint2 db "  hint: check the chain of imports: each module imports only what it uses", 13, 10, 0
-    msg_err_lex  db "ERROR: lexer failed.", 13, 10, 0
+    msg_err_lex  db "ERROR: the program with its modules is too big for the lexer: more than 349000 tokens.", 13, 10, 0
+    d_lex_char   db "a character Kron does not use ", 0
+    d_hint_lexchar db "  hint: outside a ", 34, "...", 34, " text and a // comment, Kron is written with letters, digits, _ and its operators", 13, 10, 0
+    d_lex_text   db "a text with no closing quote", 0
+    d_hint_lextext db "  hint: a text ends on its own ", 34, "; inside one, write \", 34, " for a quote and \\ for a backslash", 13, 10, 0
     msg_err_parse db "ERROR: parser failed. Token=", 0
     msg_err_pos   db " Position=", 0
     msg_err_line  db " Line=", 0
@@ -161,10 +176,13 @@ section .data
     msg_err_arn_ovl  db "ERROR: arenas with overlapping regions at line ", 0
     msg_newline   db 13, 10, 0
     msg_err_code  db "ERROR: codegen failed.", 13, 10, 0
+    msg_err_codebig db "ERROR: the generated code is larger than the compiler's buffers hold.", 13, 10
+                  db "  hint: split the longest function, or the program, into smaller ones", 13, 10, 0
     msg_err_write db "ERROR: could not write the output file.", 13, 10
                   db "  hint: is the program still running, or the file open elsewhere?", 13, 10, 0
     msg_wrote     db "Written: ", 0
     asm_ext       db ".asm", 0
+    mod_ext       db "_kr.asm", 0
     bin_ext       db ".kbin", 0
     krn_ext       db ".krn", 0
     exe_ext       db ".exe", 0
@@ -188,6 +206,32 @@ section .data
     msg_xwasm_err db 13, 10, "ERROR: xwasm could not lower the generated code to WebAssembly", 13, 10, 0
     ew_start_name db "_start", 0
     bin_ext_ptr   dq 0
+    ; a program that calls the system's libraries (extern): what its ELF
+    ; header area holds besides the headers -- the loader's name, and the
+    ; five functions the loader fills in before _start runs
+    ed_interp_x86 db "/lib64/ld-linux-x86-64.so.2", 0
+    ed_interp_arm db "/lib/ld-linux-aarch64.so.1", 0
+    ed_strtab     db 0, "libc.so.6", 0, "libdl.so.2", 0, "libpthread.so.0", 0
+                  db "dlopen", 0, "dlsym", 0, "pthread_create", 0, "pthread_detach", 0, "exit", 0
+    ed_strtab_len equ $ - ed_strtab
+    ; the same for Android: libc.so and libdl.so, the five names where the
+    ; others have them
+    ed_strtab_and db 0, "libc.so", 0, "libdl.so", 0
+                  db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                  db "dlopen", 0, "dlsym", 0, "pthread_create", 0, "pthread_detach", 0, "exit", 0
+    so_shnames    db 0, ".dynsym", 0, ".dynstr", 0, ".dynamic", 0, ".shstrtab", 0
+    ed_got_names  db "__got_dlopen", 0, "__got_dlsym", 0, "__got_ptc", 0, "__got_ptd", 0, "__got_exit", 0
+    so_ext        db ".so", 0
+    tg_android    db "android", 0
+    mac_fw_ext    db ".framework"
+    tg_ios        db "ios", 0
+    msg_lib_only  db "ERROR: Android and iOS run Kron inside an app: build a library with --lib (see templates/)", 13, 10, 0
+    dll_ext       db ".dll", 0
+    dylib_ext     db ".dylib", 0
+    msg_lib_target db "ERROR: --lib makes a library for windows, linux, linux-arm64 or macos", 13, 10, 0
+    msg_module_target db "ERROR: --module writes x86-64 text for the compiler's own build: it goes with --target=windows only, and not with --lib or --debug", 13, 10, 0
+    msg_debug_target db "ERROR: --debug builds for windows and linux (x86-64); build there to debug, then for the other systems", 13, 10, 0
+    s_std_debug  db "std_debug.kr", 0
 
 section .bss
     arg_input    resb 512
@@ -199,8 +243,44 @@ section .bss
     ew_sec       resq 1        ; elf_write: its section
     ew_val       resq 1        ; elf_write: the address to store
     ew_img       resq 1        ; elf_write: length of the flat image
+    ew_hsize     resq 1        ; bytes of headers before the image: 128, 1024 with externs
+    ew_base      resq 1        ; where the image is in memory: 0x400000 + ew_hsize
+    ew_dbase     resq 1        ; elf_write: .data inside the image
+    ew_bbase     resq 1        ; elf_write: .bss inside the image
+    ew_got       resq 5        ; the addresses of __got_dlopen ... __got_exit
+    ed_load      resq 7        ; elf_dynamic: the PT_LOAD header, kept aside
+    out_dynamic  resb 1        ; the program calls the system's libraries
+    arg_flag_lib resb 1        ; --lib: a library (.dll .so .dylib), not a program
+    out_android  resb 1        ; --target=android (out_target ARM64)
+    out_ios      resb 1        ; --target=ios (out_target MACOS)
+    mac_idbuf    resb 520      ; a framework dylib's install name
+    es_arm       resq 1        ; elf_write_so: 1 for ARM64
+    es_img       resq 1        ; the image's length
+    es_code      resq 1        ; its code's length
+    es_doff      resq 1        ; where its .data starts
+    es_dlen      resq 1        ; .data's length
+    es_boff      resq 1        ; where its .bss starts
+    es_blen      resq 1        ; .bss's length
+    es_falign    resq 1        ; the page the segments are aligned to
+    es_F         resq 1        ; the table segment: in the file
+    es_V         resq 1        ; and in memory
+    es_exp       resq 1        ; exports
+    es_strsz     resq 1
+    es_sym       resq 1        ; offsets in the table segment
+    es_hash      resq 1
+    es_rela      resq 1
+    es_nrel      resq 1        ; relocations written
+    es_end       resq 1        ; the table segment's length
+    es_name      resb 320      ; "__ce_" and an export's name
+    es_android   resb 1        ; the C library is Android's (bionic)
+    es_soname    resq 1        ; the library's file name, without its folder
+    es_soname_off resq 1       ; where it is in the strings
+    es_shoff     resq 1        ; the section headers
+    es_shend     resq 1        ; and the file's end after them
     arg_flag_check resb 1      ; --check: report errors, write nothing
+    arg_flag_debug resb 1      ; --debug: a build the debugger can stop
     arg_flag_window resb 1     ; --window: a Windows program with no console
+    arg_flag_module resb 1     ; --module: a part of the compiler, as text
     src_buffer   resb SRC_BUFFER_SIZE
     dump_name    resb 512               ; '<input>.expanded'
     exp_buffer   resb SRC_BUFFER_SIZE   ; source after expanding imports
@@ -286,6 +366,7 @@ section .text
 global main
 global print_string
 global lmap_lookup
+global arg_input, src_buffer, lmap_out, lmap_file, lmap_count
 
 main:
     push rbp
@@ -333,6 +414,73 @@ main:
     jmp  .cg_target
 .cg_target:
     call jup_codegen_set_target
+    ; --lib: a library, for a system that loads them
+    mov  dil, [rel arg_flag_lib]
+    call jup_codegen_set_lib
+    cmp  byte [rel arg_flag_lib], 0
+    jne  .lib_check
+    mov  al, [rel out_android]
+    or   al, [rel out_ios]
+    jz   .lib_ok
+    lea  rcx, [rel msg_lib_only]
+    call print_string
+    mov  eax, 1
+    pop  rbp
+    ret
+.lib_check:
+    mov  al, [rel out_target]
+    cmp  al, TARGET_PE
+    je   .lib_ok
+    cmp  al, TARGET_ELF
+    je   .lib_ok
+    cmp  al, TARGET_ARM64
+    je   .lib_ok
+    cmp  al, TARGET_MACOS
+    je   .lib_ok
+    lea  rcx, [rel msg_lib_target]
+    call print_string
+    mov  eax, 1
+    pop  rbp
+    ret
+.lib_ok:
+    ; --debug: the hooks are x86-64 code calling the debugger's module
+    mov  al, [rel arg_flag_debug]
+    mov  [rel cg_debug], al
+    test al, al
+    jz   .debug_ok
+    mov  al, [rel out_target]
+    cmp  al, TARGET_PE
+    je   .debug_ok
+    cmp  al, TARGET_ELF
+    je   .debug_ok
+    lea  rcx, [rel msg_debug_target]
+    call print_string
+    mov  eax, 1
+    pop  rbp
+    ret
+.debug_ok:
+    ; --module: a part of the compiler written in Kron. Its functions become
+    ; x86-64 text that kron_all.asm includes, so the compiler is still built
+    ; by kasm alone; nothing of a program goes with them.
+    cmp  byte [rel arg_flag_module], 0
+    je   .module_ok
+    mov  al, [rel out_target]
+    cmp  al, TARGET_PE
+    jne  .module_bad
+    mov  al, [rel arg_flag_lib]
+    or   al, [rel arg_flag_debug]
+    jnz  .module_bad
+    mov  byte [rel arg_flag_S], 1
+    mov  byte [rel cg_as_module], 1
+    call module_tag
+    jmp  .module_ok
+.module_bad:
+    lea  rcx, [rel msg_module_target]
+    call print_string
+    mov  eax, 1
+    pop  rbp
+    ret
+.module_ok:
 
     ; --assemble : run only the assembler over an existing .asm file
     call scan_assemble_flag
@@ -425,7 +573,7 @@ main:
     call jup_lexer_run
     add  rsp, 32
     test rax, rax
-    jz   .error_lex
+    jle  .error_lex
     
     lea  rcx, [rel msg_ok]
     call print_string
@@ -591,6 +739,8 @@ main:
     call jup_semantic_error_kind
     cmp  rax, 5
     je   .sem_noname
+    cmp  rax, 11
+    je   .sem_noname
     call jup_semantic_error_name
     test rax, rax
     jz   .sem_noname
@@ -635,6 +785,8 @@ main:
     je   .sem_fixed_hint
     mov  rcx, [rel cg_hint_msg]
     cmp  rax, 10
+    je   .sem_hint10
+    cmp  rax, 11
     je   .sem_hint10
     lea  rcx, [rel d_hint_thread]
     cmp  rax, 8
@@ -692,7 +844,11 @@ main:
     call jup_codegen_run
     add  rsp, 32
     test rax, rax
-    jz   .error_code
+    jle  .error_code                 ; 0 an error, negative an internal one
+    ; extern functions: the executable is linked with the system's loader
+    call codegen_uses_extern
+    mov  [rel out_dynamic], al
+    call ew_set_layout
 
     lea  rcx, [rel msg_ok]
     call print_string
@@ -782,6 +938,9 @@ main:
 .arm_os:
     sub  rsp, 32
     call xarm_set_os
+    call codegen_has_exports
+    mov  ecx, eax
+    call xarm_set_lib
     add  rsp, 32
     sub  rsp, 32
     lea  rcx, [rel exp_buffer]
@@ -818,9 +977,11 @@ main:
 .arm_image:
     cmp  byte [rel out_target], TARGET_MACOS
     je   .mac_image
+    cmp  byte [rel arg_flag_lib], 0
+    jne  .arm_so
     sub  rsp, 32
     call karm_init
-    mov  rcx, 0x400080
+    mov  rcx, [rel ew_base]
     call karm_set_base
     lea  rcx, [rel code_buffer]
     mov  rdx, [rel src_size]
@@ -838,12 +999,52 @@ main:
     mov  [rel bin_ext_ptr], rcx
     jmp  .direct_name
 
+.arm_so:
+    ; a shared object for ARM64 Linux (and Android): the image 512 bytes in,
+    ; .data on a 64 KB page of its own, so that code and data get segments
+    ; of their own -- read and run, read and write
+    sub  rsp, 32
+    call karm_init
+    mov  rcx, 512
+    call karm_set_base
+    mov  rcx, 0x10000
+    call karm_set_align
+    lea  rcx, [rel code_buffer]
+    mov  rdx, [rel src_size]
+    call karm_assemble
+    add  rsp, 32
+    test rax, rax
+    jz   .error_karm
+    sub  rsp, 32
+    lea  rcx, [rel code_buffer]
+    call so_prepare
+    mov  edx, 1
+    call elf_write_so
+    add  rsp, 32
+    mov  r11, rax
+    lea  r10, [rel code_buffer]
+    lea  rcx, [rel so_ext]
+    mov  [rel bin_ext_ptr], rcx
+    jmp  .direct_name
+
 .mac_image:
     ; macOS: the code at 0x100004000, after the page of the header, and each
-    ; section on a 16 KB page of its own; then the Mach-O file around it
+    ; section on a 16 KB page of its own; then the Mach-O file around it.
+    ; A dylib starts at 0, dyld sliding it wherever it goes.
+    mov  al, [rel arg_flag_lib]
+    mov  [rel mo_dylib], al
+    mov  dword [rel mo_platform], 1
+    cmp  byte [rel out_ios], 0
+    je   .mac_plat
+    mov  dword [rel mo_platform], 2  ; PLATFORM_IOS
+.mac_plat:
     sub  rsp, 32
     call karm_init
     mov  rcx, 0x100004000
+    cmp  byte [rel arg_flag_lib], 0
+    je   .mac_base_set
+    mov  rcx, 0x4000
+.mac_base_set:
     call karm_set_base
     mov  rcx, 0x4000
     call karm_set_align
@@ -854,6 +1055,10 @@ main:
     test rax, rax
     jz   .error_karm
     lea  rcx, [rel elf_ext]
+    cmp  byte [rel arg_flag_lib], 0
+    je   .mac_ext
+    lea  rcx, [rel dylib_ext]
+.mac_ext:
     mov  [rel bin_ext_ptr], rcx
     call build_bin_name
     ; the name in the signature: the file's, without its folder
@@ -873,6 +1078,59 @@ main:
     mov  rdx, rax
     jmp  .mac_base
 .mac_named:
+    ; a dylib's install name: @rpath/ and its file's name -- or, inside
+    ; Name.framework/, "Name.framework/" before it, as Xcode embeds one
+    mov  [rel mo_idname], rdx
+    lea  rax, [rel out_bin_name]
+    mov  rcx, rdx
+    sub  rcx, rax
+    cmp  rcx, 12
+    jb   .mac_id_done
+    lea  r8, [rdx - 1]               ; the separator before the name
+    mov  r9, r8                      ; the folder: back to the one before
+.mac_id_back:
+    cmp  r9, rax
+    je   .mac_id_dir
+    mov  cl, [r9 - 1]
+    cmp  cl, '/'
+    je   .mac_id_dir
+    cmp  cl, 92
+    je   .mac_id_dir
+    dec  r9
+    jmp  .mac_id_back
+.mac_id_dir:
+    ; does the folder end in ".framework"?
+    mov  rcx, r8
+    sub  rcx, r9
+    cmp  rcx, 10
+    jb   .mac_id_done
+    lea  rsi, [r8 - 10]
+    lea  rdi, [rel mac_fw_ext]
+    xor  ecx, ecx
+.mac_id_cmp:
+    cmp  ecx, 10
+    jae  .mac_id_fw
+    mov  al, [rsi + rcx]
+    cmp  al, [rdi + rcx]
+    jne  .mac_id_done
+    inc  ecx
+    jmp  .mac_id_cmp
+.mac_id_fw:
+    ; "Name.framework/name", with / for a Windows separator
+    lea  rdi, [rel mac_idbuf]
+    mov  [rel mo_idname], rdi
+.mac_id_copy:
+    mov  al, [r9]
+    cmp  al, 92
+    jne  .mac_id_put
+    mov  al, '/'
+.mac_id_put:
+    mov  [rdi], al
+    inc  r9
+    inc  rdi
+    test al, al
+    jnz  .mac_id_copy
+.mac_id_done:
     sub  rsp, 32
     lea  rcx, [rel code_buffer]
     call macho_write
@@ -1034,6 +1292,31 @@ main:
     je   .direct_elf
     mov  al, [rel arg_flag_window]
     mov  [rel pw_gui], al         ; --window: the GUI subsystem, no console
+    mov  al, [rel arg_flag_lib]
+    mov  [rel pw_dll], al         ; --lib: a DLL, which needs its own name
+    test al, al
+    jz   .pe_named
+    lea  rcx, [rel dll_ext]
+    mov  [rel bin_ext_ptr], rcx
+    call build_bin_name
+    lea  rax, [rel out_bin_name]
+    mov  rdx, rax
+.pe_base:
+    mov  cl, [rax]
+    test cl, cl
+    jz   .pe_based
+    inc  rax
+    cmp  cl, '/'
+    je   .pe_sep
+    cmp  cl, 92
+    je   .pe_sep
+    jmp  .pe_base
+.pe_sep:
+    mov  rdx, rax
+    jmp  .pe_base
+.pe_based:
+    mov  [rel pw_dll_file], rdx
+.pe_named:
     sub  rsp, 32
     lea  rcx, [rel code_buffer]
     call pw_write                 ; the PE goes into code_buffer, rax = length
@@ -1041,10 +1324,28 @@ main:
     lea  r10, [rel code_buffer]
     add  rsp, 32
     lea  rcx, [rel exe_ext]
+    cmp  byte [rel arg_flag_lib], 0
+    je   .pe_ext
+    lea  rcx, [rel dll_ext]
+.pe_ext:
     mov  [rel bin_ext_ptr], rcx
     jmp  .direct_name
 .direct_elf:
     ; Linux: the same image, in an ELF file with no extension
+    cmp  byte [rel arg_flag_lib], 0
+    je   .direct_elf_exe
+    sub  rsp, 32
+    call so_prepare
+    lea  rcx, [rel code_buffer]
+    xor  edx, edx
+    call elf_write_so             ; a shared object: name.so
+    mov  r11, rax
+    lea  r10, [rel code_buffer]
+    add  rsp, 32
+    lea  rcx, [rel so_ext]
+    mov  [rel bin_ext_ptr], rcx
+    jmp  .direct_name
+.direct_elf_exe:
     sub  rsp, 32
     lea  rcx, [rel code_buffer]
     call elf_write                ; the ELF goes into code_buffer, rax = length
@@ -1187,6 +1488,8 @@ main:
 .assemble_arm:
     ; ARM64: karm instead of kasm, and an AArch64 ELF around the image. The
     ; image sits at 0x400080, after the 0x80 bytes of headers, as on x86-64.
+    mov  byte [rel out_dynamic], 0
+    call ew_set_layout
     sub  rsp, 32
     call karm_init
     mov  rcx, 0x400080
@@ -1296,6 +1599,22 @@ main:
     add  rsp, 32
     mov  rcx, rax
     call print_string
+    mov  rcx, r15
+    sub  rsp, 32
+    call kasm_get_error_dst
+    add  rsp, 32
+    cmp  rax, 99
+    jne  .ea_dup
+    lea  rcx, [rel msg_nolabel]
+    call print_string
+    jmp  .ea_next
+.ea_dup:
+    cmp  rax, 98
+    jne  .ea_kinds
+    lea  rcx, [rel msg_duplabel]
+    call print_string
+    jmp  .ea_next
+.ea_kinds:
     lea  rcx, [rel msg_dst]
     call print_string
     mov  rcx, r15
@@ -1312,6 +1631,7 @@ main:
     add  rsp, 32
     mov  rcx, rax
     call print_u64
+.ea_next:
     lea  rcx, [rel msg_newline]
     call print_string
     inc  r15
@@ -1383,11 +1703,42 @@ main:
     ret
 
 .error_lex:
+    ; where the lexer stopped, reported like the errors after it: the file,
+    ; line and column, the line itself, and the characters marked
+    call lexer_error_kind
+    cmp  rax, 1
+    je   .lex_char
+    cmp  rax, 2
+    je   .lex_text
+    lea  rcx, [rel msg_newline]
+    call print_string
     lea  rcx, [rel msg_err_lex]
     call print_string
     mov  eax, 3
     pop  rbp
     ret
+.lex_char:
+    lea  rax, [rel d_hint_lexchar]
+    mov  [rel cg_hint_msg], rax
+    call lexer_error_token
+    mov  rcx, rax
+    mov  rdx, 10                     ; the character itself, then the hint
+    call jup_semantic_set_error
+    lea  rcx, [rel msg_newline]
+    call print_string
+    lea  rcx, [rel d_lex_char]
+    jmp  .sem_msg_go
+.lex_text:
+    lea  rax, [rel d_hint_lextext]
+    mov  [rel cg_hint_msg], rax
+    call lexer_error_token
+    mov  rcx, rax
+    mov  rdx, 11                     ; no name to show, a hint of its own
+    call jup_semantic_set_error
+    lea  rcx, [rel msg_newline]
+    call print_string
+    lea  rcx, [rel d_lex_text]
+    jmp  .sem_msg_go
     
 .error_parse:
     ; file:line:col: unexpected <token>
@@ -1513,6 +1864,14 @@ main:
     lea  rcx, [rel d_sem_thread]
     jmp  .sem_msg_go
 .error_code_plain:
+    cmp  byte [rel dbg_which], 1
+    jne  .error_code_other
+    lea  rcx, [rel msg_err_codebig]
+    call print_string
+    mov  eax, 5
+    pop  rbp
+    ret
+.error_code_other:
     lea  rcx, [rel msg_err_code]
     call print_string
     movzx rcx, byte [rel dbg_which]
@@ -1771,6 +2130,67 @@ build_bin_name:
     ret
 
 ; ==============================================================================
+; module_tag(): the module's name -- the input's file name without folder
+; and extension, letters, digits and '_' kept, anything else made '_' --
+; followed by '_', into cg_mod_tag. Its globals carry it: __g_lexer_pos.
+module_tag:
+    push rbx
+    push rsi
+    push rdi
+    lea  rsi, [rel arg_input]
+    mov  rdi, rsi
+.mt_find:
+    mov  al, [rsi]
+    test al, al
+    jz   .mt_start
+    inc  rsi
+    cmp  al, '/'
+    je   .mt_sep
+    cmp  al, '\'
+    jne  .mt_find
+.mt_sep:
+    mov  rdi, rsi
+    jmp  .mt_find
+.mt_start:
+    lea  rsi, [rel cg_mod_tag]
+    xor  ebx, ebx
+.mt_copy:
+    cmp  ebx, 63
+    jae  .mt_end
+    mov  al, [rdi + rbx]
+    test al, al
+    jz   .mt_end
+    cmp  al, '.'
+    je   .mt_end
+    cmp  al, '_'
+    je   .mt_keep
+    cmp  al, '0'
+    jb   .mt_other
+    cmp  al, '9'
+    jbe  .mt_keep
+    cmp  al, 'A'
+    jb   .mt_other
+    cmp  al, 'Z'
+    jbe  .mt_keep
+    cmp  al, 'a'
+    jb   .mt_other
+    cmp  al, 'z'
+    jbe  .mt_keep
+.mt_other:
+    mov  al, '_'
+.mt_keep:
+    mov  [rsi + rbx], al
+    inc  ebx
+    jmp  .mt_copy
+.mt_end:
+    lea  rdi, [rsi + rbx]
+    mov  byte [rdi], '_'
+    mov  byte [rdi + 1], 0
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
 build_asm_name:
     push rbx
     push rsi
@@ -1818,8 +2238,13 @@ build_asm_name:
 .trim:
     mov  rbx, rcx              ; cut at the dot
 .append:
-    ; append ".asm"
+    ; append ".asm" -- "_kr.asm" for a module, so that lexer.kr does not
+    ; overwrite the lexer.asm beside it
     lea  rsi, [rel asm_ext]
+    cmp  byte [rel arg_flag_module], 0
+    je   .app_go
+    lea  rsi, [rel mod_ext]
+.app_go:
     xor  rcx, rcx
 .app_loop:
     mov  al, [rsi + rcx]
@@ -2192,6 +2617,41 @@ lmap_add:
     mov  [r9 + rbx*8], rcx
     lea  r9, [rel lmap_src]
     mov  [r9 + rbx*8], r8
+    ; a file named before keeps its one copy: a file is the same pointer in
+    ; every entry (the traces and the debugger number files by it)
+    push rcx
+    push rdx
+    xor  ecx, ecx
+.same:
+    cmp  rcx, rbx
+    jae  .same_none
+    lea  r9, [rel lmap_file]
+    mov  rdi, [r9 + rcx*8]
+    mov  rsi, rdx
+.same_cmp:
+    mov  al, [rsi]
+    cmp  al, [rdi]
+    jne  .same_next
+    test al, al
+    jz   .same_found
+    inc  rsi
+    inc  rdi
+    jmp  .same_cmp
+.same_next:
+    inc  rcx
+    jmp  .same
+.same_found:
+    lea  r9, [rel lmap_file]
+    mov  rdi, [r9 + rcx*8]
+    mov  [r9 + rbx*8], rdi
+    pop  rdx
+    pop  rcx
+    inc  rbx
+    mov  [rel lmap_count], rbx
+    jmp  .full
+.same_none:
+    pop  rdx
+    pop  rcx
     ; copy the name into lmap_names
     mov  r9, [rel lmap_names_n]
     lea  rdi, [rel lmap_names]
@@ -2520,6 +2980,20 @@ imp_resolve:
     mov  eax, [rel imp_err]
     test eax, eax
     jnz  .ir_fail_self
+    ; --debug: the program imports the debugger's module as well
+    cmp  byte [rel arg_flag_debug], 0
+    je   .ir_loop
+    mov  eax, [rel dfs_nkids]
+    cmp  eax, IMP_KIDS
+    jae  .ir_loop
+    shl  rax, 8
+    lea  rdi, [rel dfs_kids]
+    add  rdi, rax
+    lea  rsi, [rel s_std_debug]
+    call imp_strcpy
+    mov  eax, [rel dfs_nkids]
+    inc  eax
+    mov  [rel dfs_nkids], eax
 .ir_loop:
     mov  r12d, [rel dfs_depth]
     mov  eax, r12d
@@ -2710,7 +3184,7 @@ elf_write_arm:
     add  rsp, 32
     mov  rsi, rax
     mov  rdi, r12
-    add  rdi, 128
+    add  rdi, [rel ew_hsize]
     mov  rcx, r13
     jmp  .ewa_copy
 .ewa_copy:
@@ -2751,7 +3225,7 @@ elf_write_arm:
     mov  [rdi + 80], rax
     mov  [rdi + 88], rax
     mov  rax, r13
-    add  rax, 128
+    add  rax, [rel ew_hsize]
     mov  [rdi + 96], rax             ; bytes in the file
     mov  rbx, rax
     sub  rsp, 32
@@ -2761,12 +3235,47 @@ elf_write_arm:
     add  rcx, 15
     and  rcx, -16                    ; .bss starts 16-aligned after .data
     add  rax, rcx
-    add  rax, 128
+    add  rax, [rel ew_hsize]
     mov  [rdi + 104], rax            ; bytes in memory: up to the end of .bss
     mov  rax, 0x10000
     mov  [rdi + 112], rax
     xor  eax, eax
     mov  [rdi + 120], rax
+    cmp  byte [rel out_dynamic], 0
+    je   .ewa_static
+    ; the five words the loader fills: karm knows their addresses
+    lea  rsi, [rel ed_got_names]
+    lea  rdi, [rel ew_got]
+    mov  ecx, 5
+    jmp  .ewa_got
+.ewa_got:
+    test ecx, ecx
+    jz   .ewa_dyn
+    push rcx
+    push rsi
+    push rdi
+    mov  rcx, rsi
+    sub  rsp, 32
+    call karm_label
+    add  rsp, 32
+    pop  rdi
+    pop  rsi
+    pop  rcx
+    mov  [rdi], rax
+    add  rdi, 8
+    jmp  .ewa_skip
+.ewa_skip:
+    mov  al, [rsi]
+    inc  rsi
+    test al, al
+    jnz  .ewa_skip
+    dec  ecx
+    jmp  .ewa_got
+.ewa_dyn:
+    mov  rcx, r12
+    mov  edx, 1
+    call elf_dynamic
+.ewa_static:
     mov  rax, rbx
     pop  r13
     pop  r12
@@ -2790,7 +3299,7 @@ elf_write:
     call kasm_get_code
     mov  rsi, rax
     mov  rdi, r12
-    add  rdi, 128
+    add  rdi, [rel ew_hsize]
     mov  rcx, [rel ew_img]
     jmp  .ew_copy
 .ew_copy:
@@ -2814,6 +3323,8 @@ elf_write:
     add  r15, rax
     add  r15, 15
     and  r15, -16                    ; bss base, aligned as kasm resolves it
+    mov  [rel ew_dbase], r14
+    mov  [rel ew_bbase], r15
     ; fill every 'dq label' with its final address
     call kasm_get_fixup_count
     mov  [rel ew_count], rax
@@ -2846,12 +3357,12 @@ elf_write:
     add  rax, r15
     jmp  .ew_based
 .ew_based:
-    add  rax, 0x400080               ; base of the image in memory
+    add  rax, [rel ew_base]          ; base of the image in memory
     mov  [rel ew_val], rax
     mov  rcx, rbx
     call kasm_get_fixup_at           ; offset of the slot inside .data
     mov  rdi, r12
-    add  rdi, 128
+    add  rdi, [rel ew_hsize]
     add  rdi, r14
     add  rdi, rax
     mov  rax, [rel ew_val]
@@ -2873,7 +3384,7 @@ elf_write:
     xor  eax, eax
     jmp  .ew_entry
 .ew_entry:
-    add  rax, 0x400080
+    add  rax, [rel ew_base]
     mov  r13, rax                    ; entry address
     ; ELF header, 64 bytes, then one program header, 56 bytes
     mov  rdi, r12
@@ -2900,17 +3411,53 @@ elf_write:
     mov  [rdi + 80], rax             ; virtual address
     mov  [rdi + 88], rax             ; physical address
     mov  rax, [rel ew_img]
-    add  rax, 128
+    add  rax, [rel ew_hsize]
     mov  [rdi + 96], rax             ; bytes in the file
     mov  rbx, rax
     call kasm_get_bss_size
     add  rax, r15
-    add  rax, 128
+    add  rax, [rel ew_hsize]
     mov  [rdi + 104], rax            ; bytes in memory: up to the end of .bss
     mov  rax, 0x1000
     mov  [rdi + 112], rax
     xor  eax, eax
     mov  [rdi + 120], rax
+    cmp  byte [rel out_dynamic], 0
+    je   .ew_static
+    ; the five words the loader fills
+    lea  rsi, [rel ed_got_names]
+    lea  rdi, [rel ew_got]
+    mov  r13d, 5
+    jmp  .ew_got
+.ew_got:
+    test r13d, r13d
+    jz   .ew_dyn
+    mov  rcx, rsi
+    xor  edx, edx
+    jmp  .ew_len
+.ew_len:
+    cmp  byte [rsi + rdx], 0
+    je   .ew_len_ok
+    inc  edx
+    jmp  .ew_len
+.ew_len_ok:
+    push rsi
+    push rdi
+    push rdx
+    call ew_va
+    pop  rdx
+    pop  rdi
+    pop  rsi
+    mov  [rdi], rax
+    add  rdi, 8
+    lea  rsi, [rsi + rdx + 1]
+    dec  r13d
+    jmp  .ew_got
+.ew_dyn:
+    mov  rcx, r12
+    xor  edx, edx
+    call elf_dynamic
+.ew_static:
     mov  rax, rbx                    ; the file's length
     pop  r15
     pop  r14
@@ -2919,6 +3466,1038 @@ elf_write:
     pop  rdi
     pop  rsi
     pop  rbx
+    ret
+
+; ew_set_layout(): the header area and the base of the image, from
+; out_dynamic -- 128 bytes and 0x400080 for a program that reaches the system
+; by its calls alone, 1 KB and 0x400400 for one linked with its libraries
+ew_set_layout:
+    mov  rax, 128
+    cmp  byte [rel out_dynamic], 0
+    je   .sl_set
+    mov  rax, 1024
+.sl_set:
+    mov  [rel ew_hsize], rax
+    add  rax, 0x400000
+    mov  [rel ew_base], rax
+    ret
+
+; ew_va(rcx = name, rdx = its length) -> rax = the address of that label of
+; the image kasm built, 0 when there is none
+ew_va:
+    push rbx
+    push r12
+    call kasm_find_label
+    cmp  eax, -1
+    je   .va_none
+    mov  ebx, eax
+    mov  rcx, rbx
+    call kasm_get_label_section
+    mov  r12, rax
+    mov  rax, rbx
+    call kasm_label_addr
+    cmp  r12, 1
+    jne  .va_notdata
+    add  rax, [rel ew_dbase]
+    jmp  .va_based
+.va_notdata:
+    cmp  r12, 2
+    jne  .va_based
+    add  rax, [rel ew_bbase]
+.va_based:
+    add  rax, [rel ew_base]
+    pop  r12
+    pop  rbx
+    ret
+.va_none:
+    xor  eax, eax
+    pop  r12
+    pop  rbx
+    ret
+
+; ==============================================================================
+; elf_dynamic(rcx = the file, edx = 0 x86-64, 1 ARM64): the header area of a
+; program linked with the system's libraries, after its writer made the ELF
+; header and the PT_LOAD for 1 KB of headers. In the area, at fixed places:
+;     64  four program headers: PT_PHDR, PT_INTERP, PT_LOAD, PT_DYNAMIC
+;    288  the loader's name
+;    320  the strings: the libraries and the five functions
+;    448  the symbols, 448 + 24 each; 592 the hash table; 632 the relocations
+;    752  the dynamic table
+; The loader maps the C library (libdl and libpthread too, where they are
+; still apart from it), stores the five functions in __got_* (ew_got), and
+; starts the program at _start as the kernel would.
+; ==============================================================================
+elf_dynamic:
+    push rbx
+    push rsi
+    push rdi
+    mov  rdi, rcx
+    mov  ebx, edx
+    ; the PT_LOAD aside, the area cleared
+    xor  ecx, ecx
+.ed_keep:
+    mov  rax, [rdi + rcx*8 + 64]
+    lea  rdx, [rel ed_load]
+    mov  [rdx + rcx*8], rax
+    inc  ecx
+    cmp  ecx, 7
+    jb   .ed_keep
+    mov  ecx, 8
+.ed_zero:
+    xor  eax, eax
+    mov  [rdi + rcx*8], rax
+    inc  ecx
+    cmp  ecx, 128
+    jb   .ed_zero
+    mov  rax, 4
+    mov  [rdi + 56], rax             ; four program headers
+    ; PT_PHDR
+    mov  rax, 0x0000000400000006
+    mov  [rdi + 64], rax
+    mov  rax, 64
+    mov  [rdi + 72], rax
+    mov  rax, 0x400040
+    mov  [rdi + 80], rax
+    mov  [rdi + 88], rax
+    mov  rax, 224
+    mov  [rdi + 96], rax
+    mov  [rdi + 104], rax
+    mov  rax, 8
+    mov  [rdi + 112], rax
+    ; PT_INTERP
+    mov  rax, 0x0000000400000003
+    mov  [rdi + 120], rax
+    mov  rax, 288
+    mov  [rdi + 128], rax
+    mov  rax, 0x400120
+    mov  [rdi + 136], rax
+    mov  [rdi + 144], rax
+    lea  rsi, [rel ed_interp_x86]
+    test ebx, ebx
+    jz   .ed_interp
+    lea  rsi, [rel ed_interp_arm]
+.ed_interp:
+    xor  ecx, ecx
+.ed_icopy:
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx + 288], al
+    inc  ecx
+    test al, al
+    jnz  .ed_icopy
+    mov  [rdi + 152], rcx
+    mov  [rdi + 160], rcx
+    mov  rax, 1
+    mov  [rdi + 168], rax
+    ; PT_LOAD, as the writer made it
+    xor  ecx, ecx
+.ed_load:
+    lea  rdx, [rel ed_load]
+    mov  rax, [rdx + rcx*8]
+    mov  [rdi + rcx*8 + 176], rax
+    inc  ecx
+    cmp  ecx, 7
+    jb   .ed_load
+    ; PT_DYNAMIC
+    mov  rax, 0x0000000600000002
+    mov  [rdi + 232], rax
+    mov  rax, 752
+    mov  [rdi + 240], rax
+    mov  rax, 0x4002F0
+    mov  [rdi + 248], rax
+    mov  [rdi + 256], rax
+    mov  rax, 192
+    mov  [rdi + 264], rax
+    mov  [rdi + 272], rax
+    mov  rax, 8
+    mov  [rdi + 280], rax
+    ; the strings
+    lea  rsi, [rel ed_strtab]
+    xor  ecx, ecx
+.ed_scopy:
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx + 320], al
+    inc  ecx
+    cmp  ecx, ed_strtab_len
+    jb   .ed_scopy
+    ; the symbols: 1 dlopen, 2 dlsym, 3 pthread_create, 4 pthread_detach,
+    ; 5 exit -- global functions, undefined here
+    mov  rax, 0x1200000026
+    mov  [rdi + 472], rax
+    mov  rax, 0x120000002D
+    mov  [rdi + 496], rax
+    mov  rax, 0x1200000033
+    mov  [rdi + 520], rax
+    mov  rax, 0x1200000042
+    mov  [rdi + 544], rax
+    mov  rax, 0x1200000051
+    mov  [rdi + 568], rax
+    ; the hash table: one bucket, six symbols, nothing defined
+    mov  rax, 0x0000000600000001
+    mov  [rdi + 592], rax
+    ; the relocations: each word of ew_got gets its function
+    mov  edx, 6                      ; R_X86_64_GLOB_DAT
+    test ebx, ebx
+    jz   .ed_rtype
+    mov  edx, 1025                   ; R_AARCH64_GLOB_DAT
+.ed_rtype:
+    xor  ecx, ecx
+    lea  rsi, [rdi + 632]
+.ed_rela:
+    lea  rax, [rel ew_got]
+    mov  rax, [rax + rcx*8]
+    mov  [rsi], rax
+    lea  rax, [rcx + 1]
+    shl  rax, 32
+    or   rax, rdx
+    mov  [rsi + 8], rax
+    add  rsi, 24
+    inc  ecx
+    cmp  ecx, 5
+    jb   .ed_rela
+    ; the dynamic table
+    lea  rsi, [rdi + 752]
+    mov  rax, 1                      ; DT_NEEDED libc.so.6
+    mov  [rsi], rax
+    mov  rax, 1
+    mov  [rsi + 8], rax
+    mov  rax, 1                      ; DT_NEEDED libdl.so.2
+    mov  [rsi + 16], rax
+    mov  rax, 11
+    mov  [rsi + 24], rax
+    mov  rax, 1                      ; DT_NEEDED libpthread.so.0
+    mov  [rsi + 32], rax
+    mov  rax, 22
+    mov  [rsi + 40], rax
+    mov  rax, 4                      ; DT_HASH
+    mov  [rsi + 48], rax
+    mov  rax, 0x400250
+    mov  [rsi + 56], rax
+    mov  rax, 5                      ; DT_STRTAB
+    mov  [rsi + 64], rax
+    mov  rax, 0x400140
+    mov  [rsi + 72], rax
+    mov  rax, 6                      ; DT_SYMTAB
+    mov  [rsi + 80], rax
+    mov  rax, 0x4001C0
+    mov  [rsi + 88], rax
+    mov  rax, 10                     ; DT_STRSZ
+    mov  [rsi + 96], rax
+    mov  rax, ed_strtab_len
+    mov  [rsi + 104], rax
+    mov  rax, 11                     ; DT_SYMENT
+    mov  [rsi + 112], rax
+    mov  rax, 24
+    mov  [rsi + 120], rax
+    mov  rax, 7                      ; DT_RELA
+    mov  [rsi + 128], rax
+    mov  rax, 0x400278
+    mov  [rsi + 136], rax
+    mov  rax, 8                      ; DT_RELASZ
+    mov  [rsi + 144], rax
+    mov  rax, 120
+    mov  [rsi + 152], rax
+    mov  rax, 9                      ; DT_RELAENT
+    mov  [rsi + 160], rax
+    mov  rax, 24
+    mov  [rsi + 168], rax
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; ==============================================================================
+; elf_write_so(rcx = the file, edx = 0 x86-64, 1 ARM64) -> rax = its length.
+; A shared object (--lib), loaded anywhere: its addresses count from 0. The
+; file:
+;     0      the ELF header and the program headers
+;     512    the image -- code, .data, then .bss in memory -- as kasm or karm
+;            made it for an image at 512
+;     F      the tables the loader reads, on a page of their own in memory
+;            (es_V): the dynamic table, the strings, the symbols -- the
+;            loader's five (dlopen ... exit, as a program with externs has)
+;            and every export, its __ce_ entry -- a hash table, and the
+;            relocations: each word holding an address gets the load address
+;            added (RELATIVE), each __got_* its function (GLOB_DAT)
+; On ARM64 the code and the data are apart, the code read and run, the data
+; read and write: Android refuses a segment both written and run.
+; ==============================================================================
+elf_write_so:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    mov  r12, rcx
+    mov  [rel es_arm], rdx
+    mov  qword [rel ew_hsize], 512
+    mov  qword [rel ew_base], 512
+    cmp  qword [rel es_arm], 0
+    jne  .so_arm_img
+    ; ---- x86-64: kasm's image --------------------------------------------
+    call kasm_build_image
+    mov  [rel es_img], rax
+    call kasm_get_code_size
+    mov  [rel es_code], rax
+    add  rax, 15
+    and  rax, -16
+    mov  [rel es_doff], rax
+    mov  [rel ew_dbase], rax
+    mov  r14, rax
+    call kasm_get_data_size
+    mov  [rel es_dlen], rax
+    add  rax, r14
+    add  rax, 15
+    and  rax, -16
+    mov  [rel es_boff], rax
+    mov  [rel ew_bbase], rax
+    call kasm_get_bss_size
+    mov  [rel es_blen], rax
+    call kasm_get_code
+    mov  qword [rel es_falign], 0x1000
+    jmp  .so_copy
+.so_arm_img:
+    ; ---- ARM64: karm's -----------------------------------------------------
+    sub  rsp, 32
+    call karm_build_image
+    mov  [rel es_img], rax
+    call karm_get_code_len
+    mov  [rel es_code], rax
+    call karm_get_data_off
+    mov  [rel es_doff], rax
+    call karm_get_data_len
+    mov  [rel es_dlen], rax
+    add  rax, 0xFFFF
+    and  rax, -65536
+    add  rax, [rel es_doff]
+    mov  [rel es_boff], rax
+    call karm_get_bss_size
+    mov  [rel es_blen], rax
+    call karm_get_code
+    add  rsp, 32
+    mov  qword [rel es_falign], 0x10000
+    jmp  .so_copy
+.so_copy:
+    ; the image at 512, zeros before it
+    mov  rsi, rax
+    xor  ecx, ecx
+.so_zero_hdr:
+    xor  eax, eax
+    mov  [r12 + rcx*8], rax
+    inc  ecx
+    cmp  ecx, 64
+    jb   .so_zero_hdr
+    lea  rdi, [r12 + 512]
+    mov  rcx, [rel es_img]
+.so_cp:
+    test rcx, rcx
+    jz   .so_copied
+    mov  al, [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    dec  rcx
+    jmp  .so_cp
+.so_copied:
+    ; the table segment: after the file's end and after the end of .bss in
+    ; memory, both on a page boundary
+    mov  rax, [rel es_img]
+    add  rax, 512
+    mov  rbx, rax                    ; where the zeros start
+    mov  rcx, [rel es_falign]
+    dec  rcx
+    add  rax, rcx
+    not  rcx
+    and  rax, rcx
+    mov  [rel es_F], rax
+.so_pad:
+    cmp  rbx, rax
+    jae  .so_padded
+    mov  byte [r12 + rbx], 0
+    inc  rbx
+    jmp  .so_pad
+.so_padded:
+    mov  rax, [rel es_boff]
+    add  rax, [rel es_blen]
+    add  rax, 512
+    mov  rcx, [rel es_falign]
+    dec  rcx
+    add  rax, rcx
+    not  rcx
+    and  rax, rcx
+    mov  [rel es_V], rax
+    ; its layout: dynamic table (12 entries), strings, symbols, hash table,
+    ; relocations
+    call codegen_export_count
+    mov  [rel es_exp], rax
+    mov  r13, ed_strtab_len          ; the strings: the loader's, then the exports'
+    xor  ebx, ebx
+.so_strsz:
+    cmp  rbx, [rel es_exp]
+    jae  .so_strsz_done
+    mov  ecx, ebx
+    call codegen_export_name
+    add  r13, rdx
+    inc  r13
+    inc  rbx
+    jmp  .so_strsz
+.so_strsz_done:
+    ; and the library's own name, DT_SONAME
+    mov  [rel es_soname_off], r13
+    mov  rsi, [rel es_soname]
+.so_snl:
+    inc  r13
+    cmp  byte [rsi], 0
+    je   .so_snl_done
+    inc  rsi
+    jmp  .so_snl
+.so_snl_done:
+    mov  [rel es_strsz], r13
+    lea  rax, [r13 + 224 + 7]
+    and  rax, -8
+    mov  [rel es_sym], rax
+    mov  rcx, [rel es_exp]
+    add  rcx, 6
+    imul rcx, rcx, 24
+    add  rax, rcx
+    mov  [rel es_hash], rax
+    mov  rcx, [rel es_exp]
+    test rcx, rcx
+    jnz  .so_nb
+    mov  rcx, 1
+.so_nb:
+    mov  rdx, [rel es_exp]
+    add  rdx, 6
+    add  rcx, rdx
+    add  rcx, 2
+    shl  rcx, 2
+    add  rax, rcx
+    add  rax, 7
+    and  rax, -8
+    mov  [rel es_rela], rax
+    ; clear the table segment as far as the relocations
+    mov  rdi, r12
+    add  rdi, [rel es_F]
+    xor  ecx, ecx
+.so_clr:
+    cmp  rcx, rax
+    jae  .so_clr_done
+    mov  byte [rdi + rcx], 0
+    inc  rcx
+    jmp  .so_clr
+.so_clr_done:
+    ; the strings
+    mov  r14, r12
+    add  r14, [rel es_F]             ; r14: the table segment in the file
+    lea  rsi, [rel ed_strtab]
+    cmp  byte [rel es_android], 0
+    je   .so_s_glibc
+    lea  rsi, [rel ed_strtab_and]
+.so_s_glibc:
+    xor  ecx, ecx
+.so_s0:
+    mov  al, [rsi + rcx]
+    mov  [r14 + rcx + 224], al
+    inc  ecx
+    cmp  ecx, ed_strtab_len
+    jb   .so_s0
+    ; the loader's five symbols, as for a program with externs
+    mov  rdi, r14
+    add  rdi, [rel es_sym]
+    mov  rax, 0x1200000026
+    mov  [rdi + 24], rax
+    mov  rax, 0x120000002D
+    mov  [rdi + 48], rax
+    mov  rax, 0x1200000033
+    mov  [rdi + 72], rax
+    mov  rax, 0x1200000042
+    mov  [rdi + 96], rax
+    mov  rax, 0x1200000051
+    mov  [rdi + 120], rax
+    ; each export: its name in the strings, its symbol (6 on), its place in
+    ; the hash table
+    mov  r15, ed_strtab_len          ; where the next name goes
+    xor  ebx, ebx
+.so_exp:
+    cmp  rbx, [rel es_exp]
+    jae  .so_exp_done
+    mov  ecx, ebx
+    call codegen_export_name         ; rax = the name, rdx = its length
+    mov  rsi, rax
+    mov  r13, rdx
+    ; the string
+    xor  ecx, ecx
+.so_en:
+    cmp  rcx, r13
+    jae  .so_en_done
+    mov  al, [rsi + rcx]
+    lea  rdi, [r14 + r15 + 224]
+    mov  [rdi + rcx], al
+    inc  rcx
+    jmp  .so_en
+.so_en_done:
+    ; its entry: the address of __ce_<name>
+    push rsi
+    lea  rdi, [rel es_name]
+    mov  al, '_'
+    mov  [rdi], al
+    mov  [rdi + 1], al
+    mov  al, 'c'
+    mov  [rdi + 2], al
+    mov  al, 'e'
+    mov  [rdi + 3], al
+    mov  al, '_'
+    mov  [rdi + 4], al
+    xor  ecx, ecx
+.so_ln:
+    cmp  rcx, r13
+    jae  .so_ln_done
+    cmp  rcx, 300
+    jae  .so_ln_done
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx + 5], al
+    inc  rcx
+    jmp  .so_ln
+.so_ln_done:
+    mov  byte [rdi + rcx + 5], 0
+    lea  rdx, [rcx + 5]              ; the label's length
+    cmp  qword [rel es_arm], 0
+    jne  .so_ce_arm
+    lea  rcx, [rel es_name]
+    call ew_va
+    jmp  .so_ce_have
+.so_ce_arm:
+    lea  rcx, [rel es_name]
+    sub  rsp, 32
+    call karm_label
+    add  rsp, 32
+.so_ce_have:
+    pop  rsi
+    ; the symbol: 6 + the export's number
+    lea  rcx, [rbx + 6]
+    imul rcx, rcx, 24
+    mov  rdi, r14
+    add  rdi, [rel es_sym]
+    add  rdi, rcx
+    mov  [rdi + 8], rax              ; st_value
+    mov  rax, 0x0001001200000000     ; GLOBAL FUNC, section 1 (defined)
+    or   rax, r15
+    mov  [rdi], rax
+    ; the hash table: elf_hash(name) % the exports
+    xor  eax, eax
+    xor  ecx, ecx
+.so_h:
+    cmp  rcx, r13
+    jae  .so_h_done
+    shl  rax, 4
+    movzx edx, byte [rsi + rcx]
+    add  rax, rdx
+    mov  eax, eax
+    mov  rdx, rax
+    shr  rdx, 28
+    jz   .so_h_nog
+    shl  rdx, 4
+    xor  rax, rdx
+.so_h_nog:
+    and  rax, 0x0FFFFFFF
+    inc  rcx
+    jmp  .so_h
+.so_h_done:
+    xor  edx, edx
+    mov  rcx, [rel es_exp]
+    div  rcx                         ; rdx = the bucket
+    mov  rdi, r14
+    add  rdi, [rel es_hash]
+    ; chain[sym] = bucket[b]; bucket[b] = sym -- [nbucket][nchain][buckets]
+    ; [chains], four bytes each
+    lea  r8, [rbx + 6]
+    mov  r10, rdx
+    shl  r10, 2
+    add  r10, rdi
+    add  r10, 8                      ; &bucket[b]
+    mov  ecx, [r10]
+    mov  r9, [rel es_exp]
+    add  r9, r8
+    shl  r9, 2
+    add  r9, rdi
+    add  r9, 8                       ; &chain[sym]
+    mov  [r9], ecx
+    mov  [r10], r8d
+    ; next
+    add  r15, r13
+    inc  r15
+    inc  rbx
+    jmp  .so_exp
+.so_exp_done:
+    ; the library's own name
+    mov  rsi, [rel es_soname]
+    mov  rdi, r14
+    add  rdi, [rel es_soname_off]
+    add  rdi, 224
+.so_sn:
+    mov  al, [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    test al, al
+    jnz  .so_sn
+    ; the hash table's sizes
+    mov  rdi, r14
+    add  rdi, [rel es_hash]
+    mov  rax, [rel es_exp]
+    test rax, rax
+    jnz  .so_hb
+    mov  rax, 1
+.so_hb:
+    mov  [rdi], eax
+    mov  rax, [rel es_exp]
+    add  rax, 6
+    mov  [rdi + 4], eax
+    ; the relocations: the five words the loader fills
+    mov  qword [rel es_nrel], 0
+    lea  rsi, [rel ed_got_names]
+    xor  ebx, ebx
+.so_got:
+    cmp  rbx, 5
+    jae  .so_got_done
+    xor  edx, edx
+.so_gl:
+    cmp  byte [rsi + rdx], 0
+    je   .so_gl_ok
+    inc  rdx
+    jmp  .so_gl
+.so_gl_ok:
+    push rsi
+    push rdx
+    cmp  qword [rel es_arm], 0
+    jne  .so_got_arm
+    mov  rcx, rsi
+    call ew_va
+    jmp  .so_got_have
+.so_got_arm:
+    mov  rcx, rsi
+    sub  rsp, 32
+    call karm_label
+    add  rsp, 32
+.so_got_have:
+    mov  rcx, rax                    ; r_offset
+    lea  rdx, [rbx + 1]
+    shl  rdx, 32
+    mov  r8, 6                       ; R_X86_64_GLOB_DAT
+    cmp  qword [rel es_arm], 0
+    je   .so_got_t
+    mov  r8, 1025                    ; R_AARCH64_GLOB_DAT
+.so_got_t:
+    or   rdx, r8
+    xor  r8, r8
+    call so_rela
+    pop  rdx
+    pop  rsi
+    lea  rsi, [rsi + rdx + 1]
+    inc  rbx
+    jmp  .so_got
+.so_got_done:
+    ; every word holding an address: RELATIVE, the address its addend
+    cmp  qword [rel es_arm], 0
+    jne  .so_rel_arm
+    call kasm_get_fixup_count
+    mov  r13, rax
+    xor  ebx, ebx
+.so_fx:
+    cmp  rbx, r13
+    jae  .so_rel_done
+    mov  rcx, rbx
+    call kasm_get_fixup_kind
+    cmp  eax, 6
+    jne  .so_fx_next
+    mov  rcx, rbx
+    call kasm_get_fixup_label
+    cmp  eax, -1
+    je   .so_fx_next
+    mov  r15, rax
+    mov  rcx, rax
+    call kasm_get_label_section
+    mov  rsi, rax
+    mov  rax, r15
+    call kasm_label_addr
+    cmp  rsi, 1
+    jne  .so_fx_nd
+    add  rax, [rel es_doff]
+    jmp  .so_fx_b
+.so_fx_nd:
+    cmp  rsi, 2
+    jne  .so_fx_b
+    add  rax, [rel es_boff]
+.so_fx_b:
+    add  rax, 512
+    mov  r15, rax                    ; the address, as loaded at 0
+    mov  rcx, rbx
+    call kasm_get_fixup_at           ; the word, inside .data
+    add  rax, [rel es_doff]
+    add  rax, 512
+    mov  [r12 + rax], r15            ; the file holds it too
+    mov  rcx, rax
+    mov  rdx, 8                      ; R_X86_64_RELATIVE
+    mov  r8, r15
+    call so_rela
+.so_fx_next:
+    inc  rbx
+    jmp  .so_fx
+.so_rel_arm:
+    sub  rsp, 32
+    call karm_reloc_count
+    add  rsp, 32
+    mov  r13, rax
+    xor  ebx, ebx
+.so_ra:
+    cmp  rbx, r13
+    jae  .so_rel_done
+    mov  rcx, rbx
+    sub  rsp, 32
+    call karm_reloc_at               ; the word, inside .data
+    add  rsp, 32
+    add  rax, [rel es_doff]
+    add  rax, 512
+    mov  rcx, rax
+    mov  r8, [r12 + rax]             ; karm wrote the address for a load at 0
+    mov  rdx, 1027                   ; R_AARCH64_RELATIVE
+    call so_rela
+    inc  rbx
+    jmp  .so_ra
+.so_rel_done:
+    mov  rax, [rel es_nrel]
+    imul rax, rax, 24
+    add  rax, [rel es_rela]
+    mov  [rel es_end], rax
+    ; the dynamic table: what the library needs -- the C library's
+    ; libc.so.6, libdl.so.2 and libpthread.so.0 on Linux, libc.so and
+    ; libdl.so on Android -- its own name, and where the tables are
+    mov  rdi, r14
+    mov  rax, 1                      ; DT_NEEDED
+    mov  rdx, 1
+    call so_dyn
+    mov  rax, 1
+    mov  rdx, 11
+    cmp  byte [rel es_android], 0
+    je   .so_dn2
+    mov  rdx, 9
+.so_dn2:
+    call so_dyn
+    cmp  byte [rel es_android], 0
+    jne  .so_dn3
+    mov  rax, 1
+    mov  rdx, 22
+    call so_dyn
+.so_dn3:
+    mov  rax, 14                     ; DT_SONAME
+    mov  rdx, [rel es_soname_off]
+    call so_dyn
+    mov  rax, 4                      ; DT_HASH
+    mov  rdx, [rel es_V]
+    add  rdx, [rel es_hash]
+    call so_dyn
+    mov  rax, 5                      ; DT_STRTAB
+    mov  rdx, [rel es_V]
+    add  rdx, 224
+    call so_dyn
+    mov  rax, 6                      ; DT_SYMTAB
+    mov  rdx, [rel es_V]
+    add  rdx, [rel es_sym]
+    call so_dyn
+    mov  rax, 10                     ; DT_STRSZ
+    mov  rdx, [rel es_strsz]
+    call so_dyn
+    mov  rax, 11                     ; DT_SYMENT
+    mov  rdx, 24
+    call so_dyn
+    mov  rax, 7                      ; DT_RELA
+    mov  rdx, [rel es_V]
+    add  rdx, [rel es_rela]
+    call so_dyn
+    mov  rax, 8                      ; DT_RELASZ
+    mov  rdx, [rel es_nrel]
+    imul rdx, rdx, 24
+    call so_dyn
+    mov  rax, 9                      ; DT_RELAENT
+    mov  rdx, 24
+    call so_dyn
+    ; ---- the ELF header ---------------------------------------------------
+    mov  rdi, r12
+    mov  rax, 0x00010102464C457F
+    mov  [rdi], rax
+    xor  eax, eax
+    mov  [rdi + 8], rax
+    mov  rax, 0x00000001003E0003     ; a shared object, x86-64
+    cmp  qword [rel es_arm], 0
+    je   .so_mach
+    mov  rax, 0x0000000100B70003     ; a shared object, AArch64
+.so_mach:
+    mov  [rdi + 16], rax
+    xor  eax, eax
+    mov  [rdi + 24], rax             ; no entry
+    mov  rax, 64
+    mov  [rdi + 32], rax
+    xor  eax, eax
+    mov  [rdi + 40], rax
+    mov  rax, 0x0038004000000000
+    mov  [rdi + 48], rax
+    lea  rsi, [rdi + 64]             ; the program headers
+    cmp  qword [rel es_arm], 0
+    jne  .so_ph_arm
+    ; x86-64: the image, read write run
+    mov  rax, 0x0000000700000001
+    mov  [rsi], rax
+    xor  eax, eax
+    mov  [rsi + 8], rax
+    mov  [rsi + 16], rax
+    mov  [rsi + 24], rax
+    mov  rax, [rel es_img]
+    add  rax, 512
+    mov  [rsi + 32], rax
+    mov  rax, [rel es_boff]
+    add  rax, [rel es_blen]
+    add  rax, 512
+    mov  [rsi + 40], rax
+    mov  rax, [rel es_falign]
+    mov  [rsi + 48], rax
+    add  rsi, 56
+    mov  rax, 3
+    jmp  .so_ph_tab
+.so_ph_arm:
+    ; ARM64: the code, read and run
+    mov  rax, 0x0000000500000001
+    mov  [rsi], rax
+    xor  eax, eax
+    mov  [rsi + 8], rax
+    mov  [rsi + 16], rax
+    mov  [rsi + 24], rax
+    mov  rax, [rel es_code]
+    add  rax, 512
+    mov  [rsi + 32], rax
+    mov  [rsi + 40], rax
+    mov  rax, 0x10000
+    mov  [rsi + 48], rax
+    ; the data, read and write: .data, then .bss
+    mov  rax, 0x0000000600000001
+    mov  [rsi + 56], rax
+    mov  rax, [rel es_doff]
+    add  rax, 512
+    mov  [rsi + 64], rax
+    mov  [rsi + 72], rax
+    mov  [rsi + 80], rax
+    mov  rax, [rel es_dlen]
+    mov  [rsi + 88], rax
+    mov  rax, [rel es_boff]
+    sub  rax, [rel es_doff]
+    add  rax, [rel es_blen]
+    mov  [rsi + 96], rax
+    mov  rax, 0x10000
+    mov  [rsi + 104], rax
+    add  rsi, 112
+    mov  rax, 4
+.so_ph_tab:
+    mov  [rdi + 56], rax             ; how many program headers
+    ; the tables, read and write
+    mov  rax, 0x0000000600000001
+    mov  [rsi], rax
+    mov  rax, [rel es_F]
+    mov  [rsi + 8], rax
+    mov  rax, [rel es_V]
+    mov  [rsi + 16], rax
+    mov  [rsi + 24], rax
+    mov  rax, [rel es_end]
+    mov  [rsi + 32], rax
+    mov  [rsi + 40], rax
+    mov  rax, [rel es_falign]
+    mov  [rsi + 48], rax
+    ; PT_DYNAMIC: the start of the tables
+    mov  rax, 0x0000000600000002
+    mov  [rsi + 56], rax
+    mov  rax, [rel es_F]
+    mov  [rsi + 64], rax
+    mov  rax, [rel es_V]
+    mov  [rsi + 72], rax
+    mov  [rsi + 80], rax
+    mov  rax, 224
+    mov  [rsi + 88], rax
+    mov  [rsi + 96], rax
+    mov  rax, 8
+    mov  [rsi + 104], rax
+    ; ---- the section headers, at the file's end: the tools read them,
+    ; and Android's loader insists on .dynamic and its strings
+    call so_sections
+    ; the file's length: up to the end of the section headers
+    mov  rax, [rel es_shend]
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; so_prepare(): before elf_write_so -- the file's name, for DT_SONAME, and
+; whose C library it will meet. Preserves rcx.
+so_prepare:
+    push rcx
+    lea  rcx, [rel so_ext]
+    mov  [rel bin_ext_ptr], rcx
+    call build_bin_name
+    lea  rax, [rel out_bin_name]
+    mov  rdx, rax
+.sp_l:
+    mov  cl, [rax]
+    test cl, cl
+    jz   .sp_d
+    inc  rax
+    cmp  cl, '/'
+    je   .sp_s
+    cmp  cl, 92
+    je   .sp_s
+    jmp  .sp_l
+.sp_s:
+    mov  rdx, rax
+    jmp  .sp_l
+.sp_d:
+    mov  [rel es_soname], rdx
+    mov  al, [rel out_android]
+    mov  [rel es_android], al
+    pop  rcx
+    ret
+
+; so_dyn(rdi = where, rax = tag, rdx = value): one entry of the dynamic
+; table, rdi moved on
+so_dyn:
+    mov  [rdi], rax
+    mov  [rdi + 8], rdx
+    add  rdi, 16
+    ret
+
+; so_sections(): .dynsym .dynstr .dynamic .shstrtab after the tables, their
+; headers after their names; the ELF header pointed at them (r12 = the file)
+so_sections:
+    push rbx
+    push rsi
+    push rdi
+    mov  rbx, [rel es_F]
+    add  rbx, [rel es_end]           ; the names of the sections
+    lea  rsi, [rel so_shnames]
+    xor  ecx, ecx
+.ss_n:
+    mov  al, [rsi + rcx]
+    mov  [r12 + rbx], al
+    inc  rbx
+    inc  ecx
+    cmp  ecx, 36
+    jb   .ss_n
+    add  rbx, 7
+    and  rbx, -8
+    mov  [rel es_shoff], rbx
+    lea  rdi, [r12 + rbx]            ; five headers of 64 bytes
+    xor  ecx, ecx
+.ss_z:
+    xor  eax, eax
+    mov  [rdi + rcx*8], rax
+    inc  ecx
+    cmp  ecx, 40
+    jb   .ss_z
+    ; 1 .dynsym: SHT_DYNSYM, allocated, its strings section 2
+    lea  rsi, [rdi + 64]
+    mov  rax, 0x0000000B00000001
+    mov  [rsi], rax
+    mov  rax, 2
+    mov  [rsi + 8], rax
+    mov  rax, [rel es_V]
+    add  rax, [rel es_sym]
+    mov  [rsi + 16], rax
+    mov  rax, [rel es_F]
+    add  rax, [rel es_sym]
+    mov  [rsi + 24], rax
+    mov  rax, [rel es_exp]
+    add  rax, 6
+    imul rax, rax, 24
+    mov  [rsi + 32], rax
+    mov  rax, 0x0000000100000002     ; link 2, info 1
+    mov  [rsi + 40], rax
+    mov  rax, 8
+    mov  [rsi + 48], rax
+    mov  rax, 24
+    mov  [rsi + 56], rax
+    ; 2 .dynstr
+    lea  rsi, [rdi + 128]
+    mov  rax, 0x0000000300000009
+    mov  [rsi], rax
+    mov  rax, 2
+    mov  [rsi + 8], rax
+    mov  rax, [rel es_V]
+    add  rax, 224
+    mov  [rsi + 16], rax
+    mov  rax, [rel es_F]
+    add  rax, 224
+    mov  [rsi + 24], rax
+    mov  rax, [rel es_strsz]
+    mov  [rsi + 32], rax
+    mov  rax, 1
+    mov  [rsi + 48], rax
+    ; 3 .dynamic: SHT_DYNAMIC, written and allocated, strings section 2
+    lea  rsi, [rdi + 192]
+    mov  rax, 0x0000000600000011
+    mov  [rsi], rax
+    mov  rax, 3
+    mov  [rsi + 8], rax
+    mov  rax, [rel es_V]
+    mov  [rsi + 16], rax
+    mov  rax, [rel es_F]
+    mov  [rsi + 24], rax
+    mov  rax, 224
+    mov  [rsi + 32], rax
+    mov  rax, 2
+    mov  [rsi + 40], rax
+    mov  rax, 8
+    mov  [rsi + 48], rax
+    mov  rax, 16
+    mov  [rsi + 56], rax
+    ; 4 .shstrtab
+    lea  rsi, [rdi + 256]
+    mov  rax, 0x000000030000001A
+    mov  [rsi], rax
+    mov  rax, [rel es_F]
+    add  rax, [rel es_end]
+    mov  [rsi + 24], rax
+    mov  rax, 36
+    mov  [rsi + 32], rax
+    mov  rax, 1
+    mov  [rsi + 48], rax
+    add  rbx, 320
+    mov  [rel es_shend], rbx
+    ; the ELF header: where they are, their size, how many, which has names
+    mov  rax, [rel es_shoff]
+    mov  [r12 + 40], rax
+    mov  eax, 0x00050040             ; shentsize 64, shnum 5
+    mov  [r12 + 58], eax
+    mov  eax, 4                      ; shstrndx 4
+    mov  [r12 + 62], ax
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; so_rela(rcx = where, rdx = type and symbol, r8 = addend): one relocation,
+; at the end of those of elf_write_so (r14 = the table segment in the file)
+so_rela:
+    push rdi
+    mov  rax, [rel es_nrel]
+    imul rax, rax, 24
+    add  rax, [rel es_rela]
+    lea  rdi, [r14 + rax]
+    mov  [rdi], rcx
+    mov  [rdi + 8], rdx
+    mov  [rdi + 16], r8
+    inc  qword [rel es_nrel]
+    pop  rdi
     ret
 
 ; imp_fullpath(rcx = module name) -> rax = where to look for it first: the
@@ -3109,7 +4688,22 @@ expand_imports:
     ; it: the line was consumed above and nothing more is written for it.
     mov  eax, [rel imp_emitted]
     test eax, eax
-    jnz  .scan
+    jz   .load_first
+    ; a later directive: its line is gone from the joined text, so the main
+    ; file's lines below it map from here (each one after the first put
+    ; every line below it one line early in errors and traces)
+    push rcx
+    push rdx
+    push r8
+    mov  rcx, [rel lmap_outline]
+    lea  rdx, [rel arg_input]
+    mov  r8, [rel lmap_srcline]
+    call lmap_add
+    pop  r8
+    pop  rdx
+    pop  rcx
+    jmp  .scan
+.load_first:
     mov  dword [rel imp_emitted], 1
     mov  dword [rel imp_i], 0
 .mod_next:
@@ -4325,6 +5919,24 @@ scan_target:
     mov  bl, TARGET_MACOS
     jmp  .out
 .t_not_mac:
+    ; android: ARM64 Linux with Android's C library; ios: macOS's program
+    ; for an iPhone. Both are libraries (--lib) an app loads.
+    lea  rdi, [rel tg_android]
+    call st_word
+    test eax, eax
+    jz   .t_not_android
+    mov  byte [rel out_android], 1
+    mov  bl, TARGET_ARM64
+    jmp  .out
+.t_not_android:
+    lea  rdi, [rel tg_ios]
+    call st_word
+    test eax, eax
+    jz   .t_not_ios
+    mov  byte [rel out_ios], 1
+    mov  bl, TARGET_MACOS
+    jmp  .out
+.t_not_ios:
     cmp  byte [rsi+0], 'b'
     jne  .t_not_bare
     cmp  byte [rsi+1], 'a'
@@ -4365,6 +5977,36 @@ scan_target:
     mov  al, bl
     pop  rbx
     pop  rsi
+    ret
+
+; st_word(rsi = text, rdi = a word) -> eax = 1 when the text is that word,
+; then a blank or its end
+st_word:
+    push rcx
+    xor  ecx, ecx
+.sw_l:
+    mov  al, [rdi + rcx]
+    test al, al
+    jz   .sw_end
+    cmp  al, [rsi + rcx]
+    jne  .sw_no
+    inc  ecx
+    jmp  .sw_l
+.sw_end:
+    mov  al, [rsi + rcx]
+    cmp  al, ' '
+    je   .sw_yes
+    cmp  al, 9
+    je   .sw_yes
+    test al, al
+    jz   .sw_yes
+.sw_no:
+    xor  eax, eax
+    pop  rcx
+    ret
+.sw_yes:
+    mov  eax, 1
+    pop  rcx
     ret
 
 ; ==============================================================================
@@ -4463,7 +6105,10 @@ parse_command_line:
     mov  byte [rdi], 0
     mov  byte [rel arg_flag_S], 0
     mov  byte [rel arg_flag_check], 0
+    mov  byte [rel arg_flag_debug], 0
     mov  byte [rel arg_flag_window], 0
+    mov  byte [rel arg_flag_lib], 0
+    mov  byte [rel arg_flag_module], 0
     jmp  .o_scan
 .o_scan:
     mov  al, [rsi]
@@ -4495,6 +6140,12 @@ parse_command_line:
     jne  .o_notcheck
     cmp  byte [rsi+2], 'w'
     je   .o_window
+    cmp  byte [rsi+2], 'l'
+    je   .o_lib
+    cmp  byte [rsi+2], 'd'
+    je   .o_debug
+    cmp  byte [rsi+2], 'm'
+    je   .o_module
     cmp  byte [rsi+2], 'c'
     jne  .o_skiptok
     cmp  byte [rsi+3], 'h'
@@ -4507,6 +6158,59 @@ parse_command_line:
     jne  .o_skiptok
     mov  byte [rel arg_flag_check], 1
     add  rsi, 7
+    jmp  .o_skiptok
+.o_debug:
+    ; --debug: a build the debugger can stop (std_debug.kr)
+    cmp  byte [rsi+3], 'e'
+    jne  .o_skiptok
+    cmp  byte [rsi+4], 'b'
+    jne  .o_skiptok
+    cmp  byte [rsi+5], 'u'
+    jne  .o_skiptok
+    cmp  byte [rsi+6], 'g'
+    jne  .o_skiptok
+    mov  byte [rel arg_flag_debug], 1
+    add  rsi, 7
+    jmp  .o_skiptok
+.o_module:
+    ; --module: the functions of a part of the compiler, as assembly text
+    cmp  byte [rsi+3], 'o'
+    jne  .o_skiptok
+    cmp  byte [rsi+4], 'd'
+    jne  .o_skiptok
+    cmp  byte [rsi+5], 'u'
+    jne  .o_skiptok
+    cmp  byte [rsi+6], 'l'
+    jne  .o_skiptok
+    cmp  byte [rsi+7], 'e'
+    jne  .o_skiptok
+    mov  al, [rsi+8]
+    cmp  al, ' '
+    je   .o_module_yes
+    cmp  al, 9
+    je   .o_module_yes
+    test al, al
+    jnz  .o_skiptok
+.o_module_yes:
+    mov  byte [rel arg_flag_module], 1
+    add  rsi, 8
+    jmp  .o_skiptok
+.o_lib:
+    ; --lib: a library C and the rest can load, not a program
+    cmp  byte [rsi+3], 'i'
+    jne  .o_skiptok
+    cmp  byte [rsi+4], 'b'
+    jne  .o_skiptok
+    mov  al, [rsi+5]
+    cmp  al, ' '
+    je   .o_lib_yes
+    cmp  al, 9
+    je   .o_lib_yes
+    test al, al
+    jnz  .o_skiptok
+.o_lib_yes:
+    mov  byte [rel arg_flag_lib], 1
+    add  rsi, 5
     jmp  .o_skiptok
 .o_window:
     ; --window: Windows opens no console for the program (std_window)

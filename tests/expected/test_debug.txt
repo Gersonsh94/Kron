@@ -1,0 +1,93 @@
+@@kdbg hello 6
+@@kdbg file 0 std_heap.kr
+@@kdbg file 1 std_list.kr
+@@kdbg file 2 std_text.kr
+@@kdbg file 3 std_map.kr
+@@kdbg file 4 std_debug.kr
+@@kdbg file 5 test_debug.kr
+@@kdbg ready
+@@kdbg stop breakpoint
+@@kdbg frame 0 5 34 main
+@@kdbg var 0 a i64[3] [7, -2, 0]
+@@kdbg var 0 a[0] i64 7
+@@kdbg var 0 a[1] i64 -2
+@@kdbg var 0 a[2] i64 0
+@@kdbg var 0 p Point {...}
+@@kdbg var 0 p.x i32 4
+@@kdbg var 0 p.y f64 0.5
+@@kdbg var 0 words list(1) ["one"]
+@@kdbg var 0 words[0] item "one"
+@@kdbg var 0 f f64 2.25
+@@kdbg var 0 k i64 0
+@@kdbg var g total i64 0
+@@kdbg var g label text "sum"
+@@kdbg end
+@@kdbg stop step
+@@kdbg frame 0 5 18 square
+@@kdbg frame 1 5 34 main
+@@kdbg var 0 n i64 1
+@@kdbg var 1 a i64[3] [7, -2, 0]
+@@kdbg var 1 a[0] i64 7
+@@kdbg var 1 a[1] i64 -2
+@@kdbg var 1 a[2] i64 0
+@@kdbg var 1 p Point {...}
+@@kdbg var 1 p.x i32 4
+@@kdbg var 1 p.y f64 0.5
+@@kdbg var 1 words list(1) ["one"]
+@@kdbg var 1 words[0] item "one"
+@@kdbg var 1 f f64 2.25
+@@kdbg var 1 k i64 0
+@@kdbg var g total i64 0
+@@kdbg var g label text "sum"
+@@kdbg end
+@@kdbg stop step
+@@kdbg frame 0 5 19 square
+@@kdbg frame 1 5 34 main
+@@kdbg var 0 n i64 1
+@@kdbg var 1 a i64[3] [7, -2, 0]
+@@kdbg var 1 a[0] i64 7
+@@kdbg var 1 a[1] i64 -2
+@@kdbg var 1 a[2] i64 0
+@@kdbg var 1 p Point {...}
+@@kdbg var 1 p.x i32 4
+@@kdbg var 1 p.y f64 0.5
+@@kdbg var 1 words list(1) ["one"]
+@@kdbg var 1 words[0] item "one"
+@@kdbg var 1 f f64 2.25
+@@kdbg var 1 k i64 0
+@@kdbg var g total i64 0
+@@kdbg var g label text "sum"
+@@kdbg end
+@@kdbg stop step
+@@kdbg frame 0 5 35 main
+@@kdbg var 0 a i64[3] [7, -2, 0]
+@@kdbg var 0 a[0] i64 7
+@@kdbg var 0 a[1] i64 -2
+@@kdbg var 0 a[2] i64 0
+@@kdbg var 0 p Point {...}
+@@kdbg var 0 p.x i32 4
+@@kdbg var 0 p.y f64 0.5
+@@kdbg var 0 words list(1) ["one"]
+@@kdbg var 0 words[0] item "one"
+@@kdbg var 0 f f64 2.25
+@@kdbg var 0 k i64 0
+@@kdbg var g total i64 1
+@@kdbg var g label text "sum"
+@@kdbg end
+14
+@@kdbg stop breakpoint
+@@kdbg frame 0 5 38 main
+@@kdbg var 0 a i64[3] [7, -2, 0]
+@@kdbg var 0 a[0] i64 7
+@@kdbg var 0 a[1] i64 -2
+@@kdbg var 0 a[2] i64 0
+@@kdbg var 0 p Point {...}
+@@kdbg var 0 p.x i32 4
+@@kdbg var 0 p.y f64 0.5
+@@kdbg var 0 words list(1) ["one"]
+@@kdbg var 0 words[0] item "one"
+@@kdbg var 0 f f64 2.25
+@@kdbg var 0 k i64 3
+@@kdbg var g total i64 14
+@@kdbg var g label text "sum"
+@@kdbg end

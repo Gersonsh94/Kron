@@ -1,0 +1,9 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser...test_modnames_bad.kr:8:11: two modules define a function of this name: write which, module.name
+    print(area(4));
+          ^^^^

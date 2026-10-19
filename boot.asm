@@ -7,8 +7,12 @@
 ; first 2 MB identity-mapped -> long mode on -> jump to 64-bit code
 ; -> call kmain (the 'main' of your Kron program) -> hlt.
 ;
-; Assemble:  nasm -f bin boot.asm -o kernel.bin
+; Assemble:  kronc.exe boot.asm --assemble      (kasm: boot.kbin)
 ; boot.asm includes "kernel_program.asm" (the output of: kronc program.kr --bare)
+;
+; kasm writes 64-bit code. The 32-bit part runs before long mode is on, so
+; it is written as the bytes of each instruction, the instruction beside
+; them; the addresses inside come from the labels, counted from 'org'.
 ; ==============================================================================
 
 bits 32
@@ -17,9 +21,8 @@ org 0x100000
 ; ---- Multiboot1 header (a.out kludge for a flat binary) ----
 MB_MAGIC   equ 0x1BADB002
 MB_FLAGS   equ 0x00010000            ; bit16 = use the address fields (a.out)
-MB_CHECK   equ -(MB_MAGIC + MB_FLAGS)
+MB_CHECK   equ 0xE4514FFE            ; -(MB_MAGIC + MB_FLAGS), as 32 bits
 
-align 4
 mb_header:
     dd MB_MAGIC
     dd MB_FLAGS
@@ -34,62 +37,75 @@ mb_header:
 ; 32-bit entry (Multiboot state)
 ; ==============================================================================
 _start:
-    cli
-    mov  esp, stack_top
+    db 0xFA                          ; cli
+    db 0xBC                          ; mov esp, stack_top
+    dd stack_top
 
-    ; --- Clear the page tables (PML4, PDPT, PD) ---
-    mov  edi, pml4
-    xor  eax, eax
-    mov  ecx, (4096*3)/4
-    rep  stosd
+    ; clear the three page tables
+    db 0xBF                          ; mov edi, pml4
+    dd pml4
+    db 0x31, 0xC0                    ; xor eax, eax
+    db 0xB9                          ; mov ecx, (4096 * 3) / 4
+    dd 3072
+    db 0xF3, 0xAB                    ; rep stosd
 
-    ; --- Link the tables: the first 2 MB identity-mapped with one 2 MB page ---
-    mov  eax, pdpt
-    or   eax, 0x3                     ; present | rw
-    mov  [pml4], eax
+    ; PML4[0] -> PDPT
+    db 0xB8                          ; mov eax, pdpt
+    dd pdpt
+    db 0x83, 0xC8, 0x03              ; or eax, 3          present | rw
+    db 0xA3                          ; mov [pml4], eax
+    dd pml4
 
-    mov  eax, pd
-    or   eax, 0x3
-    mov  [pdpt], eax
+    ; PDPT[0] -> PD
+    db 0xB8                          ; mov eax, pd
+    dd pd
+    db 0x83, 0xC8, 0x03              ; or eax, 3
+    db 0xA3                          ; mov [pdpt], eax
+    dd pdpt
 
-    mov  dword [pd], 0x83             ; present | rw | page-size(2MB), base 0
+    ; PD[0] = a 2 MB page at 0
+    db 0xC7, 0x05                    ; mov dword [pd], 0x83   present | rw | 2 MB
+    dd pd
+    dd 0x83
 
-    ; --- Load CR3 with the PML4 ---
-    mov  eax, pml4
-    mov  cr3, eax
+    db 0xB8                          ; mov eax, pml4
+    dd pml4
+    db 0x0F, 0x22, 0xD8              ; mov cr3, eax
 
-    ; --- Enable PAE (CR4.PAE = bit 5) ---
-    mov  eax, cr4
-    or   eax, 1 << 5
-    mov  cr4, eax
+    db 0x0F, 0x20, 0xE0              ; mov eax, cr4
+    db 0x83, 0xC8, 0x20              ; or eax, 1 << 5     CR4.PAE
+    db 0x0F, 0x22, 0xE0              ; mov cr4, eax
 
-    ; --- Enable long mode (EFER.LME = bit 8) ---
-    mov  ecx, 0xC0000080
-    rdmsr
-    or   eax, 1 << 8
-    wrmsr
+    db 0xB9                          ; mov ecx, 0xC0000080   EFER
+    dd 0xC0000080
+    db 0x0F, 0x32                    ; rdmsr
+    db 0x0D                          ; or eax, 1 << 8     LME
+    dd 0x100
+    db 0x0F, 0x30                    ; wrmsr
 
-    ; --- Enable paging + protection (CR0.PG | CR0.PE) ---
-    mov  eax, cr0
-    or   eax, (1 << 31) | (1 << 0)
-    mov  cr0, eax
+    db 0x0F, 0x20, 0xC0              ; mov eax, cr0
+    db 0x0D                          ; or eax, (1 << 31) | 1   PG | PE
+    dd 0x80000001
+    db 0x0F, 0x22, 0xC0              ; mov cr0, eax
 
-    ; --- Load the 64-bit GDT and jump to the long mode code segment ---
-    lgdt [gdt64.pointer]
-    jmp  0x08:long_mode
+    db 0x0F, 0x01, 0x15              ; lgdt [gdt64_pointer]
+    dd gdt64_pointer
+    db 0xEA                          ; jmp 0x08:long_mode
+    dd long_mode
+    dw 0x08
 
 ; ==============================================================================
 ; 64-bit code
 ; ==============================================================================
 bits 64
 long_mode:
-    mov  ax, 0x10
-    mov  ds, ax
-    mov  es, ax
-    mov  ss, ax
-    mov  fs, ax
-    mov  gs, ax
-    mov  rsp, stack_top
+    db 0x66, 0xB8, 0x10, 0x00        ; mov ax, 0x10
+    db 0x8E, 0xD8                    ; mov ds, ax
+    db 0x8E, 0xC0                    ; mov es, ax
+    db 0x8E, 0xD0                    ; mov ss, ax
+    db 0x8E, 0xE0                    ; mov fs, ax
+    db 0x8E, 0xE8                    ; mov gs, ax
+    lea  rsp, [rel stack_top]
 
     call kmain                       ; <- your Kron program (fn main)
 
@@ -103,12 +119,10 @@ long_mode:
 align 8
 gdt64:
     dq 0x0000000000000000            ; null
-.code:
     dq 0x00209A0000000000            ; 64-bit code (L=1, present, exec/read)
-.data:
     dq 0x0000920000000000            ; data (present, read/write)
-.pointer:
-    dw .pointer - gdt64 - 1
+gdt64_pointer:
+    dw gdt64_pointer - gdt64 - 1
     dq gdt64
 
 ; ==============================================================================

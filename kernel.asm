@@ -1,12 +1,12 @@
 ; ==============================================================================
-; JUPITER KERNEL ENTRY (no Multiboot)
+; KRON KERNEL ENTRY (no Multiboot)
 ; The MBR bootloader has already entered long mode, set up identity paging for
 ; the first 2 MB and jumped here at 0x100000. There is nothing else underneath:
 ; no GRUB, no firmware services, no operating system.
 ;
-; Build:
-;   jupiterc.exe program.jup --bare      -> program.asm
-;   nasm -f bin kernel.asm -o kernel.bin
+; Build (BUILDOS.bat does it):
+;   kronc.exe program.kr --bare          -> program.asm, copied to kernel_program.asm
+;   kronc.exe kernel.asm --assemble      -> kernel.kbin
 ; ==============================================================================
 
 bits 64
@@ -27,7 +27,7 @@ _start:
     jmp  .banner
 .banner_done:
 
-    ; hand control to the compiled Jupiter program
+    ; hand control to the compiled Kron program
     call kmain
 
 .hang:
@@ -35,10 +35,10 @@ _start:
     hlt
     jmp  .hang
 
-msg_kernel: db "Jupiter kernel: long mode reached", 0
+msg_kernel: db "Kron kernel: long mode reached", 0
 
 ; ------------------------------------------------------------------------------
-; The compiled Jupiter program: kmain, __print_int, __print_str, VGA output.
-; Produced by:  jupiterc.exe program.jup --bare
+; The compiled Kron program: kmain, __print_int, __print_str, VGA output.
+; Produced by:  kronc.exe program.kr --bare
 ; ------------------------------------------------------------------------------
 %include "kernel_program.asm"

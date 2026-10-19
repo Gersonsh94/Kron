@@ -31,6 +31,10 @@ section .bss
     kasm_code_len  resq 1
     kasm_data      resb KASM_DATA_MAX     ; .data contents
     kasm_data_len  resq 1
+    kasm_org       resq 1             ; 'org N' of a flat binary
+    kasm_org_set   resb 1             ; the source said 'org'
+    p1_data_base   resq 1             ; where .data and .bss went in pass one
+    p1_bss_base    resq 1
     kasm_bss_len   resq 1             ; .bss size, reserved not emitted
 
     ; --- label table ---
@@ -39,6 +43,8 @@ section .bss
     lbl_name_off   resd KASM_LBL_MAX      ; offset into lbl_names
     lbl_addr       resq KASM_LBL_MAX      ; resolved address
     lbl_section    resb KASM_LBL_MAX      ; 0 = text, 1 = data, 2 = bss
+    lbl_pass       resb KASM_LBL_MAX      ; the pass that last defined it
+    lbl_is_equ     resb 1                 ; the label being defined is an equ
     ; A hash of the names, so finding a label does not read every label
     ; before it: buckets hold index + 1 of the newest label in them, and
     ; lbl_chain the one added to the same bucket before it.
@@ -110,8 +116,10 @@ section .bss
     err_dst        resd 64            ; operand kind of the destination
     err_src        resd 64            ; operand kind of the source
     err_count      resq 1
-    err_mnem       resb 1024          ; 16 bytes of tok_a per error, so a
+    err_mnem       resb 4096          ; 64 bytes of tok_a per error, so a
                                       ; report names the instruction itself
+                                      ; (and its operands, for a label
+                                      ; defined nowhere)
     cur_addend     resq 1             ; addend for the pending [rel label+N] fixup
     dbg_written    resq 1
     dbg_buf        resb 8
@@ -209,6 +217,8 @@ global kasm_get_label_section
 ; kasm_init()
 ; ==============================================================================
 kasm_init:
+    mov  qword [rel kasm_org], 0
+    mov  byte [rel kasm_org_set], 0
     mov  qword [rel kasm_code_len], 0
     mov  qword [rel kasm_data_len], 0
     mov  qword [rel kasm_bss_len], 0
@@ -275,6 +285,14 @@ kasm_build_image:
 .copy_done:
     mov  rax, rbx
     add  rax, [rel kasm_data_len]
+    ; a flat binary with 'org' and no .data ends where its code ends: a
+    ; boot sector is 512 bytes, not 512 rounded up
+    cmp  byte [rel kasm_org_set], 0
+    je   .img_len
+    cmp  qword [rel kasm_data_len], 0
+    jne  .img_len
+    mov  rax, [rel kasm_code_len]
+.img_len:
     pop  rdi
     pop  rsi
     pop  rbx
@@ -328,7 +346,7 @@ kasm_had_error:
 ; kasm_get_error_mnem(rcx = index) -> rax = pointer to the mnemonic text
 kasm_get_error_mnem:
     lea  rax, [rel err_mnem]
-    shl  rcx, 4
+    shl  rcx, 6
     add  rax, rcx
     ret
 
@@ -340,7 +358,7 @@ record_err_mnem:
     push rsi
     push rdi
     lea  rdi, [rel err_mnem]
-    shl  rcx, 4
+    shl  rcx, 6
     add  rdi, rcx
     lea  rsi, [rel tok_a]
     xor  ebx, ebx
@@ -357,6 +375,52 @@ record_err_mnem:
     jmp  .rem_cp
 .rem_end:
     mov  byte [rdi], 0
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; record_err_ops(rcx = error index): the operands after the mnemonic in
+; that slot, as far as 63 bytes go -- the name of a label defined nowhere
+record_err_ops:
+    push rbx
+    push rsi
+    push rdi
+    lea  rdi, [rel err_mnem]
+    shl  rcx, 6
+    add  rdi, rcx
+    xor  ebx, ebx
+.reo_end:
+    cmp  byte [rdi + rbx], 0
+    je   .reo_b
+    inc  ebx
+    jmp  .reo_end
+.reo_b:
+    mov  byte [rdi + rbx], ' '
+    inc  ebx
+    lea  rsi, [rel tok_b]
+.reo_cp:
+    cmp  ebx, 62
+    jae  .reo_out
+    mov  al, [rsi]
+    test al, al
+    jz   .reo_c
+    mov  [rdi + rbx], al
+    inc  rsi
+    inc  ebx
+    jmp  .reo_cp
+.reo_c:
+    lea  rax, [rel tok_c]
+    cmp  byte [rax], 0
+    je   .reo_out
+    cmp  rsi, rax
+    jae  .reo_out
+    mov  byte [rdi + rbx], ','
+    inc  ebx
+    mov  rsi, rax
+    jmp  .reo_cp
+.reo_out:
+    mov  byte [rdi + rbx], 0
     pop  rdi
     pop  rsi
     pop  rbx
@@ -393,6 +457,23 @@ kasm_get_extref_sym:
 ; ==============================================================================
 
 ; emit_b(al = byte)
+; kasm_crnum(rcx = operand text) -> eax = N for cr0..cr8, else -1
+kasm_crnum:
+    mov  eax, -1
+    cmp  byte [rcx], 'c'
+    jne  .cr_out
+    cmp  byte [rcx+1], 'r'
+    jne  .cr_out
+    cmp  byte [rcx+3], 0
+    jne  .cr_out
+    movzx edx, byte [rcx+2]
+    sub  edx, '0'
+    cmp  edx, 8
+    ja   .cr_out
+    mov  eax, edx
+.cr_out:
+    ret
+
 emit_b:
     push rcx
     push rdx
@@ -558,10 +639,92 @@ emit_modrm:
     call emit_b
     ret
 
+; kasm_unknown_label(): a reference, in pass two, to a label that is defined
+; nowhere and is no extern -- an error (dst 99), not a jump to wherever the
+; zero displacement points. Preserves every register.
+kasm_unknown_label:
+    cmp  byte [rel kasm_pass], 2
+    jne  .ul_out
+    push rax
+    push rcx
+    push rdx
+    mov  byte [rel kasm_error], 1
+    mov  rax, [rel kasm_line]
+    cmp  qword [rel kasm_err_line], 0
+    jne  .ul_more
+    mov  [rel kasm_err_line], rax
+.ul_more:
+    mov  rcx, [rel err_count]
+    cmp  rcx, 64
+    jae  .ul_pop
+    lea  rdx, [rel err_lines]
+    mov  [rdx + rcx*4], eax
+    lea  rdx, [rel err_dst]
+    mov  eax, 99
+    mov  [rdx + rcx*4], eax
+    lea  rdx, [rel err_src]
+    xor  eax, eax
+    mov  [rdx + rcx*4], eax
+    push rcx
+    call record_err_mnem
+    pop  rcx
+    push rcx
+    call record_err_ops
+    pop  rcx
+    inc  rcx
+    mov  [rel err_count], rcx
+.ul_pop:
+    pop  rdx
+    pop  rcx
+    pop  rax
+.ul_out:
+    ret
+
+; kasm_dup_label(): a label defined a second time (dst 98), reported once,
+; in pass one, with its name. Preserves every register.
+kasm_dup_label:
+    cmp  byte [rel kasm_pass], 1
+    jne  .dl_out
+    push rax
+    push rcx
+    push rdx
+    mov  byte [rel kasm_error], 1
+    mov  rax, [rel kasm_line]
+    cmp  qword [rel kasm_err_line], 0
+    jne  .dl_more
+    mov  [rel kasm_err_line], rax
+.dl_more:
+    mov  rcx, [rel err_count]
+    cmp  rcx, 64
+    jae  .dl_pop
+    lea  rdx, [rel err_lines]
+    mov  [rdx + rcx*4], eax
+    lea  rdx, [rel err_dst]
+    mov  eax, 98
+    mov  [rdx + rcx*4], eax
+    lea  rdx, [rel err_src]
+    xor  eax, eax
+    mov  [rdx + rcx*4], eax
+    push rcx
+    call record_err_mnem
+    pop  rcx
+    inc  rcx
+    mov  [rel err_count], rcx
+.dl_pop:
+    pop  rdx
+    pop  rcx
+    pop  rax
+.dl_out:
+    ret
+
 ; emit_rip(sil = reg, eax = label index)
 ; encodes the RIP-relative form: mod=00, rm=101, then a disp32 fixup.
 ; The displacement is resolved once the data base address is known.
 emit_rip:
+    cmp  eax, -1
+    jne  .rip_known
+    call kasm_unknown_label
+.rip_known:
     push rax
     mov  dil, 0
     mov  dl, 5                    ; rm = 101 means RIP-relative in 64-bit mode
@@ -1110,6 +1273,22 @@ kasm_add_label:
     cmp  eax, -1
     je   .fresh
     mov  rbx, rax                ; existing index
+    ; defined already in this pass: two labels of one name, an error -- the
+    ; compiler is several files in one, and the later one used to win
+    ; without a word
+    lea  rdi, [rel lbl_pass]
+    movzx eax, byte [rdi + rbx]
+    movzx ecx, byte [rel kasm_pass]
+    cmp  eax, ecx
+    jne  .refresh
+    ; every module includes the same headers, whose %defines arrive as equ
+    ; once per include: those may repeat
+    cmp  byte [rel lbl_is_equ], 0
+    jne  .refresh
+    call kasm_dup_label
+    jmp  .done
+.refresh:
+    mov  [rdi + rbx], cl
     call here
     lea  rdi, [rel lbl_addr]
     mov  [rdi + rbx*8], rax
@@ -1165,6 +1344,9 @@ kasm_add_label:
     inc  rdi
     mov  [rel lbl_names_len], rdi
     ; store address and section
+    movzx eax, byte [rel kasm_pass]
+    lea  rdi, [rel lbl_pass]
+    mov  [rdi + rbx], al
     call here
     lea  rdi, [rel lbl_addr]
     mov  [rdi + rbx*8], rax
@@ -1791,6 +1973,10 @@ parse_operand:
     je   .mem_disp
     cmp  byte [rsi], '+'
     je   .mem_maybe_index
+    ; [rbx*4], an index with no base, has no form here: it was read as
+    ; [rbx] and the scale dropped without a word
+    cmp  byte [rsi], ']'
+    jne  .none
     mov  edx, r12d
     mov  eax, 9                  ; plain [reg]
     jmp  .out
@@ -2054,7 +2240,7 @@ match_reg_prefix:
 
 ; ==============================================================================
 ; parse_float(rcx = text) -> xmm0 = the value
-; Accepts [-]ddd[.ddd]. Needed because `dq 3.14` in a data section must become
+; Accepts [-]ddd[.ddd][e[+-]ddd]. Needed because `dq 3.14` in a data section must become
 ; an IEEE-754 double, not the integer 3.
 ; ==============================================================================
 parse_float:
@@ -2084,7 +2270,7 @@ parse_float:
 .pf_idone:
     cvtsi2sd xmm0, rax
     cmp  byte [rsi], '.'
-    jne  .pf_sign
+    jne  .pf_exp                 ; 1e5 has an exponent and no point
     inc  rsi
     xor  rax, rax                ; fraction digits
     mov  rcx, 1                  ; matching power of ten
@@ -2521,7 +2707,28 @@ ex_symbol:
     call kasm_find_label
     cmp  eax, -1
     je   .unknown
+    ; a .text label counts from 'org' (0 unless the source says otherwise)
+    push r8
+    push rax
     call kasm_label_addr
+    pop  rcx                     ; the label's index
+    lea  r8, [rel lbl_section]
+    movzx ecx, byte [r8 + rcx]
+    test ecx, ecx
+    jz   .lbl_text
+    ; .data and .bss follow the code: only a flat binary with 'org' asks
+    ; for their absolute place, from where pass one put them
+    cmp  byte [rel kasm_org_set], 0
+    je   .lbl_noorg
+    add  rax, [rel p1_data_base]
+    cmp  ecx, 1
+    je   .lbl_text
+    sub  rax, [rel p1_data_base]
+    add  rax, [rel p1_bss_base]
+.lbl_text:
+    add  rax, [rel kasm_org]
+.lbl_noorg:
+    pop  r8
     pop  rsi
     pop  rbx
     ret
@@ -3541,6 +3748,64 @@ encode_line:
     mov  r15, rdx                ; src value (full 64 bits)
     mov  [rel src_base], r8      ; base register of a [base+disp] source
 
+    ; mov crN, r64 (0F 22 /r) and mov r64, crN (0F 20 /r): the control
+    ; registers a boot block sets
+    cmp  r14d, 1
+    jne  .mov_nocr_to
+    lea  rcx, [rel tok_b]
+    call kasm_crnum
+    cmp  eax, -1
+    je   .mov_nocr_to
+    mov  ecx, eax                ; cr
+    mov  edx, r15d               ; gpr
+    mov  bl, 0x22
+    jmp  .mov_cr
+.mov_nocr_to:
+    cmp  r12d, 1
+    jne  .mov_nocr
+    lea  rcx, [rel tok_c]
+    call kasm_crnum
+    cmp  eax, -1
+    je   .mov_nocr
+    mov  ecx, eax
+    mov  edx, r13d
+    mov  bl, 0x20
+.mov_cr:
+    ; REX: R for cr8 and up, B for r8..r15
+    xor  eax, eax
+    cmp  ecx, 8
+    jb   .mcr_r
+    or   eax, 0x44
+.mcr_r:
+    cmp  edx, 8
+    jb   .mcr_b
+    or   eax, 0x41
+.mcr_b:
+    test eax, eax
+    jz   .mcr_norex
+    push rcx
+    push rdx
+    call emit_b
+    pop  rdx
+    pop  rcx
+.mcr_norex:
+    push rcx
+    push rdx
+    mov  al, 0x0F
+    call emit_b
+    mov  al, bl
+    call emit_b
+    pop  rdx
+    pop  rcx
+    and  ecx, 7
+    shl  ecx, 3
+    and  edx, 7
+    mov  eax, 0xC0
+    or   eax, ecx
+    or   eax, edx
+    call emit_b
+    jmp  .done
+.mov_nocr:
     cmp  r12d, 1
     je   .mov_to_reg
     cmp  r12d, 8
@@ -5928,7 +6193,10 @@ encode_line:
     cmp  eax, -1
     je   .rel_unknown
     call kasm_add_extref
+    jmp  .rel_emit
 .rel_unknown:
+    call kasm_unknown_label
+.rel_emit:
     xor  eax, eax
     call emit_d
     jmp  .done
@@ -6730,22 +6998,36 @@ encode_line:
     jmp  .done
 
 ; movq xmm, r64 : 66 REX.W 0F 6E /r
+; movq r64, xmm : 66 REX.W 0F 7E /r, the xmm register in the reg field.
+; The second form was encoded as the first, operands swapped: the bits went
+; the wrong way without a word of complaint.
 .i_movq:
     lea  rcx, [rel tok_b]
     call parse_operand
+    mov  r12d, eax
     mov  r13d, edx
     lea  rcx, [rel tok_c]
     call parse_operand
     mov  r15d, edx
+    mov  bl, 0x6E
+    cmp  r12d, 6
+    je   .movq_fwd
+    mov  bl, 0x7E
+    mov  eax, r13d
+    mov  r13d, r15d
+    mov  r15d, eax
+.movq_fwd:
     mov  al, 0x66
     call emit_b
     mov  dil, 1
     mov  esi, r13d
     mov  edx, r15d
+    push rbx
     call emit_rex
+    pop  rbx
     mov  al, 0x0F
     call emit_b
-    mov  al, 0x6E
+    mov  al, bl
     call emit_b
     mov  dil, 3
     mov  esi, r13d
@@ -6943,6 +7225,8 @@ section .data
     d_db:      db "db",0
     d_dq:      db "dq",0
     d_times:   db "times",0
+    d_org:     db "org",0
+    d_align:   db "align",0
     d_equ:     db "equ",0
     dd_table: dq d_db, d_dq, d_dw, d_dd, d_resb, d_resw, d_resd, d_resq, d_times, d_equ, 0
     d_resb:    db "resb",0
@@ -6975,6 +7259,8 @@ handle_directive:
     MNEMONIC_IS d_dd,      .data_dd
     MNEMONIC_IS d_equ,     .decl_equ
     MNEMONIC_IS d_times,   .data_times
+    MNEMONIC_IS d_org,     .dir_org
+    MNEMONIC_IS d_align,   .dir_align
     xor  al, al
     pop  rdi
     pop  rsi
@@ -7001,23 +7287,52 @@ handle_directive:
     mov  byte [rel cur_section], 2
     jmp  .yes
 
+.dir_org:
+    ; 'org N': where a flat binary is loaded. A label of .text used as a
+    ; value (dd label, dw label + 2) counts from there; jumps and calls are
+    ; relative and do not change.
+    lea  rcx, [rel tok_b]
+    call parse_expr
+    mov  [rel kasm_org], rax
+    mov  byte [rel kasm_org_set], 1
+    jmp  .yes
+.dir_align:
+    ; 'align N': up to the next multiple of N, with nop in code, 0 in data
+    push r12
+    lea  rcx, [rel tok_b]
+    call parse_expr
+    mov  r12, rax
+    test r12, r12
+    jz   .al_done
+.al_loop:
+    mov  rax, [rel kasm_code_len]
+    cmp  byte [rel cur_section], 1
+    jne  .al_have
+    mov  rax, [rel kasm_data_len]
+.al_have:
+    xor  edx, edx
+    div  r12
+    test rdx, rdx
+    jz   .al_done
+    mov  al, 0x90
+    cmp  byte [rel cur_section], 1
+    jne  .al_put
+    xor  eax, eax
+.al_put:
+    call emit_b
+    jmp  .al_loop
+.al_done:
+    pop  r12
+    jmp  .yes
 .data_times:
-    ; 'times N db V' arrives with tok_b holding "N db V"
+    ; 'times N db V' arrives with tok_b holding "N db V"; N may be an
+    ; expression of numbers, equ constants and labels
     push r12
     push r13
     lea  rcx, [rel tok_b]
-    call parse_number
+    call parse_expr
     mov  r12, rax                ; repeat count
-    ; step over the count and the directive name to reach the value
-    lea  rsi, [rel tok_b]
-.dt_skipnum:
-    mov  al, [rsi]
-    cmp  al, '0'
-    jb   .dt_afternum
-    cmp  al, '9'
-    ja   .dt_afternum
-    inc  rsi
-    jmp  .dt_skipnum
+    mov  rsi, [rel expr_ptr]     ; just past it
 .dt_afternum:
     call skip_blanks_rsi
     mov  r13b, 1                 ; 1 = byte, 8 = qword
@@ -7112,34 +7427,43 @@ handle_directive:
     pop  rdi
     pop  rsi
     jmp  .yes
-; resb / resq reserve space in .bss without emitting bytes
+; resb / resq reserve space in .bss without emitting bytes. Anywhere else
+; they are that many zero bytes, as in NASM: a global array that starts
+; from a few values is data, and the rest of it zeros.
 .res_b:
     lea  rcx, [rel tok_b]
     call parse_expr
-    call bss_round8
-    add  [rel kasm_bss_len], rax
-    add  [rel bss_cursor], rax
-    jmp  .yes
+    jmp  .res_any
 .res_w:
     lea  rcx, [rel tok_b]
     call parse_expr
     shl  rax, 1
-    call bss_round8
-    add  [rel kasm_bss_len], rax
-    add  [rel bss_cursor], rax
-    jmp  .yes
+    jmp  .res_any
 .res_d:
     lea  rcx, [rel tok_b]
     call parse_expr
     shl  rax, 2
-    call bss_round8
-    add  [rel kasm_bss_len], rax
-    add  [rel bss_cursor], rax
-    jmp  .yes
+    jmp  .res_any
 .res_q:
     lea  rcx, [rel tok_b]
     call parse_expr
     shl  rax, 3
+.res_any:
+    cmp  byte [rel cur_section], 2
+    je   .res_bss
+    push r12
+    mov  r12, rax
+.res_zero:
+    test r12, r12
+    jz   .res_zdone
+    xor  eax, eax
+    call emit_b
+    dec  r12
+    jmp  .res_zero
+.res_zdone:
+    pop  r12
+    jmp  .yes
+.res_bss:
     call bss_round8
     add  [rel kasm_bss_len], rax
     add  [rel bss_cursor], rax
@@ -7195,6 +7519,22 @@ handle_directive:
     je   .db_tail_dq
     cmp  al, 0x27
     je   .db_tail_sq
+    ; a flat binary with 'org' (a boot sector, say) writes expressions of
+    ; labels and constants: db 0x72, target - here
+    cmp  byte [rel kasm_org_set], 0
+    je   .db_numonly
+    push rcx
+    call parse_expr
+    pop  rcx
+    cmp  rcx, [rel expr_ptr]
+    je   .db_bad                 ; nothing an expression starts with
+    call emit_b
+    mov  rcx, [rel expr_ptr]
+    jmp  .db_tail
+.db_bad:
+    mov  byte [rel kasm_error], 1
+    jmp  .db_next_buf
+.db_numonly:
     cmp  al, '0'
     jb   .db_next_buf
     cmp  al, '9'
@@ -7300,9 +7640,14 @@ handle_directive:
     je   .dl_adv
     cmp  al, 9
     je   .dl_adv
+    ; with 'org' the program is a flat binary nobody links: a label is a
+    ; value here, worked out like any expression (dd gdt, dw end - start)
+    cmp  byte [rel kasm_org_set], 0
+    jne  .dl_expr
     call dl_is_label
     test al, al
     jnz  .dl_label
+.dl_expr:
     call parse_expr              ; rcx = text; leaves expr_ptr past the value
     mov  rcx, [rel expr_ptr]
     push rcx
@@ -7373,6 +7718,14 @@ kasm_assemble:
     mov  byte [rel kasm_pass], 1
     mov  qword [rel bss_cursor], 0
     call run_pass
+    mov  rax, [rel kasm_code_len]
+    add  rax, 15
+    and  rax, -16
+    mov  [rel p1_data_base], rax
+    add  rax, [rel kasm_data_len]
+    add  rax, 15
+    and  rax, -16
+    mov  [rel p1_bss_base], rax
     mov  byte [rel kasm_pass], 2
     mov  qword [rel kasm_code_len], 0
     mov  qword [rel kasm_data_len], 0
@@ -7523,6 +7876,43 @@ run_pass:
     mov  rdx, rax
     pop  rcx
     call qualify_label
+    ; 'NAME equ value': a constant, not a place
+    mov  byte [rel lbl_is_equ], 0
+    cmp  byte [rsp], 2
+    jne  .lbl_add
+    push rcx
+    lea  rcx, [rel lbl_rest]
+.lbl_eqws:
+    cmp  byte [rcx], ' '
+    je   .lbl_eqadv
+    cmp  byte [rcx], 9
+    jne  .lbl_eqchk
+.lbl_eqadv:
+    inc  rcx
+    jmp  .lbl_eqws
+.lbl_eqchk:
+    mov  al, [rcx]
+    or   al, 32
+    cmp  al, 'e'
+    jne  .lbl_eqno
+    mov  al, [rcx + 1]
+    or   al, 32
+    cmp  al, 'q'
+    jne  .lbl_eqno
+    mov  al, [rcx + 2]
+    or   al, 32
+    cmp  al, 'u'
+    jne  .lbl_eqno
+    mov  al, [rcx + 3]
+    cmp  al, ' '
+    je   .lbl_eqyes
+    cmp  al, 9
+    jne  .lbl_eqno
+.lbl_eqyes:
+    mov  byte [rel lbl_is_equ], 1
+.lbl_eqno:
+    pop  rcx
+.lbl_add:
     call kasm_add_label
 .lbl_after:
     pop  rax

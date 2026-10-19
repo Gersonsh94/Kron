@@ -1,0 +1,293 @@
+kron_program
+kron_domain std_gamepad;
+kron_imports
+acquire_domain "std_window.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- game controllers.
+//
+//     while window_show() {
+//         gamepad_poll();
+//         if gamepad_connected(0) {
+//             x = x + gamepad_axis(0, GP_LX) * speed;
+//             if gamepad_pressed(0, GP_A) { jump(); }
+//         }
+//     }
+//
+// Up to four controllers, laid out as an Xbox one: XInput on Windows, the
+// joystick devices (/dev/input/js0..3) on Linux, the Gamepad API on the
+// web. Other controllers work where the system maps them that way.
+//
+//     gamepad_poll()                    read them all: once a frame
+//     gamepad_connected(pad)            1 when there is one
+//     gamepad_button(pad, b)            1 while held
+//     gamepad_pressed(pad, b)           1 in the frame it went down
+//     gamepad_axis(pad, a)              the sticks from -1 to 1 (y down is
+//                                       positive), the triggers from 0 to 1
+//
+// Buttons: GP_A GP_B GP_X GP_Y GP_LB GP_RB GP_BACK GP_START GP_LSTICK
+// GP_RSTICK GP_UP GP_DOWN GP_LEFT GP_RIGHT. Axes: GP_LX GP_LY GP_RX GP_RY
+// GP_LT GP_RT. A small dead zone near the middle of a stick reads 0.
+// =========================================================================
+
+const GP_A: i64 = 0;
+const GP_B: i64 = 1;
+const GP_X: i64 = 2;
+const GP_Y: i64 = 3;
+const GP_LB: i64 = 4;
+const GP_RB: i64 = 5;
+const GP_BACK: i64 = 6;
+const GP_START: i64 = 7;
+const GP_LSTICK: i64 = 8;
+const GP_RSTICK: i64 = 9;
+const GP_UP: i64 = 10;
+const GP_DOWN: i64 = 11;
+const GP_LEFT: i64 = 12;
+const GP_RIGHT: i64 = 13;
+const GP_LX: i64 = 0;
+const GP_LY: i64 = 1;
+const GP_RX: i64 = 2;
+const GP_RY: i64 = 3;
+const GP_LT: i64 = 4;
+const GP_RT: i64 = 5;
+
+var gp_on: [i64; 4];
+var gp_btn: [i64; 64];          // pad * 16 + button
+var gp_prev: [i64; 64];
+var gp_ax: [i64; 32];           // pad * 8 + axis, from -10000 to 10000
+var gp_fd: [i64; 4];            // Linux: the open joystick, -1 none
+var gp_tried: i64;
+var gp_xinput: i64;             // Windows: XInputGetState
+var gp_buf: [i64; 32];
+var gp_ign: i64;
+
+fn gamepad_connected(pad: i64) -> i64 {
+    if pad < 0 || pad > 3 { return 0; }
+    return gp_on[pad];
+}
+
+fn gamepad_button(pad: i64, b: i64) -> i64 {
+    if pad < 0 || pad > 3 || b < 0 || b > 15 { return 0; }
+    return gp_btn[pad * 16 + b];
+}
+
+fn gamepad_pressed(pad: i64, b: i64) -> i64 {
+    if pad < 0 || pad > 3 || b < 0 || b > 15 { return 0; }
+    if gp_btn[pad * 16 + b] == 1 && gp_prev[pad * 16 + b] == 0 { return 1; }
+    return 0;
+}
+
+fn gamepad_axis(pad: i64, a: i64) -> f64 {
+    if pad < 0 || pad > 3 || a < 0 || a > 5 { return 0.0; }
+    var v: i64 = gp_ax[pad * 8 + a];
+    if a < 4 && v > 0 - 1200 && v < 1200 { return 0.0; }
+    return (v as f64) / 10000.0;
+}
+
+fn gp_set_axis(pad: i64, a: i64, v: i64) -> i64 {
+    var x: i64 = v;
+    if x > 10000 { x = 10000; }
+    if x < 0 - 10000 { x = 0 - 10000; }
+    gp_ax[pad * 8 + a] = x;
+    return 0;
+}
+
+fn gamepad_poll() -> i64 {
+    var i: i64 = 0;
+    while i < 64 {
+        gp_prev[i] = gp_btn[i];
+        i = i + 1;
+    }
+    if win_is_web() { return gp_web(); }
+    if win_is_mac() || app_mode != 0 { return 0; }
+    if target_os() == 1 { return gp_windows(); }
+    return gp_linux();
+}
+
+// ---------------------------------------------------------------- web ---
+fn gp_web() -> i64 {
+    var pad: i64 = 0;
+    while pad < 4 {
+        var c: i64 = 0;
+        raw { c = syscall(1009, pad, &gp_buf); }
+        if c != 1 { c = 0; }
+        gp_on[pad] = c;
+        if c == 1 {
+            // the standard mapping: buttons 0-3 A B X Y, 4 5 the bumpers,
+            // 8 9 back start, 10 11 the sticks, 12-15 the cross
+            var map: [i64; 14];
+            map[0] = 0; map[1] = 1; map[2] = 2; map[3] = 3; map[4] = 4; map[5] = 5;
+            map[6] = 8; map[7] = 9; map[8] = 10; map[9] = 11;
+            map[10] = 12; map[11] = 13; map[12] = 14; map[13] = 15;
+            var b: i64 = 0;
+            while b < 14 {
+                gp_btn[pad * 16 + b] = gp_buf[1 + map[b]];
+                b = b + 1;
+            }
+            gp_set_axis(pad, GP_LX, gp_buf[17]);
+            gp_set_axis(pad, GP_LY, gp_buf[18]);
+            gp_set_axis(pad, GP_RX, gp_buf[19]);
+            gp_set_axis(pad, GP_RY, gp_buf[20]);
+            gp_set_axis(pad, GP_LT, gp_buf[21]);
+            gp_set_axis(pad, GP_RT, gp_buf[22]);
+        }
+        pad = pad + 1;
+    }
+    return 1;
+}
+
+// ------------------------------------------------------------ Windows ---
+fn gp_windows() -> i64 {
+    raw {
+        if gp_tried == 0 {
+            gp_tried = 1;
+            var lib: i64 = dll_load("xinput1_4.dll");
+            if lib == 0 { lib = dll_load("xinput9_1_0.dll"); }
+            if lib != 0 { gp_xinput = dll_proc(lib, "XInputGetState"); }
+        }
+        if gp_xinput == 0 { return 0; }
+        var pad: i64 = 0;
+        while pad < 4 {
+            var st: i64 = &gp_buf;
+            var r: i64 = call gp_xinput(pad, st);
+            if r != 0 {
+                gp_on[pad] = 0;
+            } else {
+                gp_on[pad] = 1;
+                var w: i64 = peek16(st + 4);
+                // XInput's bits, in the order of GP_A ... GP_RIGHT
+                var bits: [i64; 14];
+                bits[0] = 0x1000; bits[1] = 0x2000; bits[2] = 0x4000; bits[3] = 0x8000;
+                bits[4] = 0x100; bits[5] = 0x200; bits[6] = 0x20; bits[7] = 0x10;
+                bits[8] = 0x40; bits[9] = 0x80; bits[10] = 0x1; bits[11] = 0x2;
+                bits[12] = 0x4; bits[13] = 0x8;
+                var b: i64 = 0;
+                while b < 14 {
+                    if (w & bits[b]) != 0 {
+                        gp_btn[pad * 16 + b] = 1;
+                    } else {
+                        gp_btn[pad * 16 + b] = 0;
+                    }
+                    b = b + 1;
+                }
+                gp_set_axis(pad, GP_LT, peek8(st + 6) * 10000 / 255);
+                gp_set_axis(pad, GP_RT, peek8(st + 7) * 10000 / 255);
+                gp_set_axis(pad, GP_LX, gp_s16(peek16(st + 8)) * 10000 / 32767);
+                gp_set_axis(pad, GP_LY, 0 - gp_s16(peek16(st + 10)) * 10000 / 32767);
+                gp_set_axis(pad, GP_RX, gp_s16(peek16(st + 12)) * 10000 / 32767);
+                gp_set_axis(pad, GP_RY, 0 - gp_s16(peek16(st + 14)) * 10000 / 32767);
+            }
+            pad = pad + 1;
+        }
+    }
+    return 1;
+}
+
+fn gp_s16(v: i64) -> i64 {
+    if v >= 32768 { return v - 65536; }
+    return v;
+}
+
+// -------------------------------------------------------------- Linux ---
+// /dev/input/jsN: events of 8 bytes -- time, value (i16), type, number
+fn gp_linux() -> i64 {
+    if gp_tried == 0 {
+        gp_tried = 1;
+        var k: i64 = 0;
+        while k < 4 {
+            gp_fd[k] = -1;
+            k = k + 1;
+        }
+    }
+    var pad: i64 = 0;
+    while pad < 4 {
+        if gp_fd[pad] < 0 {
+            var path: [u8; 16];
+            var fd: i64 = 0;
+            raw {
+                var p: i64 = &path[0];
+                // "/dev/input/js" + the digit
+                poke8(p + 0, 47); poke8(p + 1, 100); poke8(p + 2, 101); poke8(p + 3, 118);
+                poke8(p + 4, 47); poke8(p + 5, 105); poke8(p + 6, 110); poke8(p + 7, 112);
+                poke8(p + 8, 117); poke8(p + 9, 116); poke8(p + 10, 47); poke8(p + 11, 106);
+                poke8(p + 12, 115); poke8(p + 13, 48 + pad); poke8(p + 14, 0);
+                fd = syscall(2, p, 0x800, 0);        // O_RDONLY | O_NONBLOCK
+            }
+            if fd >= 0 {
+                gp_fd[pad] = fd;
+            }
+        }
+        if gp_fd[pad] >= 0 {
+            gp_on[pad] = 1;
+            var going: i64 = 1;
+            while going == 1 {
+                var r: i64 = 0;
+                raw { r = syscall(0, gp_fd[pad], &gp_buf, 8); }
+                if r == 8 {
+                    var ev: i64 = 0;
+                    raw { ev = &gp_buf; }
+                    var value: i64 = 0;
+                    var kind: i64 = 0;
+                    var num: i64 = 0;
+                    raw {
+                        value = gp_s16(peek16(ev + 4));
+                        kind = peek8(ev + 6) & 0x7F;
+                        num = peek8(ev + 7);
+                    }
+                    gp_js_event(pad, kind, num, value);
+                } else {
+                    going = 0;
+                    if r != 0 - 11 {
+                        // gone (unplugged): looked for again next time
+                        raw { gp_ign = syscall(3, gp_fd[pad]); }
+                        gp_fd[pad] = -1;
+                        gp_on[pad] = 0;
+                    }
+                }
+            }
+        } else {
+            gp_on[pad] = 0;
+        }
+        pad = pad + 1;
+    }
+    return 1;
+}
+
+// the xpad layout of Linux: buttons A B X Y LB RB BACK START GUIDE LS RS,
+// axes LX LY LT RX RY RT and the cross as axes 6 and 7
+fn gp_js_event(pad: i64, kind: i64, num: i64, value: i64) -> i64 {
+    var base: i64 = pad * 16;
+    if kind == 1 {
+        var down: i64 = 0;
+        if value != 0 { down = 1; }
+        if num <= 7 {
+            gp_btn[base + num] = down;
+        } else if num == 9 {
+            gp_btn[base + GP_LSTICK] = down;
+        } else if num == 10 {
+            gp_btn[base + GP_RSTICK] = down;
+        }
+    } else if kind == 2 {
+        var v: i64 = value * 10000 / 32767;
+        if num == 0 { gp_set_axis(pad, GP_LX, v); }
+        if num == 1 { gp_set_axis(pad, GP_LY, v); }
+        if num == 2 { gp_set_axis(pad, GP_LT, (v + 10000) / 2); }
+        if num == 3 { gp_set_axis(pad, GP_RX, v); }
+        if num == 4 { gp_set_axis(pad, GP_RY, v); }
+        if num == 5 { gp_set_axis(pad, GP_RT, (v + 10000) / 2); }
+        if num == 6 {
+            gp_btn[base + GP_LEFT] = 0;
+            gp_btn[base + GP_RIGHT] = 0;
+            if value < 0 { gp_btn[base + GP_LEFT] = 1; }
+            if value > 0 { gp_btn[base + GP_RIGHT] = 1; }
+        }
+        if num == 7 {
+            gp_btn[base + GP_UP] = 0;
+            gp_btn[base + GP_DOWN] = 0;
+            if value < 0 { gp_btn[base + GP_UP] = 1; }
+            if value > 0 { gp_btn[base + GP_DOWN] = 1; }
+        }
+    }
+    return 0;
+}

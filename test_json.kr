@@ -1,0 +1,23 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "std_json.kr";
+kron_definitions
+fn main() {
+    var d: i64 = json_parse("{\"a\": [1, 2.5, -3e2, true, null], \"name\": \"x\\u00e9y\\n\", \"o\": {\"k\": 7}, \"e\": {}, \"f\": []}");
+    var a: i64 = json_get(d, "a");
+    print(json_len(a));
+    print(json_num(json_at(a, 1)));
+    print(json_int(json_at(a, 2)));
+    print(json_bool(json_at(a, 3)));
+    print(json_kind(json_at(a, 4)));
+    say(json_text(json_get(d, "name")));
+    print(json_int(json_get(json_get(d, "o"), "k")));
+    print(json_len(json_get(d, "e")));
+    print(json_get(d, "missing"));
+    print(json_int(json_get(json_get(d, "missing"), "x")));
+    say(json_key(d, 2));
+    var bad: i64 = json_parse("{\"a\": }");
+    if failed() { print(1); }
+    return 0;
+}

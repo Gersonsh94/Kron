@@ -22,11 +22,13 @@ extern TlsSetValue
 extern SwitchToThread
 extern LoadLibraryA
 extern GetProcAddress
+extern GetModuleHandleA
 extern QueryPerformanceCounter
 extern QueryPerformanceFrequency
 extern GetCommandLineA
 extern VirtualAlloc
 section .bss
+__lib_state: resq 1
 __clo_lock: resq 1
 __clo_cur: resq 1
 __clo_end: resq 1
@@ -291,8 +293,9 @@ __main_exit:
     push rbp
     mov rbp, rsp
     push rbx
-    sub rsp, 40
     mov rbx, rcx
+    and rsp, -16
+    sub rsp, 32
     mov rcx, [rel __fail_tls]
     call TlsGetValue
     test rax, rax
@@ -302,8 +305,50 @@ __main_exit:
     jz .me_go
     call __print_fail
 .me_go:
+    call __crt_flush
     mov rcx, rbx
     call ExitProcess
+__crt_flush:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rsi
+    mov rax, rsp
+    sar rax, 4
+    shl rax, 4
+    mov rsp, rax
+    sub rsp, 32
+    lea rbx, [rel __crt_dlls]
+.cf_lib:
+    mov al, [rbx]
+    test al, al
+    jz .cf_out
+    mov rcx, rbx
+    call GetModuleHandleA
+    test rax, rax
+    jz .cf_next
+    mov rcx, rax
+    lea rdx, [rel __crt_flushall]
+    call GetProcAddress
+    test rax, rax
+    jz .cf_next
+    call rax
+.cf_next:
+    mov al, [rbx]
+    inc rbx
+    test al, al
+    jnz .cf_next
+    jmp .cf_lib
+.cf_out:
+    lea rsp, [rbp-16]
+    pop rsi
+    pop rbx
+    pop rbp
+    ret
+section .data
+__crt_dlls: db 'msvcrt.dll', 0, 'ucrtbase.dll', 0, 0
+__crt_flushall: db '_flushall', 0
+section .text
 __print_fail:
     push rbp
     mov rbp, rsp
@@ -988,6 +1033,177 @@ __print_cstr:
     pop rbx
     mov rsp, rbp
     pop rbp
+    ret
+section .data
+__xm_lib: db 'a system library could not be loaded', 0
+__xh_lib: db 'check that it is installed: the names tried are the ones of its extern block', 0
+__xm_fn: db 'the system library has no function of that name', 0
+__xh_fn: db 'check the name, and that the installed version of the library has it', 0
+section .text
+__ccall:
+    mov r9, [r11]
+    test r9, r9
+    jnz .cc_go
+    push rbp
+    mov rbp, rsp
+    push rax
+    push rdx
+    push r10
+    push r11
+    mov rcx, r11
+    call __ext_resolve
+    mov r9, rax
+    pop r11
+    pop r10
+    pop rdx
+    pop rax
+    pop rbp
+    test r9, r9
+    jz .cc_none
+    mov [r11], r9
+.cc_go:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rsi
+    push r12
+    push r13
+    sub rsp, 168
+    and rsp, -16
+    mov r12, r11
+    mov r13, rax
+    mov rbx, r13
+    and rbx, 255
+    xor esi, esi
+.cc_arg:
+    cmp rsi, rbx
+    jae .cc_load
+    mov rax, rbx
+    sub rax, rsi
+    dec rax
+    mov rax, [r10+rax*8]
+    mov rcx, rsi
+    add rcx, 8
+    mov rdx, 1
+    shl rdx, cl
+    test r13, rdx
+    jz .cc_put
+    mov rcx, rsi
+    add rcx, 32
+    mov rdx, 1
+    shl rdx, cl
+    test r13, rdx
+    jz .cc_put
+    movq xmm0, rax
+    cvtsd2ss xmm0, xmm0
+    movq rax, xmm0
+.cc_put:
+    mov [rsp+rsi*8], rax
+    inc rsi
+    jmp .cc_arg
+.cc_load:
+    mov rcx, [rsp]
+    mov rdx, [rsp+8]
+    mov r8, [rsp+16]
+    mov r9, [rsp+24]
+    movq xmm0, rcx
+    movq xmm1, rdx
+    movq xmm2, r8
+    movq xmm3, r9
+    mov r11, [r12]
+    call r11
+    mov rcx, r13
+    shr rcx, 24
+    and rcx, 255
+    cmp rcx, 1
+    jne .cc_r2
+    shl rax, 32
+    sar rax, 32
+    jmp .cc_done
+.cc_r2:
+    cmp rcx, 2
+    jne .cc_r3
+    shl rax, 32
+    shr rax, 32
+    jmp .cc_done
+.cc_r3:
+    cmp rcx, 3
+    jne .cc_r4
+    and rax, 255
+    jmp .cc_done
+.cc_r4:
+    cmp rcx, 4
+    jne .cc_r5
+    and rax, 65535
+    jmp .cc_done
+.cc_r5:
+    cmp rcx, 5
+    jne .cc_r6
+    shl rax, 48
+    sar rax, 48
+    jmp .cc_done
+.cc_r6:
+    cmp rcx, 6
+    jne .cc_r9
+    shl rax, 56
+    sar rax, 56
+    jmp .cc_done
+.cc_r9:
+    cmp rcx, 9
+    jne .cc_done
+    cvtss2sd xmm0, xmm0
+.cc_done:
+    lea rsp, [rbp-32]
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    pop rbp
+    ret
+.cc_none:
+    xor eax, eax
+    xorps xmm0, xmm0
+    ret
+__ext_resolve:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, [rbx+16]
+.xr_lib:
+    mov al, [rsi]
+    test al, al
+    jz .xr_nolib
+    mov rcx, rsi
+    call __dll_load
+    test rax, rax
+    jnz .xr_sym
+.xr_skip:
+    mov al, [rsi]
+    inc rsi
+    test al, al
+    jnz .xr_skip
+    jmp .xr_lib
+.xr_sym:
+    mov rcx, rax
+    mov rdx, [rbx+8]
+    call __dll_proc
+    test rax, rax
+    jnz .xr_out
+    lea rcx, [rel __xm_fn]
+    lea rdx, [rel __xh_fn]
+    jmp .xr_fail
+.xr_nolib:
+    lea rcx, [rel __xm_lib]
+    lea rdx, [rel __xh_lib]
+.xr_fail:
+    xor r8, r8
+    call __fail_raise
+    xor eax, eax
+.xr_out:
+    add rsp, 40
+    pop rsi
+    pop rbx
     ret
 section .data
 __tp_at: db '  at ', 0
@@ -2062,13 +2278,11 @@ ob_new:
     mov rax, [rel __g_ob_freehead]
     sub rax, 1
     mov r14, rax
-    mov rax, [rel __g_ob_ptr]
-    push rax
     mov rax, r14
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_ptr]
     add rax, rcx
     mov rax, [rax]
     mov [rel __g_ob_freehead], rax
@@ -2149,56 +2363,45 @@ ob_new:
 .L69:
     mov rax, 0
     mov rbx, rax
-    mov rax, [rel __g_ob_meta]
-    push rax
     mov rax, r14
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_meta]
     add rax, rcx
     mov rax, [rax]
-    mov rcx, 8
-    sar rax, cl
+    sar rax, 8
     mov rcx, 1073741823
     and rax, rcx
     mov rbx, rax
-    mov rax, [rel __g_ob_ptr]
-    push rax
     mov rax, r14
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_ptr]
     add rax, rcx
     push rax
     mov rax, r12
     mov rcx, rax
     pop rdx
     mov [rdx], rcx
-    mov rax, [rel __g_ob_meta]
-    push rax
     mov rax, r14
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_meta]
     add rax, rcx
     push rax
     mov rax, rbx
-    mov rcx, 8
-    shl rax, cl
+    shl rax, 8
     or rax, r13
     mov rcx, rax
     pop rdx
     mov [rdx], rcx
-    mov rax, [rel __g_HP_TAG]
-    push rax
     mov rax, rbx
-    mov rcx, 32
-    shl rax, cl
+    shl rax, 32
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_HP_TAG]
     or rax, rcx
     or rax, r14
     jmp .__ret_67
@@ -2280,8 +2483,7 @@ ob_slot:
     and rax, rcx
     mov r13, rax
     mov rax, rbx
-    mov rcx, 32
-    sar rax, cl
+    sar rax, 32
     mov rcx, 1073741823
     and rax, rcx
     mov r12, rax
@@ -2302,19 +2504,16 @@ ob_slot:
 .L87:
     mov rax, 0
     mov rbx, rax
-    mov rax, [rel __g_ob_meta]
-    push rax
     mov rax, r13
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_meta]
     add rax, rcx
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    mov rcx, 8
-    sar rax, cl
+    sar rax, 8
     mov rcx, 1073741823
     and rax, rcx
     cmp rax, r12
@@ -2388,13 +2587,11 @@ ob_get:
 .L96:
     mov rax, 0
     mov rbx, rax
-    mov rax, [rel __g_ob_ptr]
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_ptr]
     add rax, rcx
     mov rax, [rax]
     mov rbx, rax
@@ -2424,13 +2621,11 @@ ob_put:
     mov rcx, 4294967295
     and rax, rcx
     mov rbx, rax
-    mov rax, [rel __g_ob_ptr]
-    push rax
     mov rax, rbx
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_ptr]
     add rax, rcx
     push rax
     mov rax, r12
@@ -2456,45 +2651,37 @@ ob_drop:
     mov rcx, 4294967295
     and rax, rcx
     mov r12, rax
-    mov rax, [rel __g_ob_meta]
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_meta]
     add rax, rcx
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    mov rcx, 8
-    sar rax, cl
+    sar rax, 8
     add rax, 1
     mov rcx, 1073741823
     and rax, rcx
     mov rbx, rax
-    mov rax, [rel __g_ob_meta]
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_meta]
     add rax, rcx
     push rax
     mov rax, rbx
-    mov rcx, 8
-    shl rax, cl
+    shl rax, 8
     mov rcx, rax
     pop rdx
     mov [rdx], rcx
-    mov rax, [rel __g_ob_ptr]
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rel __g_ob_ptr]
     add rax, rcx
     push rax
     mov rax, [rel __g_ob_freehead]
@@ -3143,7 +3330,8 @@ section .text
     lea rax, [rel .str199]
     push rax
 section .data
-.str200: db 80,78,71,44,32,111,114,32,66,77,80,32,111,102,32,50,52,32,111,114,32,51,50,32,98,105,116,115,59,32,116,104,101,32,102,105,108,101,32,109,97,121,32,98,101,32,100,97,109,97,103,101,100,0
+.str200: db 80,78,71,44,32,98,97,115,101,108,105,110,101,32,74,80,69,71,32,40,110,111,116,32,112,114,111,103,114,101,115,115,105,118,101,41,44,32,111,114,32,66,77,80,32,111,102,32,50,52,32,111,114,32,51,50,32,98,105,116,115,59,32,116
+    db 104,101,32,102,105,108,101,32,109,97,121,32,98,101,32,100,97,109,97,103,101,100,0
 section .text
     lea rax, [rel .str200]
     mov rdx, rax
@@ -3214,13 +3402,11 @@ li_new:
     mov [rbp-48], rbx
     mov [rbp-40], r12
     mov rbx, rcx
-    mov rax, 8
-    push rax
     mov rax, rbx
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, 8
     add rax, rcx
     push rax
     pop rcx
@@ -3266,9 +3452,9 @@ li_new:
 .kfe:
 section .data
 .kft: dq heap_fail.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl43,43
-    dq .kl44,47
-    dq .kl45,49
+    dq .kl43,48
+    dq .kl44,52
+    dq .kl45,54
 .kfn: db "li_new", 0
 section .text
 li_len:
@@ -3312,7 +3498,7 @@ li_len:
 .kfe:
 section .data
 .kft: dq li_new.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl46,55
+    dq .kl46,60
 .kfn: db "li_len", 0
 section .text
 li_room:
@@ -3348,13 +3534,11 @@ li_room:
     call hp_room
     add rsp, 32
     push rax
-    mov rax, 8
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, 8
     add rax, rcx
     mov rcx, rax
     pop rax
@@ -3367,13 +3551,11 @@ li_room:
 .L213:
     mov rax, rbx
     push rax
-    mov rax, 8
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, 8
     add rax, rcx
     push rax
     pop rdx
@@ -3408,10 +3590,10 @@ li_room:
 .kfe:
 section .data
 .kft: dq li_len.kft, .kfe, .kfn, __kron_file_1,4
-    dq .kl47,66
-    dq .kl48,70
-    dq .kl49,73
-    dq .kl50,77
+    dq .kl47,71
+    dq .kl48,75
+    dq .kl49,78
+    dq .kl50,82
 .kfn: db "li_room", 0
 section .text
 li_add:
@@ -3500,8 +3682,8 @@ li_add:
 .kfe:
 section .data
 .kft: dq li_room.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl51,82
-    dq .kl52,88
+    dq .kl51,87
+    dq .kl52,93
 .kfn: db "li_add", 0
 section .text
 li_at:
@@ -3574,7 +3756,7 @@ li_at:
 .kfe:
 section .data
 .kft: dq li_add.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl53,101
+    dq .kl53,106
 .kfn: db "li_at", 0
 section .text
 li_get:
@@ -3615,7 +3797,7 @@ li_get:
 .kfe:
 section .data
 .kft: dq li_at.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl54,119
+    dq .kl54,124
 .kfn: db "li_get", 0
 section .text
 li_free:
@@ -3664,9 +3846,9 @@ li_free:
 .kfe:
 section .data
 .kft: dq li_get.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl55,129
-    dq .kl56,133
-    dq .kl57,134
+    dq .kl55,134
+    dq .kl56,138
+    dq .kl57,139
 .kfn: db "li_free", 0
 section .text
 li_sort:
@@ -3757,13 +3939,11 @@ li_sort:
     jmp .L248
 .L247:
 .L248:
-    mov rax, rbx
-    push rax
     mov rax, [rbp-64]
     mov rcx, 2
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, rbx
     add rax, rcx
     mov [rbp-88], rax
     mov rax, [rbp-88]
@@ -3803,23 +3983,19 @@ li_sort:
     mov [rbp-128], rax
     mov rax, 0
     mov [rbp-136], rax
-    mov rax, r14
-    push rax
     mov rax, r13
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, r14
     add rax, rcx
     mov rax, [rax]
     mov [rbp-128], rax
-    mov rax, r14
-    push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, r14
     add rax, rcx
     mov rax, [rax]
     mov [rbp-136], rax
@@ -3844,22 +4020,18 @@ li_sort:
     mov rax, [rbp-120]
     test rax, rax
     jz .L260
-    mov rax, [rbp-56]
-    push rax
     mov rax, rbx
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rbp-56]
     add rax, rcx
-    push rax
-    mov rax, r14
     push rax
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, r14
     add rax, rcx
     mov rax, [rax]
     mov rcx, rax
@@ -3867,22 +4039,18 @@ li_sort:
     mov [rdx], rcx
     jmp .L261
 .L260:
-    mov rax, [rbp-56]
-    push rax
     mov rax, rbx
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, [rbp-56]
     add rax, rcx
-    push rax
-    mov rax, r14
     push rax
     mov rax, r13
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, r14
     add rax, rcx
     mov rax, [rax]
     mov rcx, rax
@@ -3965,11 +4133,11 @@ li_sort:
 .kfe:
 section .data
 .kft: dq li_free.kft, .kfe, .kfn, __kron_file_1,5
-    dq .kl58,141
-    dq .kl59,150
-    dq .kl60,182
-    dq .kl61,208
-    dq .kl62,210
+    dq .kl58,146
+    dq .kl59,155
+    dq .kl60,187
+    dq .kl61,213
+    dq .kl62,215
 .kfn: db "li_sort", 0
 section .text
 li_less:
@@ -4021,7 +4189,7 @@ li_less:
 .kfe:
 section .data
 .kft: dq li_sort.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl63,221
+    dq .kl63,226
 .kfn: db "li_less", 0
 section .text
 list_end:
@@ -4063,8 +4231,8 @@ list_end:
 .kfe:
 section .data
 .kft: dq li_less.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl64,230
-    dq .kl65,233
+    dq .kl64,235
+    dq .kl65,238
 .kfn: db "list_end", 0
 section .text
 list_new:
@@ -4094,7 +4262,7 @@ list_new:
 .kfe:
 section .data
 .kft: dq list_end.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl66,240
+    dq .kl66,245
 .kfn: db "list_new", 0
 section .text
 list_free:
@@ -4127,7 +4295,7 @@ list_free:
 .kfe:
 section .data
 .kft: dq list_new.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl67,245
+    dq .kl67,250
 .kfn: db "list_free", 0
 section .text
 list_len:
@@ -4160,7 +4328,7 @@ list_len:
 .kfe:
 section .data
 .kft: dq list_free.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl68,250
+    dq .kl68,255
 .kfn: db "list_len", 0
 section .text
 list_add:
@@ -4197,7 +4365,7 @@ list_add:
 .kfe:
 section .data
 .kft: dq list_len.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl69,255
+    dq .kl69,260
 .kfn: db "list_add", 0
 section .text
 list_get:
@@ -4234,7 +4402,7 @@ list_get:
 .kfe:
 section .data
 .kft: dq list_add.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl70,260
+    dq .kl70,265
 .kfn: db "list_get", 0
 section .text
 list_set:
@@ -4286,8 +4454,8 @@ list_set:
 .kfe:
 section .data
 .kft: dq list_get.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl71,265
-    dq .kl72,269
+    dq .kl71,270
+    dq .kl72,274
 .kfn: db "list_set", 0
 section .text
 list_last:
@@ -4352,9 +4520,9 @@ list_last:
 .kfe:
 section .data
 .kft: dq list_set.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl73,274
-    dq .kl74,280
-    dq .kl75,283
+    dq .kl73,279
+    dq .kl74,285
+    dq .kl75,288
 .kfn: db "list_last", 0
 section .text
 list_pop:
@@ -4437,10 +4605,10 @@ list_pop:
 .kfe:
 section .data
 .kft: dq list_last.kft, .kfe, .kfn, __kron_file_1,4
-    dq .kl76,288
-    dq .kl77,294
-    dq .kl78,295
-    dq .kl79,299
+    dq .kl76,293
+    dq .kl77,299
+    dq .kl78,300
+    dq .kl79,304
 .kfn: db "list_pop", 0
 section .text
 list_insert:
@@ -4575,9 +4743,9 @@ list_insert:
 .kfe:
 section .data
 .kft: dq list_pop.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl80,304
-    dq .kl81,311
-    dq .kl82,325
+    dq .kl80,309
+    dq .kl81,316
+    dq .kl82,330
 .kfn: db "list_insert", 0
 section .text
 list_remove:
@@ -4687,9 +4855,9 @@ list_remove:
 .kfe:
 section .data
 .kft: dq list_insert.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl83,330
-    dq .kl84,332
-    dq .kl85,344
+    dq .kl83,335
+    dq .kl84,337
+    dq .kl85,349
 .kfn: db "list_remove", 0
 section .text
 list_clear:
@@ -4741,8 +4909,8 @@ list_clear:
 .kfe:
 section .data
 .kft: dq list_remove.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl86,349
-    dq .kl87,353
+    dq .kl86,354
+    dq .kl87,358
 .kfn: db "list_clear", 0
 section .text
 list_find:
@@ -4829,8 +4997,8 @@ list_find:
 .kfe:
 section .data
 .kft: dq list_clear.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl88,358
-    dq .kl89,373
+    dq .kl88,363
+    dq .kl89,378
 .kfn: db "list_find", 0
 section .text
 list_sort:
@@ -4864,7 +5032,7 @@ list_sort:
 .kfe:
 section .data
 .kft: dq list_find.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl90,378
+    dq .kl90,383
 .kfn: db "list_sort", 0
 section .text
 list_reverse:
@@ -4980,8 +5148,8 @@ list_reverse:
 .kfe:
 section .data
 .kft: dq list_sort.kft, .kfe, .kfn, __kron_file_1,2
-    dq .kl91,383
-    dq .kl92,398
+    dq .kl91,388
+    dq .kl92,403
 .kfn: db "list_reverse", 0
 section .text
 list_copy:
@@ -5043,13 +5211,11 @@ list_copy:
     push rax
     mov rax, r12
     push rax
-    mov rax, 8
-    push rax
     mov rax, r14
     mov rcx, 8
     imul rax, rcx
     mov rcx, rax
-    pop rax
+    mov rax, 8
     add rax, rcx
     push rax
     pop r8
@@ -5082,13 +5248,1036 @@ list_copy:
 .kfe:
 section .data
 .kft: dq list_reverse.kft, .kfe, .kfn, __kron_file_1,6
-    dq .kl93,403
-    dq .kl94,406
-    dq .kl95,408
-    dq .kl96,409
-    dq .kl97,410
-    dq .kl98,413
+    dq .kl93,408
+    dq .kl94,411
+    dq .kl95,413
+    dq .kl96,414
+    dq .kl97,415
+    dq .kl98,418
 .kfn: db "list_copy", 0
+section .text
+list_sget:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov [rbp-24], r12
+    mov r12, rcx
+    mov rbx, rdx
+    mov rcx, r12
+    mov rdx, rbx
+    sub rsp, 32
+.kl99:
+    call list_get
+    add rsp, 32
+    jmp .__ret_335
+.__ret_335:
+    mov rbx, [rbp-32]
+    mov r12, [rbp-24]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_copy.kft, .kfe, .kfn, __kron_file_1,1
+    dq .kl99,428
+.kfn: db "list_sget", 0
+section .text
+list_sset:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-64], rbx
+    mov [rbp-56], r12
+    mov [rbp-48], r13
+    mov r13, rcx
+    mov r12, rdx
+    mov rbx, r8
+    mov rcx, r13
+    mov rdx, r12
+    mov r8, rbx
+    sub rsp, 32
+.kl100:
+    call list_set
+    add rsp, 32
+    jmp .__ret_336
+.__ret_336:
+    mov rbx, [rbp-64]
+    mov r12, [rbp-56]
+    mov r13, [rbp-48]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_sget.kft, .kfe, .kfn, __kron_file_1,1
+    dq .kl100,432
+.kfn: db "list_sset", 0
+section .text
+li_at_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rbp-80], rbx
+    mov [rbp-72], r12
+    mov [rbp-64], r13
+    mov [rbp-56], r14
+    mov rbx, rcx
+    mov r14, rdx
+    mov r13, r8
+    mov rax, rbx
+    push rax
+    mov rax, [rel __g_OB_LIST]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl101:
+    call ob_get
+    add rsp, 32
+    mov r12, rax
+    cmp r12, 0
+    jne .L338
+    mov rax, 0
+    jmp .__ret_337
+    jmp .L339
+.L338:
+.L339:
+    mov rax, 0
+    mov rbx, rax
+    mov rax, r12
+    mov rax, [rax]
+    mov rbx, rax
+    cmp r14, 0
+    jge .L340
+    mov rax, 5
+    mov [rel __g_hp_err], rax
+    mov rax, 0
+    jmp .__ret_337
+    jmp .L341
+.L340:
+.L341:
+    mov rax, r14
+    push rax
+    mov rax, rbx
+    mov rcx, r13
+    cqo
+    idiv rcx
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    jl .L342
+    mov rax, 5
+    mov [rel __g_hp_err], rax
+    mov rax, 0
+    jmp .__ret_337
+    jmp .L343
+.L342:
+.L343:
+    mov rax, r12
+    add rax, 8
+    push rax
+    mov rax, r14
+    imul rax, r13
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    jmp .__ret_337
+.__ret_337:
+    mov rbx, [rbp-80]
+    mov r12, [rbp-72]
+    mov r13, [rbp-64]
+    mov r14, [rbp-56]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_sset.kft, .kfe, .kfn, __kron_file_1,1
+    dq .kl101,438
+.kfn: db "li_at_n", 0
+section .text
+list_len_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov [rbp-24], r12
+    mov r12, rcx
+    mov rbx, rdx
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r12
+    sub rsp, 32
+.kl102:
+    call li_len
+    add rsp, 32
+    mov rcx, rbx
+    cqo
+    idiv rcx
+    push rax
+    pop rcx
+    sub rsp, 32
+    call list_end
+    add rsp, 32
+    jmp .__ret_344
+.__ret_344:
+    mov rbx, [rbp-32]
+    mov r12, [rbp-24]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq li_at_n.kft, .kfe, .kfn, __kron_file_1,1
+    dq .kl102,457
+.kfn: db "list_len_n", 0
+section .text
+list_add_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 128
+    mov [rbp-96], rbx
+    mov [rbp-88], r12
+    mov [rbp-80], r13
+    mov [rbp-72], r14
+    mov [rbp-64], r15
+    mov r15, rcx
+    mov r14, rdx
+    mov r13, r8
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r15
+    sub rsp, 32
+.kl103:
+    call li_len
+    add rsp, 32
+    mov r12, rax
+    mov rax, [rel __g_hp_err]
+    cmp rax, 0
+    jne .L346
+    mov rax, r15
+    push rax
+    mov rax, r12
+    add rax, r13
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl104:
+    call li_room
+    add rsp, 32
+    mov rbx, rax
+    cmp rbx, 0
+    je .L348
+    mov rax, rbx
+    add rax, 8
+    push rax
+    mov rax, r12
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, r14
+    push rax
+    mov rax, r13
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl105:
+    call hp_copy
+    add rsp, 32
+    mov rax, rbx
+    push rax
+    mov rax, r12
+    add rax, r13
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    jmp .L349
+.L348:
+.L349:
+    jmp .L347
+.L346:
+.L347:
+    mov rcx, r15
+    sub rsp, 32
+.kl106:
+    call list_end
+    add rsp, 32
+    jmp .__ret_345
+.__ret_345:
+    mov rbx, [rbp-96]
+    mov r12, [rbp-88]
+    mov r13, [rbp-80]
+    mov r14, [rbp-72]
+    mov r15, [rbp-64]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_len_n.kft, .kfe, .kfn, __kron_file_1,4
+    dq .kl103,462
+    dq .kl104,464
+    dq .kl105,466
+    dq .kl106,470
+.kfn: db "list_add_n", 0
+section .text
+list_get_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rbp-80], rbx
+    mov [rbp-72], r12
+    mov [rbp-64], r13
+    mov [rbp-56], r14
+    mov r14, rcx
+    mov rbx, rdx
+    mov r13, r8
+    mov r12, r9
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r14
+    mov rdx, rbx
+    mov r8, r12
+    sub rsp, 32
+.kl107:
+    call li_at_n
+    add rsp, 32
+    mov rbx, rax
+    cmp rbx, 0
+    je .L351
+    mov rax, r13
+    push rax
+    mov rax, rbx
+    push rax
+    mov rax, r12
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl108:
+    call hp_copy
+    add rsp, 32
+    jmp .L352
+.L351:
+.L352:
+    mov rcx, r13
+    sub rsp, 32
+.kl109:
+    call list_end
+    add rsp, 32
+    jmp .__ret_350
+.__ret_350:
+    mov rbx, [rbp-80]
+    mov r12, [rbp-72]
+    mov r13, [rbp-64]
+    mov r14, [rbp-56]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_add_n.kft, .kfe, .kfn, __kron_file_1,3
+    dq .kl107,475
+    dq .kl108,477
+    dq .kl109,479
+.kfn: db "list_get_n", 0
+section .text
+list_set_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rbp-80], rbx
+    mov [rbp-72], r12
+    mov [rbp-64], r13
+    mov [rbp-56], r14
+    mov r14, rcx
+    mov rbx, rdx
+    mov r13, r8
+    mov r12, r9
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r14
+    mov rdx, rbx
+    mov r8, r12
+    sub rsp, 32
+.kl110:
+    call li_at_n
+    add rsp, 32
+    mov rbx, rax
+    cmp rbx, 0
+    je .L354
+    mov rax, rbx
+    push rax
+    mov rax, r13
+    push rax
+    mov rax, r12
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl111:
+    call hp_copy
+    add rsp, 32
+    jmp .L355
+.L354:
+.L355:
+    mov rcx, r14
+    sub rsp, 32
+.kl112:
+    call list_end
+    add rsp, 32
+    jmp .__ret_353
+.__ret_353:
+    mov rbx, [rbp-80]
+    mov r12, [rbp-72]
+    mov r13, [rbp-64]
+    mov r14, [rbp-56]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_get_n.kft, .kfe, .kfn, __kron_file_1,3
+    dq .kl110,484
+    dq .kl111,486
+    dq .kl112,488
+.kfn: db "list_set_n", 0
+section .text
+list_insert_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 144
+    mov [rbp-112], rbx
+    mov [rbp-104], r12
+    mov [rbp-96], r13
+    mov [rbp-88], r14
+    mov [rbp-80], r15
+    mov [rbp-8], rcx
+    mov r15, rdx
+    mov [rbp-24], r8
+    mov r14, r9
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, [rbp-8]
+    sub rsp, 32
+.kl113:
+    call li_len
+    add rsp, 32
+    mov r13, rax
+    mov rax, [rel __g_hp_err]
+    cmp rax, 0
+    jne .L357
+    cmp r15, 0
+    jge .L359
+    mov rax, 5
+    mov [rel __g_hp_err], rax
+    jmp .L360
+.L359:
+    mov rax, r15
+    push rax
+    mov rax, r13
+    mov rcx, r14
+    cqo
+    idiv rcx
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    jle .L361
+    mov rax, 5
+    mov [rel __g_hp_err], rax
+    jmp .L362
+.L361:
+    mov rax, [rbp-8]
+    push rax
+    mov rax, r13
+    add rax, r14
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl114:
+    call li_room
+    add rsp, 32
+    mov r12, rax
+    cmp r12, 0
+    je .L363
+    mov rax, r13
+    sub rax, 1
+    mov rbx, rax
+.L365:
+    mov rax, rbx
+    push rax
+    mov rax, r15
+    imul rax, r14
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    jl .L366
+    mov rax, r12
+    add rax, 8
+    push rax
+    mov rax, rbx
+    add rax, r14
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, r12
+    add rax, 8
+    push rax
+    mov rax, rbx
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov rax, [rax]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    sub rbx, 1
+.L367:
+    jmp .L365
+.L366:
+    mov rax, r12
+    add rax, 8
+    push rax
+    mov rax, r15
+    imul rax, r14
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, [rbp-24]
+    push rax
+    mov rax, r14
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl115:
+    call hp_copy
+    add rsp, 32
+    mov rax, r12
+    push rax
+    mov rax, r13
+    add rax, r14
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    jmp .L364
+.L363:
+.L364:
+.L362:
+.L360:
+    jmp .L358
+.L357:
+.L358:
+    mov rcx, [rbp-8]
+    sub rsp, 32
+.kl116:
+    call list_end
+    add rsp, 32
+    jmp .__ret_356
+.__ret_356:
+    mov rbx, [rbp-112]
+    mov r12, [rbp-104]
+    mov r13, [rbp-96]
+    mov r14, [rbp-88]
+    mov r15, [rbp-80]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_set_n.kft, .kfe, .kfn, __kron_file_1,4
+    dq .kl113,493
+    dq .kl114,500
+    dq .kl115,509
+    dq .kl116,514
+.kfn: db "list_insert_n", 0
+section .text
+list_remove_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 144
+    mov [rbp-112], rbx
+    mov [rbp-104], r12
+    mov [rbp-96], r13
+    mov [rbp-88], r14
+    mov [rbp-80], r15
+    mov r13, rcx
+    mov rbx, rdx
+    mov r15, r8
+    mov r14, r9
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r13
+    mov rdx, rbx
+    mov r8, r14
+    sub rsp, 32
+.kl117:
+    call li_at_n
+    add rsp, 32
+    mov r12, rax
+    cmp r12, 0
+    je .L369
+    mov rax, r15
+    push rax
+    mov rax, r12
+    push rax
+    mov rax, r14
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl118:
+    call hp_copy
+    add rsp, 32
+    mov rax, r13
+    push rax
+    mov rax, [rel __g_OB_LIST]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl119:
+    call ob_get
+    add rsp, 32
+    mov r13, rax
+    mov rax, r13
+    mov rax, [rax]
+    mov r12, rax
+    mov rax, rbx
+    imul rax, r14
+    mov rbx, rax
+.L371:
+    mov rax, rbx
+    push rax
+    mov rax, r12
+    sub rax, r14
+    mov rcx, rax
+    pop rax
+    cmp rax, rcx
+    jge .L372
+    mov rax, r13
+    add rax, 8
+    push rax
+    mov rax, rbx
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    push rax
+    mov rax, r13
+    add rax, 8
+    push rax
+    mov rax, rbx
+    add rax, r14
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov rax, [rax]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    add rbx, 1
+.L373:
+    jmp .L371
+.L372:
+    mov rax, r13
+    push rax
+    mov rax, r12
+    sub rax, r14
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    jmp .L370
+.L369:
+.L370:
+    mov rcx, r15
+    sub rsp, 32
+.kl120:
+    call list_end
+    add rsp, 32
+    jmp .__ret_368
+.__ret_368:
+    mov rbx, [rbp-112]
+    mov r12, [rbp-104]
+    mov r13, [rbp-96]
+    mov r14, [rbp-88]
+    mov r15, [rbp-80]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_insert_n.kft, .kfe, .kfn, __kron_file_1,4
+    dq .kl117,519
+    dq .kl118,521
+    dq .kl119,522
+    dq .kl120,533
+.kfn: db "list_remove_n", 0
+section .text
+list_last_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-64], rbx
+    mov [rbp-56], r12
+    mov [rbp-48], r13
+    mov [rbp-40], r14
+    mov r14, rcx
+    mov r13, rdx
+    mov r12, r8
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, r14
+    sub rsp, 32
+.kl121:
+    call li_len
+    add rsp, 32
+    mov rcx, r12
+    cqo
+    idiv rcx
+    mov rbx, rax
+    mov rax, [rel __g_hp_err]
+    cmp rax, 0
+    jne .L375
+    cmp rbx, 0
+    jne .L377
+    mov rax, 10
+    mov [rel __g_hp_err], rax
+    jmp .L378
+.L377:
+    mov rax, r13
+    push rax
+    mov rax, r14
+    push rax
+    mov rax, rbx
+    sub rax, 1
+    push rax
+    pop rdx
+    pop rcx
+    mov r8, r12
+    sub rsp, 32
+.kl122:
+    call li_at_n
+    add rsp, 32
+    push rax
+    mov rax, r12
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call hp_copy
+    add rsp, 32
+.L378:
+    jmp .L376
+.L375:
+.L376:
+    mov rcx, r13
+    sub rsp, 32
+.kl123:
+    call list_end
+    add rsp, 32
+    jmp .__ret_374
+.__ret_374:
+    mov rbx, [rbp-64]
+    mov r12, [rbp-56]
+    mov r13, [rbp-48]
+    mov r14, [rbp-40]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_remove_n.kft, .kfe, .kfn, __kron_file_1,3
+    dq .kl121,538
+    dq .kl122,543
+    dq .kl123,546
+.kfn: db "list_last_n", 0
+section .text
+list_pop_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rbp-80], rbx
+    mov [rbp-72], r12
+    mov [rbp-64], r13
+    mov [rbp-56], r14
+    mov rbx, rcx
+    mov r14, rdx
+    mov r13, r8
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rcx, rbx
+    sub rsp, 32
+.kl124:
+    call li_len
+    add rsp, 32
+    mov rcx, r13
+    cqo
+    idiv rcx
+    mov r12, rax
+    mov rax, [rel __g_hp_err]
+    cmp rax, 0
+    jne .L380
+    cmp r12, 0
+    jne .L382
+    mov rax, 10
+    mov [rel __g_hp_err], rax
+    jmp .L383
+.L382:
+    mov rax, r14
+    push rax
+    mov rax, rbx
+    push rax
+    mov rax, r12
+    sub rax, 1
+    push rax
+    pop rdx
+    pop rcx
+    mov r8, r13
+    sub rsp, 32
+.kl125:
+    call li_at_n
+    add rsp, 32
+    push rax
+    mov rax, r13
+    mov rcx, 8
+    imul rax, rcx
+    push rax
+    pop r8
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call hp_copy
+    add rsp, 32
+    mov rax, rbx
+    push rax
+    mov rax, [rel __g_OB_LIST]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl126:
+    call ob_get
+    add rsp, 32
+    mov rbx, rax
+    mov rax, rbx
+    push rax
+    mov rax, r12
+    sub rax, 1
+    imul rax, r13
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+.L383:
+    jmp .L381
+.L380:
+.L381:
+    mov rcx, r14
+    sub rsp, 32
+.kl127:
+    call list_end
+    add rsp, 32
+    jmp .__ret_379
+.__ret_379:
+    mov rbx, [rbp-80]
+    mov r12, [rbp-72]
+    mov r13, [rbp-64]
+    mov r14, [rbp-56]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_last_n.kft, .kfe, .kfn, __kron_file_1,4
+    dq .kl124,551
+    dq .kl125,556
+    dq .kl126,557
+    dq .kl127,561
+.kfn: db "list_pop_n", 0
+section .text
+list_reverse_n:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 160
+    mov [rbp-128], rbx
+    mov [rbp-120], r12
+    mov [rbp-112], r13
+    mov [rbp-104], r14
+    mov [rbp-96], r15
+    mov [rbp-8], rcx
+    mov r15, rdx
+    mov rax, [rel __g_HP_LOCK]
+    mov rcx, rax
+    sub rsp, 32
+    call __lock_take
+    add rsp, 32
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rel __g_OB_LIST]
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+.kl128:
+    call ob_get
+    add rsp, 32
+    mov r14, rax
+    cmp r14, 0
+    je .L385
+    mov rax, r14
+    mov rax, [rax]
+    mov rcx, r15
+    cqo
+    idiv rcx
+    mov rbx, rax
+    mov rax, 0
+    mov r13, rax
+    mov rax, rbx
+    sub rax, 1
+    mov r12, rax
+.L387:
+    cmp r13, r12
+    jge .L388
+    mov rax, 0
+    mov rbx, rax
+.L390:
+    cmp rbx, r15
+    jge .L391
+    mov rax, r14
+    add rax, 8
+    push rax
+    mov rax, r13
+    imul rax, r15
+    add rax, rbx
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-64], rax
+    mov rax, r14
+    add rax, 8
+    push rax
+    mov rax, r12
+    imul rax, r15
+    add rax, rbx
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    pop rax
+    add rax, rcx
+    mov [rbp-72], rax
+    mov rax, [rbp-64]
+    mov rax, [rax]
+    mov [rbp-80], rax
+    mov rax, [rbp-64]
+    push rax
+    mov rax, [rbp-72]
+    mov rax, [rax]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    mov rax, [rbp-72]
+    push rax
+    mov rax, [rbp-80]
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    add rbx, 1
+.L392:
+    jmp .L390
+.L391:
+    add r13, 1
+    sub r12, 1
+.L389:
+    jmp .L387
+.L388:
+    jmp .L386
+.L385:
+.L386:
+    mov rcx, [rbp-8]
+    sub rsp, 32
+.kl129:
+    call list_end
+    add rsp, 32
+    jmp .__ret_384
+.__ret_384:
+    mov rbx, [rbp-128]
+    mov r12, [rbp-120]
+    mov r13, [rbp-112]
+    mov r14, [rbp-104]
+    mov r15, [rbp-96]
+    mov rsp, rbp
+    pop rbp
+    ret
+.kfe:
+section .data
+.kft: dq list_pop_n.kft, .kfe, .kfn, __kron_file_1,2
+    dq .kl128,566
+    dq .kl129,587
+.kfn: db "list_reverse_n", 0
 section .text
 list_add_real:
     push rbp
@@ -5114,7 +6303,7 @@ list_add_real:
     mov rcx, r12
     mov rdx, rbx
     sub rsp, 32
-.kl99:
+.kl130:
     call li_add
     add rsp, 32
     push rax
@@ -5122,8 +6311,8 @@ list_add_real:
     sub rsp, 32
     call list_end
     add rsp, 32
-    jmp .__ret_335
-.__ret_335:
+    jmp .__ret_393
+.__ret_393:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     movups xmm6, [rbp-48]
@@ -5132,8 +6321,8 @@ list_add_real:
     ret
 .kfe:
 section .data
-.kft: dq list_copy.kft, .kfe, .kfn, __kron_file_1,1
-    dq .kl99,423
+.kft: dq list_reverse_n.kft, .kfe, .kfn, __kron_file_1,1
+    dq .kl130,597
 .kfn: db "list_add_real", 0
 section .text
 list_get_real:
@@ -5153,14 +6342,14 @@ list_get_real:
     mov rcx, r12
     mov rdx, rbx
     sub rsp, 32
-.kl100:
+.kl131:
     call li_get
     add rsp, 32
     mov rbx, rax
 section .data
-.flt337: dq 0.0
+.flt395: dq 0.0
 section .text
-    movsd xmm0, [rel .flt337]
+    movsd xmm0, [rel .flt395]
     movaps xmm6, xmm0
     lea rax, [rel __g_li_real]
     push rax
@@ -5171,7 +6360,7 @@ section .text
     movsd xmm0, [rel __g_li_real]
     movaps xmm6, xmm0
     sub rsp, 32
-.kl101:
+.kl132:
     call hp_take_err
     add rsp, 32
     mov rbx, rax
@@ -5181,23 +6370,23 @@ section .text
     call __lock_give
     add rsp, 32
     cmp rbx, 0
-    je .L338
+    je .L396
     mov rcx, rbx
     sub rsp, 32
-.kl102:
+.kl133:
     call heap_fail
     add rsp, 32
 section .data
-.flt340: dq 0.0
+.flt398: dq 0.0
 section .text
-    movsd xmm0, [rel .flt340]
-    jmp .__ret_336
-    jmp .L339
-.L338:
-.L339:
+    movsd xmm0, [rel .flt398]
+    jmp .__ret_394
+    jmp .L397
+.L396:
+.L397:
     movaps xmm0, xmm6
-    jmp .__ret_336
-.__ret_336:
+    jmp .__ret_394
+.__ret_394:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     movups xmm6, [rbp-64]
@@ -5207,9 +6396,9 @@ section .text
 .kfe:
 section .data
 .kft: dq list_add_real.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl100,428
-    dq .kl101,434
-    dq .kl102,437
+    dq .kl131,602
+    dq .kl132,608
+    dq .kl133,611
 .kfn: db "list_get_real", 0
 section .text
 list_set_real:
@@ -5230,12 +6419,12 @@ list_set_real:
     mov rcx, r12
     mov rdx, rbx
     sub rsp, 32
-.kl103:
+.kl134:
     call li_at
     add rsp, 32
     mov rbx, rax
     cmp rbx, 0
-    je .L342
+    je .L400
     movaps xmm0, xmm6
     movsd [rel __g_li_real], xmm0
     mov rax, rbx
@@ -5245,11 +6434,11 @@ list_set_real:
     mov rcx, rax
     pop rdx
     mov [rdx], rcx
-    jmp .L343
-.L342:
-.L343:
+    jmp .L401
+.L400:
+.L401:
     sub rsp, 32
-.kl104:
+.kl135:
     call hp_take_err
     add rsp, 32
     mov rbx, rax
@@ -5259,23 +6448,23 @@ list_set_real:
     call __lock_give
     add rsp, 32
     cmp rbx, 0
-    je .L344
+    je .L402
     mov rcx, rbx
     sub rsp, 32
-.kl105:
+.kl136:
     call heap_fail
     add rsp, 32
 section .data
-.flt346: dq 0.0
+.flt404: dq 0.0
 section .text
-    movsd xmm0, [rel .flt346]
-    jmp .__ret_341
-    jmp .L345
-.L344:
-.L345:
+    movsd xmm0, [rel .flt404]
+    jmp .__ret_399
+    jmp .L403
+.L402:
+.L403:
     movaps xmm0, xmm6
-    jmp .__ret_341
-.__ret_341:
+    jmp .__ret_399
+.__ret_399:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     movups xmm6, [rbp-64]
@@ -5285,9 +6474,9 @@ section .text
 .kfe:
 section .data
 .kft: dq list_get_real.kft, .kfe, .kfn, __kron_file_1,3
-    dq .kl103,445
-    dq .kl104,452
-    dq .kl105,455
+    dq .kl134,619
+    dq .kl135,626
+    dq .kl136,629
 .kfn: db "list_set_real", 0
 section .text
 main:
@@ -5301,15 +6490,15 @@ main:
     call __rt_init
     add rsp, 32
     sub rsp, 32
-.kl106:
+.kl137:
     call list_new
     add rsp, 32
     mov r13, rax
     mov rax, 0
     mov r12, rax
-.L348:
+.L406:
     cmp r12, 20
-    jge .L349
+    jge .L407
     mov rax, r13
     push rax
     mov rax, r12
@@ -5323,16 +6512,16 @@ main:
     pop rdx
     pop rcx
     sub rsp, 32
-.kl107:
+.kl138:
     call list_add
     add rsp, 32
     add r12, 1
-.L350:
-    jmp .L348
-.L349:
+.L408:
+    jmp .L406
+.L407:
     mov rcx, r13
     sub rsp, 32
-.kl108:
+.kl139:
     call list_len
     add rsp, 32
     mov rcx, rax
@@ -5341,18 +6530,18 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl109:
+.kl140:
     call list_sort
     add rsp, 32
     mov rax, 0
     mov r12, rax
-.L351:
+.L409:
     cmp r12, 5
-    jge .L352
+    jge .L410
     mov rcx, r13
     mov rdx, r12
     sub rsp, 32
-.kl110:
+.kl141:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5360,12 +6549,12 @@ main:
     call __print_int
     add rsp, 32
     add r12, 1
-.L353:
-    jmp .L351
-.L352:
+.L411:
+    jmp .L409
+.L410:
     mov rcx, r13
     sub rsp, 32
-.kl111:
+.kl142:
     call list_last
     add rsp, 32
     mov rcx, rax
@@ -5375,7 +6564,7 @@ main:
     mov rcx, r13
     mov rdx, 99
     sub rsp, 32
-.kl112:
+.kl143:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5393,13 +6582,13 @@ main:
     mov rdx, 0
     mov r8, 100
     sub rsp, 32
-.kl113:
+.kl144:
     call list_insert
     add rsp, 32
     mov rcx, r13
     mov rdx, 0
     sub rsp, 32
-.kl114:
+.kl145:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5409,7 +6598,7 @@ main:
     mov rcx, r13
     mov rdx, 0
     sub rsp, 32
-.kl115:
+.kl146:
     call list_remove
     add rsp, 32
     mov rcx, rax
@@ -5419,7 +6608,7 @@ main:
     mov rcx, r13
     mov rdx, 12
     sub rsp, 32
-.kl116:
+.kl147:
     call list_find
     add rsp, 32
     mov rcx, rax
@@ -5429,7 +6618,7 @@ main:
     mov rcx, r13
     mov rdx, 55
     sub rsp, 32
-.kl117:
+.kl148:
     call list_find
     add rsp, 32
     mov rcx, rax
@@ -5438,7 +6627,7 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl118:
+.kl149:
     call list_pop
     add rsp, 32
     mov rcx, rax
@@ -5447,7 +6636,7 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl119:
+.kl150:
     call list_len
     add rsp, 32
     mov rcx, rax
@@ -5456,13 +6645,13 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl120:
+.kl151:
     call list_reverse
     add rsp, 32
     mov rcx, r13
     mov rdx, 0
     sub rsp, 32
-.kl121:
+.kl152:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5471,18 +6660,18 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl122:
+.kl153:
     call list_copy
     add rsp, 32
     mov rbx, rax
     mov rcx, r13
     sub rsp, 32
-.kl123:
+.kl154:
     call list_clear
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl124:
+.kl155:
     call list_len
     add rsp, 32
     mov rcx, rax
@@ -5491,7 +6680,7 @@ main:
     add rsp, 32
     mov rcx, rbx
     sub rsp, 32
-.kl125:
+.kl156:
     call list_len
     add rsp, 32
     mov rcx, rax
@@ -5500,7 +6689,7 @@ main:
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl126:
+.kl157:
     call list_pop
     add rsp, 32
     mov rcx, rax
@@ -5515,31 +6704,31 @@ main:
     call __print_int
     add rsp, 32
     sub rsp, 32
-.kl127:
+.kl158:
     call list_new
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
     push rax
 section .data
-.flt354: dq 2.5
+.flt412: dq 2.5
 section .text
-    movsd xmm0, [rel .flt354]
+    movsd xmm0, [rel .flt412]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm1, [rsp]
     add rsp, 8
     pop rcx
     sub rsp, 32
-.kl128:
+.kl159:
     call list_add_real
     add rsp, 32
     mov rax, rbx
     push rax
 section .data
-.flt355: dq 0.125
+.flt413: dq 0.125
 section .text
-    movsd xmm0, [rel .flt355]
+    movsd xmm0, [rel .flt413]
     movaps xmm1, xmm0
     xorps xmm0, xmm0
     subsd xmm0, xmm1
@@ -5549,13 +6738,13 @@ section .text
     add rsp, 8
     pop rcx
     sub rsp, 32
-.kl129:
+.kl160:
     call list_add_real
     add rsp, 32
     mov rcx, rbx
     mov rdx, 1
     sub rsp, 32
-.kl130:
+.kl161:
     call list_get_real
     add rsp, 32
     call __print_float
@@ -5564,9 +6753,9 @@ section .text
     mov rax, 0
     push rax
 section .data
-.flt356: dq 9.75
+.flt414: dq 9.75
 section .text
-    movsd xmm0, [rel .flt356]
+    movsd xmm0, [rel .flt414]
     sub rsp, 8
     movsd [rsp], xmm0
     movsd xmm2, [rsp]
@@ -5574,24 +6763,24 @@ section .text
     pop rdx
     pop rcx
     sub rsp, 32
-.kl131:
+.kl162:
     call list_set_real
     add rsp, 32
     mov rcx, rbx
     mov rdx, 0
     sub rsp, 32
-.kl132:
+.kl163:
     call list_get_real
     add rsp, 32
     call __print_float
     mov rcx, r13
     sub rsp, 32
-.kl133:
+.kl164:
     call list_free
     add rsp, 32
     mov rcx, r13
     sub rsp, 32
-.kl134:
+.kl165:
     call list_len
     add rsp, 32
     mov rcx, rax
@@ -5606,15 +6795,15 @@ section .text
     call __print_int
     add rsp, 32
     sub rsp, 32
-.kl135:
+.kl166:
     call list_new
     add rsp, 32
     mov rbx, rax
     mov rax, 0
     mov r12, rax
-.L357:
+.L415:
     cmp r12, 100000
-    jge .L358
+    jge .L416
     mov rax, rbx
     push rax
     mov rax, 100000
@@ -5623,22 +6812,22 @@ section .text
     pop rdx
     pop rcx
     sub rsp, 32
-.kl136:
+.kl167:
     call list_add
     add rsp, 32
     add r12, 1
-.L359:
-    jmp .L357
-.L358:
+.L417:
+    jmp .L415
+.L416:
     mov rcx, rbx
     sub rsp, 32
-.kl137:
+.kl168:
     call list_sort
     add rsp, 32
     mov rcx, rbx
     mov rdx, 0
     sub rsp, 32
-.kl138:
+.kl169:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5648,7 +6837,7 @@ section .text
     mov rcx, rbx
     mov rdx, 99999
     sub rsp, 32
-.kl139:
+.kl170:
     call list_get
     add rsp, 32
     mov rcx, rax
@@ -5656,8 +6845,8 @@ section .text
     call __print_int
     add rsp, 32
     mov rax, 0
-    jmp .__ret_347
-.__ret_347:
+    jmp .__ret_405
+.__ret_405:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov r13, [rbp-64]
@@ -5669,40 +6858,40 @@ section .text
 .kfe:
 section .data
 .kft: dq list_set_real.kft, .kfe, .kfn, __kron_file_2,34
-    dq .kl106,10
-    dq .kl107,13
-    dq .kl108,16
-    dq .kl109,17
-    dq .kl110,20
-    dq .kl111,23
-    dq .kl112,24
-    dq .kl113,26
-    dq .kl114,27
-    dq .kl115,28
-    dq .kl116,29
-    dq .kl117,30
-    dq .kl118,31
-    dq .kl119,32
-    dq .kl120,33
-    dq .kl121,34
-    dq .kl122,35
-    dq .kl123,36
-    dq .kl124,37
-    dq .kl125,38
-    dq .kl126,39
-    dq .kl127,41
-    dq .kl128,42
-    dq .kl129,43
-    dq .kl130,44
-    dq .kl131,45
-    dq .kl132,46
-    dq .kl133,47
-    dq .kl134,48
-    dq .kl135,51
-    dq .kl136,54
-    dq .kl137,57
-    dq .kl138,58
-    dq .kl139,59
+    dq .kl137,10
+    dq .kl138,13
+    dq .kl139,16
+    dq .kl140,17
+    dq .kl141,20
+    dq .kl142,23
+    dq .kl143,24
+    dq .kl144,26
+    dq .kl145,27
+    dq .kl146,28
+    dq .kl147,29
+    dq .kl148,30
+    dq .kl149,31
+    dq .kl150,32
+    dq .kl151,33
+    dq .kl152,34
+    dq .kl153,35
+    dq .kl154,36
+    dq .kl155,37
+    dq .kl156,38
+    dq .kl157,39
+    dq .kl158,41
+    dq .kl159,42
+    dq .kl160,43
+    dq .kl161,44
+    dq .kl162,45
+    dq .kl163,46
+    dq .kl164,47
+    dq .kl165,48
+    dq .kl166,51
+    dq .kl167,54
+    dq .kl168,57
+    dq .kl169,58
+    dq .kl170,59
 .kfn: db "main", 0
 section .text
 section .text

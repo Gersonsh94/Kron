@@ -1,0 +1,103 @@
+kron_program
+kron_domain test_extern;
+kron_imports
+kron_definitions
+
+// Calling the system's libraries: extern.
+//
+//   extern "libm.so.6", "libm.dylib", "msvcrt.dll" {
+//       fn cos(x: f64) -> f64;
+//   }
+//
+// The strings name the library on each system; the first that loads is
+// used. Each function is found the first time it is called. Calls go inside
+// raw { }: the code they run is C, outside what Kron checks. Reals go as
+// reals (an f32 parameter gets an f32), integers as integers, strings and
+// pointers as addresses; '...' takes any number more, as printf does.
+//
+// Expected output:
+//   1.000000      cos(0)
+//   1024.000000   pow(2, 10)
+//   4.000000      sqrt(16)
+//   2.000000      floorf(2.75), an f32 there and back
+//   5             strlen("hello")
+//   42            abs(-42), an i32 result sign-extended
+//   -7            atoi("-7")
+//   2.500000      strtod
+//   printf: 7 seven 3.142 x 1 2 3 4 5 6 7 8 9 10 (and its length, 41)
+//   41
+//   16006         four threads, each calling sqrt a thousand times
+//   0             a function no library has: 0, and a failure
+//   1
+//   fail: the system library has no function of that name ...
+
+extern "libm.so.6", "libm.dylib", "msvcrt.dll" {
+    fn cos(x: f64) -> f64;
+    fn pow(x: f64, y: f64) -> f64;
+    fn sqrt(x: f64) -> f64;
+    fn floorf(x: f32) -> f32;
+}
+
+extern "libc.so.6", "libSystem.B.dylib", "msvcrt.dll" {
+    fn strlen(s: str) -> u64;
+    fn abs(x: i32) -> i32;
+    fn atoi(s: str) -> i32;
+    fn strtod(s: str, end: ptr<u8>) -> f64;
+    fn printf(format: str, ...) -> i32;
+    fn fflush(file: ptr<u8>) -> i32;
+    fn kron_no_such_function(x: i64) -> i64;
+}
+
+shared var total: i64;
+
+fn work(arg: i64) -> i64 {
+    var i: i64 = 0;
+    var s: f64 = 0.0;
+    while i < 1000 {
+        raw {
+            s = s + sqrt(16.0);
+        }
+        i = i + 1;
+    }
+    lock_take(0);
+    total = total + (s as i64) + arg;
+    lock_give(0);
+    return 0;
+}
+
+fn main() -> i32 {
+    raw {
+        print(cos(0.0));
+        print(pow(2.0, 10.0));
+        print(sqrt(16.0));
+        print(floorf(2.75));
+        print(strlen("hello"));
+        print(abs(-42));
+        print(atoi("-7"));
+        print(strtod("2.5", 0));
+        var n: i32 = printf("printf: %d %s %.3f %c %d %d %d %d %d %d %d %d %d %d\n", 7, "seven", 3.14159, 120, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        fflush(0);
+        print(n);
+    }
+    var hs: [i64; 4];
+    var i: i64 = 0;
+    lock_init(0);
+    while i < 4 {
+        hs[i] = thread_start(&work, i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 4 {
+        thread_wait(hs[i]);
+        i = i + 1;
+    }
+    print(total);
+    var r: i64 = 5;
+    raw {
+        r = kron_no_such_function(3);
+    }
+    print(r);
+    print(failed());
+    print_fail();
+    return 0;
+}

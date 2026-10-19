@@ -5,7 +5,7 @@ REM  it in QEMU. Native all the way down: no Windows or Linux underneath.
 REM
 REM  Usage:  krun.bat my_kernel.kr
 REM
-REM  Needs: nasm and qemu-system-x86_64 on the PATH.
+REM  Needs: qemu-system-x86_64 on the PATH (to run it; kronc builds it all).
 REM ============================================================================
 setlocal
 if "%~1"=="" (
@@ -17,25 +17,24 @@ set SRC=%~1
 set BASE=%~n1
 
 echo === [1/4] Compiling %SRC% for bare metal ===
+if exist "%BASE%.asm" del "%BASE%.asm"
 kronc.exe "%SRC%" --bare
-if errorlevel 1 (
+if not exist "%BASE%.asm" (
     echo ERROR: the Kron compilation failed.
     exit /b 1
 )
 
 echo === [2/4] Preparing kernel_program.asm ===
 copy /Y "%BASE%.asm" kernel_program.asm >nul
-if errorlevel 1 (
-    echo ERROR: %BASE%.asm was not found
-    exit /b 1
-)
 
-echo === [3/4] Assembling boot.asm -^> kernel.bin (flat binary) ===
-nasm -f bin boot.asm -o kernel.bin
-if errorlevel 1 (
-    echo ERROR: NASM failed to assemble the boot stub.
+echo === [3/4] Assembling boot.asm -^> kernel.bin (Multiboot, flat binary) ===
+if exist boot.kbin del boot.kbin
+kronc.exe boot.asm --assemble >nul
+if not exist boot.kbin (
+    echo ERROR: kasm could not assemble the boot stub.
     exit /b 1
 )
+copy /Y boot.kbin kernel.bin >nul
 
 echo === [4/4] Booting in QEMU (bare metal) ===
 echo   Close the QEMU window to come back.

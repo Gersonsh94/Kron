@@ -35,6 +35,7 @@ extern kasm_get_fixup_label
 extern kasm_get_fixup_addend
 extern kasm_get_fixup_kind
 extern kasm_get_label_section
+extern codegen_export_count, codegen_export_name
 
 %define FILE_ALIGN  0x200
 %define SECT_ALIGN  0x1000
@@ -72,15 +73,28 @@ section .bss
     pw_hint_rva     resq 128
     pw_entry_rva    resq 1
     pw_total        resq 1
+    pw_base         resq 1          ; ImageBase: a program's, or a library's
+    pw_exp_n        resq 1          ; a library: how many exports
+    pw_exp_order    resq 4096       ; their numbers, sorted by name
+    pw_exp_dir      resq 1          ; offset of the export directory in .idata
+    pw_exp_size     resq 1
+    pw_rel_dir      resq 1          ; and of the base relocations
+    pw_rel_size     resq 1
+    pw_rel_page     resq 1          ; the page of the block being written
+    pw_rel_block    resq 1          ; where that block starts
+    pw_name         resb 320        ; "__ce_" and an export's name
 
 section .data
     pw_gui db 0                   ; 1: GUI subsystem (set by main for --window)
+    pw_dll db 0                   ; 1: a DLL (--lib); main sets pw_dll_file too
+    pw_dll_file dq 0              ; the DLL's own name, without its folder
     pw_dll_name     db "kernel32.dll", 0
     pw_main_name    db "main", 0
+    pw_dllmain_name db "__dll_main", 0
 
 section .text
     global pw_write
-    global pw_gui
+    global pw_gui, pw_dll, pw_dll_file
 
 pw_put8:
     mov  rax, [rel pw_buf]
@@ -148,9 +162,18 @@ pw_write:
     add  rsp,32
     mov  [rel pw_xref_count], rax
 
-    ; ---- EntryPoint = TEXT_RVA + offset(main) ----
+    ; ---- EntryPoint = TEXT_RVA + offset(main), or of __dll_main ----
+    mov  rax, 0x0000000140000000
+    mov  [rel pw_base], rax
     lea  rcx, [rel pw_main_name]
     mov  rdx, 4
+    cmp  byte [rel pw_dll], 0
+    je   .entry_name
+    mov  rax, 0x0000000180000000     ; where a DLL would rather go
+    mov  [rel pw_base], rax
+    lea  rcx, [rel pw_dllmain_name]
+    mov  rdx, 10
+.entry_name:
     sub  rsp,32
     call kasm_find_label
     add  rsp,32
@@ -273,6 +296,10 @@ pw_write:
     call pw_put16
     mov  rcx, 0xBC+18
     mov  dx, 0x0023              ; EXEC | LARGE_ADDR | RELOCS_STRIPPED
+    cmp  byte [rel pw_dll], 0
+    je   .coff_ch
+    mov  dx, 0x2022              ; EXEC | LARGE_ADDR | DLL: relocations kept
+.coff_ch:
     call pw_put16
 
     ; Optional
@@ -292,7 +319,7 @@ pw_write:
     mov  edx, TEXT_RVA
     call pw_put32                ; BaseOfCode
     mov  rcx, 0xD0+24
-    mov  rdx, 0x0000000140000000
+    mov  rdx, [rel pw_base]
     call pw_put64                ; ImageBase
     mov  rcx, 0xD0+32
     mov  edx, SECT_ALIGN
@@ -319,10 +346,14 @@ pw_write:
     call pw_put16
     mov  rcx, 0xD0+70
     mov  dx, 0                   ; DllCharacteristics = 0 (no ASLR)
+    cmp  byte [rel pw_dll], 0
+    je   .dllch
+    mov  dx, 0x0060              ; a DLL goes where there is room: relocated
+.dllch:
     call pw_put16
     mov  rcx, 0xD0+72
-    mov  rdx, 0x100000
-    call pw_put64
+    mov  rdx, 0x800000           ; stack reserve: 8 MB (graphics drivers use
+    call pw_put64                ; deep stacks; commit stays 64 KB)
     mov  rcx, 0xD0+80
     mov  rdx, 0x10000
     call pw_put64
@@ -606,8 +637,7 @@ pw_write:
     add  r8, [rel pw_bss_off_sec]
 .fa_have:
     add  r8, r11
-    mov  rax, 0x0000000140000000
-    add  r8, rax                  ; absolute virtual address
+    add  r8, [rel pw_base]        ; absolute virtual address
     mov  rcx, r13
     sub  rsp,32
     call kasm_get_fixup_at
@@ -723,6 +753,10 @@ pw_write:
     inc  r15
     jmp  .tab_loop
 .tab_done:
+    cmp  byte [rel pw_dll], 0
+    je   .no_dll_tables
+    call pw_dll_tables
+.no_dll_tables:
 
     ; .idata sizes
     mov  rcx, 0x1C0+80+8
@@ -762,4 +796,374 @@ pw_write:
     pop  r12
     pop  rbx
     pop  rbp
+    ret
+
+; ==============================================================================
+; pw_dll_tables(): a DLL's export directory and base relocations, after the
+; imports in .idata (r12 = its file offset, r13 = its RVA; pw_idata_size its
+; length so far, grown here).
+;   the export directory: 40 bytes, then the addresses of the functions --
+;   each export's __ce_ entry -- the addresses of their names, sorted (the
+;   loader looks them up by halving), the numbers that go with them, the
+;   names, and the DLL's own name
+;   the relocations: one block per page of .data, an entry for every word
+;   that holds an address, so that the DLL may load anywhere
+; ==============================================================================
+pw_dll_tables:
+    push rbx
+    push rsi
+    push rdi
+    push r14
+    push r15
+    sub  rsp, 40
+    call codegen_export_count
+    mov  [rel pw_exp_n], rax
+    ; the order of the names: a sort of their numbers, by insertion
+    xor  ebx, ebx
+.ord_init:
+    cmp  rbx, [rel pw_exp_n]
+    jae  .ord_sort
+    lea  rax, [rel pw_exp_order]
+    mov  [rax + rbx*8], rbx
+    inc  rbx
+    jmp  .ord_init
+.ord_sort:
+    mov  rbx, 1
+.ord_i:
+    cmp  rbx, [rel pw_exp_n]
+    jae  .ord_done
+    mov  rsi, rbx
+.ord_j:
+    test rsi, rsi
+    jz   .ord_next
+    lea  rax, [rel pw_exp_order]
+    mov  rcx, [rax + rsi*8 - 8]
+    mov  rdx, [rax + rsi*8]
+    call pw_name_cmp                 ; eax = 1 when name rcx > name rdx
+    test eax, eax
+    jz   .ord_next
+    lea  rax, [rel pw_exp_order]
+    mov  rcx, [rax + rsi*8 - 8]
+    mov  rdx, [rax + rsi*8]
+    mov  [rax + rsi*8 - 8], rdx
+    mov  [rax + rsi*8], rcx
+    dec  rsi
+    jmp  .ord_j
+.ord_next:
+    inc  rbx
+    jmp  .ord_i
+.ord_done:
+    ; where it goes: after the imports, on 8 bytes; what follows cleared
+    mov  rax, [rel pw_idata_size]
+    add  rax, 7
+    and  rax, -8
+    mov  [rel pw_exp_dir], rax
+    mov  rdi, [rel pw_buf]
+    add  rdi, r12
+    add  rdi, rax
+    xor  eax, eax
+    mov  rcx, 65536
+    rep  stosb
+    mov  rax, [rel pw_exp_dir]
+    mov  r14, rax                    ; r14: the next free offset in .idata
+    add  r14, 40
+    mov  rbx, [rel pw_exp_n]
+    ; AddressOfFunctions, AddressOfNames, AddressOfNameOrdinals
+    mov  r15, r14                    ; the functions
+    mov  rax, rbx
+    shl  rax, 2
+    add  r14, rax
+    mov  rdi, r14                    ; the names' addresses
+    add  r14, rax
+    mov  rsi, r14                    ; the numbers
+    mov  rax, rbx
+    shl  rax, 1
+    add  r14, rax
+    add  r14, 3
+    and  r14, -4
+    ; the directory
+    mov  rcx, r12
+    add  rcx, [rel pw_exp_dir]
+    push rcx
+    ; Base 1, NumberOfFunctions, NumberOfNames
+    add  rcx, 16
+    mov  edx, 1
+    call pw_put32
+    pop  rcx
+    push rcx
+    lea  rcx, [rcx + 20]
+    mov  edx, ebx
+    call pw_put32
+    pop  rcx
+    push rcx
+    lea  rcx, [rcx + 24]
+    mov  edx, ebx
+    call pw_put32
+    pop  rcx
+    push rcx
+    lea  rcx, [rcx + 28]
+    lea  rdx, [r13 + r15]
+    call pw_put32
+    pop  rcx
+    push rcx
+    lea  rcx, [rcx + 32]
+    lea  rdx, [r13 + rdi]
+    call pw_put32
+    pop  rcx
+    push rcx
+    lea  rcx, [rcx + 36]
+    lea  rdx, [r13 + rsi]
+    call pw_put32
+    pop  rcx
+    ; each export, in the sorted order: its entry, its name, its number
+    xor  ebx, ebx
+.ex_loop:
+    cmp  rbx, [rel pw_exp_n]
+    jae  .ex_done
+    lea  rax, [rel pw_exp_order]
+    mov  rax, [rax + rbx*8]
+    mov  [rsp + 32], rax             ; its number
+    ; the name's address, then the name
+    lea  rcx, [r12 + rdi]
+    lea  rcx, [rcx + rbx*4]
+    lea  rdx, [r13 + r14]
+    call pw_put32
+    mov  rcx, [rsp + 32]
+    call codegen_export_name         ; rax = the name, rdx = its length
+    push rsi
+    push rdi
+    mov  rsi, rax
+    mov  rdi, [rel pw_buf]
+    add  rdi, r12
+    add  rdi, r14
+    xor  ecx, ecx
+.ex_cp:
+    cmp  rcx, rdx
+    jae  .ex_cpd
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx], al
+    inc  rcx
+    jmp  .ex_cp
+.ex_cpd:
+    mov  byte [rdi + rcx], 0
+    ; the label of its entry: __ce_<name>
+    lea  rdi, [rel pw_name]
+    mov  byte [rdi], '_'
+    mov  byte [rdi + 1], '_'
+    mov  byte [rdi + 2], 'c'
+    mov  byte [rdi + 3], 'e'
+    mov  byte [rdi + 4], '_'
+    xor  ecx, ecx
+.ex_ln:
+    cmp  rcx, rdx
+    jae  .ex_lnd
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx + 5], al
+    inc  rcx
+    jmp  .ex_ln
+.ex_lnd:
+    mov  byte [rdi + rcx + 5], 0
+    pop  rdi
+    pop  rsi
+    lea  r14, [r14 + rdx + 1]
+    ; its number in the ordinal table: the slot it has in the functions,
+    ; which is the sorted position too
+    lea  rcx, [r12 + rsi]
+    lea  rcx, [rcx + rbx*2]
+    mov  edx, ebx
+    call pw_put16
+    ; the function: the entry's RVA
+    push rdx
+    lea  rcx, [rel pw_name]
+    mov  rdx, 5
+.ex_len:
+    cmp  byte [rcx + rdx], 0
+    je   .ex_len_ok
+    inc  rdx
+    jmp  .ex_len
+.ex_len_ok:
+    sub  rsp, 32
+    call kasm_find_label
+    add  rsp, 32
+    pop  rdx
+    cmp  eax, -1
+    je   .ex_next
+    sub  rsp, 32
+    call kasm_label_addr
+    add  rsp, 32
+    add  rax, TEXT_RVA
+    lea  rcx, [r12 + r15]
+    lea  rcx, [rcx + rbx*4]
+    mov  edx, eax
+    call pw_put32
+.ex_next:
+    inc  rbx
+    jmp  .ex_loop
+.ex_done:
+    ; the DLL's own name
+    mov  rcx, [rel pw_exp_dir]
+    add  rcx, r12
+    add  rcx, 12
+    lea  rdx, [r13 + r14]
+    call pw_put32
+    mov  rsi, [rel pw_dll_file]
+    mov  rdi, [rel pw_buf]
+    add  rdi, r12
+    xor  ecx, ecx
+.dn_cp:
+    mov  al, [rsi + rcx]
+    mov  [rdi + r14], al
+    inc  rcx
+    inc  r14
+    test al, al
+    jnz  .dn_cp
+    mov  rax, r14
+    sub  rax, [rel pw_exp_dir]
+    mov  [rel pw_exp_size], rax
+    ; DataDirectory[0], the exports
+    mov  rcx, 0xD0+112
+    mov  rdx, [rel pw_exp_dir]
+    add  rdx, r13
+    call pw_put32
+    mov  rcx, 0xD0+112+4
+    mov  edx, dword [rel pw_exp_size]
+    call pw_put32
+    ; ---- the base relocations ----
+    add  r14, 3
+    and  r14, -4
+    mov  [rel pw_rel_dir], r14
+    mov  qword [rel pw_rel_page], -1
+    mov  qword [rel pw_rel_block], -1
+    sub  rsp, 32
+    call kasm_get_fixup_count
+    add  rsp, 32
+    mov  r15, rax
+    xor  ebx, ebx
+.rl_loop:
+    cmp  rbx, r15
+    jae  .rl_done
+    mov  rcx, rbx
+    sub  rsp, 32
+    call kasm_get_fixup_kind
+    add  rsp, 32
+    cmp  eax, 6
+    jne  .rl_next
+    mov  rcx, rbx
+    sub  rsp, 32
+    call kasm_get_fixup_label
+    add  rsp, 32
+    cmp  eax, -1
+    je   .rl_next
+    mov  rcx, rbx
+    sub  rsp, 32
+    call kasm_get_fixup_at
+    add  rsp, 32
+    add  rax, [rel pw_data_rva]      ; the word's RVA
+    mov  rsi, rax
+    and  rax, -4096
+    cmp  rax, [rel pw_rel_page]
+    je   .rl_entry
+    ; a new page: close the block, open another
+    push rax
+    call pw_rel_close
+    pop  rax
+    mov  [rel pw_rel_page], rax
+    mov  [rel pw_rel_block], r14
+    lea  rcx, [r12 + r14]
+    mov  edx, eax
+    call pw_put32
+    add  r14, 8
+.rl_entry:
+    mov  rdx, rsi
+    and  rdx, 4095
+    or   rdx, 0xA000                 ; IMAGE_REL_BASED_DIR64
+    lea  rcx, [r12 + r14]
+    call pw_put16
+    add  r14, 2
+.rl_next:
+    inc  rbx
+    jmp  .rl_loop
+.rl_done:
+    call pw_rel_close
+    mov  rax, r14
+    sub  rax, [rel pw_rel_dir]
+    mov  [rel pw_rel_size], rax
+    mov  rcx, 0xD0+112+40            ; DataDirectory[5]
+    mov  rdx, [rel pw_rel_dir]
+    add  rdx, r13
+    call pw_put32
+    mov  rcx, 0xD0+112+44
+    mov  edx, dword [rel pw_rel_size]
+    call pw_put32
+    mov  [rel pw_idata_size], r14
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; pw_rel_close(): the block being written gets its size, padded to four bytes
+; (r12 = .idata in the file, r14 = the next free offset, grown)
+pw_rel_close:
+    mov  rax, [rel pw_rel_block]
+    cmp  rax, -1
+    je   .rc_out
+    test r14, 2
+    jz   .rc_even
+    lea  rcx, [r12 + r14]
+    xor  edx, edx
+    call pw_put16
+    add  r14, 2
+.rc_even:
+    mov  rdx, r14
+    sub  rdx, [rel pw_rel_block]
+    mov  rcx, [rel pw_rel_block]
+    add  rcx, r12
+    add  rcx, 4
+    call pw_put32
+.rc_out:
+    ret
+
+; pw_name_cmp(rcx, rdx = two exports' numbers) -> eax = 1 when the first's
+; name sorts after the second's
+pw_name_cmp:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    mov  r12, rdx
+    call codegen_export_name
+    mov  rsi, rax
+    mov  r13, rdx
+    mov  rcx, r12
+    call codegen_export_name
+    mov  rdi, rax                    ; the second, rdx its length
+    xor  ecx, ecx
+.nc_l:
+    cmp  rcx, r13
+    jae  .nc_first_ended
+    cmp  rcx, rdx
+    jae  .nc_after                   ; the second ended first: it is shorter
+    mov  al, [rsi + rcx]
+    mov  bl, [rdi + rcx]
+    cmp  al, bl
+    ja   .nc_after
+    jb   .nc_before
+    inc  rcx
+    jmp  .nc_l
+.nc_first_ended:
+.nc_before:
+    xor  eax, eax
+    jmp  .nc_out
+.nc_after:
+    mov  eax, 1
+.nc_out:
+    pop  r13
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbx
     ret

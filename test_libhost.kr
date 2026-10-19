@@ -1,0 +1,68 @@
+kron_program
+kron_domain test_libhost;
+kron_imports
+kron_definitions
+
+// Calls the library test_lib.kr makes, as a C program would: build it first
+// with  kronc test_lib.kr --lib  next to this program.
+//
+// Expected output:
+//   42
+//   -7
+//   10.000000
+//   298.750000
+//   10
+//   2002000      four threads, a thousand calls each
+//   4005         every call counted, under the library's lock
+
+extern "test_lib.dll", "./test_lib.so", "./test_lib.dylib" {
+    fn kron_add(a: i32, b: i32) -> i32;
+    fn kron_scale(x: f64) -> f64;
+    fn kron_mix(a: i64, x: f32, b: u8, y: f64, c: i16, d: i64, e: i64, f: i64, g: i64) -> f32;
+    fn kron_len(s: str) -> i64;
+    fn kron_calls() -> i64;
+}
+
+shared var total: i64;
+
+fn work(arg: i64) -> i64 {
+    var i: i64 = 0;
+    var s: i64 = 0;
+    while i < 1000 {
+        raw {
+            s = s + kron_add(i as i32, 1);
+        }
+        i = i + 1;
+    }
+    lock_take(0);
+    total = total + s;
+    lock_give(0);
+    return 0;
+}
+
+fn main() -> i32 {
+    raw {
+        print(kron_add(40, 2));
+        print(kron_add(-10, 3));
+        print(kron_scale(4.0));
+        print(kron_mix(1, 0.5, 200, 0.25, -3, 10, 20, 30, 40));
+        print(kron_len("hello kron"));
+    }
+    var hs: [i64; 4];
+    var i: i64 = 0;
+    lock_init(0);
+    while i < 4 {
+        hs[i] = thread_start(&work, i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 4 {
+        thread_wait(hs[i]);
+        i = i + 1;
+    }
+    print(total);
+    raw {
+        print(kron_calls());
+    }
+    return 0;
+}

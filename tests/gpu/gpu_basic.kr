@@ -1,0 +1,236 @@
+kron_program
+kron_domain gpu_basic;
+kron_imports
+acquire_domain "std_gpu.kr";
+acquire_domain "std_file.kr";
+acquire_domain "std_time.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: draws without a window and checks the pixels it reads back.
+// Run by GPUTESTS.bat; the exit code is the number of checks that failed.
+// =========================================================================
+
+var failures: i64;
+const W: i64 = 256;
+const H: i64 = 256;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+// a color within a few steps of another, channel by channel
+fn near(c: i64, r: i64, g: i64, b: i64, tol: i64) -> i64 {
+    if iabs(channel(c, 0) - r) > tol { return 0; }
+    if iabs(channel(c, 1) - g) > tol { return 0; }
+    if iabs(channel(c, 2) - b) > tol { return 0; }
+    return 1;
+}
+
+fn hex(c: i64) -> text {
+    var t: text = text_new();
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 1));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 2));
+    text_add(t, ")");
+    return t;
+}
+
+fn check_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, tol: i64, what: i64) -> i64 {
+    var c: i64 = gpu_pixel(x, y);
+    var t: text = text_add(text_add(text_new(), what), hex(c));
+    return report(near(c, r, g, b, tol), t);
+}
+
+// a square from (x0, y0) to (x1, y1) in screen space (-1..1), at depth z
+fn quad(x0: f64, y0: f64, x1: f64, y1: f64, z: f64) -> i64 {
+    var v: i64 = list_new();
+    var i: i64 = list_new();
+    // pos x y z, uv u v; v = 0 at the top
+    list_add_real(v, x0); list_add_real(v, y0); list_add_real(v, z); list_add_real(v, 0.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y0); list_add_real(v, z); list_add_real(v, 1.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y1); list_add_real(v, z); list_add_real(v, 1.0); list_add_real(v, 0.0);
+    list_add_real(v, x0); list_add_real(v, y1); list_add_real(v, z); list_add_real(v, 0.0); list_add_real(v, 0.0);
+    list_add(i, 0); list_add(i, 1); list_add(i, 2);
+    list_add(i, 0); list_add(i, 2); list_add(i, 3);
+    return gpu_mesh_lists(v, 5, i);
+}
+
+fn main() -> i64 {
+    say("GPU basic test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    var name: text = text_add(text_new(), "the card: ");
+    text_add(name, gpu_name());
+    report(text_len(gpu_name()) > 0, name);
+
+    // a flat color and a picture, on squares
+    var flat: text = "uniform { tint: vec4; }\nin pos: vec3;\nin uv: vec2;\nvertex {\n position = vec4(pos, 1.0);\n}\nfragment {\n color = tint;\n}\n";
+    var pic: text = "texture albedo;\nin pos: vec3;\nin uv: vec2;\nvar vuv: vec2;\nvertex {\n vuv = uv;\n position = vec4(pos, 1.0);\n}\nfragment {\n color = sample(albedo, vuv);\n}\n";
+    var pflat: i64 = gpu_shader(flat);
+    report(pflat != 0, "a shader of one color compiles");
+    var ppic: i64 = gpu_shader(pic);
+    report(ppic != 0, "a shader with a texture compiles");
+    if pflat == 0 || ppic == 0 {
+        return failures;
+    }
+    var full: i64 = quad(-1.0, -1.0, 1.0, 1.0, 0.5);
+    var near_q: i64 = quad(-0.5, -0.5, 0.5, 0.5, 0.2);
+    var far_q: i64 = quad(-0.5, -0.5, 0.5, 0.5, 0.8);
+
+    // 1. the clear color
+    gpu_begin(color4(20, 30, 60, 255));
+    gpu_end();
+    check_pixel(0, 0, 20, 30, 60, 0, "clear color, corner");
+    check_pixel(W - 1, H - 1, 20, 30, 60, 0, "clear color, other corner");
+
+    // 2. depth: the near square wins whichever is drawn first
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_set_vec4(pflat, "tint", v4(0.0, 1.0, 0.0, 1.0));
+    gpu_draw(pflat, far_q, 0);
+    gpu_set_vec4(pflat, "tint", v4(1.0, 0.0, 0.0, 1.0));
+    gpu_draw(pflat, near_q, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 255, 0, 0, 0, "depth: near drawn last");
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_set_vec4(pflat, "tint", v4(1.0, 0.0, 0.0, 1.0));
+    gpu_draw(pflat, near_q, 0);
+    gpu_set_vec4(pflat, "tint", v4(0.0, 1.0, 0.0, 1.0));
+    gpu_draw(pflat, far_q, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 255, 0, 0, 0, "depth: near drawn first");
+    check_pixel(10, 10, 0, 0, 0, 0, "depth: outside the squares");
+
+    // 3. a texture of four colors, one in each quarter
+    var img: i64 = image_new(2, 2);
+    image_set(img, 0, 0, 0xFFFF0000);
+    image_set(img, 1, 0, 0xFF00FF00);
+    image_set(img, 0, 1, 0xFF0000FF);
+    image_set(img, 1, 1, 0xFFFFFFFF);
+    var tex: i64 = gpu_texture(img);
+    report(tex != 0, "a texture is made");
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw(ppic, full, tex);
+    gpu_end();
+    check_pixel(W / 4, H / 4, 255, 0, 0, 8, "texture: top left red");
+    check_pixel(W * 3 / 4, H / 4, 0, 255, 0, 8, "texture: top right green");
+    check_pixel(W / 4, H * 3 / 4, 0, 0, 255, 8, "texture: bottom left blue");
+    check_pixel(W * 3 / 4, H * 3 / 4, 255, 255, 255, 8, "texture: bottom right white");
+
+    // 4. blending: half of blue over black
+    // (blending is on unless gpu_blend(0) says otherwise)
+    var pblend: i64 = gpu_shader(flat);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_set_vec4(pblend, "tint", v4(0.0, 0.0, 1.0, 0.5));
+    gpu_draw(pblend, full, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 0, 0, 128, 2, "blend: half blue over black");
+    // and without blending the alpha is only stored
+    gpu_blend(0);
+    var popaque: i64 = gpu_shader(flat);
+    gpu_blend(1);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_set_vec4(popaque, "tint", v4(1.0, 1.0, 0.0, 0.0));
+    gpu_draw(popaque, full, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 255, 255, 0, 0, "no blend: alpha 0 still drawn");
+
+    // 5. a lit cube in perspective
+    var lit: text = "uniform { mvp: mat4; model: mat4; light: vec3; }\ntexture albedo;\nin pos: vec3;\nin normal: vec3;\nin uv: vec2;\nvar vn: vec3;\nvar vuv: vec2;\nvertex {\n vn = (model * vec4(normal, 0.0)).xyz;\n vuv = uv;\n position = mvp * vec4(pos, 1.0);\n}\nfragment {\n let d = max(dot(normalize(vn), light), 0.0);\n color = vec4(sample(albedo, vuv).rgb * (0.25 + 0.75 * d), 1.0);\n}\n";
+    var plit: i64 = gpu_shader(lit);
+    report(plit != 0, "a lit shader compiles");
+    var cube: i64 = gpu_cube();
+    var proj: Mat4 = m4_perspective(radians(60.0), 1.0, 0.1, 100.0);
+    var view: Mat4 = m4_look_at(v3(2.5, 2.0, 3.5), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
+    var model: Mat4 = m4_rotate_y(radians(20.0));
+    gpu_begin(color4(20, 30, 60, 255));
+    gpu_set_mat4(plit, "mvp", m4_mul(proj, m4_mul(view, model)));
+    gpu_set_mat4(plit, "model", model);
+    gpu_set_vec3(plit, "light", v3_norm(v3(0.4, 1.0, 0.7)));
+    gpu_draw(plit, cube, tex);
+    gpu_end();
+    var c: i64 = gpu_pixel(W / 2, H / 2);
+    report(!near(c, 20, 30, 60, 0), text_add(text_add(text_new(), "cube: the middle is covered"), hex(c)));
+    check_pixel(2, 2, 20, 30, 60, 0, "cube: the corner is not");
+    gpu_save_bmp("tests/tmp/gpu_cube.bmp");
+
+    // 6. a mesh made from lists: a square of eight floats a corner
+    var sv: list<f64> = list_new();
+    var corners: [f64; 32];
+    corners[0] = -1.0; corners[1] = -1.0; corners[2] = 0.0; corners[3] = 0.0; corners[4] = 0.0; corners[5] = 1.0; corners[6] = 0.0; corners[7] = 1.0;
+    corners[8] = 1.0; corners[9] = -1.0; corners[10] = 0.0; corners[11] = 0.0; corners[12] = 0.0; corners[13] = 1.0; corners[14] = 1.0; corners[15] = 1.0;
+    corners[16] = 1.0; corners[17] = 1.0; corners[18] = 0.0; corners[19] = 0.0; corners[20] = 0.0; corners[21] = 1.0; corners[22] = 1.0; corners[23] = 0.0;
+    corners[24] = -1.0; corners[25] = 1.0; corners[26] = 0.0; corners[27] = 0.0; corners[28] = 0.0; corners[29] = 1.0; corners[30] = 0.0; corners[31] = 0.0;
+    var ci: i64 = 0;
+    while ci < 32 {
+        list_add_real(sv, corners[ci]);
+        ci = ci + 1;
+    }
+    var si: list<i64> = list_new();
+    list_add(si, 0); list_add(si, 1); list_add(si, 2);
+    list_add(si, 0); list_add(si, 2); list_add(si, 3);
+    var mm: i64 = gpu_mesh_lists(sv, 8, si);
+    report(mm != 0, "a mesh is made from lists");
+    var ortho: Mat4 = m4_ortho(-2.0, 2.0, -2.0, 2.0, -1.0, 1.0);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_set_mat4(plit, "mvp", ortho);
+    gpu_set_mat4(plit, "model", m4_identity());
+    gpu_set_vec3(plit, "light", v3(0.0, 0.0, 1.0));
+    gpu_draw(plit, mm, tex);
+    gpu_end();
+    check_pixel(W * 3 / 8, H * 3 / 8, 255, 0, 0, 8, "mesh: the square, lit from the front");
+    check_pixel(4, H / 2, 0, 0, 0, 0, "mesh: outside it");
+
+    // 7. speed: 2000 cubes a frame
+    var t0: i64 = time_ms();
+    var frames: i64 = 0;
+    while frames < 30 {
+        gpu_begin(color4(0, 0, 0, 255));
+        var k: i64 = 0;
+        while k < 2000 {
+            var mk: Mat4 = m4_mul(m4_translation(v3(((k % 50) as f64) * 0.1 - 2.5, ((k / 50) as f64) * 0.1 - 2.0, 0.0)), m4_scale(0.04, 0.04, 0.04));
+            gpu_set_mat4(plit, "mvp", m4_mul(proj, m4_mul(view, mk)));
+            gpu_set_mat4(plit, "model", mk);
+            gpu_draw(plit, cube, tex);
+            k = k + 1;
+        }
+        gpu_end();
+        frames = frames + 1;
+    }
+    var ms: i64 = time_ms() - t0;
+    var sp: text = text_add(text_new(), "2000 cubes a frame, 30 frames: ");
+    text_add_int(sp, ms);
+    text_add(sp, " ms");
+    report(ms > 0, sp);
+
+    gpu_close();
+    if failures == 0 {
+        say("GPU basic test: all passed");
+    } else {
+        var t: text = text_add_int(text_new(), failures);
+        text_add(t, " checks failed");
+        say(t);
+    }
+    return failures;
+}

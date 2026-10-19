@@ -8,9 +8,8 @@ REM   else can vouch for.  Every later compiler descends from it.
 REM   Promote a new one ONLY when all of these were green on the
 REM   binary you are about to promote:
 REM
-REM       BUILD.bat        (or BUILD_NASM.bat)
+REM       BUILD.bat
 REM       RUNTESTS.bat /slow
-REM       PETESTS.bat
 REM       BOOTSTRAP.bat
 REM
 REM   Usage:

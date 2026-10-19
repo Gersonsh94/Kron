@@ -1,0 +1,319 @@
+kron_program
+kron_domain std_json;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- JSON.
+//
+//     var doc: i64 = json_parse(file_read_all("scene.gltf"));
+//     var meshes: i64 = json_get(doc, "meshes");
+//     var i: i64 = 0;
+//     while i < json_len(meshes) {
+//         say(json_text(json_get(json_at(meshes, i), "name")));
+//         i = i + 1;
+//     }
+//
+// A document is read once into values; a value is a number that names it,
+// 0 for none, so a missing key or an index past the end gives 0 and every
+// function takes 0 and answers 0, "" or the default -- no checks needed on
+// the way down.
+//
+//     json_parse(text)                  the root value, or 0 with a fail
+//     json_kind(v)                      JSON_NULL BOOL NUMBER STRING ARRAY
+//                                       OBJECT, 0 for none
+//     json_get(v, key)  json_has(v, key)  json_at(v, i)  json_len(v)
+//     json_key(v, i)                    the i-th key of an object
+//     json_num(v)  json_int(v)  json_bool(v)  json_text(v)
+//     json_num_or(v, other)  json_int_or(v, other)
+// =========================================================================
+
+const JSON_NULL: i64 = 1;
+const JSON_BOOL: i64 = 2;
+const JSON_NUMBER: i64 = 3;
+const JSON_STRING: i64 = 4;
+const JSON_ARRAY: i64 = 5;
+const JSON_OBJECT: i64 = 6;
+
+var js_kind: i64;          // by value number - 1
+var js_num: i64;           // reals
+var js_str: i64;           // texts (strings), or 0
+var js_items: i64;         // arrays and objects: a list of values
+var js_keys: i64;          // objects: a list of texts
+var js_src: i64;
+var js_p: i64;
+var js_n: i64;
+var js_bad: i64;
+
+fn js_new(kind: i64) -> i64 {
+    if js_kind == 0 {
+        js_kind = list_new();
+        js_num = list_new();
+        js_str = list_new();
+        js_items = list_new();
+        js_keys = list_new();
+    }
+    list_add(js_kind, kind);
+    list_add_real(js_num, 0.0);
+    list_add(js_str, 0);
+    list_add(js_items, 0);
+    list_add(js_keys, 0);
+    return list_len(js_kind);
+}
+
+fn js_c() -> i64 {
+    if js_p >= js_n { return 0; }
+    return text_at(js_src, js_p);
+}
+
+fn js_ws() -> i64 {
+    while js_p < js_n {
+        var c: i64 = text_at(js_src, js_p);
+        if c != 32 && c != 9 && c != 10 && c != 13 { return 0; }
+        js_p = js_p + 1;
+    }
+    return 0;
+}
+
+fn js_word(w: i64, kind: i64, val: f64) -> i64 {
+    var l: i64 = text_len(w);
+    if js_p + l > js_n || !text_same(text_part(js_src, js_p, l), w) {
+        js_bad = 1;
+        return 0;
+    }
+    js_p = js_p + l;
+    var v: i64 = js_new(kind);
+    list_set_real(js_num, v - 1, val);
+    return v;
+}
+
+fn js_hex(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48; }
+    if c >= 97 && c <= 102 { return c - 87; }
+    if c >= 65 && c <= 70 { return c - 55; }
+    js_bad = 1;
+    return 0;
+}
+
+// a string, at its opening quote: its text
+fn js_string() -> i64 {
+    js_p = js_p + 1;
+    var t: i64 = text_new();
+    while js_p < js_n {
+        var c: i64 = text_at(js_src, js_p);
+        if c == 34 {
+            js_p = js_p + 1;
+            return t;
+        }
+        if c == 92 {
+            js_p = js_p + 1;
+            var e: i64 = js_c();
+            if e == 110 { text_add_char(t, 10); }
+            else if e == 116 { text_add_char(t, 9); }
+            else if e == 114 { text_add_char(t, 13); }
+            else if e == 98 { text_add_char(t, 8); }
+            else if e == 102 { text_add_char(t, 12); }
+            else if e == 117 {
+                var u: i64 = 0;
+                var k: i64 = 1;
+                while k <= 4 {
+                    if js_p + k < js_n { u = u * 16 + js_hex(text_at(js_src, js_p + k)); }
+                    k = k + 1;
+                }
+                js_p = js_p + 4;
+                // UTF-8 of it
+                if u < 128 {
+                    text_add_char(t, u);
+                } else if u < 2048 {
+                    text_add_char(t, 192 | (u >> 6));
+                    text_add_char(t, 128 | (u & 63));
+                } else {
+                    text_add_char(t, 224 | (u >> 12));
+                    text_add_char(t, 128 | ((u >> 6) & 63));
+                    text_add_char(t, 128 | (u & 63));
+                }
+            } else {
+                text_add_char(t, e);
+            }
+            js_p = js_p + 1;
+        } else {
+            text_add_char(t, c);
+            js_p = js_p + 1;
+        }
+    }
+    js_bad = 1;
+    return t;
+}
+
+fn js_value() -> i64 {
+    js_ws();
+    if js_bad == 1 { return 0; }
+    var c: i64 = js_c();
+    if c == 123 {
+        js_p = js_p + 1;
+        var o: i64 = js_new(JSON_OBJECT);
+        var items: i64 = list_new();
+        var keys: i64 = list_new();
+        list_set(js_items, o - 1, items);
+        list_set(js_keys, o - 1, keys);
+        js_ws();
+        if js_c() == 125 {
+            js_p = js_p + 1;
+            return o;
+        }
+        while js_bad == 0 {
+            js_ws();
+            if js_c() != 34 {
+                js_bad = 1;
+                return 0;
+            }
+            var k: i64 = js_string();
+            js_ws();
+            if js_c() != 58 {
+                js_bad = 1;
+                return 0;
+            }
+            js_p = js_p + 1;
+            var v: i64 = js_value();
+            list_add(keys, k);
+            list_add(items, v);
+            js_ws();
+            if js_c() == 44 {
+                js_p = js_p + 1;
+            } else if js_c() == 125 {
+                js_p = js_p + 1;
+                return o;
+            } else {
+                js_bad = 1;
+            }
+        }
+        return 0;
+    }
+    if c == 91 {
+        js_p = js_p + 1;
+        var a: i64 = js_new(JSON_ARRAY);
+        var arr: i64 = list_new();
+        list_set(js_items, a - 1, arr);
+        js_ws();
+        if js_c() == 93 {
+            js_p = js_p + 1;
+            return a;
+        }
+        while js_bad == 0 {
+            list_add(arr, js_value());
+            js_ws();
+            if js_c() == 44 {
+                js_p = js_p + 1;
+            } else if js_c() == 93 {
+                js_p = js_p + 1;
+                return a;
+            } else {
+                js_bad = 1;
+            }
+        }
+        return 0;
+    }
+    if c == 34 {
+        var s: i64 = js_new(JSON_STRING);
+        list_set(js_str, s - 1, js_string());
+        return s;
+    }
+    if c == 116 { return js_word("true", JSON_BOOL, 1.0); }
+    if c == 102 { return js_word("false", JSON_BOOL, 0.0); }
+    if c == 110 { return js_word("null", JSON_NULL, 0.0); }
+    // a number
+    var st: i64 = js_p;
+    while js_p < js_n {
+        var d: i64 = text_at(js_src, js_p);
+        if (d >= 48 && d <= 57) || d == 45 || d == 43 || d == 46 || d == 101 || d == 69 {
+            js_p = js_p + 1;
+        } else {
+            return js_number(st);
+        }
+    }
+    return js_number(st);
+}
+
+fn js_number(st: i64) -> i64 {
+    if js_p == st {
+        js_bad = 1;
+        return 0;
+    }
+    var v: i64 = js_new(JSON_NUMBER);
+    list_set_real(js_num, v - 1, text_to_real(text_part(js_src, st, js_p - st)));
+    return v;
+}
+
+fn json_parse(t: i64) -> i64 {
+    js_src = t;
+    js_p = 0;
+    js_n = text_len(t);
+    js_bad = 0;
+    var v: i64 = js_value();
+    js_ws();
+    if js_bad == 1 || js_p != js_n {
+        fail "this is not JSON" hint "check the text near where it stops being JSON";
+    }
+    return v;
+}
+
+fn json_kind(v: i64) -> i64 {
+    if v <= 0 || js_kind == 0 || v > list_len(js_kind) { return 0; }
+    return list_get(js_kind, v - 1);
+}
+
+fn json_len(v: i64) -> i64 {
+    var k: i64 = json_kind(v);
+    if k != JSON_ARRAY && k != JSON_OBJECT { return 0; }
+    return list_len(list_get(js_items, v - 1));
+}
+
+fn json_at(v: i64, i: i64) -> i64 {
+    if i < 0 || i >= json_len(v) { return 0; }
+    return list_get(list_get(js_items, v - 1), i);
+}
+
+fn json_key(v: i64, i: i64) -> text {
+    if json_kind(v) != JSON_OBJECT || i < 0 || i >= json_len(v) { return text_new(); }
+    return list_get(list_get(js_keys, v - 1), i);
+}
+
+fn json_get(v: i64, key: i64) -> i64 {
+    if json_kind(v) != JSON_OBJECT { return 0; }
+    var keys: i64 = list_get(js_keys, v - 1);
+    var i: i64 = 0;
+    var n: i64 = list_len(keys);
+    while i < n {
+        if text_same(list_get(keys, i), key) {
+            return list_get(list_get(js_items, v - 1), i);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn json_has(v: i64, key: i64) -> i64 {
+    if json_get(v, key) != 0 { return 1; }
+    return 0;
+}
+
+fn json_num_or(v: i64, other: f64) -> f64 {
+    var k: i64 = json_kind(v);
+    if k != JSON_NUMBER && k != JSON_BOOL { return other; }
+    return list_get_real(js_num, v - 1);
+}
+
+fn json_num(v: i64) -> f64 { return json_num_or(v, 0.0); }
+fn json_int_or(v: i64, other: i64) -> i64 {
+    var k: i64 = json_kind(v);
+    if k != JSON_NUMBER && k != JSON_BOOL { return other; }
+    return list_get_real(js_num, v - 1) as i64;
+}
+fn json_int(v: i64) -> i64 { return json_int_or(v, 0); }
+fn json_bool(v: i64) -> i64 { return json_int_or(v, 0); }
+
+fn json_text(v: i64) -> text {
+    if json_kind(v) != JSON_STRING { return text_new(); }
+    return list_get(js_str, v - 1);
+}

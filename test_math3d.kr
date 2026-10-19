@@ -1,0 +1,39 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "std_math3d.kr";
+kron_definitions
+fn pm(m: Mat4) {
+    var r: i64 = 0;
+    while r < 4 {
+        print(m4_get(m, r, 0)); print(m4_get(m, r, 1)); print(m4_get(m, r, 2)); print(m4_get(m, r, 3));
+        r = r + 1;
+    }
+}
+fn main() {
+    print(fatan(1.0) * 4.0);
+    print(facos(0.5));
+    print(fasin(1.0));
+    print(fatan2(-1.0, -1.0));
+    var a: Mat4 = m4_mul(m4_translate(1.0, 2.0, 3.0), m4_rotate_y(radians(90.0)));
+    var p: Vec3 = m4_mul_point(a, v3(1.0, 0.0, 0.0));
+    print(p.x); print(p.y); print(p.z);
+    var inv: Mat4 = m4_inverse(a);
+    var id: Mat4 = m4_mul(a, inv);
+    print(m4_get(id, 0, 0)); print(m4_get(id, 1, 1)); print(m4_get(id, 0, 3));
+    var q: Quat = q_axis_angle(v3(0.0, 1.0, 0.0), radians(90.0));
+    var v: Vec3 = q_rotate(q, v3(1.0, 0.0, 0.0));
+    print(v.x); print(v.z);
+    var h: Quat = q_slerp(q_identity(), q, 0.5);
+    var v2: Vec3 = q_rotate(h, v3(1.0, 0.0, 0.0));
+    print(v2.x); print(v2.z);
+    var pr: Mat4 = m4_perspective(radians(90.0), 1.0, 1.0, 10.0);
+    var c: Vec4 = m4_mul_v4(pr, v4(0.0, 0.0, -1.0, 1.0));
+    print(c.z / c.w);
+    var c2: Vec4 = m4_mul_v4(pr, v4(0.0, 0.0, -10.0, 1.0));
+    print(c2.z / c2.w);
+    var la: Mat4 = m4_look_at(v3(0.0, 0.0, 5.0), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
+    var o: Vec3 = m4_mul_point(la, v3(0.0, 0.0, 0.0));
+    print(o.z);
+    pm(m4_set(m4_identity(), 2, 3, 7.0));
+}

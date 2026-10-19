@@ -1,10 +1,10 @@
 ; ==============================================================================
-; JUPITER COMPILER - WINDOWS API MACROS
-; Reemplaza syscalls Linux con llamadas WinAPI
-; Convencion: Windows x64 - shadow space 32 bytes, rcx/rdx/r8/r9
+; KRON COMPILER - WINDOWS API MACROS
+; The Windows API calls that stand in for the Linux system calls
+; Convention: Windows x64 - shadow space 32 bytes, rcx/rdx/r8/r9
 ; ==============================================================================
 
-; Importaciones necesarias de kernel32.dll y msvcrt.dll
+; What is imported from kernel32.dll
 extern GetStdHandle
 extern WriteFile
 extern ReadFile

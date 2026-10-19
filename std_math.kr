@@ -210,6 +210,59 @@ fn ftan(a: real64) -> real64 {
     return fsin(a) / c;
 }
 
+// The angle whose tangent is x, from -PI/2 to PI/2. Halving the angle twice
+// (atan x = 2 atan(x / (1 + sqrt(1 + x*x)))) brings x under 0.21, where the
+// series x - x^3/3 + x^5/5 - ... converges fast.
+fn fatan(x: real64) -> real64 {
+    var sign: real64 = 1.0;
+    var v: real64 = x;
+    if v < 0.0 {
+        sign = 0.0 - 1.0;
+        v = 0.0 - v;
+    }
+    v = v / (1.0 + fsqrt(1.0 + v * v));
+    v = v / (1.0 + fsqrt(1.0 + v * v));
+    var v2: real64 = v * v;
+    var term: real64 = v;
+    var sum: real64 = v;
+    for var k: i64 = 1; k < 12; k = k + 1 {
+        term = 0.0 - term * v2;
+        sum = sum + term / (2 * k + 1);
+    }
+    return sign * 4.0 * sum;
+}
+
+// The angle of the point (x, y), from -PI to PI.
+fn fatan2(y: real64, x: real64) -> real64 {
+    if x > 0.0 {
+        return fatan(y / x);
+    }
+    if x < 0.0 {
+        if y >= 0.0 {
+            return fatan(y / x) + 3.14159265358979323846;
+        }
+        return fatan(y / x) - 3.14159265358979323846;
+    }
+    if y > 0.0 {
+        return 1.57079632679489661923;
+    }
+    if y < 0.0 {
+        return 0.0 - 1.57079632679489661923;
+    }
+    return 0.0;
+}
+
+// The angles whose sine and cosine are x, for x from -1 to 1.
+fn fasin(x: real64) -> real64 {
+    var c: real64 = fclamp(x, 0.0 - 1.0, 1.0);
+    return fatan2(c, fsqrt(1.0 - c * c));
+}
+
+fn facos(x: real64) -> real64 {
+    var c: real64 = fclamp(x, 0.0 - 1.0, 1.0);
+    return fatan2(fsqrt(1.0 - c * c), c);
+}
+
 // ----------------------------------------------------------------- powers ---
 
 // x raised to a non-negative integer power.

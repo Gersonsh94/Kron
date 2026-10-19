@@ -11,6 +11,14 @@
 ;
 ;   registers   rax .. r15 are wasm globals 0..15 (i64); xmm0 .. xmm15 are
 ;               globals 16..31 (v128). A double is lane 0 of its v128.
+;               Inside a function each register it names is a local of
+;               its own (locals 10..41), which the engine can keep in a
+;               machine register. The globals carry them across calls: the
+;               integer registers and xmm0-xmm5 go out to the globals before
+;               a call, a syscall or a ret, and come back after a call and
+;               at a function's start (the runtime hands some of its helpers
+;               a value in rbx). xmm6-xmm15, which every function keeps and
+;               none takes as an argument, never leave the function's locals.
 ;   memory      one linear memory. .data starts at 0x10000, .bss after it,
 ;               then an 8 MB stack; the host maps everything past that.
 ;   stack       rsp is an ordinary register: push and pop are 8 bytes in
@@ -47,6 +55,7 @@ global xwasm_error_text
 global xwasm_error_insn
 
 extern xa_read_line, xa_split, xa_parse_ops, xa_streq, xa_prefix, xa_skipb
+extern xa_native_skip, xa_skipping
 extern xa_parse_num, xa_find_reg, xa_fail
 extern xa_in, xa_in_end, xa_line_no, xa_err, xa_err_line, xa_err_msg
 extern xa_err_insn, xa_line, xa_mn, xa_rest, xa_nops, xa_opt, xa_ops
@@ -89,6 +98,9 @@ extern parse_float
 %define L_T2  7
 %define L_FX  8                 ; f64 x 2
 %define L_FY  9
+%define L_R0  10                ; i64 x 16: rax .. r15
+                                ; v128 x 16 from 26: xmm0 .. xmm15
+XW_SYNC     equ 0x003FFFFF      ; the registers that cross calls (see above)
 
 ; label kinds
 %define LK_NONE 0
@@ -158,6 +170,9 @@ section .bss
     ; functions
     xw_f_addr    resq XW_MAXFN  ; its code address: its table slot
     xw_f_nblk    resd XW_MAXFN
+    xw_f_regs    resd XW_MAXFN  ; the registers it names: bit k = global k
+    xw_lmode     resq 1         ; registers are the function's locals now
+    xw_regs      resq 1         ; and which of them it has
     ; output pieces
     xw_body      resb XW_BODY_MAX
     xw_body_n    resq 1
@@ -288,6 +303,17 @@ section .data
     db "a",0,0,0, 9,  "nbe",0, 9,    "s",0,0,0, 10, "ns",0,0, 11
     db 0
 
+section .data
+    xw_s_ccall_lbl db "__ccall:", 0
+    xw_s_ccall     db "__ccall:", 10, "mov rcx, r11", 10, "call __ext_resolve", 10
+                   db "xor eax, eax", 10, "xorps xmm0, xmm0", 10, "ret", 10, 0
+    xw_s_ptent     db "__pt_entry:", 10, "ret", 10, 0
+    xw_s_centry_lbl db "__centry:", 0
+    xw_s_centry    db "__centry:", 10, "ret", 10, 0
+    xw_s_lenter_lbl db "__lib_enter:", 0
+    xw_s_lenter    db "__lib_enter:", 10, "ret", 10, 0
+    xw_s_lready_lbl db "__lib_ready:", 0
+    xw_s_lready    db "__lib_ready:", 10, "ret", 10, 0
 section .text
 
 ; ==============================================================================
@@ -395,20 +421,166 @@ w_i32const:
     call wsleb
     ret
 
-; w_gget(eax = global) / w_gset(eax = global)
+; w_gget(eax = global) / w_gset(eax = global): a register is the
+; function's local while xw_lmode is on. Preserve every register.
 w_gget:
+    cmp  eax, 32
+    jae  w_gget_raw
+    cmp  qword [rel xw_lmode], 0
+    je   w_gget_raw
+    push rax
+    add  eax, L_R0
+    call w_lget
+    pop  rax
+    ret
+w_gset:
+    cmp  eax, 32
+    jae  w_gset_raw
+    cmp  qword [rel xw_lmode], 0
+    je   w_gset_raw
+    push rax
+    add  eax, L_R0
+    call w_lset
+    pop  rax
+    ret
+w_gget_raw:
     push rax
     mov  al, 0x23
     call wb
     pop  rax
     call wuleb
     ret
-w_gset:
+w_gset_raw:
     push rax
     mov  al, 0x24
     call wb
     pop  rax
     call wuleb
+    ret
+
+; w_sync_in() / w_sync_out(): the registers of the function that cross
+; calls, from the globals into its locals / back out
+w_sync_in:
+    cmp  qword [rel xw_lmode], 0
+    je   .si_out
+    push rax
+    push rcx
+    push rdx
+    mov  rdx, [rel xw_regs]
+    and  edx, XW_SYNC
+    xor  ecx, ecx
+.si_l:
+    mov  eax, edx
+    shr  eax, cl
+    test eax, 1
+    jz   .si_next
+    mov  eax, ecx
+    call w_gget_raw
+    add  eax, L_R0
+    call w_lset
+.si_next:
+    inc  ecx
+    cmp  ecx, 32
+    jb   .si_l
+    pop  rdx
+    pop  rcx
+    pop  rax
+.si_out:
+    ret
+w_sync_out:
+    cmp  qword [rel xw_lmode], 0
+    je   .so_out
+    push rax
+    push rcx
+    push rdx
+    mov  rdx, [rel xw_regs]
+    and  edx, XW_SYNC
+    xor  ecx, ecx
+.so_l:
+    mov  eax, edx
+    shr  eax, cl
+    test eax, 1
+    jz   .so_next
+    mov  eax, ecx
+    add  eax, L_R0
+    call w_lget
+    mov  eax, ecx
+    call w_gset_raw
+.so_next:
+    inc  ecx
+    cmp  ecx, 32
+    jb   .so_l
+    pop  rdx
+    pop  rcx
+    pop  rax
+.so_out:
+    ret
+
+; xw_regscan(): pass 2, one instruction: the registers it names go into its
+; function's mask. syscall reads and writes seven at once: all of them.
+xw_regscan:
+    mov  rax, [rel xw_fn]
+    cmp  rax, -1
+    je   .rs_out
+    xor  edx, edx
+    lea  r8, [rel xa_ops]
+    xor  r9d, r9d
+.rs_op:
+    movzx ecx, byte [r8 + OP_KIND]
+    cmp  ecx, K_REG
+    je   .rs_reg
+    cmp  ecx, K_XMM
+    je   .rs_xmm
+    cmp  ecx, K_MEM
+    jne  .rs_next
+    movzx ecx, byte [r8 + OP_BASE]
+    cmp  ecx, 16
+    jae  .rs_noba
+    call xw_bit
+.rs_noba:
+    movzx ecx, byte [r8 + OP_INDEX]
+    cmp  ecx, 16
+    jae  .rs_next
+    call xw_bit
+    jmp  .rs_next
+.rs_reg:
+    movzx ecx, byte [r8 + OP_REG]
+    and  ecx, 15
+    call xw_bit
+    jmp  .rs_next
+.rs_xmm:
+    movzx ecx, byte [r8 + OP_XMM]
+    and  ecx, 15
+    add  ecx, 16
+    call xw_bit
+.rs_next:
+    add  r8, 32
+    inc  r9d
+    cmp  r9d, 3
+    jb   .rs_op
+    push rax
+    push rdx
+    lea  rcx, [rel xa_mn]
+    lea  rdx, [rel wm_syscall]
+    call xa_streq
+    pop  rdx
+    test eax, eax
+    jz   .rs_nosys
+    or   edx, 0xFFFF
+.rs_nosys:
+    pop  rax
+    lea  rcx, [rel xw_f_regs]
+    mov  r9d, [rcx + rax*4]
+    or   r9d, edx
+    mov  [rcx + rax*4], r9d
+.rs_out:
+    ret
+
+; xw_bit(ecx = bit): edx |= 1 << ecx. Preserves the rest but r10.
+xw_bit:
+    mov  r10d, 1
+    shl  r10d, cl
+    or   edx, r10d
     ret
 
 ; w_lget(eax = local) / w_lset / w_ltee
@@ -948,12 +1120,28 @@ xw_run_pass:
     mov  byte [rel xw_glob], 0
     mov  qword [rel xw_fn], -1
     mov  qword [rel xw_fk], FK_NONE
+    mov  qword [rel xa_skipping], 0
 .l:
     cmp  qword [rel xa_err], 0
     jne  .out
     call xa_read_line
     test eax, eax
     jz   .end
+    ; __lib_ready and __lib_enter: how C enters an export; on the web C
+    ; never does, so they are stubs and their bodies are left out
+    call xw_lib_skip
+    test eax, eax
+    jnz  .l
+    ; __ccall and __pt_entry speak a system's C convention: the web has
+    ; none, so a stub stands in for each
+    call xa_native_skip
+    test eax, eax
+    jz   .line
+    cmp  eax, 2
+    jne  .l
+    call xw_native_stub
+    jmp  .l
+.line:
     call xw_line
     jmp  .l
 .end:
@@ -962,6 +1150,100 @@ xw_run_pass:
     call xw_fn_close                 ; the last function
 .out:
     pop  rbx
+    ret
+
+; xw_lib_skip() -> eax 1 when xa_line is __lib_ready: or __lib_enter: -- its
+; stub is fed instead and the lines up to the next label are skipped
+xw_lib_skip:
+    push rsi
+    lea  rcx, [rel xa_line]
+    lea  rdx, [rel xw_s_lenter_lbl]
+    call xa_prefix
+    lea  rsi, [rel xw_s_lenter]
+    test eax, eax
+    jnz  .ls_stub
+    lea  rcx, [rel xa_line]
+    lea  rdx, [rel xw_s_lready_lbl]
+    call xa_prefix
+    lea  rsi, [rel xw_s_lready]
+    test eax, eax
+    jnz  .ls_stub
+    pop  rsi
+    ret
+.ls_stub:
+    call xw_feed
+    mov  qword [rel xa_skipping], 1
+    mov  eax, 1
+    pop  rsi
+    ret
+
+; xw_feed(rsi = lines, each ending in 10, then 0): each through xw_line
+xw_feed:
+    push rdi
+.f_next:
+    cmp  byte [rsi], 0
+    je   .f_out
+    lea  rdi, [rel xa_line]
+.f_copy:
+    mov  al, [rsi]
+    inc  rsi
+    cmp  al, 10
+    je   .f_line
+    mov  [rdi], al
+    inc  rdi
+    jmp  .f_copy
+.f_line:
+    mov  byte [rdi], 0
+    push rsi
+    call xw_line
+    pop  rsi
+    jmp  .f_next
+.f_out:
+    pop  rdi
+    ret
+
+; xw_native_stub(): xa_line starts __ccall, __pt_entry or __centry; their stubs, line
+; by line through xw_line. __ccall on the web: the extern function is looked
+; for -- and not found, there being no library to load -- so the failure is
+; the one any system gives for a missing library; the result is 0.
+xw_native_stub:
+    push rsi
+    push rdi
+    lea  rcx, [rel xa_line]
+    lea  rdx, [rel xw_s_ccall_lbl]
+    call xa_prefix
+    lea  rsi, [rel xw_s_ccall]
+    test eax, eax
+    jnz  .ns_feed
+    ; __centry: where C would enter an export -- nothing calls it on the web
+    lea  rcx, [rel xa_line]
+    lea  rdx, [rel xw_s_centry_lbl]
+    call xa_prefix
+    lea  rsi, [rel xw_s_centry]
+    test eax, eax
+    jnz  .ns_feed
+    lea  rsi, [rel xw_s_ptent]
+.ns_feed:
+    cmp  byte [rsi], 0
+    je   .ns_out
+    lea  rdi, [rel xa_line]
+.ns_copy:
+    mov  al, [rsi]
+    inc  rsi
+    cmp  al, 10
+    je   .ns_line
+    mov  [rdi], al
+    inc  rdi
+    jmp  .ns_copy
+.ns_line:
+    mov  byte [rdi], 0
+    push rsi
+    call xw_line
+    pop  rsi
+    jmp  .ns_feed
+.ns_out:
+    pop  rdi
+    pop  rsi
     ret
 
 ; xw_layout(): after pass 2. .bss after .data, the stack after .bss, the heap
@@ -1075,9 +1357,14 @@ xw_line:
     je   .p1
     cmp  rax, 3
     je   .p3
+    cmp  rax, 2
+    je   .p2
     jmp  .count
 .p1:
     call xw_targets
+    jmp  .count
+.p2:
+    call xw_regscan
     jmp  .count
 .p3:
     lea  r12, [rel xa_ops]
@@ -1226,6 +1513,9 @@ xw_label:
     lea  rcx, [rel xw_f_nblk]
     mov  edx, 1
     mov  [rcx + rax*4], edx
+    lea  rcx, [rel xw_f_regs]
+    mov  edx, 0x17                   ; rax rcx rdx rsp: cqo, div, push, call
+    mov  [rcx + rax*4], edx
     lea  rcx, [rel xw_l_fn]
     mov  [rcx + rbx*4], eax
     lea  rcx, [rel xw_l_blk]
@@ -1343,14 +1633,25 @@ xw_fn_open:
     mov  qword [rel xw_term], 0
     mov  qword [rel xw_iff], 0
     mov  qword [rel xw_fk], FK_NONE
-    ; locals: pc and an address (i32), six i64, two f64
-    OPC  3
+    ; locals: pc and an address (i32), six i64, two f64, then the
+    ; registers: sixteen i64 and sixteen v128
+    OPC  5
     OPC  2
     OPC  0x7F
     OPC  6
     OPC  0x7E
     OPC  2
     OPC  0x7C
+    OPC  16
+    OPC  0x7E
+    OPC  16
+    OPC  0x7B
+    mov  rax, [rel xw_fn]
+    lea  rcx, [rel xw_f_regs]
+    mov  ecx, [rcx + rax*4]
+    mov  [rel xw_regs], rcx
+    mov  qword [rel xw_lmode], 1
+    call w_sync_in
     mov  rax, [rel xw_fn]
     lea  rcx, [rel xw_f_nblk]
     mov  ecx, [rcx + rax*4]
@@ -1397,6 +1698,7 @@ xw_fn_close:
     inc  rax
     cmp  rax, [rel xw_nfn_total]
     jae  .nonext
+    call w_sync_out
     OPC  0x10                        ; call the next one
     mov  rax, rbx
     add  rax, 3                      ; +1 next, +2 past syscall and the start
@@ -1437,6 +1739,7 @@ xw_fn_close:
 .cpd:
     mov  [rel xw_code_n], rdx
     mov  qword [rel xw_fn], -1
+    mov  qword [rel xw_lmode], 0
     jmp  .out
 .full:
     lea  rcx, [rel xe_full]
@@ -2474,11 +2777,13 @@ xi_ret:
     OPC  0x7C
     mov  eax, 4
     call w_gset
+    call w_sync_out
     OPC  0x0F
     mov  qword [rel xw_term], 1
     ret
 
 xi_syscall:
+    call w_sync_out                  ; the host may look at any of them
     xor  eax, eax                    ; rax rdi rsi rdx r10 r8 r9
     call w_gget
     mov  eax, 7
@@ -2497,7 +2802,8 @@ xi_syscall:
     xor  eax, eax
     call wuleb                       ; function 0: env.syscall
     xor  eax, eax
-    call w_gset
+    call w_gset_raw
+    call w_sync_in
     mov  qword [rel xw_fk], FK_NONE
     ret
 
@@ -2513,20 +2819,24 @@ xi_call:
     je   .out
     push rax
     call w_push_ret
+    call w_sync_out
     OPC  0x10
     pop  rax
     call wuleb
+    call w_sync_in
     jmp  .out
 .reg:
     call w_push_ret
     movzx eax, byte [r12 + OP_REG]
     call w_gget
     OPC  0xA7
+    call w_sync_out
     OPC  0x11
     xor  eax, eax
     call wuleb                       ; type 0
     xor  eax, eax
     call wuleb                       ; table 0
+    call w_sync_in
 .out:
     mov  qword [rel xw_fk], FK_NONE
     ret
@@ -2635,6 +2945,7 @@ w_goto:
     call xw_fn_of
     cmp  eax, -1
     je   .out
+    call w_sync_out                  ; a jump into another function
     push rax
     OPC  0x10
     pop  rax

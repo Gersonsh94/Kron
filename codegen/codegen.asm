@@ -41,11 +41,13 @@ db "extern TlsSetValue", 10
 db "extern SwitchToThread", 10
 db "extern LoadLibraryA", 10
 db "extern GetProcAddress", 10
+db "extern GetModuleHandleA", 10
 db "extern QueryPerformanceCounter", 10
 db "extern QueryPerformanceFrequency", 10
 db "extern GetCommandLineA", 10
 db "extern VirtualAlloc", 10
 db "section .bss", 10
+db "__lib_state: resq 1", 10
 db "__clo_lock: resq 1", 10
 db "__clo_cur: resq 1", 10
 db "__clo_end: resq 1", 10
@@ -358,8 +360,9 @@ db "__main_exit:", 10
 db "    push rbp", 10
 db "    mov rbp, rsp", 10
 db "    push rbx", 10
-db "    sub rsp, 40", 10
 db "    mov rbx, rcx", 10
+db "    and rsp, -16", 10
+db "    sub rsp, 32", 10
 db "    mov rcx, [rel __fail_tls]", 10
 db "    call TlsGetValue", 10
 db "    test rax, rax", 10
@@ -369,8 +372,53 @@ db "    test rax, rax", 10
 db "    jz .me_go", 10
 db "    call __print_fail", 10
 db ".me_go:", 10
+db "    call __crt_flush", 10
 db "    mov rcx, rbx", 10
 db "    call ExitProcess", 10
+; __crt_flush: what a C library loaded for an extern function keeps in its
+; buffers is written out before the process ends -- printf to a file or a
+; pipe would otherwise lose it. Libraries not loaded are not loaded for this.
+db "__crt_flush:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    mov rax, rsp", 10
+db "    sar rax, 4", 10
+db "    shl rax, 4", 10
+db "    mov rsp, rax", 10
+db "    sub rsp, 32", 10
+db "    lea rbx, [rel __crt_dlls]", 10
+db ".cf_lib:", 10
+db "    mov al, [rbx]", 10
+db "    test al, al", 10
+db "    jz .cf_out", 10
+db "    mov rcx, rbx", 10
+db "    call GetModuleHandleA", 10
+db "    test rax, rax", 10
+db "    jz .cf_next", 10
+db "    mov rcx, rax", 10
+db "    lea rdx, [rel __crt_flushall]", 10
+db "    call GetProcAddress", 10
+db "    test rax, rax", 10
+db "    jz .cf_next", 10
+db "    call rax", 10
+db ".cf_next:", 10
+db "    mov al, [rbx]", 10
+db "    inc rbx", 10
+db "    test al, al", 10
+db "    jnz .cf_next", 10
+db "    jmp .cf_lib", 10
+db ".cf_out:", 10
+db "    lea rsp, [rbp-16]", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    pop rbp", 10
+db "    ret", 10
+db "section .data", 10
+db "__crt_dlls: db 'msvcrt.dll', 0, 'ucrtbase.dll', 0, 0", 10
+db "__crt_flushall: db '_flushall', 0", 10
+db "section .text", 10
 ; __print_fail: prints the cause and hint of THIS thread's last failure.
 ; It may be called with the stack at any alignment, so it aligns it itself.
 db "__print_fail:", 10
@@ -1095,6 +1143,187 @@ db "    pop rbx", 10
 db "    mov rsp, rbp", 10
 db "    pop rbp", 10
 db "    ret", 10
+; ---- Calling the system's libraries (extern), Windows -------------------------
+; __ccall: the arguments pushed in order (the last one at [r10]), r11 = the
+; function's record -- its address (0 until found), its name, the names of
+; its libraries -- rax = the shape of the call and rdx the widths, as on
+; Linux (see the Linux preamble). The Windows convention takes the first four
+; in rcx rdx r8 r9 or xmm0-xmm3 by position, the rest on the stack above 32
+; bytes of room for the callee; a real goes in both registers, which is what
+; a variadic function reads. Windows keeps every register Kron keeps.
+db "section .data", 10
+db "__xm_lib: db 'a system library could not be loaded', 0", 10
+db "__xh_lib: db 'check that it is installed: the names tried are the ones of its extern block', 0", 10
+db "__xm_fn: db 'the system library has no function of that name', 0", 10
+db "__xh_fn: db 'check the name, and that the installed version of the library has it', 0", 10
+db "section .text", 10
+db "__ccall:", 10
+db "    mov r9, [r11]", 10
+db "    test r9, r9", 10
+db "    jnz .cc_go", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rax", 10
+db "    push rdx", 10
+db "    push r10", 10
+db "    push r11", 10
+db "    mov rcx, r11", 10
+db "    call __ext_resolve", 10
+db "    mov r9, rax", 10
+db "    pop r11", 10
+db "    pop r10", 10
+db "    pop rdx", 10
+db "    pop rax", 10
+db "    pop rbp", 10
+db "    test r9, r9", 10
+db "    jz .cc_none", 10
+db "    mov [r11], r9", 10
+db ".cc_go:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    sub rsp, 168", 10
+db "    and rsp, -16", 10
+db "    mov r12, r11", 10
+db "    mov r13, rax", 10
+db "    mov rbx, r13", 10
+db "    and rbx, 255", 10
+db "    xor esi, esi", 10
+db ".cc_arg:", 10
+db "    cmp rsi, rbx", 10
+db "    jae .cc_load", 10
+db "    mov rax, rbx", 10
+db "    sub rax, rsi", 10
+db "    dec rax", 10
+db "    mov rax, [r10+rax*8]", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 8", 10
+db "    mov rdx, 1", 10
+db "    shl rdx, cl", 10
+db "    test r13, rdx", 10
+db "    jz .cc_put", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 32", 10
+db "    mov rdx, 1", 10
+db "    shl rdx, cl", 10
+db "    test r13, rdx", 10
+db "    jz .cc_put", 10
+db "    movq xmm0, rax", 10
+db "    cvtsd2ss xmm0, xmm0", 10
+db "    movq rax, xmm0", 10
+db ".cc_put:", 10
+db "    mov [rsp+rsi*8], rax", 10
+db "    inc rsi", 10
+db "    jmp .cc_arg", 10
+db ".cc_load:", 10
+db "    mov rcx, [rsp]", 10
+db "    mov rdx, [rsp+8]", 10
+db "    mov r8, [rsp+16]", 10
+db "    mov r9, [rsp+24]", 10
+db "    movq xmm0, rcx", 10
+db "    movq xmm1, rdx", 10
+db "    movq xmm2, r8", 10
+db "    movq xmm3, r9", 10
+db "    mov r11, [r12]", 10
+db "    call r11", 10
+db "    mov rcx, r13", 10
+db "    shr rcx, 24", 10
+db "    and rcx, 255", 10
+db "    cmp rcx, 1", 10
+db "    jne .cc_r2", 10
+db "    shl rax, 32", 10
+db "    sar rax, 32", 10
+db "    jmp .cc_done", 10
+db ".cc_r2:", 10
+db "    cmp rcx, 2", 10
+db "    jne .cc_r3", 10
+db "    shl rax, 32", 10
+db "    shr rax, 32", 10
+db "    jmp .cc_done", 10
+db ".cc_r3:", 10
+db "    cmp rcx, 3", 10
+db "    jne .cc_r4", 10
+db "    and rax, 255", 10
+db "    jmp .cc_done", 10
+db ".cc_r4:", 10
+db "    cmp rcx, 4", 10
+db "    jne .cc_r5", 10
+db "    and rax, 65535", 10
+db "    jmp .cc_done", 10
+db ".cc_r5:", 10
+db "    cmp rcx, 5", 10
+db "    jne .cc_r6", 10
+db "    shl rax, 48", 10
+db "    sar rax, 48", 10
+db "    jmp .cc_done", 10
+db ".cc_r6:", 10
+db "    cmp rcx, 6", 10
+db "    jne .cc_r9", 10
+db "    shl rax, 56", 10
+db "    sar rax, 56", 10
+db "    jmp .cc_done", 10
+db ".cc_r9:", 10
+db "    cmp rcx, 9", 10
+db "    jne .cc_done", 10
+db "    cvtss2sd xmm0, xmm0", 10
+db ".cc_done:", 10
+db "    lea rsp, [rbp-32]", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    pop rbp", 10
+db "    ret", 10
+db ".cc_none:", 10
+db "    xor eax, eax", 10
+db "    xorps xmm0, xmm0", 10
+db "    ret", 10
+; __ext_resolve(rcx = record) -> rax = the function, 0 after a failure:
+; LoadLibraryA on each name of its libraries in turn, then GetProcAddress.
+db "__ext_resolve:", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    sub rsp, 40", 10
+db "    mov rbx, rcx", 10
+db "    mov rsi, [rbx+16]", 10
+db ".xr_lib:", 10
+db "    mov al, [rsi]", 10
+db "    test al, al", 10
+db "    jz .xr_nolib", 10
+db "    mov rcx, rsi", 10
+db "    call __dll_load", 10
+db "    test rax, rax", 10
+db "    jnz .xr_sym", 10
+db ".xr_skip:", 10
+db "    mov al, [rsi]", 10
+db "    inc rsi", 10
+db "    test al, al", 10
+db "    jnz .xr_skip", 10
+db "    jmp .xr_lib", 10
+db ".xr_sym:", 10
+db "    mov rcx, rax", 10
+db "    mov rdx, [rbx+8]", 10
+db "    call __dll_proc", 10
+db "    test rax, rax", 10
+db "    jnz .xr_out", 10
+db "    lea rcx, [rel __xm_fn]", 10
+db "    lea rdx, [rel __xh_fn]", 10
+db "    jmp .xr_fail", 10
+db ".xr_nolib:", 10
+db "    lea rcx, [rel __xm_lib]", 10
+db "    lea rdx, [rel __xh_lib]", 10
+db ".xr_fail:", 10
+db "    xor r8, r8", 10
+db "    call __fail_raise", 10
+db "    xor eax, eax", 10
+db ".xr_out:", 10
+db "    add rsp, 40", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    ret", 10
 hdr_len equ $ - hdr
 
 ; ---- BARE-METAL preamble (freestanding: no externs, no operating system) ----
@@ -1393,6 +1622,9 @@ db "default rel", 10
 db "bits 64", 10
 db "global _start", 10
 db "section .bss", 10
+; first, where they are aligned: the words a library exchanges atomically
+db "__lib_state: resq 1", 10
+db "__lib_lock: resq 1", 10
 db "__numbuf: resb 32", 10
 db "__chbuf: resb 2", 10
 db "__keybuf: resb 2", 10
@@ -1463,6 +1695,8 @@ db "    test rax, rax", 10
 db "    jz .me_go", 10
 db "    call __print_fail", 10
 db ".me_go:", 10
+db "    mov rcx, rbx", 10
+db "    call __xexit", 10
 db "    mov rdi, rbx", 10
 db "    mov rax, 231", 10
 db "    syscall", 10
@@ -1969,6 +2203,18 @@ db "    add rsi, 0x100000", 10
 db "    sub rsi, 16", 10
 db "    mov [rsi], r12", 10
 db "    mov [rsi+8], r13", 10
+; linked with the system's libraries: a pthread, so that they work in it
+db "    mov rax, [rel __got_ptc]", 10
+db "    test rax, rax", 10
+db "    jz .ts_clone", 10
+db "    mov rdx, rbx", 10
+db "    add rdx, 96", 10
+db "    call __pt_start", 10
+db "    test rax, rax", 10
+db "    js .ts_unmap", 10
+db "    mov rax, rbx", 10
+db "    jmp .ts_out", 10
+db ".ts_clone:", 10
 db "    mov rax, 56", 10
 db "    mov rdi, 0x350F00", 10
 db "    mov rdx, rbx", 10
@@ -2252,7 +2498,782 @@ db "    xor r8, r8", 10
 db "    call __fail_raise", 10
 db "    xor eax, eax", 10
 db "    ret", 10
+; ---- Calling the system's libraries (extern), Linux ---------------------------
+; A program with an extern block is linked dynamically: the system's loader
+; fills __got_* with dlopen, dlsym, pthread_create, pthread_detach and exit
+; before _start runs. Without one they stay 0 and the program is the static
+; one it always was.
+;
+; __ccall: the arguments pushed in order (the last one at [r10]), r11 = the
+; function's record -- its address (0 until found), its name, the names of
+; its libraries (each ending in 0, an empty one last) -- rax = the shape of
+; this call: bits 0-7 the number of arguments, 8-23 which are reals, 24-31
+; the result (0 a 64-bit integer or nothing, 1 i32, 2 u32, 3 u8, 4 u16,
+; 5 i16, 6 i8, 8 f64, 9 f32), 32-47 which reals are f32, 48-55 where the
+; variadic arguments start (0 when there are none); rdx = the width
+; of each argument, two bits apiece (0 eight bytes, 1 four, 2 two, 3 one).
+; The first call finds the function; every call moves the arguments where
+; the System V convention wants them (integers in rdi rsi rdx rcx r8 r9,
+; reals in xmm0-xmm7, each in order, the rest on the stack), calls, and
+; gives the result back as Kron keeps it: rax, or xmm0 as an f64.
+db "section .data", 10
+db "__got_dlopen: dq 0", 10
+db "__got_dlsym: dq 0", 10
+db "__got_ptc: dq 0", 10
+db "__got_ptd: dq 0", 10
+db "__got_exit: dq 0", 10
+db "__xr_dlopen: dq 0, 0, 0", 10
+db "__xr_dlsym: dq 0, 0, 0", 10
+db "__xr_ptc: dq 0, 0, 0", 10
+db "__xr_ptd: dq 0, 0, 0", 10
+db "__xr_exit: dq 0, 0, 0", 10
+db "__xm_lib: db 'a system library could not be loaded', 0", 10
+db "__xh_lib: db 'check that it is installed: the names tried are the ones of its extern block', 0", 10
+db "__xm_fn: db 'the system library has no function of that name', 0", 10
+db "__xh_fn: db 'check the name, and that the installed version of the library has it', 0", 10
+db "section .text", 10
+db "__ccall:", 10
+db "    mov r9, [r11]", 10
+db "    test r9, r9", 10
+db "    jnz .cc_go", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rax", 10
+db "    push rdx", 10
+db "    push r10", 10
+db "    push r11", 10
+db "    mov rcx, r11", 10
+db "    call __ext_resolve", 10
+db "    mov r9, rax", 10
+db "    pop r11", 10
+db "    pop r10", 10
+db "    pop rdx", 10
+db "    pop rax", 10
+db "    pop rbp", 10
+db "    test r9, r9", 10
+db "    jz .cc_none", 10
+db "    mov [r11], r9", 10
+db ".cc_go:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    push rdi", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    push r14", 10
+db "    push r15", 10
+db "    sub rsp, 480", 10
+db "    and rsp, -16", 10
+db "    mov r12, r11", 10
+db "    mov r13, rax", 10
+db "    movups [rbp-240], xmm6", 10
+db "    movups [rbp-224], xmm7", 10
+db "    movups [rbp-208], xmm8", 10
+db "    movups [rbp-192], xmm9", 10
+db "    movups [rbp-176], xmm10", 10
+db "    movups [rbp-160], xmm11", 10
+db "    movups [rbp-144], xmm12", 10
+db "    movups [rbp-128], xmm13", 10
+db "    movups [rbp-112], xmm14", 10
+db "    movups [rbp-96], xmm15", 10
+db "    mov rbx, r13", 10
+db "    and rbx, 255", 10
+db "    xor esi, esi", 10
+db "    xor edi, edi", 10
+db "    xor r14, r14", 10
+db "    xor r15, r15", 10
+db ".cc_arg:", 10
+db "    cmp rsi, rbx", 10
+db "    jae .cc_load", 10
+db "    mov rax, rbx", 10
+db "    sub rax, rsi", 10
+db "    dec rax", 10
+db "    mov rax, [r10+rax*8]", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 8", 10
+db "    mov rdx, 1", 10
+db "    shl rdx, cl", 10
+db "    test r13, rdx", 10
+db "    jz .cc_int", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 32", 10
+db "    mov rdx, 1", 10
+db "    shl rdx, cl", 10
+db "    test r13, rdx", 10
+db "    jz .cc_dbl", 10
+db "    movq xmm0, rax", 10
+db "    cvtsd2ss xmm0, xmm0", 10
+db "    movq rax, xmm0", 10
+db ".cc_dbl:", 10
+db "    cmp r14, 8", 10
+db "    jae .cc_spill", 10
+db "    mov [rbp+r14*8-336], rax", 10
+db "    inc r14", 10
+db "    jmp .cc_next", 10
+db ".cc_int:", 10
+db "    cmp rdi, 6", 10
+db "    jae .cc_spill", 10
+db "    mov [rbp+rdi*8-400], rax", 10
+db "    inc rdi", 10
+db "    jmp .cc_next", 10
+db ".cc_spill:", 10
+db "    mov [rsp+r15*8], rax", 10
+db "    inc r15", 10
+db ".cc_next:", 10
+db "    inc rsi", 10
+db "    jmp .cc_arg", 10
+db ".cc_load:", 10
+db "    mov rdi, [rbp-400]", 10
+db "    mov rsi, [rbp-392]", 10
+db "    mov rdx, [rbp-384]", 10
+db "    mov rcx, [rbp-376]", 10
+db "    mov r8, [rbp-368]", 10
+db "    mov r9, [rbp-360]", 10
+db "    movsd xmm0, [rbp-336]", 10
+db "    movsd xmm1, [rbp-328]", 10
+db "    movsd xmm2, [rbp-320]", 10
+db "    movsd xmm3, [rbp-312]", 10
+db "    movsd xmm4, [rbp-304]", 10
+db "    movsd xmm5, [rbp-296]", 10
+db "    movsd xmm6, [rbp-288]", 10
+db "    movsd xmm7, [rbp-280]", 10
+db "    mov rax, r14", 10
+db "    mov r11, [r12]", 10
+db "    call r11", 10
+db "    mov rcx, r13", 10
+db "    shr rcx, 24", 10
+db "    and rcx, 255", 10
+db "    cmp rcx, 1", 10
+db "    jne .cc_r2", 10
+db "    shl rax, 32", 10
+db "    sar rax, 32", 10
+db "    jmp .cc_done", 10
+db ".cc_r2:", 10
+db "    cmp rcx, 2", 10
+db "    jne .cc_r3", 10
+db "    shl rax, 32", 10
+db "    shr rax, 32", 10
+db "    jmp .cc_done", 10
+db ".cc_r3:", 10
+db "    cmp rcx, 3", 10
+db "    jne .cc_r4", 10
+db "    and rax, 255", 10
+db "    jmp .cc_done", 10
+db ".cc_r4:", 10
+db "    cmp rcx, 4", 10
+db "    jne .cc_r5", 10
+db "    and rax, 65535", 10
+db "    jmp .cc_done", 10
+db ".cc_r5:", 10
+db "    cmp rcx, 5", 10
+db "    jne .cc_r6", 10
+db "    shl rax, 48", 10
+db "    sar rax, 48", 10
+db "    jmp .cc_done", 10
+db ".cc_r6:", 10
+db "    cmp rcx, 6", 10
+db "    jne .cc_r9", 10
+db "    shl rax, 56", 10
+db "    sar rax, 56", 10
+db "    jmp .cc_done", 10
+db ".cc_r9:", 10
+db "    cmp rcx, 9", 10
+db "    jne .cc_done", 10
+db "    cvtss2sd xmm0, xmm0", 10
+db ".cc_done:", 10
+db "    movups xmm6, [rbp-240]", 10
+db "    movups xmm7, [rbp-224]", 10
+db "    movups xmm8, [rbp-208]", 10
+db "    movups xmm9, [rbp-192]", 10
+db "    movups xmm10, [rbp-176]", 10
+db "    movups xmm11, [rbp-160]", 10
+db "    movups xmm12, [rbp-144]", 10
+db "    movups xmm13, [rbp-128]", 10
+db "    movups xmm14, [rbp-112]", 10
+db "    movups xmm15, [rbp-96]", 10
+db "    lea rsp, [rbp-56]", 10
+db "    pop r15", 10
+db "    pop r14", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rdi", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    pop rbp", 10
+db "    ret", 10
+db ".cc_none:", 10
+db "    xor eax, eax", 10
+db "    xorps xmm0, xmm0", 10
+db "    ret", 10
+; __ext_resolve(rcx = record) -> rax = the function, 0 after a failure:
+; dlopen each name of its libraries in turn, then dlsym. Through __ccall,
+; so the same text works wherever __ccall speaks the system's convention.
+db "__ext_resolve:", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    push rdi", 10
+db "    push r12", 10
+db "    sub rsp, 40", 10
+db "    mov rbx, rcx", 10
+db "    mov rax, [rel __got_dlopen]", 10
+db "    test rax, rax", 10
+db "    jz .xr_nolib", 10
+db "    mov [rel __xr_dlopen], rax", 10
+db "    mov rax, [rel __got_dlsym]", 10
+db "    mov [rel __xr_dlsym], rax", 10
+db "    mov rsi, [rbx+16]", 10
+db ".xr_lib:", 10
+db "    movzx rax, byte [rsi]", 10
+db "    test rax, rax", 10
+db "    jz .xr_nolib", 10
+db "    mov [rsp+8], rsi", 10
+db "    mov qword [rsp], 2", 10
+db "    mov r10, rsp", 10
+db "    mov rax, 2", 10
+db "    xor edx, edx", 10
+db "    lea r11, [rel __xr_dlopen]", 10
+db "    call __ccall", 10
+db "    test rax, rax", 10
+db "    jnz .xr_sym", 10
+db ".xr_skip:", 10
+db "    movzx rax, byte [rsi]", 10
+db "    inc rsi", 10
+db "    test rax, rax", 10
+db "    jnz .xr_skip", 10
+db "    jmp .xr_lib", 10
+db ".xr_sym:", 10
+db "    mov [rsp+8], rax", 10
+db "    mov rax, [rbx+8]", 10
+db "    mov [rsp], rax", 10
+db "    mov r10, rsp", 10
+db "    mov rax, 2", 10
+db "    xor edx, edx", 10
+db "    lea r11, [rel __xr_dlsym]", 10
+db "    call __ccall", 10
+db "    test rax, rax", 10
+db "    jnz .xr_out", 10
+db "    lea rcx, [rel __xm_fn]", 10
+db "    lea rdx, [rel __xh_fn]", 10
+db "    jmp .xr_fail", 10
+db ".xr_nolib:", 10
+db "    lea rcx, [rel __xm_lib]", 10
+db "    lea rdx, [rel __xh_lib]", 10
+db ".xr_fail:", 10
+db "    xor r8, r8", 10
+db "    call __fail_raise", 10
+db "    xor eax, eax", 10
+db ".xr_out:", 10
+db "    add rsp, 40", 10
+db "    pop r12", 10
+db "    pop rdi", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    ret", 10
+; __pt_start(rsi = the thread's Kron stack, its function and argument on
+; it; rdx = the word that gets the thread's id and is cleared when it ends)
+; -> the id, or a negative number when the system refused. The thread is a
+; pthread, so that the system's libraries work in it: they keep per-thread
+; state that a bare clone leaves without.
+db "__pt_start:", 10
+db "    push rbx", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    sub rsp, 48", 10
+db "    mov [rsi+16], rdx", 10
+db "    mov rbx, rsi", 10
+db "    mov r12, rdx", 10
+db "    mov rax, rsi", 10
+db "    shr rax, 12", 10
+db "    and rax, 2147483647", 10
+db "    or rax, 1", 10
+db "    mov r13, rax", 10
+db "    mov [r12], eax", 10
+db "    mov rax, [rel __got_ptc]", 10
+db "    mov [rel __xr_ptc], rax", 10
+db "    mov rax, [rel __got_ptd]", 10
+db "    mov [rel __xr_ptd], rax", 10
+db "    lea rax, [rsp+40]", 10
+db "    mov [rsp+24], rax", 10
+db "    mov qword [rsp+16], 0", 10
+db "    lea rax, [rel __pt_entry]", 10
+db "    mov [rsp+8], rax", 10
+db "    mov [rsp], rbx", 10
+db "    mov r10, rsp", 10
+db "    mov rax, 16777220", 10
+db "    xor edx, edx", 10
+db "    lea r11, [rel __xr_ptc]", 10
+db "    call __ccall", 10
+db "    test rax, rax", 10
+db "    jnz .pt_fail", 10
+db "    mov rax, [rsp+40]", 10
+db "    mov [rsp], rax", 10
+db "    mov r10, rsp", 10
+db "    mov rax, 16777217", 10
+db "    xor edx, edx", 10
+db "    lea r11, [rel __xr_ptd]", 10
+db "    call __ccall", 10
+db "    mov rax, r13", 10
+db "    jmp .pt_out", 10
+db ".pt_fail:", 10
+db "    mov dword [r12], 0", 10
+db "    mov rax, -11", 10
+db ".pt_out:", 10
+db "    add rsp, 48", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rbx", 10
+db "    ret", 10
+; __xexit(rcx = code): through the C library's exit when the program is
+; linked with it, so that what it buffered is written out; it returns only
+; when there is none.
+db "__xexit:", 10
+db "    push rbx", 10
+db "    sub rsp, 16", 10
+db "    mov rax, [rel __got_exit]", 10
+db "    test rax, rax", 10
+db "    jz .xe_none", 10
+db "    mov [rel __xr_exit], rax", 10
+db "    mov [rsp], rcx", 10
+db "    mov r10, rsp", 10
+db "    mov rax, 1", 10
+db "    xor edx, edx", 10
+db "    lea r11, [rel __xr_exit]", 10
+db "    call __ccall", 10
+db ".xe_none:", 10
+db "    add rsp, 16", 10
+db "    pop rbx", 10
+db "    ret", 10
+; __pt_entry(rdi = the thread's Kron stack): where pthread_create starts it,
+; in the System V convention. What the child of clone does: the Kron stack,
+; the function and its argument popped, the room of a call, the call. Then
+; the pthread's own stack back, the id word cleared and its waiter woken --
+; a shared futex, as thread_wait waits on it.
+db "__pt_entry:", 10
+db "    push rbx", 10
+db "    push rbp", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    push r14", 10
+db "    push r15", 10
+db "    mov r12, rsp", 10
+db "    mov rbx, rdi", 10
+db "    mov rsp, rdi", 10
+db "    pop rax", 10
+db "    pop rcx", 10
+db "    sub rsp, 32", 10
+db "    call rax", 10
+db "    mov rdi, [rbx+16]", 10
+db "    mov rsp, r12", 10
+db "    mov dword [rdi], 0", 10
+db "    mov rsi, 1", 10
+db "    mov rdx, 2147483647", 10
+db "    xor r10, r10", 10
+db "    mov rax, 202", 10
+db "    syscall", 10
+db "    pop r15", 10
+db "    pop r14", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rbp", 10
+db "    pop rbx", 10
+db "    xor eax, eax", 10
+db "    ret", 10
 hdrelf_len equ $ - hdrelf
+
+; ==============================================================================
+; A LIBRARY (--lib): the runtime C calls into. hdrlib with every system,
+; then hdrlib_elf (Linux, macOS) or hdrlib_win.
+; ==============================================================================
+hdrlib:
+; ---- A Kron library: what C calls into ----------------------------------------
+; Each function marked export has a record and an entry the library exports
+; under its name:
+;     __xe_K: dq the function, its shape, its widths, which are signed
+;     __ce_name: lea r11, [rel __xe_K] / jmp __centry
+; __centry, in the system's C convention, puts the arguments in a row in the
+; order of the parameters and calls __lib_enter. The shape and the widths as
+; for __ccall; bit k of the last word: argument k is a signed integer.
+db "section .text", 10
+; __lib_ready(): the library's globals get their first values on the first
+; call into it, whichever thread makes it; a call arriving meanwhile waits.
+; __lib_state: 0 nothing yet, 1 being done, 2 done. It is the first word
+; of the preamble's .bss: an exchange on ARM64 needs it aligned.
+db "__lib_ready:", 10
+db "    push rbx", 10
+db "    lea rbx, [rel __lib_state]", 10
+db ".lr_check:", 10
+db "    mov rax, [rbx]", 10
+db "    cmp rax, 2", 10
+db "    je .lr_out", 10
+db "    mov eax, 1", 10
+db "    xchg [rbx], eax", 10
+db "    test rax, rax", 10
+db "    jz .lr_mine", 10
+db "    cmp rax, 2", 10
+db "    jne .lr_wait", 10
+db "    mov dword [rbx], 2", 10
+db "    jmp .lr_out", 10
+db ".lr_wait:", 10
+db "    call __thread_yield", 10
+db "    jmp .lr_check", 10
+db ".lr_mine:", 10
+db "    sub rsp, 32", 10
+db "    call __kron_lib_init", 10
+db "    add rsp, 32", 10
+db "    mov dword [rbx], 2", 10
+db ".lr_out:", 10
+db "    pop rbx", 10
+db "    ret", 10
+; __lib_enter(rcx = an export's record, rdx = its arguments in a row): the
+; call runs on a Kron stack of this thread (__lib_stack: 0 when it already
+; does, C having been called from Kron), after the first-call setup, with
+; the arguments where a Kron call puts them -- the first four in rcx rdx r8
+; r9 or xmm0-xmm3 by position, the fifth r10 or xmm4, the sixth rax or
+; xmm5, the rest pushed, the last first. Integers narrower than 64 bits are
+; widened, an f32 becomes an f64; an f32 result goes back as one.
+db "__lib_enter:", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    push rdi", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    push r14", 10
+db "    push r15", 10
+db "    push rbp", 10
+db "    mov r12, rcx", 10
+db "    mov r13, rdx", 10
+db "    mov r14, rsp", 10
+db "    call __lib_stack", 10
+db "    test rax, rax", 10
+db "    jz .le_stay", 10
+db "    mov rsp, rax", 10
+db ".le_stay:", 10
+db "    and rsp, -16", 10
+db "    call __lib_ready", 10
+db "    mov rbx, [r12+8]", 10
+db "    and rbx, 255", 10
+db "    xor esi, esi", 10
+db ".le_fix:", 10
+db "    cmp rsi, rbx", 10
+db "    jae .le_fixed", 10
+db "    mov rax, [r13+rsi*8]", 10
+db "    mov rdx, [r12+8]", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 8", 10
+db "    shr rdx, cl", 10
+db "    and rdx, 1", 10
+db "    jz .le_int", 10
+db "    mov rdx, [r12+8]", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 32", 10
+db "    shr rdx, cl", 10
+db "    and rdx, 1", 10
+db "    jz .le_put", 10
+db "    movq xmm0, rax", 10
+db "    cvtss2sd xmm0, xmm0", 10
+db "    movq rax, xmm0", 10
+db "    jmp .le_put", 10
+db ".le_int:", 10
+db "    mov rdx, [r12+16]", 10
+db "    mov rcx, rsi", 10
+db "    shl rcx, 1", 10
+db "    shr rdx, cl", 10
+db "    and rdx, 3", 10
+db "    jz .le_put", 10
+db "    mov rdi, [r12+24]", 10
+db "    mov rcx, rsi", 10
+db "    shr rdi, cl", 10
+db "    and rdi, 1", 10
+db "    mov rcx, 32", 10
+db "    cmp rdx, 1", 10
+db "    je .le_widen", 10
+db "    mov rcx, 48", 10
+db "    cmp rdx, 2", 10
+db "    je .le_widen", 10
+db "    mov rcx, 56", 10
+db ".le_widen:", 10
+db "    shl rax, cl", 10
+db "    test rdi, rdi", 10
+db "    jz .le_zero", 10
+db "    sar rax, cl", 10
+db "    jmp .le_put", 10
+db ".le_zero:", 10
+db "    shr rax, cl", 10
+db ".le_put:", 10
+db "    mov [r13+rsi*8], rax", 10
+db "    inc rsi", 10
+db "    jmp .le_fix", 10
+db ".le_fixed:", 10
+db "    mov rsi, rbx", 10
+db ".le_push:", 10
+db "    cmp rsi, 6", 10
+db "    jbe .le_regs", 10
+db "    dec rsi", 10
+db "    mov rax, [r13+rsi*8]", 10
+db "    push rax", 10
+db "    jmp .le_push", 10
+db ".le_regs:", 10
+db "    mov rax, [r13]", 10
+db "    movq xmm0, rax", 10
+db "    mov rcx, rax", 10
+db "    mov rax, [r13+8]", 10
+db "    movq xmm1, rax", 10
+db "    mov rdx, rax", 10
+db "    mov rax, [r13+16]", 10
+db "    movq xmm2, rax", 10
+db "    mov r8, rax", 10
+db "    mov rax, [r13+24]", 10
+db "    movq xmm3, rax", 10
+db "    mov r9, rax", 10
+db "    mov rax, [r13+32]", 10
+db "    movq xmm4, rax", 10
+db "    mov r10, rax", 10
+db "    mov rax, [r13+40]", 10
+db "    movq xmm5, rax", 10
+db "    mov r11, [r12]", 10
+db "    sub rsp, 32", 10
+db "    call r11", 10
+db "    mov rsp, r14", 10
+db "    mov rcx, [r12+8]", 10
+db "    shr rcx, 24", 10
+db "    and rcx, 255", 10
+db "    cmp rcx, 9", 10
+db "    jne .le_out", 10
+db "    cvtsd2ss xmm0, xmm0", 10
+db ".le_out:", 10
+db "    pop rbp", 10
+db "    pop r15", 10
+db "    pop r14", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rdi", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    ret", 10
+hdrlib_len equ $ - hdrlib
+hdrlib_elf:
+; ---- A Kron library on Linux and macOS: its stacks and its C entry ------------
+; __lib_stack() -> rax = the top of this thread's Kron stack, or 0 when rsp is
+; on it already. A thread that calls into the library for the first time
+; gets one, made as thread_start makes them -- 1 MB, aligned to 1 MB, the
+; failure block at its bottom -- and keeps it. Threads are told apart by the
+; id the system gives them (gettid; thread_selfid on macOS).
+db "section .bss", 10
+db "__lib_n: resq 1", 10
+db "__lib_tids: resq 256", 10
+db "__lib_bases: resq 256", 10
+db "section .text", 10
+db "__lib_stack:", 10
+db "    push rbx", 10
+db "    push rsi", 10
+db "    push rdi", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    mov rax, 186", 10
+db "    syscall", 10
+db "    mov r12, rax", 10
+db ".ls_lock:", 10
+db "    lea rdi, [rel __lib_lock]", 10
+db "    mov eax, 1", 10
+db "    xchg [rdi], eax", 10
+db "    test rax, rax", 10
+db "    jz .ls_locked", 10
+db "    mov rax, 24", 10
+db "    syscall", 10
+db "    jmp .ls_lock", 10
+db ".ls_locked:", 10
+db "    xor ebx, ebx", 10
+db ".ls_find:", 10
+db "    cmp rbx, [rel __lib_n]", 10
+db "    jae .ls_new", 10
+db "    lea rax, [rel __lib_tids]", 10
+db "    mov rcx, [rax+rbx*8]", 10
+db "    cmp rcx, r12", 10
+db "    je .ls_found", 10
+db "    inc rbx", 10
+db "    jmp .ls_find", 10
+db ".ls_new:", 10
+db "    cmp rbx, 256", 10
+db "    jae .ls_none", 10
+db "    mov rax, 9", 10
+db "    xor rdi, rdi", 10
+db "    mov rsi, 0x200000", 10
+db "    mov rdx, 3", 10
+db "    mov r10, 0x22", 10
+db "    mov r8, -1", 10
+db "    xor r9, r9", 10
+db "    syscall", 10
+db "    cmp rax, -4096", 10
+db "    ja .ls_none", 10
+db "    mov r13, rax", 10
+db "    add rax, 0xFFFFF", 10
+db "    shr rax, 20", 10
+db "    shl rax, 20", 10
+db "    mov qword [rax + 0], 0", 10
+db "    mov qword [rax + 8], 0", 10
+db "    mov qword [rax + 16], 0", 10
+db "    mov qword [rax + 24], 0", 10
+db "    mov qword [rax + 96], 0", 10
+db "    mov [rax+104], r13", 10
+db "    lea rcx, [rel __lib_tids]", 10
+db "    mov [rcx+rbx*8], r12", 10
+db "    lea rcx, [rel __lib_bases]", 10
+db "    mov [rcx+rbx*8], rax", 10
+db "    inc rbx", 10
+db "    mov [rel __lib_n], rbx", 10
+db "    jmp .ls_have", 10
+db ".ls_found:", 10
+db "    lea rax, [rel __lib_bases]", 10
+db "    mov rax, [rax+rbx*8]", 10
+db ".ls_have:", 10
+db "    lea rdi, [rel __lib_lock]", 10
+db "    mov dword [rdi], 0", 10
+db "    mov rcx, rsp", 10
+db "    sub rcx, rax", 10
+db "    cmp rcx, 0x100000", 10
+db "    jb .ls_stay", 10
+db "    add rax, 0xFFFC0", 10
+db "    jmp .ls_out", 10
+db ".ls_none:", 10
+db "    lea rdi, [rel __lib_lock]", 10
+db "    mov dword [rdi], 0", 10
+db ".ls_stay:", 10
+db "    xor eax, eax", 10
+db ".ls_out:", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rdi", 10
+db "    pop rsi", 10
+db "    pop rbx", 10
+db "    ret", 10
+; __centry: where C enters an exported function, in the System V convention
+; (r11 = its record): the integers taken from rdi rsi rdx rcx r8 r9, the
+; reals from xmm0-xmm7, each in order, the rest from the caller's stack --
+; then all of them in a row, in the order of the parameters, for
+; __lib_enter. C keeps rbx rbp r12-r15 across the call; Kron keeps them too.
+db "__centry:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rbx", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    push r14", 10
+db "    push r15", 10
+db "    sub rsp, 312", 10
+db "    mov [rbp-224], rdi", 10
+db "    mov [rbp-216], rsi", 10
+db "    mov [rbp-208], rdx", 10
+db "    mov [rbp-200], rcx", 10
+db "    mov [rbp-192], r8", 10
+db "    mov [rbp-184], r9", 10
+db "    movsd [rbp-176], xmm0", 10
+db "    movsd [rbp-168], xmm1", 10
+db "    movsd [rbp-160], xmm2", 10
+db "    movsd [rbp-152], xmm3", 10
+db "    movsd [rbp-144], xmm4", 10
+db "    movsd [rbp-136], xmm5", 10
+db "    movsd [rbp-128], xmm6", 10
+db "    movsd [rbp-120], xmm7", 10
+db "    mov r12, r11", 10
+db "    mov r13, [r11+8]", 10
+db "    mov rbx, r13", 10
+db "    and rbx, 255", 10
+db "    xor esi, esi", 10
+db "    xor edi, edi", 10
+db "    xor r14, r14", 10
+db "    xor r15, r15", 10
+db ".ce_arg:", 10
+db "    cmp rsi, rbx", 10
+db "    jae .ce_go", 10
+db "    mov rcx, rsi", 10
+db "    add rcx, 8", 10
+db "    mov rdx, 1", 10
+db "    shl rdx, cl", 10
+db "    test r13, rdx", 10
+db "    jz .ce_int", 10
+db "    cmp r14, 8", 10
+db "    jae .ce_stk", 10
+db "    mov rax, [rbp+r14*8-176]", 10
+db "    inc r14", 10
+db "    jmp .ce_put", 10
+db ".ce_int:", 10
+db "    cmp rdi, 6", 10
+db "    jae .ce_stk", 10
+db "    mov rax, [rbp+rdi*8-224]", 10
+db "    inc rdi", 10
+db "    jmp .ce_put", 10
+db ".ce_stk:", 10
+db "    mov rax, [rbp+r15*8+16]", 10
+db "    inc r15", 10
+db ".ce_put:", 10
+db "    mov [rbp+rsi*8-352], rax", 10
+db "    inc rsi", 10
+db "    jmp .ce_arg", 10
+db ".ce_go:", 10
+db "    mov rcx, r12", 10
+db "    lea rdx, [rbp-352]", 10
+db "    call __lib_enter", 10
+db "    lea rsp, [rbp-40]", 10
+db "    pop r15", 10
+db "    pop r14", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop rbx", 10
+db "    pop rbp", 10
+db "    ret", 10
+hdrlib_elf_len equ $ - hdrlib_elf
+hdrlib_win:
+; ---- A Kron library on Windows: its C entry -----------------------------------
+; Windows keeps a failure block per thread itself (TLS): Kron code runs on
+; the caller's stack. __centry (r11 = the export's record): the Windows
+; convention leaves 32 bytes above the return address for the first four
+; arguments; with them stored there, every argument is in a row from
+; [rbp+16] -- a real of the first four from its xmm register.
+db "__lib_stack:", 10
+db "    xor eax, eax", 10
+db "    ret", 10
+db "__centry:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    mov [rbp+16], rcx", 10
+db "    mov [rbp+24], rdx", 10
+db "    mov [rbp+32], r8", 10
+db "    mov [rbp+40], r9", 10
+db "    mov rax, [r11+8]", 10
+db "    test rax, 256", 10
+db "    jz .cw1", 10
+db "    movq rcx, xmm0", 10
+db "    mov [rbp+16], rcx", 10
+db ".cw1:", 10
+db "    test rax, 512", 10
+db "    jz .cw2", 10
+db "    movq rcx, xmm1", 10
+db "    mov [rbp+24], rcx", 10
+db ".cw2:", 10
+db "    test rax, 1024", 10
+db "    jz .cw3", 10
+db "    movq rcx, xmm2", 10
+db "    mov [rbp+32], rcx", 10
+db ".cw3:", 10
+db "    test rax, 2048", 10
+db "    jz .cw4", 10
+db "    movq rcx, xmm3", 10
+db "    mov [rbp+40], rcx", 10
+db ".cw4:", 10
+db "    mov rcx, r11", 10
+db "    lea rdx, [rbp+16]", 10
+db "    sub rsp, 32", 10
+db "    call __lib_enter", 10
+db "    mov rsp, rbp", 10
+db "    pop rbp", 10
+db "    ret", 10
+; __dll_main: what Windows calls as the library loads and unloads -- TRUE;
+; the setup waits for the first call.
+db "__dll_main:", 10
+db "    mov eax, 1", 10
+db "    ret", 10
+hdrlib_win_len equ $ - hdrlib_win
 
 ; ==============================================================================
 ; The failure trace, shared by the Windows and the Linux preambles.
@@ -2505,6 +3526,83 @@ s_peek_seq:  db "    mov rax, [rax]", 10, 0
 s_idx_rcx:   db "    mov rcx, rax", 10, 0
 s_idx_pop:   db "    pop rcx", 10, 0
 s_lea_loc:   db "    lea rdx, [rbp-", 0
+s_ld_rdx_loc: db "    mov rdx, [rbp-", 0
+s_zero_nl:   db "0", 10, 0
+s_xorps0:    db "    xorps xmm0, xmm0", 10, 0
+s_mov_rax_rdx: db "    mov rax, rdx", 10, 0
+s_rdx_rax_pop: db "    mov rdx, rax", 10, "    pop rax", 10, 0
+s_cp8_ld:    db "    mov rcx, [rax+", 0
+s_cp8_st:    db "    mov [rdx+", 0, "], rcx", 10, 0
+s_cp4_ld:    db "    mov ecx, dword [rax+", 0
+s_cp4_st:    db "    mov [rdx+", 0, "], ecx", 10, 0
+s_cp2_ld:    db "    movzx ecx, word [rax+", 0
+s_cp2_st:    db "    mov [rdx+", 0, "], cx", 10, 0
+s_cp1_ld:    db "    movzx ecx, byte [rax+", 0
+s_cp1_st:    db "    mov [rdx+", 0, "], cl", 10, 0
+s_lea_r11:   db "    lea r11, [rbp-", 0
+s_ld_r11_loc: db "    mov r11, [rbp-", 0
+s_st_r11_suf: db "], r11", 10, 0
+s_ld_rdx_glb: db "    mov rdx, [rel __g_", 0
+s_add_rdx:   db "    add rdx, ", 0
+s_err_snot:  db "a struct of another type, or no struct, where one is expected ", 0
+s_hint_snot: db "  hint: a struct is copied, passed and returned whole, as a value of the same struct", 13, 10, 0
+s_err_sret:  db "this function returns a struct, and this is not one of that struct ", 0
+cg_tmp_tok:  dq TOK_IDENT
+             dq cg_tmp_txt
+             dd 3
+             dd 0
+cg_tmp_txt:  db " $t", 0
+; a call on a list<S>: its name, 1 when it reads an element (a struct
+; value) or 2, and which of cg_ln_toks it becomes
+cg_lnames:   db "list_sget", 0, 1, 0
+             db "list_get", 0, 1, 0
+             db "list_sset", 0, 2, 1
+             db "list_set", 0, 2, 1
+             db "list_add", 0, 2, 2
+             db "list_insert", 0, 2, 3
+             db "list_remove", 0, 1, 4
+             db "list_pop", 0, 1, 5
+             db "list_last", 0, 1, 6
+             db "list_len", 0, 2, 7
+             db "list_reverse", 0, 2, 8
+             db 0
+cg_ln_toks:
+             dq TOK_IDENT, nm_ln0
+             dd 10
+             dw 0, 0
+             dq TOK_IDENT, nm_ln1
+             dd 10
+             dw 0, 0
+             dq TOK_IDENT, nm_ln2
+             dd 10
+             dw 0, 0
+             dq TOK_IDENT, nm_ln3
+             dd 13
+             dw 0, 0
+             dq TOK_IDENT, nm_ln4
+             dd 13
+             dw 0, 0
+             dq TOK_IDENT, nm_ln5
+             dd 10
+             dw 0, 0
+             dq TOK_IDENT, nm_ln6
+             dd 11
+             dw 0, 0
+             dq TOK_IDENT, nm_ln7
+             dd 10
+             dw 0, 0
+             dq TOK_IDENT, nm_ln8
+             dd 14
+             dw 0, 0
+nm_ln0:      db "list_get_n"
+nm_ln1:      db "list_set_n"
+nm_ln2:      db "list_add_n"
+nm_ln3:      db "list_insert_n"
+nm_ln4:      db "list_remove_n"
+nm_ln5:      db "list_pop_n"
+nm_ln6:      db "list_last_n"
+nm_ln7:      db "list_len_n"
+nm_ln8:      db "list_reverse_n"
 s_ld_loc:    db "    mov rdx, [rbp-", 0
 s_lea_loc2:  db "]", 10, 0
 s_lea_glbp:  db "    lea rdx, [rel __g_", 0
@@ -2709,6 +3807,83 @@ s_clo_put:     db "    pop rax", 10, "    pop rcx", 10, "    push rcx", 10, "   
 s_clo_put2:    db "], rax", 10, 0
 s_env_get:     db "    mov rax, [rax+", 0
 s_err_nofn:    db "unknown function ", 0
+s_ext_raw:     db "an extern fn is called outside raw { }: ", 0
+s_ext_rawh:    db "  hint: its code is C, which Kron does not check -- raw { n = strlen(s); }", 13, 10, 0
+s_ext_bare:    db "no system library to call without an operating system: ", 0
+s_mod_hdr:     db "; A Kron module, written by kronc --module. Edit the .kr file it comes", 10
+               db "; from, not this one: the build makes it again.", 10, 0
+s_mod_init:    db "a global of a module must start from a number written out: ", 0
+s_mod_inith:   db "  hint: nothing runs before a module's functions are called; give it its value in one of them", 13, 10, 0
+s_mod_main:    db "a module has no main: ", 0
+s_mod_mainh:   db "  hint: its functions are called by the compiler's own code; build a program without --module", 13, 10, 0
+s_mod_exp:     db "a module exports nothing to C: ", 0
+s_mod_exph:    db "  hint: its functions are called by name from the compiler's own code; drop 'export'", 13, 10, 0
+s_garr_lit:    db "a global array starts from numbers written out: ", 0
+s_garr_lith:   db "  hint: give it the other values in a function, element by element", 13, 10, 0
+s_garr_dq:     db "    dq ", 0
+s_garr_dd:     db "    dd ", 0
+s_garr_dw:     db "    dw ", 0
+s_garr_db:     db "    db ", 0
+s_garr_res:    db "    ", 0
+s_garr_rq:     db "resq ", 0
+s_garr_rd:     db "resd ", 0
+s_garr_rw:     db "resw ", 0
+s_garr_rb:     db "resb ", 0
+s_ext_bareh:   db "  hint: extern calls need --target=windows, linux, linux-arm64 or macos", 13, 10, 0
+s_ext_count:   db "another number of arguments than its extern declaration has: ", 0
+s_ext_counth:  db "  hint: count the parameters in the extern block; ... takes any number more", 13, 10, 0
+s_ext_many:    db "an extern call takes at most 16 arguments: ", 0
+s_ext_struct:  db "a struct cannot go to an extern fn by value: ", 0
+s_ext_structh: db "  hint: declare the parameter ptr<T> and pass &s", 13, 10, 0
+s_ext_full:    db "too many extern functions (1024): ", 0
+s_ext_mov10:   db "    mov r10, rsp", 10, "    lea r11, [rel __xr_", 0
+s_ext_movax:   db "]", 10, "    mov rax, ", 0
+s_ext_movdx:   db 10, "    mov rdx, ", 0
+s_ext_call:    db "    call __ccall", 10, 0
+s_ext_trunc:   db "    cvttsd2si rax, xmm0", 10, "    push rax", 10, 0
+s_ext_rec0:    db "__xr_", 0
+s_ext_rec1:    db ":", 10, "    dq 0", 10, "    dq __xn_", 0
+s_ext_rec2:    db 10, "    dq __xl_", 0
+s_ext_rec3:    db 10, "__xn_", 0
+s_ext_db:      db ": db ", 0
+s_ext_rec4:    db "0", 10, "__xl_", 0
+s_ext_rec5:    db "0, 0", 10, 0
+s_ext_comma:   db ", ", 0
+s_ccall_raw:   db "c_call runs C code at an address: inside raw { } only: ", 0
+s_ccall_none:  db "c_call takes the address of the C function first: ", 0
+s_cc_r10:      db "    mov r10, rsp", 10, "    mov rax, [r10 + ", 0
+s_cc_rec:      db "]", 10, "    sub rsp, 24", 10, "    mov [rsp], rax", 10, "    mov r11, rsp", 10, "    xor edx, edx", 10, "    mov rax, ", 0
+s_cc_call:     db "    call __ccall", 10, "    add rsp, ", 0
+s_lib_xe:      db "__xe_", 0
+s_lib_ce:      db "__ce_", 0
+s_lib_rec1:    db ":", 10, "    dq ", 0
+s_lib_dq:      db 10, "    dq ", 0
+s_lib_stub1:   db ":", 10, "    lea r11, [rel __xe_", 0
+s_lib_stub2:   db "]", 10, "    jmp __centry", 10, 0
+s_lib_nomain:  db "main:", 10, "    xor eax, eax", 10, "    ret", 10, 0
+s_lib_noinit:  db "__kron_lib_init:", 10, "    ret", 10, 0
+s_cfn_name:    db "c_fn", 0
+s_cfn_lea:     db "    lea rax, [rel __ce_", 0
+s_cfn_end:     db "]", 10, 0
+s_cfn_bad:     db "c_fn takes the name of a function marked export: ", 0
+s_cfn_badh:    db "  hint: fn export name(...) -- C then calls it in its own convention", 13, 10, 0
+s_cfn_raw:     db "c_fn gives the address of code C calls: inside raw { } only: ", 0
+s_lib_struct:  db "an exported fn takes numbers and pointers, not a struct by value: ", 0
+s_lib_method:  db "a method cannot be exported to C: ", 0
+s_lib_methodh: db "  hint: export a plain fn that calls it", 13, 10, 0
+s_lib_multi:   db "an exported fn gives C one result: ", 0
+tk_libinit: dq TOK_IDENT, nm_libinit
+    dd 15
+    dw 0, 0
+nm_libinit: db "__kron_lib_init"
+tk_userinit: dq TOK_IDENT, nm_userinit
+    dd 8
+    dw 0, 0
+nm_userinit: db "lib_init"
+tk_mainname: dq TOK_IDENT, nm_mainname
+    dd 4
+    dw 0, 0
+nm_mainname: db "main"
 s_err_lamfull: db "too many fn values, or one keeping too many names (16) ", 0
 tk_env: dq TOK_IDENT, nm_tk_env
     dd 5
@@ -2740,6 +3915,116 @@ s_kt_hi:     db "section .text", 10, "__kron_hi:", 10, "section .data", 10, "__k
 s_kt_file:   db "__kron_file_", 0
 s_kt_db:     db ": db ", 0
 s_kt_text:   db "section .text", 10, 0
+s_probe:     db "    mov [rbp-", 0
+s_probe2:    db "], rbp", 10, 0
+; --- debug builds (kd_*) ---
+s_kd_mov:     db "    mov r11, ", 0
+s_kd_call:    db 10, "    call __dbg_stmt", 10, 0
+s_kd_head:    db ".kde:", 10, "section .data", 10, ".kdr: dq ", 0
+s_kd_kdr:     db ".kdr", 0
+s_kd_mid:     db ", .kde, .kdn, ", 0
+s_kd_dq:      db "    dq ", 0
+s_kd_vref:    db ", .kdv", 0
+s_kd_name:    db ".kdn: db ", 34, 0
+s_kd_name2:   db 34, ", 0", 10, 0
+s_kd_vlbl:    db ".kdv", 0
+s_kd_db:      db ": db ", 34, 0
+s_kd_info:    db "section .data", 10, "__kdbg_info: dq ", 0
+s_kd_info2:   db ", __kdbg_files, ", 0
+s_kd_info3:   db ", __kdbg_structs, __kdbg_fields, ", 0
+s_kd_info4:   db ", __kdbg_globals", 10, 0
+s_kd_files:   db "__kdbg_files:", 10, 0
+s_kd_dqfile:  db "    dq __kron_file_", 0
+s_kd_structs: db "__kdbg_structs:", 10, 0
+s_kd_dqsn:    db "    dq __kdbg_sn_", 0
+s_kd_fields:  db "__kdbg_fields:", 10, 0
+s_kd_dqfn:    db "    dq __kdbg_fn_", 0
+s_kd_globals: db "__kdbg_globals:", 10, 0
+s_kd_dqg:     db "    dq __g_", 0
+s_kd_gnref:   db ", __kdbg_gn_", 0
+s_kd_sn:      db "__kdbg_sn_", 0
+s_kd_fnl:     db "__kdbg_fn_", 0
+s_kd_gnl:     db "__kdbg_gn_", 0
+; __dbg_stmt: r11 = file << 20 | line. Keeps every register and the low
+; halves of xmm0-xmm15, and calls kdbg_hook(line, the caller's frame, the
+; address it returns to, __kdbg_info) with the stack aligned.
+s_kd_hook:
+db "section .text", 10
+db "__dbg_stmt:", 10
+db "    push rbp", 10
+db "    mov rbp, rsp", 10
+db "    push rax", 10
+db "    push rbx", 10
+db "    push rcx", 10
+db "    push rdx", 10
+db "    push rsi", 10
+db "    push rdi", 10
+db "    push r8", 10
+db "    push r9", 10
+db "    push r10", 10
+db "    push r11", 10
+db "    push r12", 10
+db "    push r13", 10
+db "    push r14", 10
+db "    push r15", 10
+db "    sub rsp, 128", 10
+db "    movsd [rbp-240], xmm0", 10
+db "    movsd [rbp-232], xmm1", 10
+db "    movsd [rbp-224], xmm2", 10
+db "    movsd [rbp-216], xmm3", 10
+db "    movsd [rbp-208], xmm4", 10
+db "    movsd [rbp-200], xmm5", 10
+db "    movsd [rbp-192], xmm6", 10
+db "    movsd [rbp-184], xmm7", 10
+db "    movsd [rbp-176], xmm8", 10
+db "    movsd [rbp-168], xmm9", 10
+db "    movsd [rbp-160], xmm10", 10
+db "    movsd [rbp-152], xmm11", 10
+db "    movsd [rbp-144], xmm12", 10
+db "    movsd [rbp-136], xmm13", 10
+db "    movsd [rbp-128], xmm14", 10
+db "    movsd [rbp-120], xmm15", 10
+db "    and rsp, -16", 10
+db "    sub rsp, 32", 10
+db "    mov rcx, r11", 10
+db "    mov rdx, [rbp]", 10
+db "    mov r8, [rbp+8]", 10
+db "    lea r9, [rel __kdbg_info]", 10
+db "    call kdbg_hook", 10
+db "    lea rsp, [rbp-240]", 10
+db "    movsd xmm0, [rbp-240]", 10
+db "    movsd xmm1, [rbp-232]", 10
+db "    movsd xmm2, [rbp-224]", 10
+db "    movsd xmm3, [rbp-216]", 10
+db "    movsd xmm4, [rbp-208]", 10
+db "    movsd xmm5, [rbp-200]", 10
+db "    movsd xmm6, [rbp-192]", 10
+db "    movsd xmm7, [rbp-184]", 10
+db "    movsd xmm8, [rbp-176]", 10
+db "    movsd xmm9, [rbp-168]", 10
+db "    movsd xmm10, [rbp-160]", 10
+db "    movsd xmm11, [rbp-152]", 10
+db "    movsd xmm12, [rbp-144]", 10
+db "    movsd xmm13, [rbp-136]", 10
+db "    movsd xmm14, [rbp-128]", 10
+db "    movsd xmm15, [rbp-120]", 10
+db "    add rsp, 128", 10
+db "    pop r15", 10
+db "    pop r14", 10
+db "    pop r13", 10
+db "    pop r12", 10
+db "    pop r11", 10
+db "    pop r10", 10
+db "    pop r9", 10
+db "    pop r8", 10
+db "    pop rdi", 10
+db "    pop rsi", 10
+db "    pop rdx", 10
+db "    pop rcx", 10
+db "    pop rbx", 10
+db "    pop rax", 10
+db "    pop rbp", 10
+db "    ret", 10, 0
 s_str_lbl:   db ".str", 0        ; LOCAL label, like .flt
 s_str_db:    db ": db ", 0
 s_str_cont:  db 10, "    db ", 0
@@ -2919,6 +4204,9 @@ s_setbe:     db "    setbe al", 10, "    movzx rax, al", 10, 0
 s_setae:     db "    setae al", 10, "    movzx rax, al", 10, 0
 s_imod:      db "    cqo", 10, "    idiv rcx", 10, "    mov rax, rdx", 10, 0
 s_shl:       db "    shl rax, cl", 10, 0
+s_shlk:      db "    shl rax, ", 0
+s_shrk:      db "    sar rax, ", 0
+s_ushrk:     db "    shr rax, ", 0
 s_shr:       db "    sar rax, cl", 10, 0
 s_ushr:      db "    shr rax, cl", 10, 0
 s_xor:       db "    xor rax, rcx", 10, 0
@@ -2986,6 +4274,9 @@ LQ_CAPS      equ 16
 FNVAL_MARK   equ 0x464E56          ; AST.owner_type of a call through a value
 KT_MAX_MARKS equ 65536
 extern lmap_lookup
+extern parse_float
+extern par_ps_decl, par_ps_type, par_ps_n
+extern par_ls_decl, par_ls_type, par_ls_n
 
 section .bss
     cg_out       resq 1
@@ -3137,6 +4428,31 @@ section .bss
     cg_err_msg     resq 1              ; where, what, and a hint (or 0)
     cg_err_hint    resq 1
     fn_ret_unsig   resd CG_MAX_FUNCS   ; 1 when the return type is u8..u64
+    ; --- struct results (see STRUCT VALUES) ---
+    cg_sret_kind   resd 1              ; where the next struct-returning call
+    cg_sret_off    resd 1              ; writes: 0 a temporary, 1 [rbp-off],
+                                       ; 2 the address [rbp-off] holds
+    cg_sret_pend   resq 1              ; the same, kept until its call
+    cg_cur_sret    resd 1              ; struct the current function returns
+    cg_sret_slot   resd 1              ; its hidden slot: where to write it
+    cg_add_fresh   resd 1              ; cg_add_var: a new slot, never reuse
+    cg_lop_n       resd 1              ; cg_list_op: which _n function
+    ; --- extern functions: the system's libraries -------------------------
+    cg_ext_toks    resq CG_MAX_EXTERN  ; name token of each
+    cg_ext_nodes   resq CG_MAX_EXTERN  ; its AST_EXTERN
+    cg_ext_used    resb CG_MAX_EXTERN  ; 1 once a call to it is emitted
+    cg_ext_count   resd 1
+    cg_ext_any     resd 1              ; some extern function is called
+    ; --- a library (--lib): what it exports --------------------------------
+    cg_lib         resb 1              ; 1 when the output is a library
+    cg_exp_toks    resq CG_MAX_FUNCS   ; name token of each exported function
+    cg_exp_name    resq CG_MAX_FUNCS   ; and its name, copied: the source text
+    cg_exp_nlen    resd CG_MAX_FUNCS   ; is gone by the time the writer asks
+    cg_exp_buf     resb 65536
+    cg_exp_used    resd 1
+    cg_exp_count   resd 1
+    cg_has_exp     resd 1              ; some function is marked export
+    cg_main_idx    resd 1              ; main's number, for the thread check
     fn_count       resd 1
     ; --- the thread check: which functions can run in a thread, and whether
     ; any of them touches a global that is not declared 'shared' ---
@@ -3190,13 +4506,23 @@ section .bss
     kt_nfiles    resd 1
     kt_files     resq KT_MAX_FILES
     kt_lines     resd KT_MAX_MARKS
+    cg_debug     resb 1          ; --debug: hooks before statements, records
+    kdb_on        resd 1          ; this function gets the hooks
+    kdb_prev      resq 1          ; last function with a debug record, 0 none
+    cg_as_module resb 1          ; --module: the functions alone, no program
+    cg_mod_tag   resb 72         ; '<name>_': what a module's data labels carry
 
 section .text
     global jup_codegen_init
+    global cg_debug
+    global cg_as_module, cg_mod_tag
     global jup_codegen_run
     global jup_codegen_set_target
     global codegen_get_code
     global codegen_get_code_size
+    global codegen_uses_extern
+    global jup_codegen_set_lib, codegen_export_count, codegen_export_name
+    global codegen_has_exports
 
 ; ==============================================================================
 ; jup_codegen_init(rdi=out_buf, rsi=out_cap)
@@ -3915,9 +5241,40 @@ ir_emit_kind:
     mov  rax, [rel ra_grow]
     add  rdi, rax                    ; room for the registers it saves
 .ek_fr_n:
+    push rdi
     call emit_uint
     mov  rsi, s_nl
     call emit_cstr
+    pop  rdi
+    ; Windows commits a thread's stack a page at a time, through a guard
+    ; page just below what is in use: a frame bigger than a page has to
+    ; touch its pages from the top down, or the first store far below
+    ; lands past the guard page and the process dies with no message.
+    ; A store of rbp: nothing in the frame holds a value yet, and it needs
+    ; no register (rax, r10 and r11 may carry arguments here)
+    cmp  byte [rel cg_target], TARGET_PE
+    jne  .ek_fr_saves
+    cmp  rdi, 4096
+    jbe  .ek_fr_saves
+    push rbx
+    push r12
+    mov  r12, rdi
+    mov  ebx, 4096
+.ek_probe:
+    cmp  rbx, r12
+    ja   .ek_probed
+    mov  rsi, s_probe
+    call emit_cstr
+    mov  rdi, rbx
+    call emit_uint
+    mov  rsi, s_probe2
+    call emit_cstr
+    add  rbx, 4096
+    jmp  .ek_probe
+.ek_probed:
+    pop  r12
+    pop  rbx
+.ek_fr_saves:
     mov  eax, [rel ra_active]
     test eax, eax
     jz   .ek_out
@@ -3990,7 +5347,10 @@ ra_analyze:
     mov  qword [rel ra_grow], 0
     mov  eax, [rel ra_asm]
     test eax, eax
-    jz   .a_bits
+    jnz  .a_noregs
+    cmp  byte [rel cg_debug], 0      ; a debug build keeps every local in its slot
+    je   .a_bits
+.a_noregs:
     mov  dword [rel ra_skip], 1
     jmp  .a_out
 
@@ -5849,6 +7209,21 @@ emit_cstr:
     pop  rdx
     ret
 
+; cg_emit_gpre(rsi = text that ends in '__g_'): the text and, in a module,
+; the module's name after it. A module's globals and constants are its own:
+; two modules built apart may both import the same constants, and each
+; carries its copy under its own label. Preserves what emit_cstr does.
+cg_emit_gpre:
+    call emit_cstr
+    cmp  byte [rel cg_as_module], 0
+    je   .gp_out
+    push rsi
+    lea  rsi, [rel cg_mod_tag]
+    call emit_cstr
+    pop  rsi
+.gp_out:
+    ret
+
 ; emit_tok(rdi=token ptr) -- emits the source text of the token
 emit_tok:
     push rdx
@@ -5966,6 +7341,8 @@ cg_add_var:
     jnz  .have_n
     mov  rsi, 1
 .have_n:
+    cmp  dword [rel cg_add_fresh], 0
+    jne  .fresh                      ; a temporary: always a slot of its own
     ; If a variable with this name already exists, REUSE its slot so that
     ; re-declaring a name (e.g. 'i' in a second for-loop) maps every
     ; reference to a single, consistent stack offset.
@@ -6319,6 +7696,30 @@ cg_emit_struct_lit:
     cmp  eax, -1
     je   .sl_out
     mov  r14d, eax                   ; struct id
+    ; every byte starts at zero: a field the literal leaves out reads 0, and
+    ; one written narrower than a slot finds clean bytes around it
+    call cg_struct_size
+    xor  ebx, ebx
+.sl_zero:
+    cmp  ebx, eax
+    jae  .sl_zeroed
+    push rax
+    mov  rsi, s_movmemq_pre
+    call emit_cstr
+    mov  edi, ebx
+    shl  edi, 3
+    mov  eax, r15d
+    sub  eax, edi
+    mov  edi, eax
+    call emit_uint
+    mov  rsi, s_movmem_mid
+    call emit_cstr
+    mov  rsi, s_zero_nl
+    call emit_cstr
+    pop  rax
+    inc  ebx
+    jmp  .sl_zero
+.sl_zeroed:
     mov  r13, [r12 + AST.right]      ; first initialiser
     xor  ebx, ebx                    ; positional counter
 .sl_loop:
@@ -6338,54 +7739,91 @@ cg_emit_struct_lit:
     mov  eax, ebx
 .sl_have:
     ; absolute index into the flat field arrays
-    push rax
     lea  rcx, [rel struct_first]
-    mov  ecx, [rcx + r14*4]
-    pop  rax
-    add  eax, ecx
+    add  eax, [rcx + r14*4]
     lea  rcx, [rel field_offs]
     mov  edx, [rcx + rax*4]
-    push rdx                         ; byte offset inside the struct
+    mov  esi, r15d
+    sub  esi, edx                    ; effective offset of the field
+    push rsi
+    lea  rcx, [rel field_sizes]
+    mov  edx, [rcx + rax*4]
+    push rdx                         ; its width
+    lea  rcx, [rel field_struct]
+    mov  edx, [rcx + rax*4]
+    cmp  edx, -1
+    jne  .sl_nested
     lea  rcx, [rel field_isfloat]
     mov  ecx, [rcx + rax*4]
-    push rcx
-    ; value -> rax or xmm0
-    mov  rdi, [r13 + AST.left]
-    pop  rcx
-    push rcx
     test ecx, ecx
     jz   .sl_int
+    ; a real: f64 whole, f32 narrowed to four bytes
+    mov  rdi, [r13 + AST.left]
     call cg_emit_float
-    pop  rcx
     pop  rdx
-    mov  esi, r15d
-    sub  esi, edx                    ; effective offset
-    push rsi
+    cmp  edx, 4
+    jne  .sl_f64
+    mov  rsi, s_cvt_d2s
+    call emit_cstr
+    mov  rsi, s_st_ss_pre
+    jmp  .sl_fgo
+.sl_f64:
     mov  rsi, s_st_xmm_pre
+.sl_fgo:
     call emit_cstr
     pop  rdi
     call emit_uint
     mov  rsi, s_st_xmm_suf
     call emit_cstr
     jmp  .sl_next
-.sl_int:
-    call cg_emit
-    pop  rcx
+.sl_nested:
+    ; a struct inside: the value is copied in, exactly its size
+    push rdx
+    mov  rdi, [r13 + AST.left]
+    call cg_emit_struct_addr
+    pop  rdx                         ; the nested struct
+    pop  rcx                         ; width (unused)
+    pop  rdi                         ; its offset
+    cmp  eax, -1
+    je   .sl_next
+    push rdx
+    mov  edx, edi
+    mov  esi, 1
+    call cg_emit_dest_rdx
     pop  rdx
-    mov  esi, r15d
-    sub  esi, edx
-    push rsi
+    lea  rcx, [rel struct_bytes]
+    mov  edi, [rcx + rdx*4]
+    call cg_emit_copy
+    jmp  .sl_next
+.sl_int:
+    mov  rdi, [r13 + AST.left]
+    call cg_emit
     ; Written as text on purpose, not as IR_STLOC. The slots of an array or a
     ; struct are read back through a base address plus an offset, so only the
     ; base ever appears in the code as [rbp-N]. Recorded as plain local stores,
     ; the other slots looked like ordinary variables to the register allocator,
     ; which put them in registers -- and the memory the reads go to was never
     ; written. As text, every slot shows up as [rbp-N] and stays in memory.
-    mov  rsi, s_movmemrax
+    mov  rsi, s_movmem_pre
     call emit_cstr
+    pop  rdx
     pop  rdi
+    push rdx
     call emit_uint
-    mov  rsi, s_movmemrax2
+    pop  rdx
+    mov  rsi, s_st8_suf
+    cmp  edx, 4
+    jne  .sl_i2
+    mov  rsi, s_st4_suf
+.sl_i2:
+    cmp  edx, 2
+    jne  .sl_i1
+    mov  rsi, s_st2_suf
+.sl_i1:
+    cmp  edx, 1
+    jne  .sl_igo
+    mov  rsi, s_st1_suf
+.sl_igo:
     call emit_cstr
 .sl_next:
     inc  ebx
@@ -6661,7 +8099,7 @@ cg_emit_idx_base:
 .glob:
     ; global: lea rdx, [rel __g_NAME]
     mov  rsi, s_lea_glbp
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, r12
     call cg_emit_gtok
     mov  rsi, s_lea_glbs
@@ -6736,6 +8174,8 @@ tok_equal:
 
 ; name_is_main(rdi=token ptr) -> rax=1 if the text == "main"
 name_is_main:
+    cmp  byte [rel cg_lib], 0        ; a library has no main: a fn of that
+    jne  .no                         ; name is a function like the others
     mov  eax, dword [rdi + TOKEN.length]
     cmp  eax, 4
     jne  .no
@@ -6780,6 +8220,16 @@ jup_codegen_run:
     mov  dword [rel lq_done], 0
     mov  dword [rel cg_lam_cur], -1
     mov  dword [rel cg_in_raw], 0
+    ; a module: no preamble at all. It is text for the compiler's own build,
+    ; which has its own entry, and like bare metal it has no runtime: no
+    ; failure traces, no debugger hooks, no system libraries.
+    cmp  byte [rel cg_as_module], 0
+    je   .not_module
+    mov  byte [rel cg_bare], 1
+    lea  rsi, [rel s_mod_hdr]
+    call emit_cstr
+    jmp  .hdr_done
+.not_module:
     ; pick the preamble that matches the output target
     mov  al, [rel cg_target]
     cmp  al, TARGET_ELF
@@ -6810,6 +8260,9 @@ jup_codegen_run:
     mov  dword [rel fn_count], 0
     mov  dword [rel gs_count], 0
     mov  dword [rel ce_count], 0
+    mov  dword [rel cg_ext_count], 0
+    mov  dword [rel cg_ext_any], 0
+    mov  dword [rel cg_has_exp], 0
     mov  dword [rel cg_cur_fn], -1
     mov  byte [rel cg_dyn_thread], 0
     mov  qword [rel cg_thread_tok], 0
@@ -6862,8 +8315,21 @@ jup_codegen_run:
     mov  [rel gs_count], eax
     jmp  .pp_next
 .pp_notvar:
+    cmp  rax, AST_EXTERN
+    jne  .pp_notext
+    push rdi
+    mov  rdi, rcx
+    call cg_register_externs
+    pop  rdi
+    jmp  .pp_next
+.pp_notext:
     cmp  rax, AST_FUNCTION
     jne  .pp_next
+    movzx eax, word [rcx + AST.type_info]
+    cmp  eax, VIS_EXPORTED
+    jne  .pp_noexp
+    mov  dword [rel cg_has_exp], 1
+.pp_noexp:
     mov  rax, [rcx + AST.data]       ; name token
     test rax, rax
     jz   .pp_next
@@ -6970,8 +8436,37 @@ jup_codegen_run:
     call kt_program_begin
     mov  rdi, r12
     call cg_walk_top
+    cmp  byte [rel cg_lib], 0
+    jne  .walk_lib
+    cmp  dword [rel cg_has_exp], 0
+    je   .walk_nolib
+.walk_lib:
+    call cg_emit_lib
+.walk_nolib:
     call kt_program_end
+    call kdb_program_end
+    call cg_module_check
+    ; what C calls into, after the program's own functions (outside the
+    ; range a failure's trace walks)
+    cmp  byte [rel cg_lib], 0
+    jne  .rt_lib
+    cmp  dword [rel cg_has_exp], 0
+    je   .rt_nolib
+.rt_lib:
+    lea  rsi, [rel hdrlib]
+    mov  rdx, hdrlib_len
+    call emit_bytes
+    lea  rsi, [rel hdrlib_win]
+    mov  rdx, hdrlib_win_len
+    cmp  byte [rel cg_target], TARGET_ELF
+    jne  .rt_libsys
+    lea  rsi, [rel hdrlib_elf]
+    mov  rdx, hdrlib_elf_len
+.rt_libsys:
+    call emit_bytes
+.rt_nolib:
     call cg_emit_fnrecs
+    call cg_emit_extrecs
     cmp  byte [rel cg_had_error], 0
     jne  .err
     ; code that can run in a thread may only touch 'shared' globals
@@ -7160,6 +8655,11 @@ cg_thread_check:
     push r12
     push r13
     push r14
+    ; main is the program's main thread wherever it is started from -- a
+    ; library's app thread, an Android activity: nothing reaches it
+    lea  rdi, [rel tk_mainname]
+    call cg_find_func
+    mov  [rel cg_main_idx], eax
     mov  r12d, [rel fn_count]
     ; start: the functions passed to thread_start, and every address-taken
     ; one when a thread was started from a computed function
@@ -7222,6 +8722,8 @@ cg_thread_check:
     lea  rcx, [rel fn_reach]
     cmp  byte [rcx + rax], 0
     je   .tc_edge_next
+    cmp  edx, [rel cg_main_idx]
+    je   .tc_edge_next
     cmp  byte [rcx + rdx], 0
     jne  .tc_edge_next
     mov  byte [rcx + rdx], 1
@@ -7264,6 +8766,102 @@ cg_thread_error_tok:
 
 ; cg_type_error() -> rax = message (0 when none), rdx = token or 0, r8 = hint
     global cg_type_error
+; cg_module_check(): what a module cannot hold. Nothing starts a module: its
+; functions are called by the compiler's hand-written code, so it has no
+; main, no global whose first value has to be computed when main begins, and
+; no function C calls.
+cg_module_check:
+    cmp  byte [rel cg_as_module], 0
+    je   .mc_ret
+    cmp  byte [rel cg_had_error], 0
+    jne  .mc_ret
+    push rbx
+    push r12
+    mov  rbx, [rel cg_root]
+.mc_loop:
+    test rbx, rbx
+    jz   .mc_done
+    cmp  qword [rbx + AST.node_type], AST_PROGRAM
+    jne  .mc_done
+    mov  r12, [rbx + AST.left]
+    test r12, r12
+    jz   .mc_next
+    mov  rax, [r12 + AST.node_type]
+    cmp  rax, AST_FUNCTION
+    je   .mc_fn
+    cmp  rax, AST_VAR_DECL
+    je   .mc_var
+    cmp  rax, AST_CONST_DECL
+    je   .mc_var
+    jmp  .mc_next
+.mc_fn:
+    mov  rdi, [r12 + AST.data]
+    test rdi, rdi
+    jz   .mc_next
+    call name_is_main
+    test rax, rax
+    jnz  .mc_main
+    movzx eax, word [r12 + AST.type_info]
+    cmp  eax, VIS_EXPORTED
+    je   .mc_export
+    jmp  .mc_next
+.mc_var:
+    cmp  qword [r12 + AST.type_info], 0
+    jne  .mc_next                    ; an array: its own check, as data
+    mov  rdi, [r12 + AST.left]
+    test rdi, rdi
+    jz   .mc_scalar
+    cmp  qword [rdi + TOKEN.type], KW_STR
+    je   .mc_next                    ; a stream starts empty
+    call cg_find_struct
+    cmp  eax, -1
+    jne  .mc_next                    ; a struct starts at zero
+.mc_scalar:
+    mov  rdi, [r12 + AST.right]
+    test rdi, rdi
+    jz   .mc_novalue
+    mov  rax, [rdi + AST.node_type]
+    cmp  rax, AST_INTEGER_LIT
+    je   .mc_next
+    cmp  rax, AST_FLOAT_LIT
+    je   .mc_next
+    jmp  .mc_init
+.mc_novalue:
+    mov  rdi, r12
+    call cg_decl_vtag
+    and  eax, 15
+    cmp  eax, 2
+    je   .mc_init                    ; a list is made when main begins
+    cmp  eax, 3
+    je   .mc_init                    ; and so is a map
+    jmp  .mc_next
+.mc_init:
+    lea  rsi, [rel s_mod_init]
+    lea  rdx, [rel s_mod_inith]
+    jmp  .mc_err
+.mc_main:
+    lea  rsi, [rel s_mod_main]
+    lea  rdx, [rel s_mod_mainh]
+    jmp  .mc_err
+.mc_export:
+    lea  rsi, [rel s_mod_exp]
+    lea  rdx, [rel s_mod_exph]
+.mc_err:
+    mov  rax, [r12 + AST.data]
+    mov  [rel cg_err_tok], rax
+    mov  [rel cg_err_msg], rsi
+    mov  [rel cg_err_hint], rdx
+    mov  byte [rel cg_had_error], 1
+    jmp  .mc_done
+.mc_next:
+    mov  rbx, [rbx + AST.right]
+    jmp  .mc_loop
+.mc_done:
+    pop  r12
+    pop  rbx
+.mc_ret:
+    ret
+
 cg_type_error:
     mov  rax, [rel cg_err_msg]
     mov  rdx, [rel cg_err_tok]
@@ -8492,15 +10090,16 @@ cg_arg_struct_id:
     push rbx
     test rdi, rdi
     jz   .none
+    mov  rbx, rdi
     mov  rax, [rdi + AST.node_type]
     cmp  rax, AST_IDENTIFIER
-    jne  .none
+    jne  .other
     mov  rdi, [rdi + AST.data]
     test rdi, rdi
     jz   .none
     call cg_find_var_idx
     cmp  eax, -1
-    je   .none
+    je   .other
     ; An array parameter first: its slot already holds an address, pass it on.
     ; It also carries its declared size in var_arrlen, so testing the size
     ; first -- as this did -- took a parameter for a local array and passed the
@@ -8526,6 +10125,13 @@ cg_arg_struct_id:
     mov  eax, 2                       ; already an address: pass it along
     pop  rbx
     ret
+.other:
+    ; a global struct, a field that is a struct, a call returning one, a
+    ; literal, *p: passed by address all the same (cg_emit_struct_addr)
+    mov  rdi, rbx
+    call cg_struct_kind
+    pop  rbx
+    ret
 .none:
     mov  eax, -1
     pop  rbx
@@ -8537,6 +10143,7 @@ cg_function:
     push r14
     call ir_begin                    ; everything this function emits is captured
     call kt_fn_begin
+    call kdb_fn_begin
     mov  r12, rdi
     ; which function this is, for the thread check
     mov  rdi, [r12 + AST.data]
@@ -8582,7 +10189,7 @@ cg_function:
     mov  r13d, ecx               ; frame size
 
     ; --- export the symbol if it is marked global_visible / inter_cluster_export ---
-    mov  rax, [r12 + AST.type_info]
+    movzx eax, word [r12 + AST.type_info]
     cmp  rax, VIS_EXPORTED
     jne  .no_export
     mov  rdi, [r12 + AST.data]
@@ -8631,6 +10238,29 @@ cg_function:
     mov  edi, r13d
     mov  eax, IR_FRAME               ; sub rsp, N -- the allocator may grow N
     call ir_ctl
+    ; a function that returns a struct: r11 says where, kept in a slot of
+    ; its own before anything can change it
+    mov  dword [rel cg_cur_sret], -1
+    mov  rdi, [r12 + AST.data]
+    call cg_fn_ret_struct
+    cmp  eax, -1
+    je   .no_sret
+    mov  [rel cg_cur_sret], eax
+    mov  dword [rel pending_struct], -1
+    mov  dword [rel cg_add_fresh], 1
+    lea  rdi, [rel cg_tmp_tok]
+    mov  esi, 1
+    call cg_add_var
+    mov  dword [rel cg_add_fresh], 0
+    mov  [rel cg_sret_slot], eax
+    push rax
+    mov  rsi, s_movmem_pre
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_st_r11_suf
+    call emit_cstr
+.no_sret:
 
     ; --- spill incoming register parameters into their stack slots ---
     ; Win64 / System V pass the first four integer arguments in rcx,rdx,r8,r9.
@@ -8647,7 +10277,17 @@ cg_function:
     cmp  r14d, 6
     jb   .pspill_reg
     ; Parameter seven onward arrived on the stack. The caller left them just
-    ; past the shadow space, in declaration order.
+    ; past the shadow space, in declaration order. A real keeps its flag: the
+    ; slot holds the bits of a double, read with movsd from then on.
+    movzx eax, word [r13 + AST.col]
+    mov  ecx, eax
+    and  ecx, 1
+    mov  [rel pending_float], ecx
+    shr  eax, 1
+    and  eax, 1
+    mov  [rel pending_unsigned], eax
+    mov  ecx, [r13 + AST.child_count]
+    mov  [rel pending_elem], ecx
     mov  rdi, [r13 + AST.data]
     mov  esi, 1
     call cg_add_var
@@ -8848,9 +10488,10 @@ cg_function:
 .no_lamcopy:
 
     ; main on Windows starts the runtime before any thread can exist: the
-    ; per-thread failure state needs its TLS slot.
+    ; per-thread failure state needs its TLS slot. A library's first call
+    ; does the same, through __kron_lib_init.
     mov  rdi, [r12 + AST.data]
-    call name_is_main
+    call cg_is_entry
     test rax, rax
     jz   .no_rtinit
     mov  al, [rel cg_target]
@@ -8864,7 +10505,7 @@ cg_function:
     ; main also gives the globals whose first value is not a plain number
     ; that value, before anything else runs
     mov  rdi, [r12 + AST.data]
-    call name_is_main
+    call cg_is_entry
     test rax, rax
     jz   .no_ginit
     call cg_emit_global_inits
@@ -8908,7 +10549,9 @@ cg_function:
     mov  rsi, s_ret
     call emit_cstr
 .done:
+    call cg_frame_fit                ; room for the temporaries too
     call ir_end                      ; write the captured function out
+    call kdb_fn_end                   ; --debug: its record, before .kfe
     mov  rdi, r12
     call kt_fn_end
     pop  r14
@@ -9255,7 +10898,7 @@ cg_emit_global_inits:
 .gi_float:
     call cg_emit_float
     mov  rsi, s_stgf_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call emit_tok
     mov  rsi, s_stgf_suf
@@ -9274,7 +10917,7 @@ cg_emit_global_inits:
     call cg_lib_call
 .gi_store:
     mov  rsi, s_stg_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call emit_tok
     mov  rsi, s_stg_suf
@@ -9757,7 +11400,7 @@ cg_emit_multi:
 .mu_global:
     push rdi
     mov  rsi, s_stg_pre
-    call emit_cstr
+    call cg_emit_gpre
     pop  rdi
     call cg_emit_gtok
     mov  rsi, s_stg_suf
@@ -9895,6 +11538,10 @@ cg_call_kind:
     call cg_is_intrinsic
     test eax, eax
     jnz  .ck_fn
+    mov  rdi, [r12 + AST.data]
+    call cg_find_extern
+    cmp  eax, -1
+    jne  .ck_ext
     ; no function, no variable: say so instead of jumping to address zero
     mov  rax, [r12 + AST.data]
     mov  [rel cg_err_tok], rax
@@ -9907,6 +11554,10 @@ cg_call_kind:
     ret
 .ck_val:
     mov  eax, 1
+    pop  r12
+    ret
+.ck_ext:
+    mov  eax, 3
     pop  r12
     ret
 .ck_fn:
@@ -9942,7 +11593,7 @@ cg_call_ret_float:
     mov  rdi, [r12 + AST.data]
     call cg_find_global
     cmp  eax, -1
-    je   .cr_no
+    je   .cr_ext
 .cr_val:
     mov  rdi, [r12 + AST.data]
     call cg_vtag_of_name
@@ -9957,6 +11608,18 @@ cg_call_ret_float:
     mov  eax, 1
     pop  r12
     ret
+.cr_ext:
+    ; an extern function returning f64 or f32
+    mov  rdi, [r12 + AST.data]
+    call cg_find_extern
+    cmp  eax, -1
+    je   .cr_no
+    lea  rcx, [rel cg_ext_nodes]
+    mov  rcx, [rcx + rax*8]
+    mov  eax, [rcx + AST.child_count]
+    cmp  eax, 8
+    jb   .cr_no
+    jmp  .cr_yes
 .cr_no:
     xor  eax, eax
     pop  r12
@@ -10021,7 +11684,7 @@ cg_emit_fnval_target:
     jmp  .ft_close
 .ft_glb:
     mov  rsi, s_r11_ldg
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, r12
     call cg_emit_gtok
 .ft_close:
@@ -10529,6 +12192,947 @@ cg_emit_fnrecs:
     ret
 
 ; ==============================================================================
+; EXTERN FUNCTIONS: the system's libraries
+;
+;   extern "libm.so.6", "libm.dylib", "msvcrt.dll" {
+;       fn cos(x: f64) -> f64;
+;       fn printf(format: ptr<u8>, ...) -> i32;
+;   }
+;
+; A call pushes its arguments in order, each where its declaration says --
+; a real as an f64, an integer as 64 bits -- and hands __ccall the record of
+; the function and the shape of the call; __ccall, in the preamble of each
+; system, finds the function the first time and puts the arguments where
+; that system's C convention wants them. The record:
+;   __xr_K: dq address (0 until found), __xn_K (its name), __xl_K (the names
+;           of its libraries, each ending in 0, an empty one last)
+; ==============================================================================
+
+; cg_register_externs(rdi = the first AST_EXTERN of a block)
+cg_register_externs:
+    push rbx
+    mov  rbx, rdi
+.re_loop:
+    test rbx, rbx
+    jz   .re_out
+    mov  rax, [rbx + AST.data]
+    test rax, rax
+    jz   .re_next                    ; an empty block
+    mov  ecx, [rel cg_ext_count]
+    cmp  ecx, CG_MAX_EXTERN
+    jae  .re_full
+    lea  rdx, [rel cg_ext_toks]
+    mov  [rdx + rcx*8], rax
+    lea  rdx, [rel cg_ext_nodes]
+    mov  [rdx + rcx*8], rbx
+    lea  rdx, [rel cg_ext_used]
+    mov  byte [rdx + rcx], 0
+    inc  ecx
+    mov  [rel cg_ext_count], ecx
+.re_next:
+    mov  rbx, [rbx + AST.right]
+    jmp  .re_loop
+.re_full:
+    mov  [rel cg_err_tok], rax
+    lea  rax, [rel s_ext_full]
+    mov  [rel cg_err_msg], rax
+    mov  qword [rel cg_err_hint], 0
+    mov  byte [rel cg_had_error], 1
+.re_out:
+    pop  rbx
+    ret
+
+; cg_find_extern(rdi = name token) -> eax = its index, -1 when it is none
+cg_find_extern:
+    push rbx
+    push r12
+    mov  r12, rdi
+    xor  ebx, ebx
+.fe_loop:
+    cmp  ebx, [rel cg_ext_count]
+    jae  .fe_none
+    lea  rax, [rel cg_ext_toks]
+    mov  rsi, [rax + rbx*8]
+    mov  rdi, r12
+    call tok_equal
+    test eax, eax
+    jnz  .fe_have
+    inc  ebx
+    jmp  .fe_loop
+.fe_have:
+    mov  eax, ebx
+    pop  r12
+    pop  rbx
+    ret
+.fe_none:
+    mov  eax, -1
+    pop  r12
+    pop  rbx
+    ret
+
+; codegen_uses_extern() -> eax = 1 when the program calls an extern function:
+; the executable is then linked with the system's loader
+codegen_uses_extern:
+    mov  eax, [rel cg_ext_any]
+    ret
+
+; cg_ext_error(rsi = message, rdx = hint or 0, r12 = the call)
+cg_ext_error:
+    mov  rax, [r12 + AST.data]
+    mov  [rel cg_err_tok], rax
+    mov  [rel cg_err_msg], rsi
+    mov  [rel cg_err_hint], rdx
+    mov  byte [rel cg_had_error], 1
+    ret
+
+; cg_call_extern(r12 = AST_CALL of an extern function)
+cg_call_extern:
+    push rbx
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40                     ; [rsp] shape, [rsp+8] widths, [rsp+16] index
+    mov  rdi, [r12 + AST.data]
+    call cg_find_extern
+    mov  [rsp + 16], rax
+    lea  rcx, [rel cg_ext_nodes]
+    mov  rbx, [rcx + rax*8]          ; the declaration
+    cmp  byte [rel cg_bare], 0
+    je   .ce_os
+    lea  rsi, [rel s_ext_bare]
+    lea  rdx, [rel s_ext_bareh]
+    call cg_ext_error
+    jmp  .ce_out
+.ce_os:
+    cmp  dword [rel cg_in_raw], 0
+    jne  .ce_raw
+    lea  rsi, [rel s_ext_raw]
+    lea  rdx, [rel s_ext_rawh]
+    call cg_ext_error
+    jmp  .ce_out
+.ce_raw:
+    mov  rdi, [rbx + AST.left]
+    call cg_count_list
+    mov  r14d, eax                   ; its parameters
+    mov  rdi, [r12 + AST.right]
+    call cg_count_list
+    mov  r15d, eax                   ; the arguments
+    cmp  r15d, 16
+    jbe  .ce_few
+    lea  rsi, [rel s_ext_many]
+    xor  edx, edx
+    call cg_ext_error
+    jmp  .ce_out
+.ce_few:
+    cmp  r15d, r14d
+    je   .ce_count_ok
+    jb   .ce_count_bad
+    movzx eax, word [rbx + AST.col]  ; more: only after '...'
+    test eax, eax
+    jnz  .ce_count_ok
+.ce_count_bad:
+    lea  rsi, [rel s_ext_count]
+    lea  rdx, [rel s_ext_counth]
+    call cg_ext_error
+    jmp  .ce_out
+.ce_count_ok:
+    mov  rax, [rsp + 16]
+    lea  rcx, [rel cg_ext_used]
+    mov  byte [rcx + rax], 1
+    mov  dword [rel cg_ext_any], 1
+    ; the shape: the count, the result, where the variadic ones start
+    mov  eax, r15d
+    mov  ecx, [rbx + AST.child_count]
+    shl  rcx, 24
+    or   rax, rcx
+    movzx ecx, word [rbx + AST.col]
+    test ecx, ecx
+    jz   .ce_fixed
+    mov  ecx, r14d                   ; variadic: where the rest start
+    shl  rcx, 48
+    or   rax, rcx
+.ce_fixed:
+    mov  [rsp], rax
+    xor  eax, eax
+    mov  [rsp + 8], rax
+    mov  r13, [r12 + AST.right]      ; the arguments
+    mov  rbx, [rbx + AST.left]       ; the parameters (0 past the last)
+    xor  r14d, r14d                  ; which argument
+.ce_arg:
+    test r13, r13
+    jz   .ce_args_done
+    test rbx, rbx
+    jz   .ce_var
+    mov  rax, [rbx + AST.owner_type] ; the type keyword of the parameter
+    cmp  rax, TOK_IDENT
+    jne  .ce_scalar
+    ; a name: str and text are addresses; a struct is refused
+    mov  rdi, [rbx + AST.left]
+    test rdi, rdi
+    jz   .ce_int
+    call cg_find_struct
+    cmp  eax, -1
+    je   .ce_int
+    lea  rsi, [rel s_ext_struct]
+    lea  rdx, [rel s_ext_structh]
+    call cg_ext_error
+    jmp  .ce_out
+.ce_scalar:
+    cmp  rax, KW_F64
+    je   .ce_real
+    cmp  rax, KW_F32
+    je   .ce_real32
+    mov  edx, 1
+    cmp  rax, KW_I32
+    je   .ce_width
+    cmp  rax, KW_U32
+    je   .ce_width
+    mov  edx, 2
+    cmp  rax, KW_I16
+    je   .ce_width
+    cmp  rax, KW_U16
+    je   .ce_width
+    mov  edx, 3
+    cmp  rax, KW_I8
+    je   .ce_width
+    cmp  rax, KW_U8
+    je   .ce_width
+    cmp  rax, KW_BOOL
+    je   .ce_width
+    jmp  .ce_int
+.ce_width:
+    ; two bits per argument: 1 four bytes, 2 two, 3 one
+    mov  ecx, r14d
+    shl  ecx, 1
+    shl  rdx, cl
+    mov  rax, [rsp + 8]
+    or   rax, rdx
+    mov  [rsp + 8], rax
+    jmp  .ce_int
+.ce_real32:
+    mov  ecx, r14d
+    add  ecx, 32
+    mov  edx, 1
+    shl  rdx, cl
+    mov  rax, [rsp]
+    or   rax, rdx
+    mov  [rsp], rax
+    mov  ecx, r14d
+    shl  ecx, 1
+    mov  edx, 1
+    shl  rdx, cl
+    mov  rax, [rsp + 8]
+    or   rax, rdx
+    mov  [rsp + 8], rax
+    jmp  .ce_real
+.ce_var:
+    ; past '...': as the expression is, an integer of 64 bits or an f64
+    mov  rdi, [r13 + AST.left]
+    call cg_expr_is_float
+    test eax, eax
+    jz   .ce_int
+.ce_real:
+    mov  ecx, r14d
+    add  ecx, 8
+    mov  edx, 1
+    shl  rdx, cl
+    mov  rax, [rsp]
+    or   rax, rdx
+    mov  [rsp], rax
+    mov  rdi, [r13 + AST.left]
+    call cg_emit_float               ; an integer is converted
+    mov  rsi, s_fpush
+    call emit_cstr
+    jmp  .ce_next
+.ce_int:
+    mov  rdi, [r13 + AST.left]
+    call cg_expr_is_float
+    test eax, eax
+    jnz  .ce_int_f
+    mov  rdi, [r13 + AST.left]
+    call cg_emit
+    mov  rsi, s_push_rax
+    call emit_cstr
+    jmp  .ce_next
+.ce_int_f:
+    mov  rdi, [r13 + AST.left]
+    call cg_emit_float
+    mov  rsi, s_ext_trunc
+    call emit_cstr
+.ce_next:
+    inc  r14d
+    mov  r13, [r13 + AST.right]
+    test rbx, rbx
+    jz   .ce_arg
+    mov  rbx, [rbx + AST.right]
+    jmp  .ce_arg
+.ce_args_done:
+    mov  rsi, s_ext_mov10
+    call emit_cstr
+    mov  rdi, [rsp + 16]
+    call emit_uint
+    mov  rsi, s_ext_movax
+    call emit_cstr
+    mov  rdi, [rsp]
+    call emit_uint
+    mov  rsi, s_ext_movdx
+    call emit_cstr
+    mov  rdi, [rsp + 8]
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    call kt_flush
+    mov  rsi, s_ext_call
+    call emit_cstr
+    test r15d, r15d
+    jz   .ce_out
+    mov  rsi, s_addrsp_pre
+    call emit_cstr
+    mov  edi, r15d
+    shl  edi, 3
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.ce_out:
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  rbx
+    ret
+
+; cg_c_call(r12 = AST_CALL) -> eax = 1 when it was c_call(ptr, args...):
+; C code at an address -- from a library's table, a callback C handed over
+; -- called in the system's C convention, whatever the system. (call ptr()
+; is Kron's own convention: &fn, dll_proc on Windows.) The pointer, then the
+; arguments, pushed; a record for __ccall made on the stack around the
+; pointer -- [rsp] the function, never 0, so never looked up -- and the
+; shape: reals where the arguments are reals, the result a 64-bit integer.
+cg_c_call:
+    mov  rdi, [r12 + AST.data]
+    test rdi, rdi
+    jz   .cl_no
+    mov  eax, [rdi + TOKEN.length]
+    cmp  eax, 6
+    jne  .cl_no
+    mov  rsi, [rdi + TOKEN.value]
+    cmp  dword [rsi], 0x61635F63     ; "c_ca"
+    jne  .cl_no
+    cmp  word [rsi + 4], 0x6C6C      ; "ll"
+    jne  .cl_no
+    cmp  dword [rel cg_in_raw], 0
+    jne  .cl_raw
+    lea  rsi, [rel s_ccall_raw]
+    xor  edx, edx
+    call cg_ext_error
+    mov  eax, 1
+    ret
+.cl_raw:
+    mov  rax, [r12 + AST.right]
+    test rax, rax
+    jnz  .cl_go
+    lea  rsi, [rel s_ccall_none]
+    xor  edx, edx
+    call cg_ext_error
+    mov  eax, 1
+    ret
+.cl_go:
+    call cg_note_indirect
+    push rbx
+    push r13
+    push r14
+    push r15
+    mov  r13, [r12 + AST.right]
+    mov  rdi, [r13 + AST.left]
+    call cg_emit                     ; the pointer
+    mov  rsi, s_push_rax
+    call emit_cstr
+    xor  ebx, ebx                    ; the shape
+    xor  r14d, r14d                  ; which argument
+    mov  r13, [r13 + AST.right]
+.cc_arg:
+    test r13, r13
+    jz   .cc_args
+    mov  rdi, [r13 + AST.left]
+    call cg_expr_is_float
+    test eax, eax
+    jz   .cc_int
+    mov  ecx, r14d
+    add  ecx, 8
+    mov  eax, 1
+    shl  rax, cl
+    or   rbx, rax
+    mov  rdi, [r13 + AST.left]
+    call cg_emit_float
+    mov  rsi, s_fpush
+    call emit_cstr
+    jmp  .cc_next
+.cc_int:
+    mov  rdi, [r13 + AST.left]
+    call cg_emit
+    mov  rsi, s_push_rax
+    call emit_cstr
+.cc_next:
+    inc  r14d
+    mov  r13, [r13 + AST.right]
+    jmp  .cc_arg
+.cc_args:
+    or   rbx, r14                    ; the count
+    ; mov r10, rsp / mov rax, [r10 + 8n] / sub rsp, 24 / mov [rsp], rax
+    mov  rsi, s_cc_r10
+    call emit_cstr
+    mov  edi, r14d
+    shl  edi, 3
+    call emit_uint
+    mov  rsi, s_cc_rec
+    call emit_cstr
+    mov  rdi, rbx
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    call kt_flush
+    mov  rsi, s_cc_call
+    call emit_cstr
+    mov  edi, r14d
+    shl  edi, 3
+    add  edi, 32                     ; the record, the pointer, the arguments
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  rbx
+    mov  eax, 1
+    ret
+.cl_no:
+    xor  eax, eax
+    ret
+
+; cg_emit_dbytes(rsi = text, edx = length): each byte as a number and a comma
+cg_emit_dbytes:
+    push rbx
+    push r12
+    push r13
+    mov  r12, rsi
+    mov  r13d, edx
+    xor  ebx, ebx
+.db_loop:
+    cmp  ebx, r13d
+    jae  .db_out
+    movzx edi, byte [r12 + rbx]
+    call emit_uint
+    mov  rsi, s_ext_comma
+    call emit_cstr
+    inc  ebx
+    jmp  .db_loop
+.db_out:
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_emit_extrecs(): the record of every extern function a call reached
+cg_emit_extrecs:
+    push rbx
+    push r12
+    xor  ebx, ebx
+.er_loop:
+    cmp  ebx, [rel cg_ext_count]
+    jae  .er_out
+    lea  rax, [rel cg_ext_used]
+    cmp  byte [rax + rbx], 0
+    je   .er_next
+    mov  rsi, s_sec_data_nl
+    call emit_cstr
+    mov  rsi, s_ext_rec0
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_ext_rec1
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_ext_rec2
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_ext_rec3
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_ext_db
+    call emit_cstr
+    lea  rax, [rel cg_ext_toks]
+    mov  rax, [rax + rbx*8]
+    mov  rsi, [rax + TOKEN.value]
+    mov  edx, [rax + TOKEN.length]
+    call cg_emit_dbytes
+    mov  rsi, s_ext_rec4
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_ext_db
+    call emit_cstr
+    lea  rax, [rel cg_ext_nodes]
+    mov  rax, [rax + rbx*8]
+    mov  r12, [rax + AST.owner_type] ; the names of the libraries
+.er_lib:
+    test r12, r12
+    jz   .er_libs_done
+    mov  rax, [r12 + AST.data]       ; "name", quotes included
+    mov  rsi, [rax + TOKEN.value]
+    mov  edx, [rax + TOKEN.length]
+    inc  rsi
+    sub  edx, 2
+    jle  .er_lib_next
+    call cg_emit_dbytes
+    mov  edi, 0
+    call emit_uint
+    mov  rsi, s_ext_comma
+    call emit_cstr
+.er_lib_next:
+    mov  r12, [r12 + AST.right]
+    jmp  .er_lib
+.er_libs_done:
+    mov  rsi, s_ext_rec5
+    call emit_cstr
+    mov  rsi, s_sec_text_nl
+    call emit_cstr
+.er_next:
+    inc  ebx
+    jmp  .er_loop
+.er_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; ==============================================================================
+; A LIBRARY (--lib)
+;
+;   fn export add(a: i32, b: i32) -> i32 { return a + b; }
+;
+; Every function marked export gets a record and an entry C can call, the
+; name exported from the .dll, .so or .dylib:
+;   __xe_K:      dq the function, its shape, its widths, which are signed
+;   __ce_<name>: lea r11, [rel __xe_K] / jmp __centry
+; __kron_lib_init gives the globals their first values, as main does in a
+; program; the first call into the library runs it (__lib_ready).
+; ==============================================================================
+
+; jup_codegen_set_lib(dil = 1 for a library)
+jup_codegen_set_lib:
+    mov  [rel cg_lib], dil
+    ret
+
+; codegen_has_exports() -> eax = 1 when some function is marked export, or
+; the output is a library: the C entry goes into the program
+codegen_has_exports:
+    mov  eax, [rel cg_has_exp]
+    or   al, [rel cg_lib]
+    ret
+
+; codegen_export_count() -> eax = how many functions the library exports
+codegen_export_count:
+    mov  eax, [rel cg_exp_count]
+    ret
+
+; codegen_export_name(ecx = which) -> rax = its name, rdx = the name's length
+codegen_export_name:
+    lea  rax, [rel cg_exp_nlen]
+    mov  edx, [rax + rcx*4]
+    lea  rax, [rel cg_exp_name]
+    mov  rax, [rax + rcx*8]
+    ret
+
+; cg_is_entry(rdi = name token) -> rax = 1 for main, or for the init of a
+; library: what starts the runtime and gives the globals their values
+cg_is_entry:
+    lea  rax, [rel tk_libinit]
+    cmp  rdi, rax
+    je   .ie_yes
+    jmp  name_is_main
+.ie_yes:
+    mov  eax, 1
+    ret
+
+; cg_lib_kind(rax = a type keyword, rdi = its token, r12 = the function)
+; -> eax: 0 an integer or an address, 1 an f64, 2 an f32, 3 a struct; edx
+; the width code (0 eight bytes, 1 four, 2 two, 3 one); ecx 1 when signed
+cg_lib_kind:
+    xor  edx, edx
+    xor  ecx, ecx
+    cmp  rax, KW_F64
+    je   .lk_f64
+    cmp  rax, KW_F32
+    je   .lk_f32
+    cmp  rax, TOK_IDENT
+    je   .lk_name
+    mov  ecx, 1
+    mov  edx, 1
+    cmp  rax, KW_I32
+    je   .lk_int
+    mov  edx, 2
+    cmp  rax, KW_I16
+    je   .lk_int
+    mov  edx, 3
+    cmp  rax, KW_I8
+    je   .lk_int
+    xor  ecx, ecx
+    mov  edx, 1
+    cmp  rax, KW_U32
+    je   .lk_int
+    mov  edx, 2
+    cmp  rax, KW_U16
+    je   .lk_int
+    mov  edx, 3
+    cmp  rax, KW_U8
+    je   .lk_int
+    cmp  rax, KW_BOOL
+    je   .lk_int
+    xor  edx, edx
+    mov  ecx, 1
+    cmp  rax, KW_I64
+    je   .lk_int
+    xor  ecx, ecx
+.lk_int:
+    xor  eax, eax
+    ret
+.lk_f64:
+    mov  eax, 1
+    ret
+.lk_f32:
+    mov  edx, 1                      ; four bytes, where they are packed
+    mov  eax, 2
+    ret
+.lk_name:
+    ; str and text are addresses; a struct is not
+    test rdi, rdi
+    jz   .lk_int
+    push rdx
+    push rcx
+    call cg_find_struct
+    pop  rcx
+    pop  rdx
+    cmp  eax, -1
+    je   .lk_int
+    mov  eax, 3
+    ret
+
+; cg_c_fn(r12 = AST_CALL) -> eax = 1 when it was c_fn(f) and is emitted:
+; the address of f's C entry, for C to call back -- qsort's comparison, a
+; window system's callbacks. f is marked export.
+cg_c_fn:
+    mov  rdi, [r12 + AST.data]
+    test rdi, rdi
+    jz   .cf_no
+    mov  eax, [rdi + TOKEN.length]
+    cmp  eax, 4
+    jne  .cf_no
+    mov  rsi, [rdi + TOKEN.value]
+    cmp  byte [rsi], 'c'
+    jne  .cf_no
+    cmp  byte [rsi + 1], '_'
+    jne  .cf_no
+    cmp  byte [rsi + 2], 'f'
+    jne  .cf_no
+    cmp  byte [rsi + 3], 'n'
+    jne  .cf_no
+    push rbx
+    cmp  dword [rel cg_in_raw], 0
+    jne  .cf_raw
+    lea  rsi, [rel s_cfn_raw]
+    xor  edx, edx
+    call cg_ext_error
+    jmp  .cf_done
+.cf_raw:
+    ; one argument, the name of an exported function
+    mov  rbx, [r12 + AST.right]
+    test rbx, rbx
+    jz   .cf_bad
+    mov  rbx, [rbx + AST.left]
+    cmp  qword [rbx + AST.node_type], AST_IDENTIFIER
+    jne  .cf_bad
+    mov  rdi, [rbx + AST.data]
+    call cg_find_func
+    cmp  eax, -1
+    je   .cf_bad
+    lea  rcx, [rel fn_nodes]
+    mov  rcx, [rcx + rax*8]
+    movzx eax, word [rcx + AST.type_info]
+    cmp  eax, VIS_EXPORTED
+    jne  .cf_bad
+    mov  rsi, s_cfn_lea
+    call emit_cstr
+    mov  rdi, [rbx + AST.data]
+    call emit_tok
+    mov  rsi, s_cfn_end
+    call emit_cstr
+    jmp  .cf_done
+.cf_bad:
+    lea  rsi, [rel s_cfn_bad]
+    lea  rdx, [rel s_cfn_badh]
+    call cg_ext_error
+.cf_done:
+    pop  rbx
+    mov  eax, 1
+    ret
+.cf_no:
+    xor  eax, eax
+    ret
+
+; cg_emit_lib(): after every function of a library -- its init, the record
+; and the entry of each export, and a main for the preamble's _start
+cg_emit_lib:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 48                     ; [rsp] shape, [rsp+8] widths, [rsp+16] signed
+    cmp  byte [rel cg_lib], 0
+    jne  .el_lib
+    ; a program with exports (callbacks for C): main sets everything up
+    mov  rsi, s_lib_noinit
+    call emit_cstr
+    jmp  .el_main_ok
+.el_lib:
+    ; __kron_lib_init: a function with no parameters; its body calls the
+    ; library's own lib_init(), when it has one
+    mov  edi, AST_BLOCK
+    call cg_node
+    mov  r13, rax
+    lea  rdi, [rel tk_userinit]
+    call cg_find_func
+    cmp  eax, -1
+    je   .el_noinit
+    mov  edi, AST_CALL
+    call cg_node
+    lea  rcx, [rel tk_userinit]
+    mov  [rax + AST.data], rcx
+    mov  [r13 + AST.left], rax
+.el_noinit:
+    mov  edi, AST_FUNCTION
+    call cg_node
+    lea  rcx, [rel tk_libinit]
+    mov  [rax + AST.data], rcx
+    mov  [rax + AST.right], r13
+    mov  rdi, rax
+    call cg_function
+    ; a main for _start, unless the library has a function of that name
+    lea  rdi, [rel tk_mainname]
+    call cg_find_func
+    cmp  eax, -1
+    jne  .el_main_ok
+    mov  rsi, s_lib_nomain
+    call emit_cstr
+.el_main_ok:
+    ; the exports
+    mov  dword [rel cg_exp_count], 0
+    mov  dword [rel cg_exp_used], 0
+    mov  r15, [rel cg_root]
+.el_top:
+    test r15, r15
+    jz   .el_out
+    cmp  qword [r15 + AST.node_type], AST_PROGRAM
+    jne  .el_out
+    mov  r12, [r15 + AST.left]
+    test r12, r12
+    jz   .el_next
+    cmp  qword [r12 + AST.node_type], AST_FUNCTION
+    jne  .el_next
+    movzx eax, word [r12 + AST.type_info]
+    cmp  eax, VIS_EXPORTED
+    jne  .el_next
+    cmp  qword [r12 + AST.owner_type], 0
+    je   .el_plain
+    lea  rsi, [rel s_lib_method]
+    lea  rdx, [rel s_lib_methodh]
+    call cg_ext_error
+    jmp  .el_next
+.el_plain:
+    cmp  dword [r12 + AST.child_count], 0
+    je   .el_single
+    lea  rsi, [rel s_lib_multi]
+    xor  edx, edx
+    call cg_ext_error
+    jmp  .el_next
+.el_single:
+    ; the shape: count, reals, the result, f32s; widths; signed
+    xor  eax, eax
+    mov  [rsp], rax
+    mov  [rsp + 8], rax
+    mov  [rsp + 16], rax
+    mov  r13, [r12 + AST.left]       ; the parameters
+    xor  r14d, r14d                  ; which
+.el_param:
+    test r13, r13
+    jz   .el_params_done
+    mov  rax, [r13 + AST.owner_type]
+    mov  rdi, [r13 + AST.left]
+    call cg_lib_kind
+    cmp  eax, 3
+    jne  .el_scalar
+    lea  rsi, [rel s_lib_struct]
+    lea  rdx, [rel s_ext_structh]
+    call cg_ext_error
+    jmp  .el_next
+.el_scalar:
+    push rcx
+    push rdx
+    test eax, eax
+    jz   .el_pint
+    ; a real: bit 8+k, and 32+k for an f32
+    mov  r8d, eax
+    mov  ecx, r14d
+    add  ecx, 8
+    mov  edx, 1
+    shl  rdx, cl
+    mov  rax, [rsp + 16]
+    or   rax, rdx
+    mov  [rsp + 16], rax
+    cmp  r8d, 2
+    jne  .el_pint
+    mov  ecx, r14d
+    add  ecx, 32
+    mov  edx, 1
+    shl  rdx, cl
+    mov  rax, [rsp + 16]
+    or   rax, rdx
+    mov  [rsp + 16], rax
+.el_pint:
+    pop  rdx                         ; the width code
+    mov  ecx, r14d
+    shl  ecx, 1
+    shl  rdx, cl
+    mov  rax, [rsp + 16]             ; the widths (the sign still pushed)
+    or   rax, rdx
+    mov  [rsp + 16], rax
+    pop  rdx                         ; signed
+    mov  ecx, r14d
+    shl  rdx, cl
+    mov  rax, [rsp + 16]
+    or   rax, rdx
+    mov  [rsp + 16], rax
+    inc  r14d
+    mov  r13, [r13 + AST.right]
+    jmp  .el_param
+.el_params_done:
+    ; the count, and the result: 8 an f64, 9 an f32
+    mov  rax, [rsp]
+    or   rax, r14
+    mov  rcx, [r12 + AST.type_info]
+    shr  rcx, 16
+    cmp  rcx, KW_F64
+    jne  .el_r32
+    mov  edx, 8
+    shl  rdx, 24
+    or   rax, rdx
+    jmp  .el_shape
+.el_r32:
+    cmp  rcx, KW_F32
+    jne  .el_shape
+    mov  edx, 9
+    shl  rdx, 24
+    or   rax, rdx
+.el_shape:
+    mov  [rsp], rax
+    ; remember it for the writer
+    mov  ebx, [rel cg_exp_count]
+    cmp  ebx, CG_MAX_FUNCS
+    jae  .el_next
+    lea  rcx, [rel cg_exp_toks]
+    mov  rax, [r12 + AST.data]
+    mov  [rcx + rbx*8], rax
+    ; C may call it from any of its threads: for the thread check it is
+    ; where a thread starts, so the globals it touches have to be shared
+    push rax
+    mov  rdi, rax
+    call cg_find_func
+    cmp  eax, -1
+    je   .el_noroot
+    lea  rcx, [rel fn_root]
+    mov  byte [rcx + rax], 1
+.el_noroot:
+    pop  rax
+    ; its name, copied
+    mov  r8d, [rax + TOKEN.length]
+    mov  r9, [rax + TOKEN.value]
+    mov  ecx, [rel cg_exp_used]
+    mov  edx, ecx
+    add  edx, r8d
+    cmp  edx, 65000
+    jae  .el_next
+    lea  r10, [rel cg_exp_buf]
+    add  r10, rcx
+    lea  rcx, [rel cg_exp_name]
+    mov  [rcx + rbx*8], r10
+    lea  rcx, [rel cg_exp_nlen]
+    mov  [rcx + rbx*4], r8d
+    inc  edx
+    mov  [rel cg_exp_used], edx
+    xor  ecx, ecx
+.el_cpname:
+    cmp  ecx, r8d
+    jae  .el_cpdone
+    mov  al, [r9 + rcx]
+    mov  [r10 + rcx], al
+    inc  ecx
+    jmp  .el_cpname
+.el_cpdone:
+    mov  byte [r10 + rcx], 0
+    inc  dword [rel cg_exp_count]
+    ; __xe_K: dq the function, shape, widths, signed
+    mov  rsi, s_sec_data_nl
+    call emit_cstr
+    mov  rsi, s_lib_xe
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_lib_rec1
+    call emit_cstr
+    mov  rdi, [r12 + AST.data]
+    call emit_tok
+    mov  rsi, s_lib_dq
+    call emit_cstr
+    mov  rdi, [rsp]
+    call emit_uint
+    mov  rsi, s_lib_dq
+    call emit_cstr
+    mov  rdi, [rsp + 8]
+    call emit_uint
+    mov  rsi, s_lib_dq
+    call emit_cstr
+    mov  rdi, [rsp + 16]
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    ; __ce_<name>: its entry
+    mov  rsi, s_sec_text_nl
+    call emit_cstr
+    mov  rsi, s_lib_ce
+    call emit_cstr
+    mov  rdi, [r12 + AST.data]
+    call emit_tok
+    mov  rsi, s_lib_stub1
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_lib_stub2
+    call emit_cstr
+.el_next:
+    mov  r15, [r15 + AST.right]
+    jmp  .el_top
+.el_out:
+    add  rsp, 48
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ==============================================================================
 ; FOUR REALS AT A TIME: vec4 of f32
 ;
 ;   vec4_load(&a[i])            four f32 from an [f32; N] (movups)
@@ -10928,6 +13532,7 @@ kt_fn_end:
 ; kt_program_begin(): before the first function, the low end of the code the
 ; trace can name.
 kt_program_begin:
+    mov  qword [rel kdb_prev], 0
     mov  dword [rel kt_n], 0
     mov  dword [rel kt_x], 0
     mov  dword [rel kt_nfiles], 0
@@ -11007,6 +13612,662 @@ kt_program_end:
     pop  rbx
     pop  rax
 .pe_ret:
+    ret
+
+; ==============================================================================
+; DEBUG BUILDS (--debug)
+;
+; Every statement of the program's own files (not the std_*.kr modules) is
+; preceded by
+;       mov r11, file << 20 | line
+;       call __dbg_stmt
+; and every such function gets a record of its locals:
+;   .kdr: dq previous record, start, .kde (its end), .kdn (its name), file,
+;            count
+;         dq offset, flags, array length, element width, struct + 1, tag,
+;            .kdvN (the name)          (count times)
+; flags: 1 a real, 2 unsigned, 4 the slot holds an address, 8 a pointer.
+; __dbg_stmt keeps every register and calls kdbg_hook (std_debug.kr, which
+; a debug build imports by itself) with the line, the frame, the address
+; and __kdbg_info: the last record, the files, the structs with their
+; fields and the globals. The register allocator is off in a debug build:
+; every local lives in its slot, where the debugger reads it.
+; ==============================================================================
+
+; kdb_is_std(rax = file name) -> eax = 1 when the last part of the path
+; starts with std_. Preserves every other register.
+kdb_is_std:
+    push rcx
+    push rdx
+    push rsi
+    mov  rsi, rax
+    mov  rdx, rax
+.s_scan:
+    movzx ecx, byte [rsi]
+    test ecx, ecx
+    jz   .s_end
+    inc  rsi
+    cmp  ecx, '/'
+    je   .s_cut
+    cmp  ecx, 92
+    je   .s_cut
+    jmp  .s_scan
+.s_cut:
+    mov  rdx, rsi
+    jmp  .s_scan
+.s_end:
+    xor  eax, eax
+    cmp  byte [rdx], 's'
+    jne  .s_out
+    cmp  byte [rdx+1], 't'
+    jne  .s_out
+    cmp  byte [rdx+2], 'd'
+    jne  .s_out
+    cmp  byte [rdx+3], '_'
+    jne  .s_out
+    mov  eax, 1
+.s_out:
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    ret
+
+; kdb_line_std(ecx = line in the joined source) -> eax = 1 when it is in a
+; std_*.kr module, 0 in the program's own files, 2 when unknown
+kdb_line_std:
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+    test ecx, ecx
+    jz   .ls_unknown
+    call lmap_lookup
+    test rax, rax
+    jz   .ls_unknown
+    call kdb_is_std
+    jmp  .ls_out
+.ls_unknown:
+    mov  eax, 2
+.ls_out:
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rdx
+    pop  rcx
+    ret
+
+; kdb_fn_begin(rdi = AST_FUNCTION): does this function get the hooks?
+; Preserves every register.
+kdb_fn_begin:
+    mov  dword [rel kdb_on], 0
+    cmp  byte [rel cg_debug], 0
+    je   .fb_ret
+    cmp  byte [rel cg_bare], 0
+    jne  .fb_ret
+    push rax
+    push rcx
+    mov  rax, [rdi + AST.data]       ; the name's line: AST.line of a
+    xor  ecx, ecx                    ; function can be where it ends
+    test rax, rax
+    jz   .fb_line
+    movzx ecx, word [rax + TOKEN.line]
+.fb_line:
+    call kdb_line_std
+    test eax, eax
+    jnz  .fb_out
+    mov  dword [rel kdb_on], 1
+.fb_out:
+    pop  rcx
+    pop  rax
+.fb_ret:
+    ret
+
+; kdb_stmt(rdi = statement): the hook before it. Preserves every register.
+kdb_stmt:
+    cmp  dword [rel kdb_on], 0
+    je   .st_ret
+    test rdi, rdi
+    jz   .st_ret
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    movzx ecx, word [rdi + AST.line]
+    test ecx, ecx
+    jz   .st_out
+    call lmap_lookup                 ; rax = file, rdx = line in it
+    test rax, rax
+    jz   .st_out
+    call kt_file_index
+    mov  eax, eax
+    shl  rax, 20
+    and  edx, 0xFFFFF
+    or   rax, rdx
+    push rax
+    mov  rsi, s_kd_mov
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_kd_call
+    call emit_cstr
+.st_out:
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rax
+.st_ret:
+    ret
+
+; kdb_name_ok(rdi = name token) -> eax = 1 for a name the program wrote (not
+; a temporary of the compiler's)
+kdb_name_ok:
+    xor  eax, eax
+    test rdi, rdi
+    jz   .no_ret
+    push rcx
+    mov  rcx, [rdi + TOKEN.value]
+    test rcx, rcx
+    jz   .no
+    cmp  dword [rdi + TOKEN.length], 0
+    je   .no
+    movzx ecx, byte [rcx]
+    cmp  ecx, '_'
+    je   .yes
+    cmp  ecx, 'A'
+    jb   .no
+    cmp  ecx, 'z'
+    ja   .no
+    cmp  ecx, 'Z'
+    jbe  .yes
+    cmp  ecx, 'a'
+    jb   .no
+.yes:
+    mov  eax, 1
+.no:
+    pop  rcx
+.no_ret:
+    ret
+
+; kdb_dq(rdi = number): ", number". Clobbers rax rdx.
+kdb_dq:
+    push rsi
+    push rdi
+    mov  rsi, s_comma
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    pop  rsi
+    ret
+
+; kdb_fn_end(r12 = AST_FUNCTION): the record of the function just written.
+; Preserves every register.
+kdb_fn_end:
+    cmp  dword [rel kdb_on], 0
+    je   .fe_ret
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov  rsi, s_kd_head
+    call emit_cstr
+    mov  rax, [rel kdb_prev]
+    test rax, rax
+    jz   .fe_noprev
+    mov  rdi, rax
+    call kt_fn_name
+    mov  rsi, s_kd_kdr
+    call emit_cstr
+    jmp  .fe_link
+.fe_noprev:
+    mov  rsi, s_zero
+    call emit_cstr
+.fe_link:
+    mov  rsi, s_comma
+    call emit_cstr
+    mov  rdi, r12
+    call kt_fn_name
+    mov  rsi, s_kd_mid
+    call emit_cstr
+    mov  rax, [r12 + AST.data]
+    movzx ecx, word [rax + TOKEN.line]
+    call lmap_lookup
+    call kt_file_index
+    mov  edi, eax
+    call emit_uint
+    ; how many locals have a name of their own
+    xor  ebx, ebx
+    xor  r8d, r8d
+.fe_cnt:
+    cmp  ebx, [rel var_count]
+    jae  .fe_cnted
+    lea  rax, [rel var_toks]
+    mov  rdi, [rax + rbx*8]
+    call kdb_name_ok
+    add  r8d, eax
+    inc  ebx
+    jmp  .fe_cnt
+.fe_cnted:
+    mov  edi, r8d
+    call kdb_dq
+    mov  rsi, s_nl
+    call emit_cstr
+    xor  ebx, ebx
+.fe_loc:
+    cmp  ebx, [rel var_count]
+    jae  .fe_names
+    lea  rax, [rel var_toks]
+    mov  rdi, [rax + rbx*8]
+    call kdb_name_ok
+    test eax, eax
+    jz   .fe_lnext
+    mov  rsi, s_kd_dq
+    call emit_cstr
+    lea  rax, [rel var_offs]
+    mov  edi, [rax + rbx*4]
+    call emit_uint
+    ; flags
+    xor  r9d, r9d
+    lea  rax, [rel var_isfloat]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .fe_f1
+    or   r9d, 1
+.fe_f1:
+    lea  rax, [rel var_unsigned]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .fe_f2
+    or   r9d, 2
+.fe_f2:
+    lea  rax, [rel var_isref]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .fe_f3
+    or   r9d, 4
+.fe_f3:
+    lea  rax, [rel var_elemsz]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .fe_f4
+    or   r9d, 8
+.fe_f4:
+    mov  edi, r9d
+    call kdb_dq
+    lea  rax, [rel var_arrlen]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel var_aw]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel var_structs]
+    mov  edi, [rax + rbx*4]
+    inc  edi
+    call kdb_dq
+    lea  rax, [rel var_vtag]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    mov  rsi, s_kd_vref
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.fe_lnext:
+    inc  ebx
+    jmp  .fe_loc
+.fe_names:
+    mov  rsi, s_kd_name
+    call emit_cstr
+    mov  rdi, [r12 + AST.data]
+    call emit_tok
+    mov  rsi, s_kd_name2
+    call emit_cstr
+    xor  ebx, ebx
+.fe_vn:
+    cmp  ebx, [rel var_count]
+    jae  .fe_done
+    lea  rax, [rel var_toks]
+    mov  rdi, [rax + rbx*8]
+    call kdb_name_ok
+    test eax, eax
+    jz   .fe_vnext
+    mov  rsi, s_kd_vlbl
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_kd_db
+    call emit_cstr
+    lea  rax, [rel var_toks]
+    mov  rdi, [rax + rbx*8]
+    call emit_tok
+    mov  rsi, s_kd_name2
+    call emit_cstr
+.fe_vnext:
+    inc  ebx
+    jmp  .fe_vn
+.fe_done:
+    mov  rsi, s_kt_text
+    call emit_cstr
+    mov  [rel kdb_prev], r12
+    mov  dword [rel kdb_on], 0
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    pop  rax
+.fe_ret:
+    ret
+
+; kdb_program_end(): the tables of a debug build and __dbg_stmt
+kdb_program_end:
+    cmp  byte [rel cg_debug], 0
+    je   .pe_ret
+    cmp  byte [rel cg_bare], 0
+    jne  .pe_ret
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r12
+    mov  rsi, s_kd_info
+    call emit_cstr
+    mov  rax, [rel kdb_prev]
+    test rax, rax
+    jz   .pe_nofn
+    mov  rdi, rax
+    call kt_fn_name
+    mov  rsi, s_kd_kdr
+    call emit_cstr
+    jmp  .pe_n
+.pe_nofn:
+    mov  rsi, s_zero
+    call emit_cstr
+.pe_n:
+    mov  edi, [rel kt_nfiles]
+    call kdb_dq
+    mov  rsi, s_kd_info2
+    call emit_cstr
+    mov  edi, [rel struct_count]
+    call emit_uint
+    mov  rsi, s_kd_info3
+    call emit_cstr
+    ; the globals of the program's own files
+    xor  ebx, ebx
+    xor  r8d, r8d
+.pe_gc:
+    cmp  ebx, [rel g_count]
+    jae  .pe_gcd
+    call kdb_global_ok
+    add  r8d, eax
+    inc  ebx
+    jmp  .pe_gc
+.pe_gcd:
+    mov  edi, r8d
+    call emit_uint
+    mov  rsi, s_kd_info4
+    call emit_cstr
+    ; files
+    mov  rsi, s_kd_files
+    call emit_cstr
+    xor  ebx, ebx
+.pe_f:
+    cmp  ebx, [rel kt_nfiles]
+    jae  .pe_fd
+    mov  rsi, s_kd_dqfile
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    inc  ebx
+    jmp  .pe_f
+.pe_fd:
+    ; structs: name, first field, fields, bytes
+    mov  rsi, s_kd_structs
+    call emit_cstr
+    xor  ebx, ebx
+.pe_s:
+    cmp  ebx, [rel struct_count]
+    jae  .pe_sd
+    mov  rsi, s_kd_dqsn
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    lea  rax, [rel struct_first]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel struct_nfield]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel struct_bytes]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    mov  rsi, s_nl
+    call emit_cstr
+    inc  ebx
+    jmp  .pe_s
+.pe_sd:
+    ; fields: name, offset, width, flags, struct + 1, tag
+    mov  rsi, s_kd_fields
+    call emit_cstr
+    xor  ebx, ebx
+.pe_fl:
+    cmp  ebx, [rel field_count]
+    jae  .pe_fld
+    mov  rsi, s_kd_dqfn
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    lea  rax, [rel field_offs]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel field_sizes]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    xor  r9d, r9d
+    lea  rax, [rel field_isfloat]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .pe_ff1
+    or   r9d, 1
+.pe_ff1:
+    lea  rax, [rel field_unsigned]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .pe_ff2
+    or   r9d, 2
+.pe_ff2:
+    mov  edi, r9d
+    call kdb_dq
+    lea  rax, [rel field_struct]
+    mov  edi, [rax + rbx*4]
+    inc  edi
+    call kdb_dq
+    lea  rax, [rel field_vtag]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    mov  rsi, s_nl
+    call emit_cstr
+    inc  ebx
+    jmp  .pe_fl
+.pe_fld:
+    ; globals: address, flags, array length, element width, struct + 1,
+    ; tag, name
+    mov  rsi, s_kd_globals
+    call emit_cstr
+    xor  ebx, ebx
+.pe_g:
+    cmp  ebx, [rel g_count]
+    jae  .pe_gd
+    call kdb_global_ok
+    test eax, eax
+    jz   .pe_gnext
+    mov  rsi, s_kd_dqg
+    call cg_emit_gpre
+    lea  rax, [rel g_toks]
+    mov  rdi, [rax + rbx*8]
+    call emit_tok
+    xor  r9d, r9d
+    lea  rax, [rel g_isfloat]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .pe_gf1
+    or   r9d, 1
+.pe_gf1:
+    lea  rax, [rel g_unsigned]
+    mov  ecx, [rax + rbx*4]
+    test ecx, ecx
+    jz   .pe_gf2
+    or   r9d, 2
+.pe_gf2:
+    mov  edi, r9d
+    call kdb_dq
+    lea  rax, [rel g_arrlen]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel g_aw]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    lea  rax, [rel g_structs]
+    mov  edi, [rax + rbx*4]
+    inc  edi
+    call kdb_dq
+    lea  rax, [rel g_vtag]
+    mov  edi, [rax + rbx*4]
+    call kdb_dq
+    mov  rsi, s_kd_gnref
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.pe_gnext:
+    inc  ebx
+    jmp  .pe_g
+.pe_gd:
+    ; the names
+    xor  ebx, ebx
+.pe_sn:
+    cmp  ebx, [rel struct_count]
+    jae  .pe_snd
+    mov  rsi, s_kd_sn
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_kd_db
+    call emit_cstr
+    lea  rax, [rel struct_toks]
+    mov  rdi, [rax + rbx*8]
+    call emit_tok
+    mov  rsi, s_kd_name2
+    call emit_cstr
+    inc  ebx
+    jmp  .pe_sn
+.pe_snd:
+    xor  ebx, ebx
+.pe_fn:
+    cmp  ebx, [rel field_count]
+    jae  .pe_fnd
+    mov  rsi, s_kd_fnl
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_kd_db
+    call emit_cstr
+    lea  rax, [rel field_toks]
+    mov  rdi, [rax + rbx*8]
+    call emit_tok
+    mov  rsi, s_kd_name2
+    call emit_cstr
+    inc  ebx
+    jmp  .pe_fn
+.pe_fnd:
+    xor  ebx, ebx
+.pe_gn:
+    cmp  ebx, [rel g_count]
+    jae  .pe_gnd
+    call kdb_global_ok
+    test eax, eax
+    jz   .pe_gnn
+    mov  rsi, s_kd_gnl
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_kd_db
+    call emit_cstr
+    lea  rax, [rel g_toks]
+    mov  rdi, [rax + rbx*8]
+    call emit_tok
+    mov  rsi, s_kd_name2
+    call emit_cstr
+.pe_gnn:
+    inc  ebx
+    jmp  .pe_gn
+.pe_gnd:
+    ; s_kd_name2 left us in .text; the hook itself
+    lea  rsi, [rel s_kd_hook]
+    call emit_cstr
+    pop  r12
+    pop  r9
+    pop  r8
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    pop  rax
+.pe_ret:
+    ret
+
+; kdb_global_ok(ebx = global) -> eax = 1 for a global of the program's own
+; files with a name of its own
+kdb_global_ok:
+    push rcx
+    push rdi
+    lea  rax, [rel g_toks]
+    mov  rdi, [rax + rbx*8]
+    call kdb_name_ok
+    test eax, eax
+    jz   .go_out
+    movzx ecx, word [rdi + TOKEN.line]
+    call kdb_line_std
+    test eax, eax
+    jnz  .go_no
+    mov  eax, 1
+    jmp  .go_out
+.go_no:
+    xor  eax, eax
+.go_out:
+    pop  rdi
+    pop  rcx
     ret
 
 ; cg_count_vars(rdi=node) -> rax = number of AST_VAR_DECL in the subtree
@@ -11643,6 +14904,143 @@ cg_leaf_to_rcx:
     pop  rbx
     ret
 
+; cg_lit_small(rdi = expression) -> eax = its value when it is a decimal
+; integer literal from 0 to 63, else -1
+cg_lit_small:
+    test rdi, rdi
+    jz   .ls_no
+    cmp  qword [rdi + AST.node_type], AST_INTEGER_LIT
+    jne  .ls_no
+    mov  rdi, [rdi + AST.data]
+    test rdi, rdi
+    jz   .ls_zero                    ; a literal zero has no token
+    mov  ecx, [rdi + TOKEN.length]
+    mov  rdx, [rdi + TOKEN.value]
+    test ecx, ecx
+    jz   .ls_no
+    cmp  ecx, 2
+    ja   .ls_no
+    xor  eax, eax
+.ls_d:
+    movzx r8d, byte [rdx]
+    sub  r8d, '0'
+    cmp  r8d, 9
+    ja   .ls_no
+    imul eax, eax, 10
+    add  eax, r8d
+    inc  rdx
+    dec  ecx
+    jnz  .ls_d
+    cmp  eax, 63
+    ja   .ls_no
+    ret
+.ls_zero:
+    xor  eax, eax
+    ret
+.ls_no:
+    mov  eax, -1
+    ret
+
+; cg_is_leafish(rdi = expression) -> eax = 1 for an integer literal or a
+; plain integer variable (local or global): loading it touches rax alone
+cg_is_leafish:
+    test rdi, rdi
+    jz   .lf_no
+    mov  rax, [rdi + AST.node_type]
+    cmp  rax, AST_INTEGER_LIT
+    je   .lf_yes
+    cmp  rax, AST_IDENTIFIER
+    jne  .lf_no
+    push rdi
+    call cg_expr_is_float
+    pop  rdi
+    test eax, eax
+    jnz  .lf_no
+    mov  rdi, [rdi + AST.data]
+    test rdi, rdi
+    jz   .lf_no
+    push rdi
+    call cg_find_var_idx
+    pop  rdi
+    cmp  eax, -1
+    jne  .lf_local
+    call cg_find_global
+    cmp  eax, -1
+    je   .lf_no
+    lea  rcx, [rel g_arrlen]
+    mov  ecx, [rcx + rax*4]
+    test ecx, ecx
+    jnz  .lf_no
+    lea  rcx, [rel g_structs]
+    mov  ecx, [rcx + rax*4]
+    cmp  ecx, -1
+    jne  .lf_no
+    jmp  .lf_yes
+.lf_local:
+    lea  rcx, [rel var_arrlen]
+    mov  ecx, [rcx + rax*4]
+    test ecx, ecx
+    jnz  .lf_no
+    lea  rcx, [rel var_structs]
+    mov  ecx, [rcx + rax*4]
+    cmp  ecx, -1
+    jne  .lf_no
+.lf_yes:
+    mov  eax, 1
+    ret
+.lf_no:
+    xor  eax, eax
+    ret
+
+; cg_expr_pure(rdi = expression) -> eax = 1 when it is made of integer
+; literals, variables and integer operators only: nothing it runs can change
+; a variable
+cg_expr_pure:
+    push r12
+    mov  r12, rdi
+    test r12, r12
+    jz   .ep_no
+    mov  rax, [r12 + AST.node_type]
+    cmp  rax, AST_INTEGER_LIT
+    je   .ep_yes
+    cmp  rax, AST_IDENTIFIER
+    je   .ep_yes
+    cmp  rax, AST_BINOP
+    jne  .ep_no
+    mov  rax, [r12 + AST.data]
+    cmp  rax, TOK_AND
+    je   .ep_no
+    cmp  rax, TOK_OR
+    je   .ep_no
+    mov  rdi, r12
+    call cg_expr_is_float
+    test eax, eax
+    jnz  .ep_no
+    mov  rdi, r12
+    call cg_is_concat
+    test eax, eax
+    jnz  .ep_no
+    mov  rdi, r12
+    call cg_is_textcmp
+    test eax, eax
+    jnz  .ep_no
+    mov  rdi, [r12 + AST.left]
+    call cg_expr_pure
+    test eax, eax
+    jz   .ep_no
+    mov  rdi, [r12 + AST.right]
+    call cg_expr_pure
+    test eax, eax
+    jz   .ep_no
+.ep_yes:
+    mov  eax, 1
+    pop  r12
+    ret
+.ep_no:
+    xor  eax, eax
+    pop  r12
+    ret
+
 ; cg_ptr_would_scale(r12 = binary node) -> eax = 1 when cg_ptr_scale would
 ; multiply the right operand. The same test, with nothing emitted.
 ; cg_ptr_would_scale(r12 = binary node) -> eax = 1 when cg_ptr_scale would
@@ -11831,6 +15229,17 @@ cg_global_decl:
     test eax, eax
     jz   .scalar_head
 .g_array:
+    ; an array given its first values: they are data, written out
+    mov  rdi, [r12 + AST.right]
+    test rdi, rdi
+    jz   .g_arr_zero
+    cmp  qword [rdi + AST.node_type], AST_ARRAY_LIT
+    jne  .g_arr_zero
+    cmp  qword [r12 + AST.type_info], 0
+    je   .g_arr_zero
+    call cg_global_arrlit
+    jmp  .done
+.g_arr_zero:
     ; packed elements: [u8; 4096] reserves 512 qwords, not 4096
     movzx ecx, word [r12 + AST.col]
     shr  ecx, 4
@@ -11847,7 +15256,7 @@ cg_global_decl:
     mov  rsi, s_sec_bss
     call emit_cstr
     mov  rsi, s_glb_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call emit_tok
     mov  rsi, s_glb_resq
@@ -11863,7 +15272,7 @@ cg_global_decl:
     mov  rsi, s_sec_data
     call emit_cstr
     mov  rsi, s_glb_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call emit_tok
 .scalar:
@@ -11896,6 +15305,322 @@ cg_global_decl:
 .done:
     pop  r12
     pop  rbx
+    ret
+
+; cg_global_arrlit(r12 = AST_VAR_DECL of an array with an AST_ARRAY_LIT): the
+; array in .data, its elements as numbers of their width, the rest zeros.
+;   __g_v: dq 10, 20, 30
+;       resq 97
+; Only numbers written out are taken (a '-' in front included): nothing runs
+; before main gives the others, and a module has no main at all. Each value
+; becomes an unsigned number here -- a real its IEEE bits -- so every
+; assembler and translator reads the same thing.
+cg_global_arrlit:
+    push rbx
+    push r13
+    push r14
+    push r15
+    sub  rsp, 8
+    ; a struct or stream element has no number to be
+    mov  rdi, [r12 + AST.left]
+    test rdi, rdi
+    jz   .ga_typed
+    cmp  qword [rdi + TOKEN.type], KW_STR
+    je   .ga_bad
+    call cg_find_struct
+    cmp  eax, -1
+    jne  .ga_bad
+.ga_typed:
+    movzx ecx, word [r12 + AST.col]
+    mov  r15d, ecx
+    and  r15d, 1                     ; reals
+    shr  ecx, 4
+    and  ecx, 15
+    test ecx, ecx
+    jnz  .ga_w
+    mov  ecx, 8
+.ga_w:
+    mov  r14d, ecx                   ; bytes per element
+    ; every element first: a number written out
+    mov  rbx, [r12 + AST.right]
+    mov  rbx, [rbx + AST.right]
+.ga_chk:
+    test rbx, rbx
+    jz   .ga_emit
+    mov  rdi, [rbx + AST.left]
+    call cg_garr_value
+    test edx, edx
+    jz   .ga_bad
+    mov  rbx, [rbx + AST.right]
+    jmp  .ga_chk
+.ga_emit:
+    mov  rsi, s_sec_data
+    call emit_cstr
+    mov  rsi, s_glb_pre
+    call cg_emit_gpre
+    mov  rdi, [r12 + AST.data]
+    call emit_tok
+    mov  rsi, s_colon_nl
+    call emit_cstr
+    xor  r13d, r13d                  ; elements written
+    mov  rbx, [r12 + AST.right]
+    mov  rbx, [rbx + AST.right]
+.ga_elem:
+    test rbx, rbx
+    jz   .ga_rest
+    cmp  r13, [r12 + AST.type_info]
+    jae  .ga_rest                    ; past the length: dropped, as for a local
+    ; sixteen to a line
+    mov  eax, r13d
+    and  eax, 15
+    jnz  .ga_comma
+    test r13d, r13d
+    jz   .ga_dir
+    mov  rsi, s_nl
+    call emit_cstr
+.ga_dir:
+    mov  edi, r14d
+    call cg_garr_dir
+    jmp  .ga_val
+.ga_comma:
+    mov  rsi, s_comma
+    call emit_cstr
+.ga_val:
+    mov  rdi, [rbx + AST.left]
+    call cg_garr_value
+    mov  rdi, rax
+    call emit_uint
+    inc  r13d
+    mov  rbx, [rbx + AST.right]
+    jmp  .ga_elem
+.ga_rest:
+    test r13d, r13d
+    jz   .ga_rest2
+    mov  rsi, s_nl
+    call emit_cstr
+.ga_rest2:
+    ; the elements not given, then up to a whole qword, as .bss would
+    mov  rax, [r12 + AST.type_info]
+    sub  rax, r13
+    jbe  .ga_pad
+    mov  [rsp], rax
+    mov  rsi, s_garr_res
+    call emit_cstr
+    mov  rsi, s_garr_rq
+    cmp  r14d, 4
+    jne  .ga_r2
+    mov  rsi, s_garr_rd
+.ga_r2:
+    cmp  r14d, 2
+    jne  .ga_r1
+    mov  rsi, s_garr_rw
+.ga_r1:
+    cmp  r14d, 1
+    jne  .ga_r0
+    mov  rsi, s_garr_rb
+.ga_r0:
+    call emit_cstr
+    mov  rdi, [rsp]
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.ga_pad:
+    mov  rax, [r12 + AST.type_info]
+    imul rax, r14
+    neg  rax
+    and  rax, 7
+    jz   .ga_out
+    mov  [rsp], rax
+    mov  rsi, s_garr_res
+    call emit_cstr
+    mov  rsi, s_garr_rb
+    call emit_cstr
+    mov  rdi, [rsp]
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.ga_out:
+    mov  rsi, s_sec_text
+    call emit_cstr
+    add  rsp, 8
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  rbx
+    ret
+.ga_bad:
+    lea  rsi, [rel s_garr_lit]
+    lea  rdx, [rel s_garr_lith]
+    mov  rax, [r12 + AST.data]
+    mov  [rel cg_err_tok], rax
+    mov  [rel cg_err_msg], rsi
+    mov  [rel cg_err_hint], rdx
+    mov  byte [rel cg_had_error], 1
+    jmp  .ga_out
+
+; cg_garr_dir(edi = bytes per element): '    dq ' and the others
+cg_garr_dir:
+    mov  rsi, s_garr_dq
+    cmp  edi, 4
+    jne  .gd_2
+    mov  rsi, s_garr_dd
+.gd_2:
+    cmp  edi, 2
+    jne  .gd_1
+    mov  rsi, s_garr_dw
+.gd_1:
+    cmp  edi, 1
+    jne  .gd_out
+    mov  rsi, s_garr_db
+.gd_out:
+    jmp  emit_cstr
+
+; cg_garr_value(rdi = element expression, r14d = bytes per element, r15d = 1
+; for reals) -> rax = the element's bits, edx = 1 when it is a number written
+; out, 0 when it is not one. Preserves rbx and r12-r15.
+cg_garr_value:
+    push rbx
+    xor  ebx, ebx                    ; negated
+    test rdi, rdi
+    jz   .gv_no
+    cmp  qword [rdi + AST.node_type], AST_UNOP
+    jne  .gv_lit
+    cmp  qword [rdi + AST.data], TOK_MINUS
+    jne  .gv_no
+    mov  ebx, 1
+    mov  rdi, [rdi + AST.right]
+    test rdi, rdi
+    jz   .gv_no
+.gv_lit:
+    mov  rax, [rdi + AST.node_type]
+    test r15d, r15d
+    jnz  .gv_real
+    cmp  rax, AST_INTEGER_LIT
+    jne  .gv_no
+    mov  rdi, [rdi + AST.data]
+    call cg_tok_u64
+    test edx, edx
+    jz   .gv_no
+    test ebx, ebx
+    jz   .gv_mask
+    neg  rax
+.gv_mask:
+    cmp  r14d, 8
+    je   .gv_yes
+    mov  ecx, r14d
+    shl  ecx, 3
+    mov  rdx, 1
+    shl  rdx, cl
+    dec  rdx
+    and  rax, rdx
+    jmp  .gv_yes
+.gv_real:
+    cmp  rax, AST_FLOAT_LIT
+    je   .gv_rtok
+    cmp  rax, AST_INTEGER_LIT
+    jne  .gv_no
+.gv_rtok:
+    mov  rdi, [rdi + AST.data]
+    mov  rcx, [rdi + TOKEN.value]
+    cmp  byte [rcx], '0'
+    jne  .gv_dec
+    cmp  dword [rdi + TOKEN.length], 1
+    jbe  .gv_dec
+    mov  al, [rcx + 1]
+    or   al, 32
+    cmp  al, 'x'
+    je   .gv_no                      ; a hex real is not written that way
+.gv_dec:
+    call parse_float                 ; xmm0
+    cmp  r14d, 4
+    je   .gv_f32
+    movq rax, xmm0
+    test ebx, ebx
+    jz   .gv_yes
+    mov  rcx, 1
+    shl  rcx, 63
+    xor  rax, rcx                    ; the sign bit
+    jmp  .gv_yes
+.gv_f32:
+    cvtsd2ss xmm0, xmm0
+    movq rax, xmm0
+    mov  eax, eax                    ; the four bytes of the single
+    test ebx, ebx
+    jz   .gv_yes
+    xor  eax, 0x80000000
+.gv_yes:
+    mov  edx, 1
+    pop  rbx
+    ret
+.gv_no:
+    xor  eax, eax
+    xor  edx, edx
+    pop  rbx
+    ret
+
+; cg_tok_u64(rdi = integer literal token) -> rax = its value, edx = 1, or
+; edx = 0 when the text is no number (decimal, or hex after 0x)
+cg_tok_u64:
+    push rsi
+    push rdi
+    push r8
+    mov  rsi, [rdi + TOKEN.value]
+    mov  r8d, dword [rdi + TOKEN.length]
+    xor  eax, eax
+    xor  ecx, ecx
+    test r8d, r8d
+    jz   .tu_no
+    cmp  r8d, 2
+    jbe  .tu_dec
+    cmp  byte [rsi], '0'
+    jne  .tu_dec
+    mov  dl, [rsi + 1]
+    or   dl, 32
+    cmp  dl, 'x'
+    jne  .tu_dec
+    mov  ecx, 2
+.tu_hex:
+    cmp  ecx, r8d
+    jae  .tu_yes
+    movzx edx, byte [rsi + rcx]
+    cmp  dl, '0'
+    jb   .tu_no
+    cmp  dl, '9'
+    jbe  .tu_hdig
+    or   dl, 32
+    cmp  dl, 'a'
+    jb   .tu_no
+    cmp  dl, 'f'
+    ja   .tu_no
+    sub  dl, 'a' - 10 - '0'
+.tu_hdig:
+    sub  edx, '0'
+    shl  rax, 4
+    add  rax, rdx
+    inc  ecx
+    jmp  .tu_hex
+.tu_dec:
+    cmp  ecx, r8d
+    jae  .tu_yes
+    movzx edx, byte [rsi + rcx]
+    cmp  dl, '0'
+    jb   .tu_no
+    cmp  dl, '9'
+    ja   .tu_no
+    sub  edx, '0'
+    imul rax, rax, 10
+    add  rax, rdx
+    inc  ecx
+    jmp  .tu_dec
+.tu_yes:
+    mov  edx, 1
+    jmp  .tu_out
+.tu_no:
+    xor  edx, edx
+.tu_out:
+    pop  r8
+    pop  rdi
+    pop  rsi
     ret
 
 ; cg_find_global(rdi = name token) -> eax = global index, or -1
@@ -12406,7 +16131,7 @@ cg_emit_float:
     jmp  .out
 .ident_gfloat:
     mov  rsi, s_ldgf_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call cg_emit_gtok
     mov  rsi, s_closebrk
@@ -12654,7 +16379,11 @@ cg_member_resolve:
     cmp  eax, -1
     je   .from_glob
     lea  rcx, [rel var_structs]
-    mov  eax, [rcx + rax*4]
+    mov  edx, [rcx + rax*4]
+    mov  [rel mem_sid], edx
+    cmp  edx, -1
+    jne  .have_base
+    call cg_var_pstruct              ; p: ptr<S> -- p.x is a field of S
     mov  [rel mem_sid], eax
     jmp  .have_base
 .from_glob:
@@ -12665,7 +16394,11 @@ cg_member_resolve:
     cmp  eax, -1
     je   .have_base
     lea  rcx, [rel g_structs]
-    mov  eax, [rcx + rax*4]
+    mov  edx, [rcx + rax*4]
+    mov  [rel mem_sid], edx
+    cmp  edx, -1
+    jne  .have_base
+    call cg_glob_pstruct
     mov  [rel mem_sid], eax
 .have_base:
     mov  dword [rel mem_width], 8
@@ -12747,13 +16480,64 @@ cg_member_global:
     mov  rdi, [r12 + AST.data]
     call cg_find_var_idx
     cmp  eax, -1
-    jne  .mg_no
+    jne  .mg_local
     mov  rdi, [r12 + AST.data]
     call cg_find_global
     cmp  eax, -1
     je   .mg_no
-    mov  rsi, s_lea_glbp              ; lea rdx, [rel __g_
+    ; a global ptr<S>: the field is at the address it holds
+    lea  rcx, [rel g_structs]
+    mov  ecx, [rcx + rax*4]
+    cmp  ecx, -1
+    jne  .mg_gstruct
+    call cg_glob_pstruct
+    cmp  eax, -1
+    je   .mg_gstruct
+    mov  rsi, s_ld_rdx_glb            ; mov rdx, [rel __g_
+    call cg_emit_gpre
+    mov  rdi, [r12 + AST.data]
+    call cg_emit_gtok
+    mov  rsi, s_closebrk
     call emit_cstr
+    jmp  .mg_addoff
+.mg_local:
+    ; a local ptr<S> the same way: mov rdx, [rbp-N] then the offset
+    lea  rcx, [rel var_structs]
+    mov  ecx, [rcx + rax*4]
+    cmp  ecx, -1
+    jne  .mg_no
+    lea  rcx, [rel var_offs]
+    mov  ebx, [rcx + rax*4]
+    call cg_var_pstruct
+    cmp  eax, -1
+    je   .mg_no
+    mov  rsi, s_ld_rdx_loc
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_closebrk
+    call emit_cstr
+.mg_addoff:
+    mov  ebx, [rel mem_off]
+    test ebx, ebx
+    jz   .mg_ptr_done
+    mov  rsi, s_add_rdx
+    call emit_cstr
+    mov  edi, ebx
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+.mg_ptr_done:
+    ; resolve again: the lookups above went through other tables, but the
+    ; field's description must be the chain's
+    mov  rdi, r12
+    call cg_member_resolve
+    mov  eax, 1
+    pop  rbx
+    ret
+.mg_gstruct:
+    mov  rsi, s_lea_glbp              ; lea rdx, [rel __g_
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call cg_emit_gtok
     mov  ebx, [rel mem_off]
@@ -12772,6 +16556,859 @@ cg_member_global:
 .mg_no:
     xor  eax, eax
     pop  rbx
+    ret
+
+; ==============================================================================
+; STRUCT VALUES: copies, results, pointers to structs
+;
+; A struct is a run of bytes in the frame (or at __g_NAME). Copying one -- a
+; declaration from another struct, an assignment, a parameter, a result --
+; moves exactly its packed size, so a struct nested inside another never
+; spills into the field after it.
+;
+; A function that returns a struct writes the result where its caller says:
+; the caller puts the address in r11 just before the call, the callee keeps
+; it in a hidden slot of its frame and copies its result there at return,
+; leaving the same address in rax. The caller names its own variable when
+; the result is declared or assigned into one, or a temporary of its frame.
+; ==============================================================================
+
+; cg_pstruct_of(rdi = a declaration's name token) -> eax = the struct that a
+; variable declared ptr<S> points to, or -1. Preserves rbx and r12-r15.
+cg_pstruct_of:
+    mov  ecx, [rel par_ps_n]
+.po_l:
+    test ecx, ecx
+    jz   .po_no
+    dec  ecx
+    lea  rdx, [rel par_ps_decl]
+    mov  rax, [rdx + rcx*8]
+    cmp  rax, rdi
+    jne  .po_l
+    lea  rdx, [rel par_ps_type]
+    mov  rdi, [rdx + rcx*8]
+    call cg_find_struct
+    ret
+.po_no:
+    mov  eax, -1
+    ret
+
+; cg_var_pstruct(eax = local index) -> eax = struct its ptr<S> points to, -1
+cg_var_pstruct:
+    lea  rcx, [rel var_toks]
+    mov  rdi, [rcx + rax*8]
+    jmp  cg_pstruct_of
+
+; cg_glob_pstruct(eax = global index) -> eax = the same for a global
+cg_glob_pstruct:
+    lea  rcx, [rel g_toks]
+    mov  rdi, [rcx + rax*8]
+    jmp  cg_pstruct_of
+
+; cg_fn_ret_struct(rdi = a function's name token) -> eax = the struct it
+; returns, or -1
+cg_fn_ret_struct:
+    test rdi, rdi
+    jz   .rs_no
+    call cg_find_func
+    cmp  eax, -1
+    je   .rs_no
+    lea  rcx, [rel fn_nodes]
+    mov  rcx, [rcx + rax*8]
+    test rcx, rcx
+    jz   .rs_no
+    cmp  qword [rcx + AST.node_type], AST_FUNCTION
+    jne  .rs_no
+    mov  rdi, [rcx + AST.owner_type]
+    test rdi, rdi
+    jz   .rs_no
+    call cg_find_struct
+    ret
+.rs_no:
+    mov  eax, -1
+    ret
+
+; cg_alloc_temp(edi = struct id) -> eax = frame offset of a new temporary
+; that holds one. The frame grows to fit at the end of the function.
+cg_alloc_temp:
+    push rbx
+    mov  ebx, edi
+    mov  eax, edi
+    call cg_struct_size
+    test eax, eax
+    jnz  .at_n
+    mov  eax, 1
+.at_n:
+    mov  esi, eax
+    mov  [rel pending_struct], ebx
+    mov  dword [rel cg_add_fresh], 1
+    lea  rdi, [rel cg_tmp_tok]
+    call cg_add_var
+    mov  dword [rel cg_add_fresh], 0
+    pop  rbx
+    ret
+
+; cg_struct_kind(rdi = expression) -> eax = the struct it is a value of, or
+; -1. Emits nothing.
+cg_struct_kind:
+    push rbx
+    push r12
+    mov  r12, rdi
+    test r12, r12
+    jz   .sk_no
+    mov  rax, [r12 + AST.node_type]
+    cmp  rax, AST_IDENTIFIER
+    je   .sk_ident
+    cmp  rax, AST_MEMBER
+    je   .sk_member
+    cmp  rax, AST_CALL
+    je   .sk_call
+    cmp  rax, AST_STRUCT_LIT
+    je   .sk_lit
+    cmp  rax, AST_DEREF
+    je   .sk_deref
+    jmp  .sk_no
+.sk_ident:
+    mov  rdi, [r12 + AST.data]
+    test rdi, rdi
+    jz   .sk_no
+    call cg_find_var_idx
+    cmp  eax, -1
+    je   .sk_glob
+    lea  rcx, [rel var_arrlen]
+    mov  ecx, [rcx + rax*4]
+    test ecx, ecx
+    jnz  .sk_no
+    lea  rcx, [rel var_structs]
+    mov  eax, [rcx + rax*4]
+    jmp  .sk_out
+.sk_glob:
+    mov  rdi, [r12 + AST.data]
+    call cg_find_global
+    cmp  eax, -1
+    je   .sk_no
+    lea  rcx, [rel g_arrlen]
+    mov  ecx, [rcx + rax*4]
+    test ecx, ecx
+    jnz  .sk_no
+    lea  rcx, [rel g_structs]
+    mov  eax, [rcx + rax*4]
+    jmp  .sk_out
+.sk_member:
+    mov  rdi, r12
+    call cg_member_resolve
+    mov  eax, [rel mem_sid]
+    jmp  .sk_out
+.sk_call:
+    cmp  qword [r12 + AST.owner_type], FNVAL_MARK
+    je   .sk_no
+    mov  rdi, r12
+    call cg_list_op                  ; l[i] and the like on a list<S>
+    cmp  eax, 1
+    jne  .sk_fn
+    mov  eax, edx
+    jmp  .sk_out
+.sk_fn:
+    mov  rdi, [r12 + AST.data]
+    call cg_fn_ret_struct
+    jmp  .sk_out
+.sk_lit:
+    mov  rdi, [r12 + AST.data]
+    test rdi, rdi
+    jz   .sk_no
+    call cg_find_struct
+    jmp  .sk_out
+.sk_deref:
+    ; *p with p a ptr<S> variable
+    mov  rbx, [r12 + AST.right]
+    test rbx, rbx
+    jz   .sk_no
+    cmp  qword [rbx + AST.node_type], AST_IDENTIFIER
+    jne  .sk_no
+    mov  rdi, [rbx + AST.data]
+    call cg_find_var_idx
+    cmp  eax, -1
+    je   .sk_dglob
+    call cg_var_pstruct
+    jmp  .sk_out
+.sk_dglob:
+    mov  rdi, [rbx + AST.data]
+    call cg_find_global
+    cmp  eax, -1
+    je   .sk_no
+    call cg_glob_pstruct
+    jmp  .sk_out
+.sk_no:
+    mov  eax, -1
+.sk_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_emit_struct_addr(rdi = expression) -> eax = its struct, or -1 with
+; nothing emitted. Emits code that leaves the address of the value in rax:
+; a variable or field where it is, a call's result or a literal in a
+; temporary of the frame.
+cg_emit_struct_addr:
+    push rbx
+    push r12
+    mov  r12, rdi
+    mov  rdi, r12
+    call cg_struct_kind
+    cmp  eax, -1
+    je   .sa_out
+    mov  ebx, eax
+    mov  rax, [r12 + AST.node_type]
+    cmp  rax, AST_IDENTIFIER
+    je   .sa_ident
+    cmp  rax, AST_MEMBER
+    je   .sa_member
+    cmp  rax, AST_CALL
+    je   .sa_call
+    cmp  rax, AST_STRUCT_LIT
+    je   .sa_lit
+    ; *p: the pointer is the address
+    mov  rdi, [r12 + AST.right]
+    call cg_emit
+    jmp  .sa_ok
+.sa_ident:
+    mov  rdi, [r12 + AST.data]
+    call cg_find_var_idx
+    cmp  eax, -1
+    je   .sa_glob
+    lea  rcx, [rel var_offs]
+    mov  edi, [rcx + rax*4]
+    push rdi
+    mov  rsi, s_lea_rax_pre
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_lea_rax_suf
+    call emit_cstr
+    jmp  .sa_ok
+.sa_glob:
+    mov  rsi, s_lea_glb
+    call cg_emit_gpre
+    mov  rdi, [r12 + AST.data]
+    call cg_emit_gtok
+    mov  rsi, s_closebrk
+    call emit_cstr
+    jmp  .sa_ok
+.sa_member:
+    call cg_member_global            ; r12 = the member node
+    test eax, eax
+    jz   .sa_mlocal
+    mov  rsi, s_mov_rax_rdx
+    call emit_cstr
+    jmp  .sa_ok
+.sa_mlocal:
+    call cg_member_offset            ; eax = offset
+    push rax
+    mov  rsi, s_lea_rax_pre
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_lea_rax_suf
+    call emit_cstr
+    jmp  .sa_ok
+.sa_call:
+    mov  dword [rel cg_sret_kind], 0 ; into a temporary
+    mov  rdi, r12
+    call cg_emit                     ; rax = where the result is
+    jmp  .sa_ok
+.sa_lit:
+    mov  edi, ebx
+    call cg_alloc_temp
+    push rax
+    mov  rdi, r12
+    mov  esi, eax
+    call cg_emit_struct_lit
+    mov  rsi, s_lea_rax_pre
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_lea_rax_suf
+    call emit_cstr
+.sa_ok:
+    mov  eax, ebx
+.sa_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_emit_copy(edi = bytes): copies that many bytes from [rax] to [rdx],
+; through rcx, exactly: eight at a time, then four, two, one.
+cg_emit_copy:
+    push rbx
+    push r12
+    mov  ebx, edi                    ; bytes left
+    xor  r12d, r12d                  ; offset
+.ec_loop:
+    cmp  ebx, 8
+    jb   .ec_4
+    mov  rsi, s_cp8_ld
+    mov  edi, r12d
+    call cg_cp_line
+    mov  rsi, s_cp8_st
+    mov  edi, r12d
+    call cg_cp_line2
+    add  r12d, 8
+    sub  ebx, 8
+    jmp  .ec_loop
+.ec_4:
+    cmp  ebx, 4
+    jb   .ec_2
+    mov  rsi, s_cp4_ld
+    mov  edi, r12d
+    call cg_cp_line
+    mov  rsi, s_cp4_st
+    mov  edi, r12d
+    call cg_cp_line2
+    add  r12d, 4
+    sub  ebx, 4
+.ec_2:
+    cmp  ebx, 2
+    jb   .ec_1
+    mov  rsi, s_cp2_ld
+    mov  edi, r12d
+    call cg_cp_line
+    mov  rsi, s_cp2_st
+    mov  edi, r12d
+    call cg_cp_line2
+    add  r12d, 2
+    sub  ebx, 2
+.ec_1:
+    test ebx, ebx
+    jz   .ec_out
+    mov  rsi, s_cp1_ld
+    mov  edi, r12d
+    call cg_cp_line
+    mov  rsi, s_cp1_st
+    mov  edi, r12d
+    call cg_cp_line2
+.ec_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_cp_line(rsi = "    mov rcx, [rax+", edi = offset): the text, the
+; offset and "]"; cg_cp_line2(rsi = "    mov [rdx+", edi): the text, the
+; offset and the rest of the line, which follows the prefix's NUL.
+cg_cp_line:
+    push rdi
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_closebrk
+    call emit_cstr
+    ret
+cg_cp_line2:
+    push rsi
+    push rdi
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    pop  rsi
+.cl_skip:
+    mov  al, [rsi]
+    inc  rsi
+    test al, al
+    jnz  .cl_skip
+    call emit_cstr
+    ret
+
+; cg_emit_dest_rdx(esi = kind, edx = offset): rdx = [rbp-off]'s address
+; (kind 1) or the address [rbp-off] holds (kind 2)
+cg_emit_dest_rdx:
+    push rdx
+    cmp  esi, 2
+    je   .dr_held
+    mov  rsi, s_lea_loc
+    jmp  .dr_go
+.dr_held:
+    mov  rsi, s_ld_rdx_loc
+.dr_go:
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_lea_loc2
+    call emit_cstr
+    ret
+
+; cg_struct_mismatch(rdi = the expression): a value that is not the struct
+; expected. Reported with the expression's name when it has one.
+cg_struct_mismatch:
+    mov  qword [rel cg_err_tok], 0
+    test rdi, rdi
+    jz   .sm_msg
+    mov  rax, [rdi + AST.node_type]
+    cmp  rax, AST_IDENTIFIER
+    je   .sm_tok
+    cmp  rax, AST_CALL
+    je   .sm_tok
+    cmp  rax, AST_MEMBER
+    je   .sm_tok
+    cmp  rax, AST_STRUCT_LIT
+    jne  .sm_msg
+.sm_tok:
+    mov  rax, [rdi + AST.data]
+    mov  [rel cg_err_tok], rax
+.sm_msg:
+    lea  rax, [rel s_err_snot]
+    mov  [rel cg_err_msg], rax
+    lea  rax, [rel s_hint_snot]
+    mov  [rel cg_err_hint], rax
+    mov  byte [rel cg_had_error], 1
+    ret
+
+; cg_store_struct(rdi = value, esi = kind, edx = offset, ecx = struct id):
+; the value goes into the struct at [rbp-off] (kind 1) or at the address
+; [rbp-off] holds (kind 2). eax = 1 done, 0 the value is no struct at all
+; (nothing emitted; the caller does what it did before).
+cg_store_struct:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov  r12, rdi
+    mov  r13d, esi
+    mov  r14d, edx
+    mov  ebx, ecx
+    mov  rdi, r12
+    call cg_struct_kind
+    cmp  eax, -1
+    je   .ss_none
+    cmp  eax, ebx
+    je   .ss_same
+    mov  rdi, r12
+    call cg_struct_mismatch
+    jmp  .ss_done
+.ss_same:
+    mov  rax, [r12 + AST.node_type]
+    cmp  rax, AST_CALL
+    je   .ss_call
+    cmp  rax, AST_STRUCT_LIT
+    jne  .ss_copy
+    cmp  r13d, 1
+    jne  .ss_copy
+    mov  rdi, r12                    ; a literal writes itself in place
+    mov  esi, r14d
+    call cg_emit_struct_lit
+    jmp  .ss_done
+.ss_call:
+    mov  rdi, [r12 + AST.data]
+    call cg_fn_ret_struct
+    cmp  eax, -1
+    je   .ss_copy                    ; an element of a list<S>: copied out
+    mov  [rel cg_sret_kind], r13d    ; the callee writes it there itself
+    mov  [rel cg_sret_off], r14d
+    mov  rdi, r12
+    call cg_emit
+    jmp  .ss_done
+.ss_copy:
+    mov  rdi, r12
+    call cg_emit_struct_addr         ; rax = the source
+    mov  esi, r13d
+    mov  edx, r14d
+    call cg_emit_dest_rdx
+    lea  rcx, [rel struct_bytes]
+    mov  edi, [rcx + rbx*4]
+    call cg_emit_copy
+.ss_done:
+    mov  eax, 1
+    jmp  .ss_out
+.ss_none:
+    xor  eax, eax
+.ss_out:
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_assign_struct(rdi = destination, rsi = value) -> eax = 1 when both are
+; structs and the copy was emitted, 0 otherwise (nothing emitted)
+cg_assign_struct:
+    push rbx
+    push r12
+    push r13
+    mov  r12, rdi
+    mov  r13, rsi
+    mov  rdi, r12
+    call cg_struct_kind
+    cmp  eax, -1
+    je   .as_none
+    mov  ebx, eax
+    mov  rdi, r13
+    call cg_struct_kind
+    cmp  eax, -1
+    je   .as_none
+    cmp  eax, ebx
+    je   .as_same
+    mov  rdi, r13
+    call cg_struct_mismatch
+    jmp  .as_done
+.as_same:
+    ; a local by name: straight into its slots
+    cmp  qword [r12 + AST.node_type], AST_IDENTIFIER
+    jne  .as_any
+    mov  rdi, [r12 + AST.data]
+    call cg_find_var_idx
+    cmp  eax, -1
+    je   .as_any
+    lea  rcx, [rel var_offs]
+    mov  edx, [rcx + rax*4]
+    mov  rdi, r13
+    mov  esi, 1
+    mov  ecx, ebx
+    call cg_store_struct
+    jmp  .as_done
+.as_any:
+    ; anywhere else: the value's address, then the destination's
+    mov  rdi, r13
+    call cg_emit_struct_addr
+    mov  rsi, s_push_rax
+    call emit_cstr
+    mov  rdi, r12
+    call cg_emit_struct_addr
+    mov  rsi, s_rdx_rax_pop
+    call emit_cstr
+    lea  rcx, [rel struct_bytes]
+    mov  edi, [rcx + rbx*4]
+    call cg_emit_copy
+.as_done:
+    mov  eax, 1
+    jmp  .as_out
+.as_none:
+    xor  eax, eax
+.as_out:
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_sret_setup(): at a call of a function that returns a struct, before
+; its arguments: where the result goes, taken from cg_sret_kind and _off (a
+; temporary when kind is 0) and kept in cg_sret_pend until the call itself.
+; rdi = the callee's name token. Returns rax = the value to keep, -1 none.
+cg_sret_setup:
+    push rbx
+    mov  ebx, [rel cg_sret_kind]
+    mov  dword [rel cg_sret_kind], 0
+    call cg_fn_ret_struct
+    cmp  eax, -1
+    je   .su_none
+    test ebx, ebx
+    jnz  .su_have
+    mov  edi, eax
+    call cg_alloc_temp
+    mov  [rel cg_sret_off], eax
+    mov  ebx, 1
+.su_have:
+    mov  eax, [rel cg_sret_off]
+    shl  rbx, 32
+    or   rax, rbx
+    jmp  .su_out
+.su_none:
+    mov  rax, -1
+.su_out:
+    pop  rbx
+    ret
+
+; cg_sret_emit(rax = what cg_sret_setup kept): r11 = where the result goes
+cg_sret_emit:
+    cmp  rax, -1
+    je   .se_out
+    mov  rdi, rax
+    shr  rdi, 32
+    mov  rsi, s_lea_r11
+    cmp  edi, 2
+    jne  .se_go
+    mov  rsi, s_ld_r11_loc
+.se_go:
+    push rax
+    call emit_cstr
+    pop  rax
+    mov  edi, eax
+    call emit_uint
+    mov  rsi, s_closebrk
+    call emit_cstr
+.se_out:
+    ret
+
+; cg_frame_fit(): the frame of the function just emitted holds every slot
+; handed out, temporaries included: the IR_FRAME record grows if needed.
+cg_frame_fit:
+    mov  ecx, [rel var_count]
+    test ecx, ecx
+    jz   .ff_out
+    lea  rdx, [rel var_offs]
+    mov  eax, [rdx + rcx*4 - 4]      ; the deepest offset
+    add  eax, 47
+    and  eax, -16
+    xor  ecx, ecx
+.ff_l:
+    cmp  ecx, [rel ir_count]
+    jae  .ff_out
+    mov  edx, ecx
+    shl  rdx, 4
+    lea  rsi, [rel ir_recs]
+    add  rsi, rdx
+    mov  edx, [rsi]
+    cmp  edx, IR_FRAME
+    je   .ff_have
+    inc  ecx
+    jmp  .ff_l
+.ff_have:
+    mov  rdx, [rsi + 8]
+    cmp  rdx, rax
+    jae  .ff_out
+    mov  [rsi + 8], rax
+.ff_out:
+    ret
+
+; ==============================================================================
+; list<S> with S a struct. The list holds the struct's slots in a row, k per
+; element (k = its size in slots of eight), and every call that touches an
+; element goes to the _n version in std_list.kr, which moves k values at a
+; time:  l[i] -> list_get_n(l, i, &tmp, k)    l[i] = v -> list_set_n(l, i, &v, k)
+;        list_add(l, v) -> list_add_n(l, &v, k)    list_len(l) -> list_len_n(l, k)
+; and the same for insert, remove, pop, last and reverse. A struct argument
+; is passed by address anyway, so &v is just v.
+; ==============================================================================
+
+; cg_tok_is(rdi = token, rsi = name, NUL-ended) -> eax = 1 when they match
+cg_tok_is:
+    test rdi, rdi
+    jz   .ti_no
+    mov  ecx, [rdi + TOKEN.length]
+    mov  rdx, [rdi + TOKEN.value]
+.ti_l:
+    test ecx, ecx
+    jz   .ti_end
+    mov  al, [rsi]
+    cmp  al, [rdx]
+    jne  .ti_no
+    inc  rsi
+    inc  rdx
+    dec  ecx
+    jmp  .ti_l
+.ti_end:
+    cmp  byte [rsi], 0
+    jne  .ti_no
+    mov  eax, 1
+    ret
+.ti_no:
+    xor  eax, eax
+    ret
+
+; cg_list_struct(rdi = expression) -> eax = S when it names a list<S>
+; variable with S a struct, else -1
+cg_list_struct:
+    push rbx
+    test rdi, rdi
+    jz   .ls_no
+    cmp  qword [rdi + AST.node_type], AST_IDENTIFIER
+    jne  .ls_no
+    mov  rbx, [rdi + AST.data]
+    mov  rdi, rbx
+    call cg_find_var_idx
+    cmp  eax, -1
+    je   .ls_glob
+    lea  rcx, [rel var_toks]
+    mov  rdi, [rcx + rax*8]
+    jmp  .ls_find
+.ls_glob:
+    mov  rdi, rbx
+    call cg_find_global
+    cmp  eax, -1
+    je   .ls_no
+    lea  rcx, [rel g_toks]
+    mov  rdi, [rcx + rax*8]
+.ls_find:
+    mov  ecx, [rel par_ls_n]
+.ls_l:
+    test ecx, ecx
+    jz   .ls_no
+    dec  ecx
+    lea  rdx, [rel par_ls_decl]
+    mov  rax, [rdx + rcx*8]
+    cmp  rax, rdi
+    jne  .ls_l
+    lea  rdx, [rel par_ls_type]
+    mov  rdi, [rdx + rcx*8]
+    call cg_find_struct
+    pop  rbx
+    ret
+.ls_no:
+    mov  eax, -1
+    pop  rbx
+    ret
+
+; cg_list_op(rdi = AST_CALL) -> eax = what the call does to a list<S>:
+; 0 nothing special, 1 reads an element (a struct value), 2 anything else
+; that has an _n version; edx = S
+cg_list_op:
+    push rbx
+    push r12
+    mov  r12, rdi
+    mov  rbx, [r12 + AST.right]
+    test rbx, rbx
+    jz   .lo_no
+    mov  rdi, [rbx + AST.left]
+    call cg_list_struct
+    cmp  eax, -1
+    je   .lo_no
+    mov  ebx, eax
+    lea  rsi, [rel cg_lnames]
+.lo_l:
+    cmp  byte [rsi], 0
+    je   .lo_no
+    push rsi
+    mov  rdi, [r12 + AST.data]
+    call cg_tok_is
+    pop  rsi
+    test eax, eax
+    jnz  .lo_found
+.lo_skip:
+    mov  al, [rsi]
+    inc  rsi
+    test al, al
+    jnz  .lo_skip
+    add  rsi, 2                      ; the kind byte and the _n name's index
+    jmp  .lo_l
+.lo_found:
+.lo_end:
+    mov  al, [rsi]
+    inc  rsi
+    test al, al
+    jnz  .lo_end
+    movzx eax, byte [rsi]
+    movzx ecx, byte [rsi + 1]
+    mov  [rel cg_lop_n], ecx
+    mov  edx, ebx
+    jmp  .lo_out
+.lo_no:
+    xor  eax, eax
+.lo_out:
+    pop  r12
+    pop  rbx
+    ret
+
+; cg_list_call(r12 = AST_CALL) -> eax = 1 when it was a call on a list<S>,
+; emitted here as its _n version (the address of what it reads in rax)
+cg_list_call:
+    push rbx
+    push r13
+    push r14
+    push r15
+    mov  rdi, r12
+    call cg_list_op
+    test eax, eax
+    jz   .lc_no
+    mov  r15d, eax                   ; 1 reads into a temporary
+    mov  ebx, edx                    ; S
+    ; the arguments as written, then &tmp, then k
+    mov  r13, [r12 + AST.right]
+    xor  r14, r14                    ; the copy's last ARG
+    xor  ecx, ecx
+    push rcx                         ; [rsp] = the copy's first ARG
+.lc_args:
+    test r13, r13
+    jz   .lc_tail
+    mov  edi, AST_ARG
+    call cg_node
+    test rax, rax
+    jz   .lc_full
+    mov  rcx, [r13 + AST.left]
+    mov  [rax + AST.left], rcx
+    test r14, r14
+    jnz  .lc_link
+    mov  [rsp], rax
+    jmp  .lc_linked
+.lc_link:
+    mov  [r14 + AST.right], rax
+.lc_linked:
+    mov  r14, rax
+    mov  r13, [r13 + AST.right]
+    jmp  .lc_args
+.lc_tail:
+    cmp  r15d, 1
+    jne  .lc_k
+    ; a temporary for the element read
+    mov  edi, ebx
+    call cg_alloc_temp
+    push rax
+    mov  edi, AST_FRAMEADDR
+    call cg_node
+    pop  rcx
+    test rax, rax
+    jz   .lc_full
+    mov  [rax + AST.data], rcx
+    mov  rdi, rax
+    call cg_lc_append
+.lc_k:
+    mov  edi, AST_IMM
+    call cg_node
+    test rax, rax
+    jz   .lc_full
+    push rax
+    mov  eax, ebx
+    call cg_struct_size
+    pop  rcx
+    mov  [rcx + AST.data], rax
+    mov  rdi, rcx
+    call cg_lc_append
+    ; the call, to the _n function
+    mov  edi, AST_CALL
+    call cg_node
+    test rax, rax
+    jz   .lc_full
+    pop  rcx
+    mov  [rax + AST.right], rcx
+    mov  ecx, [rel cg_lop_n]
+    lea  rdx, [rel cg_ln_toks]
+    imul ecx, ecx, TOKEN_SIZE
+    add  rdx, rcx
+    mov  [rax + AST.data], rdx
+    mov  cx, [r12 + AST.line]
+    mov  [rax + AST.line], cx
+    push r12
+    mov  rdi, rax
+    call cg_emit
+    pop  r12
+    mov  eax, 1
+    jmp  .lc_out
+.lc_full:
+    pop  rcx
+.lc_no:
+    xor  eax, eax
+.lc_out:
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  rbx
+    ret
+
+; cg_lc_append(rdi = an expression node): one more ARG at the end of the
+; list cg_list_call is building (r14 its last ARG, [rsp+8] its first)
+cg_lc_append:
+    push rdi
+    mov  edi, AST_ARG
+    call cg_node
+    pop  rdi
+    test rax, rax
+    jz   .la_out
+    mov  [rax + AST.left], rdi
+    test r14, r14
+    jnz  .la_link
+    mov  [rsp + 8], rax
+    jmp  .la_done
+.la_link:
+    mov  [r14 + AST.right], rax
+.la_done:
+    mov  r14, rax
+.la_out:
     ret
 
 ; cg_member_sext(): a signed field narrower than eight bytes, just loaded
@@ -12981,6 +17618,10 @@ cg_emit:
     je   .multi_stmt
     cmp  rax, AST_LAMBDA
     je   .lambda_expr
+    cmp  rax, AST_FRAMEADDR
+    je   .frameaddr_expr
+    cmp  rax, AST_IMM
+    je   .imm_expr
     cmp  rax, AST_PRINT
     je   .print_stmt
     cmp  rax, AST_PRINTC
@@ -13115,6 +17756,7 @@ cg_emit:
     inc  dword [rel cg_in_raw]
     mov  rdi, [r12 + AST.left]
     call kt_mark
+    call kdb_stmt
     call cg_emit
     dec  dword [rel cg_in_raw]
     mov  rdi, [r12 + AST.right]
@@ -13123,6 +17765,7 @@ cg_emit:
 .block_go:
     mov  rdi, [r12 + AST.left]
     call kt_mark
+    call kdb_stmt
     call cg_emit
     mov  rdi, [r12 + AST.right]
     call cg_emit
@@ -13236,6 +17879,27 @@ cg_emit:
     ; array declared without initializer: only reserve space
     cmp  qword [r12 + AST.right], 0
     je   .vardecl_noinit
+    ; var v: S = <a struct value>: copied whole (a call writes it in place)
+    cmp  qword [r12 + AST.type_info], 0
+    jne  .vd_notstruct
+    mov  rdi, [r12 + AST.left]
+    test rdi, rdi
+    jz   .vd_notstruct
+    cmp  qword [rdi + TOKEN.type], TOK_IDENT
+    jne  .vd_notstruct
+    call cg_find_struct
+    cmp  eax, -1
+    je   .vd_notstruct
+    mov  ecx, eax
+    mov  rdi, [r12 + AST.right]
+    mov  esi, 1
+    mov  edx, [rsp]
+    call cg_store_struct
+    test eax, eax
+    jz   .vd_notstruct
+    pop  rax
+    jmp  .out
+.vd_notstruct:
     ; floating point initialiser -> store from xmm0
     movzx eax, word [r12 + AST.col]
     and  eax, 1
@@ -13298,6 +17962,57 @@ cg_emit:
     cmp  eax, 3
     je   .vd_newmap
 .vd_noinit_plain:
+    ; Declared without a value: it starts at zero, as a global does -- a
+    ; struct field never written reads 0, not what the stack held before
+    mov  rax, [r12 + AST.type_info]
+    test rax, rax
+    jnz  .vd_noinit_done             ; an array keeps the old way
+    mov  rdi, [r12 + AST.left]
+    test rdi, rdi
+    jz   .vd_zscalar
+    cmp  qword [rdi + TOKEN.type], TOK_IDENT
+    jne  .vd_zscalar
+    call cg_find_struct
+    cmp  eax, -1
+    je   .vd_zscalar
+    call cg_struct_size
+    mov  ecx, eax                    ; slots
+    xor  edx, edx
+.vd_zslot:
+    cmp  edx, ecx
+    jae  .vd_noinit_done
+    push rcx
+    push rdx
+    mov  rsi, s_movmemq_pre
+    call emit_cstr
+    mov  rdi, [rsp + 16]             ; base offset
+    mov  rax, [rsp]
+    shl  eax, 3
+    sub  edi, eax
+    call emit_uint
+    mov  rsi, s_movmem_mid
+    call emit_cstr
+    mov  rsi, s_zero_nl
+    call emit_cstr
+    pop  rdx
+    pop  rcx
+    inc  edx
+    jmp  .vd_zslot
+.vd_zscalar:
+    movzx eax, word [r12 + AST.col]
+    test eax, 1
+    jnz  .vd_zfloat
+    mov  rsi, s_mov_rax0
+    call emit_cstr
+    mov  rdi, [rsp]
+    call ir_stloc
+    jmp  .vd_noinit_done
+.vd_zfloat:
+    mov  rsi, s_xorps0
+    call emit_cstr
+    mov  rdi, [rsp]
+    call ir_fstloc
+.vd_noinit_done:
     pop  rcx
     jmp  .out
 .vd_newlist:
@@ -13333,6 +18048,12 @@ cg_emit:
     call cg_emit_struct_lit
     jmp  .out
 .assign_notlit:
+    ; a struct into a struct: copied whole
+    mov  rdi, [r12 + AST.left]
+    mov  rsi, [r12 + AST.right]
+    call cg_assign_struct
+    test eax, eax
+    jnz  .out
     mov  rdi, [r12 + AST.left]
     mov  rax, [rdi + AST.node_type]
     cmp  rax, AST_INDEX
@@ -13373,7 +18094,7 @@ cg_emit:
 .assign_glb:
     push rdi
     mov  rsi, s_stg_pre
-    call emit_cstr
+    call cg_emit_gpre
     pop  rdi
     call cg_emit_gtok
     mov  rsi, s_stg_suf
@@ -13399,7 +18120,7 @@ cg_emit:
 .assign_gfloat:
     ; a file-scope real64 lives at its own label, not in the frame
     mov  rsi, s_stgf_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.left]
     mov  rdi, [rdi + AST.data]
     call cg_emit_gtok
@@ -13596,6 +18317,32 @@ cg_emit:
     mov  rdi, [r12 + AST.right]
     test rdi, rdi
     jz   .ret_jmp
+    ; a struct result goes where the caller said, which goes back in rax
+    mov  ecx, [rel cg_cur_sret]
+    cmp  ecx, -1
+    je   .ret_plain
+    mov  esi, 2
+    mov  edx, [rel cg_sret_slot]
+    call cg_store_struct
+    test eax, eax
+    jnz  .ret_sret
+    mov  rax, [r12 + AST.right]
+    mov  qword [rel cg_err_tok], 0
+    lea  rax, [rel s_err_sret]
+    mov  [rel cg_err_msg], rax
+    lea  rax, [rel s_hint_snot]
+    mov  [rel cg_err_hint], rax
+    mov  byte [rel cg_had_error], 1
+.ret_sret:
+    mov  rsi, s_ld_rax_pre
+    call emit_cstr
+    mov  edi, [rel cg_sret_slot]
+    call emit_uint
+    mov  rsi, s_lea_rax_suf
+    call emit_cstr
+    jmp  .ret_jmp
+.ret_plain:
+    mov  rdi, [r12 + AST.right]
     ; float return value goes in xmm0, integer in rax
     call cg_expr_is_float
     test eax, eax
@@ -13631,6 +18378,24 @@ cg_emit:
 
 .lambda_expr:
     call cg_emit_lambda
+    jmp  .out
+
+; --- made by codegen: the address of a slot of the frame, a number ---
+.frameaddr_expr:
+    mov  rsi, s_lea_rax_pre
+    call emit_cstr
+    mov  rdi, [r12 + AST.data]
+    call emit_uint
+    mov  rsi, s_lea_rax_suf
+    call emit_cstr
+    jmp  .out
+.imm_expr:
+    mov  rsi, s_movrax_imm
+    call emit_cstr
+    mov  rdi, [r12 + AST.data]
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
     jmp  .out
 
 ; --- peek8/16/32(address): exact-width read, zero-extended into rax ---
@@ -13784,7 +18549,7 @@ cg_emit:
     ; default: global variable (NASM resolves forward refs). '&g[i]' adds
     ; the index, scaled; it used to be dropped, so &g[5] was &g[0].
     mov  rsi, s_lea_glb
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call cg_emit_gtok
     mov  rsi, s_closebrk
@@ -14659,6 +19424,67 @@ cg_emit:
     call emit_cstr
     jmp  .out
 .int_binop:
+    ; x << 3, x >> 3, x >>> 3: the count is part of the instruction
+    mov  rax, [r12 + AST.data]
+    cmp  rax, TOK_LSHIFT
+    je   .int_shk
+    cmp  rax, TOK_RSHIFT
+    je   .int_shk
+    cmp  rax, TOK_URSHIFT
+    jne  .int_noshk
+.int_shk:
+    mov  rdi, [r12 + AST.right]
+    call cg_lit_small
+    cmp  eax, -1
+    je   .int_noshk
+    push rax
+    mov  rdi, [r12 + AST.left]
+    call cg_emit
+    mov  rdi, r12
+    call cg_binop_is_unsigned
+    mov  rsi, s_shlk
+    mov  rcx, [r12 + AST.data]
+    cmp  rcx, TOK_LSHIFT
+    je   .int_shk_go
+    mov  rsi, s_ushrk
+    cmp  rcx, TOK_URSHIFT
+    je   .int_shk_go
+    test eax, eax
+    jnz  .int_shk_go
+    mov  rsi, s_shrk
+.int_shk_go:
+    call emit_cstr
+    pop  rdi
+    call emit_uint
+    mov  rsi, s_nl
+    call emit_cstr
+    jmp  .out
+.int_noshk:
+    ; A constant or a variable on the left of an expression with no calls:
+    ; the right side first, into rcx, then the left straight into rax. Only
+    ; a call could change the variable in between, and there is none, so
+    ; the order makes no difference -- and the push and pop are gone.
+    mov  rdi, [r12 + AST.right]
+    call cg_is_leafish
+    test eax, eax
+    jnz  .int_leftfirst
+    mov  rdi, [r12 + AST.left]
+    call cg_is_leafish
+    test eax, eax
+    jz   .int_leftfirst
+    mov  rdi, [r12 + AST.right]
+    call cg_expr_pure
+    test eax, eax
+    jz   .int_leftfirst
+    mov  rdi, [r12 + AST.right]
+    call cg_emit
+    call cg_ptr_scale
+    mov  rsi, s_movrcxrax
+    call emit_cstr
+    mov  rdi, [r12 + AST.left]
+    call cg_emit
+    jmp  .int_op
+.int_leftfirst:
     ; left -> rax. When the right side is a constant or a local it is loaded
     ; straight into rcx: loading it cannot disturb rax, so the push and the pop
     ; that protect rax around a general expression are dead weight. That was
@@ -14829,6 +19655,15 @@ cg_emit:
     jmp  .out
 
 .call:
+    call cg_c_fn                     ; c_fn(f): the C entry of an export
+    test eax, eax
+    jnz  .out
+    call cg_c_call                   ; c_call(p, ...): C code at an address
+    test eax, eax
+    jnz  .out
+    call cg_list_call                ; on a list<S>: the _n versions
+    test eax, eax
+    jnz  .out
     call cg_intrinsic                ; vec4_add(...) and the like: inline
     test eax, eax
     jnz  .out
@@ -14836,6 +19671,11 @@ cg_emit:
     call cg_call_kind                ; eax = 0 a function, 1 through a value
     cmp  eax, 2
     je   .out                        ; no such function: reported
+    cmp  eax, 3
+    jne  .call_kron
+    call cg_call_extern              ; a function of a system library
+    jmp  .out
+.call_kron:
     cmp  eax, 1
     jne  .call_direct
     call cg_note_indirect
@@ -14844,6 +19684,15 @@ cg_emit:
 .call_direct:
     mov  rdi, [r12 + AST.data]
     call cg_note_call                ; caller -> callee, for the thread check
+    ; a struct result: where it goes is settled now, before the arguments
+    ; (which may call such functions themselves), and set in r11 last
+    mov  rax, -1
+    cmp  qword [r12 + AST.owner_type], FNVAL_MARK
+    je   .call_nosret
+    mov  rdi, [r12 + AST.data]
+    call cg_sret_setup
+.call_nosret:
+    push rax
     ; --- evaluate arguments onto the stack, then load into the ABI registers.
     ; Integer args -> rcx/rdx/r8/r9 ; float args -> xmm0..xmm3 (by position).
     push r13
@@ -14929,10 +19778,19 @@ cg_emit:
     jmp  .arg_push_next
 .arg_push_struct:
     mov  rdi, [r13 + AST.left]
+    cmp  qword [rdi + AST.node_type], AST_IDENTIFIER
+    jne  .arg_push_saddr
     mov  rdi, [rdi + AST.data]       ; variable name token
     call cg_find_var_idx
     cmp  eax, -1
-    je   .arg_push_next
+    jne  .arg_push_local
+.arg_push_saddr:
+    mov  rdi, [r13 + AST.left]
+    call cg_emit_struct_addr         ; rax = its address
+    mov  rsi, s_push_rax
+    call emit_cstr
+    jmp  .arg_push_next
+.arg_push_local:
     ; A slot that already holds an address -- an array parameter being handed
     ; on to another function -- is forwarded with mov, not lea. Taking its
     ; address instead would pass a pointer to the pointer.
@@ -15057,9 +19915,13 @@ cg_emit:
     pop  r15
     pop  r14
     pop  r13
+    pop  rax
+    mov  [rel cg_sret_pend], rax
     mov  rsi, s_shadow_sub
     call emit_cstr
     call kt_flush
+    mov  rax, [rel cg_sret_pend]
+    call cg_sret_emit
     cmp  qword [r12 + AST.owner_type], FNVAL_MARK
     jne  .call_named
     ; through a value: its record's first word is the code
@@ -15335,7 +20197,7 @@ cg_emit:
     jmp  .out
 .ident_gvar:
     mov  rsi, s_ldg_pre
-    call emit_cstr
+    call cg_emit_gpre
     mov  rdi, [r12 + AST.data]
     call cg_emit_gtok
     mov  rsi, s_closebrk

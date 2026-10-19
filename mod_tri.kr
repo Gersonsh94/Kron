@@ -1,0 +1,6 @@
+kron_program
+kron_domain mod_tri;
+kron_imports
+kron_definitions
+fn area(s: i64) -> i64 { return s * s / 2; }
+fn half_area(s: i64) -> i64 { return area(s) / 2; }

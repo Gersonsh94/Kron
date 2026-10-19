@@ -130,6 +130,8 @@ var ui_pressed: i64;
 var ui_released: i64;
 var ui_active: i64;                  // the control the press began on
 var ui_focus: i64;                   // the box being typed in
+var ui_kb_want: i64;                 // a box to type in has the focus this frame
+var ui_kb_shown: i64;                // ... and had it the last: the screen keyboard is up
 var ui_tick: i64;
 var ui_chars: [i64; 64];
 var ui_nchars: i64;
@@ -366,6 +368,12 @@ fn ui_begin() -> i64 {
 
 fn ui_end() -> i64 {
     window_unclip();
+    // a phone's screen keyboard follows the boxes to type in
+    if ui_kb_want != ui_kb_shown {
+        window_keyboard(ui_kb_want);
+        ui_kb_shown = ui_kb_want;
+    }
+    ui_kb_want = 0;
     // a press anywhere else closes an open menu or dropdown
     if ui_pressed {
         if ui_menu_open != 0 && ui_menu_any == 0 {
@@ -1074,6 +1082,7 @@ fn ui_input_hint(x: i64, y: i64, w: i64, buffer: i64, capacity: i64, placeholder
     }
     var focused: i64 = 0;
     if ui_focus == id { focused = 1; }
+    if focused { ui_kb_want = 1; }    // a phone shows its keyboard
     if focused {
         var i: i64 = 0;
         while i < ui_nchars {
@@ -1358,6 +1367,7 @@ fn ui_edit(x: i64, y: i64, w: i64, t: i64, placeholder: i64) -> i64 {
     var over: i64 = ui_inside(x, y, w, h);
     var focused: i64 = 0;
     if ui_focus == id { focused = 1; }
+    if focused { ui_kb_want = 1; }    // a phone shows its keyboard
     var p: i64 = ui_str(t);
     var len: i64 = ui_tx_len(t);
     if over && ui_pressed {
@@ -1643,6 +1653,7 @@ fn ui_area(x: i64, y: i64, w: i64, h: i64, t: i64) -> i64 {
     var over: i64 = ui_inside(x, y, w, h);
     var focused: i64 = 0;
     if ui_focus == id { focused = 1; }
+    if focused { ui_kb_want = 1; }    // a phone shows its keyboard
     var p: i64 = ui_str(t);
     var n: i64 = ui_tx_len(t);
     var scroll: i64 = ui_scroll_get(id);

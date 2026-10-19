@@ -1,0 +1,13 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "mod_sq.kr" as sq;
+acquire_domain "mod_tri.kr";
+kron_definitions
+fn main() {
+    print(sq.area(4));
+    print(mod_tri.area(4));
+    print(twice_area(3));
+    print(half_area(4));
+    print(mod_sq.twice_area(5));
+}

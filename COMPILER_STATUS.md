@@ -5,7 +5,47 @@ race between threads, and must run without a runtime underneath: native
 code for Windows, Linux (x86-64 and ARM64) and macOS on Apple silicon, and
 WebAssembly for the web, from one source.
 
-The compiler is written entirely in x86-64 assembly and depends on no C runtime.
+The compiler is written in x86-64 assembly and, part by part, in Kron: the
+lexer is Kron since 19-10-2026 (`lexer/lexer.kr`). It depends on no C
+runtime, and kasm alone builds it.
+
+---
+
+## 0. STATE AT 19-10-2026
+
+The compiler moves to Kron, one part per delivery (DECISIONS.md, "The
+compiler moves to Kron, part by part"). Part 1:
+
+| Area | What |
+|---|---|
+| The lexer | `lexer/lexer.kr` and `lexer/tokens.kr`; `lexer/lexer.asm` is now only the door to it (the old entry names, registers kept) |
+| `--module` | `kronc part.kr --module` writes `part_kr.asm`: the functions alone, no runtime, no entry; its globals carry its name; it refuses `main`, `export` and globals computed at start |
+| The build | `KRONPARTS.bat` makes the parts in Kron again; BUILD.bat and BOOTSTRAP.bat call it with stage1 and stage2, so the fixpoint covers them |
+| kasm | a label defined twice is an error; `resb`/`resq` outside `.bss` are zeros; `1e5` in `dq` |
+| Language | a global array given values keeps them (`var t: [i64; 4] = [1, 2, 3, 4];`), as data; a character Kron does not use, and a text with no closing quote, are errors with their line and column |
+
+Checked: the Kron lexer gives the same tokens as the assembly one on every
+`.kr` file of the repository and on 2,500 generated files, and `-S` of every
+test is the same text. Tests: Windows 102 plus the debug test, Linux 101,
+ARM64 101, web 97, macOS (emulated) 100, 38 refused programs.
+
+## 0b. STATE AT 18-10-2026
+
+Since the last count (section 1), one delivery added:
+
+| Area | What |
+|---|---|
+| C interop | `extern` blocks, `--lib` (.dll .so .dylib), `fn export`, `c_fn`, `c_call` |
+| Phones | `--target=android`, `--target=ios`, `std_app.kr`, `templates/` (Android, iOS, React Native) |
+| Language | struct values, `ptr<S>` fields, `list<S>`, generics, module names and `as`, zero-initialised locals |
+| Speed | web 2-4x faster (registers as wasm locals), fewer pushes, constant shifts |
+| Hardware | `std_gpu` (Vulkan, Metal, WebGPU), `std_shader` (KSL to SPIR-V, MSL, WGSL), `std_math3d`, `std_audio`, `std_gamepad`, JPEG in `std_image`, `std_json`, mouse capture and held keys in `std_window` |
+| Tools | `--debug` and `std_debug.kr`; VS Code extension 0.5.0 (debugger, builds for every target); `GETTING_STARTED.md`; `GPUTESTS.bat` |
+
+Tests: Windows 101 plus the debug test, Linux 100,
+ARM64 100, web 96, macOS (emulated) 99, 35 refused programs; the GPU tests
+(`tests/gpu`) pass on an RTX 3060 (Windows), Mesa's software Vulkan and
+WebGPU (Dawn).
 
 ---
 
@@ -21,7 +61,8 @@ The compiler is written entirely in x86-64 assembly and depends on no C runtime.
 | `main.asm` | 4,641 | Driver, CLI, pipeline, ELF writers, the web page |
 | `xwasm.asm` | 3,679 | x86-64 text -> WebAssembly module |
 | `semantic/semantic.asm` | 1,676 | Semantic analysis |
-| `lexer/lexer.asm` | 1,381 | Tokenizer |
+| `lexer/lexer.kr` | 632 | Tokenizer, in Kron (since 19-10-2026; with `lexer/tokens.kr`, 186) |
+| `lexer/lexer.asm` | 101 | The door to it, by hand; `lexer/lexer_kr.asm` is made by `kronc --module` |
 | `macho.asm` | 1,235 | Mach-O executable for macOS, with its ad-hoc signature (SHA-256) |
 | `runtime/runtime.asm` | 784 | Runtime support |
 | `pe_writer.asm` | 765 | PE32+ writer |
@@ -78,8 +119,11 @@ knows where an imported function lands.
 - Emitting a finished executable: kasm produces the bytes and the external
   reference table, but building a PE import table from them is the linker's job
 
-kasm now covers every instruction form the code generator emits. What remains
-between it and replacing NASM entirely is the link step.
+kasm covers every instruction form the code generator emits, and pe_writer
+(Windows), the ELF writer (Linux) and macho (macOS) write the executables.
+For hand-written flat binaries it also takes `org`, `align`, `times` with an
+expression, and data whose values are expressions of labels (the boot
+sector of BUILDOS.bat is assembled this way).
 
 ## 1b2. KARM — THE ARM64 ASSEMBLER
 
@@ -218,14 +262,15 @@ already reserves the fields for `ed25519` and post-quantum algorithms.
 ## 2. PIPELINE
 
 ```
-source.kr -> expand -> lexer -> parser -> AST -> semantic -> codegen -> x86-64 text
+source.kr -> expand -> lexer (Kron) -> parser -> AST -> semantic -> codegen -> x86-64 text
    x86-64 text -> kasm -> PE (Windows) or ELF (Linux x86-64)
    x86-64 text -> xarm -> ARM64 text -> karm -> ELF (Linux ARM64) or Mach-O (macOS)
    x86-64 text -> xwasm -> WebAssembly module (the web)
 ```
 
-No external tool in any path. NASM and GoLink only build `kronc_nasm.exe`,
-the audit build.
+No external tool in any path, the compiler's own build and its tests
+included: since 18-10-2026 neither NASM nor GoLink is used anywhere (see
+DECISIONS.md, "Without NASM and GoLink").
 
 ```
 kronc.exe app.kr                          # Windows .exe (default)
@@ -506,11 +551,10 @@ The distinction that governs design decisions:
 
 ### Remaining external dependencies
 
-1. **NASM + GoLink** — the compiler emits text assembly rather than machine code
-   bytes. Removing this requires direct byte emission plus using `linker.asm`
-   for the final binary.
-2. **Multiboot1** — `boot.asm` requires a Multiboot-compliant loader (GRUB, or
-   `qemu -kernel`). A 512-byte MBR or a UEFI stub would remove it.
+None to build: kronc assembles and links everything itself, the compiler
+included. `krun.bat` boots a kernel through Multiboot1 (GRUB, or `qemu
+-kernel`); `BUILDOS.bat` makes a disk image with its own 512-byte MBR, which
+needs neither.
 
 QEMU is a test machine, not a dependency.
 
@@ -520,10 +564,11 @@ QEMU is a test machine, not a dependency.
 
 Ordered by how much each one enables:
 
-1. **Finish kasm**: external symbols and `.bss`, which is what still ties the
-   pipeline to NASM — removes NASM and GoLink, making the toolchain
-   self-contained.
-3. **Own bootloader** — MBR or UEFI, removes the GRUB requirement.
+1. **Done 18-10-2026**: kasm and the executable writers replaced NASM and
+   GoLink everywhere, tests included; the own MBR boots (BUILDOS.bat).
+2. **Under way since 19-10-2026**: the compiler in Kron, part by part. The
+   lexer is done.
+3. **UEFI** — the MBR covers BIOS machines; new PCs boot through UEFI.
 4. **Parameters beyond the fourth** — the ABI requires passing them on the stack.
 5. **Register allocation** — everything currently goes to the stack; this is
    where the most performance is left unclaimed.

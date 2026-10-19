@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_extern_bad;
+kron_imports
+kron_definitions
+
+// An extern function runs C code, which Kron does not check: calling one
+// outside raw { } is refused, as peek and poke are.
+
+extern "libc.so.6", "libSystem.B.dylib", "msvcrt.dll" {
+    fn strlen(s: str) -> u64;
+}
+
+fn main() -> i32 {
+    var n: u64 = strlen("hello");
+    print(n);
+    return 0;
+}

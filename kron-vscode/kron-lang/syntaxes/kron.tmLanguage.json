@@ -101,15 +101,15 @@
         },
         {
           "name": "storage.type.kron",
-          "match": "\\b(?:private|aliased|struct|import|export|module|public|delete|shared|const|enum|from|var|new|fn|as)\\b"
+          "match": "\\b(?:private|aliased|struct|import|export|extern|module|public|delete|shared|const|enum|from|var|new|fn|as)\\b"
         },
         {
           "name": "support.type.primitive.kron",
-          "match": "\\b(?:ArenaAllocationToken|physical_ptr|hardware_bit|utf8_stream|virtual_ptr|register16|register32|register64|register8|uint16|uint32|uint64|real32|real64|stream|int16|int32|int64|uint8|slice|int8|bool|void|i16|i32|i64|u16|u32|u64|f32|f64|ptr|i8|u8)\\b"
+          "match": "\\b(?:ArenaAllocationToken|physical_ptr|hardware_bit|utf8_stream|virtual_ptr|register16|register32|register64|register8|uint16|uint32|uint64|real32|real64|stream|int16|int32|int64|uint8|slice|int8|bool|void|text|list|map|str|i16|i32|i64|u16|u32|u64|f32|f64|ptr|i8|u8)\\b"
         },
         {
           "name": "keyword.other.unsafe.kron",
-          "match": "\\b(?:dll_load|dll_proc|invcache|prefetch|peek16|peek32|poke16|poke32|peek8|poke8|peek|poke|outb|raw|asm|inb)\\b"
+          "match": "\\b(?:dll_load|dll_proc|invcache|prefetch|syscall|c_call|peek16|peek32|poke16|poke32|c_fn|peek8|poke8|peek|poke|outb|raw|asm|inb)\\b"
         },
         {
           "name": "keyword.control.exception.kron",
@@ -117,7 +117,7 @@
         },
         {
           "name": "support.function.builtin.kron",
-          "match": "\\b(?:ticks_per_sec|thread_start|thread_yield|thread_wait|vec2_store|readmouse|cpu_count|lock_init|lock_take|lock_give|vec2_load|loadfile|savefile|vec2_add|vec2_sub|vec2_mul|readkey|printc|mousex|mousey|sizeof|print|trunc|ticks|beep|rotl|rotr)\\b"
+          "match": "\\b(?:ticks_per_sec|thread_start|thread_yield|thread_wait|vec2_store|readmouse|cpu_count|lock_init|lock_take|lock_give|vec2_load|loadfile|savefile|vec2_add|vec2_sub|vec2_mul|target_os|readkey|printc|mousex|mousey|sizeof|print|trunc|ticks|beep|rotl|rotr)\\b"
         },
         {
           "name": "keyword.other.system.kron",

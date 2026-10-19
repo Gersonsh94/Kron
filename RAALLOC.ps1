@@ -26,4 +26,4 @@ if (-not ($new -match "%define RA_ENABLE\s+$val")) {
     Write-Host "No RA_ENABLE line found in $f"; exit 1
 }
 [IO.File]::WriteAllBytes((Resolve-Path $f), [Text.Encoding]::UTF8.GetBytes($new))
-Write-Host "RA_ENABLE = $val. Rebuild with BUILD_NASM.bat."
+Write-Host "RA_ENABLE = $val. Rebuild with BOOTSTRAP.bat, then SEED.bat and BUILD.bat."

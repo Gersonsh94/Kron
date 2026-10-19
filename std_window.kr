@@ -108,6 +108,16 @@ var w32_gunlock: i64;
 var w32_to_wide: i64;
 var w32_from_wide: i64;
 var win_ignore: i64;                 // results nobody needs
+var win_capture: i64;                // the mouse is captured (games)
+var win_held: [i64; 256];            // keys held now, by their code
+var win_dx: i64;                     // its motion since the last window_show
+var win_dy: i64;
+var x_cursor_none: i64;              // X11: a cursor with no pixels
+var w32_cursor_pos: i64;
+var w32_set_cursor: i64;
+var w32_client_screen: i64;
+var w32_foreground: i64;
+var w32_show_cursor: i64;
 
 // Windows
 var win_hwnd: i64;
@@ -148,6 +158,51 @@ var x_sel_prop: i64;
 // the web
 var web_state: i64;                  // 0 not asked yet, 1 macOS, 2 the web, 3 neither
 var web_ev: [i64; 8];                // one event from the page
+
+// A phone app (std_app.kr): the system or a host app owns the screen and
+// calls into the program from its own threads -- these are what both sides
+// touch, under lock 30. app_mode: 1 Android (NativeActivity), 2 a host app
+// that shows the picture itself (the iOS template, any embedder).
+shared var app_mode: i64;
+shared var app_alive: i64;           // 0 once the system ended the app
+shared var app_activity: i64;        // Android: the ANativeActivity
+shared var and_window: i64;          // Android: the ANativeWindow, 0 while there is none
+shared var and_queue: i64;           // Android: the AInputQueue
+shared var app_screen_w: i64;        // the screen, in pixels
+shared var app_screen_h: i64;
+shared var app_frame: [i64; 1048576];  // a host app: the last picture shown
+shared var app_fw: i64;
+shared var app_fh: i64;
+shared var app_seq: i64;             // pictures shown so far
+shared var app_ev: [i64; 256];       // events from the host: kind, x, y, extra
+shared var app_ev_head: i64;
+shared var app_ev_tail: i64;
+shared var app_kb: i64;              // a host app: the program wants the screen keyboard
+var and_bw: i64;                     // Android: the buffer's size, set once
+var and_bh: i64;
+var and_buf: [i64; 8];               // ANativeWindow_Buffer
+var and_ev: [i64; 2];                // an AInputEvent*
+
+extern "libandroid.so" {
+    fn ANativeWindow_setBuffersGeometry(window: i64, w: i32, h: i32, format: i32) -> i32;
+    fn ANativeWindow_lock(window: i64, buffer: i64, dirty: i64) -> i32;
+    fn ANativeWindow_unlockAndPost(window: i64) -> i32;
+    fn ANativeWindow_getWidth(window: i64) -> i32;
+    fn ANativeWindow_getHeight(window: i64) -> i32;
+    fn AInputQueue_hasEvents(queue: i64) -> i32;
+    fn AInputQueue_getEvent(queue: i64, out: i64) -> i32;
+    fn AInputQueue_preDispatchEvent(queue: i64, event: i64) -> i32;
+    fn AInputQueue_finishEvent(queue: i64, event: i64, handled: i32);
+    fn AInputEvent_getType(event: i64) -> i32;
+    fn AMotionEvent_getAction(event: i64) -> i32;
+    fn AMotionEvent_getX(event: i64, index: u64) -> f32;
+    fn AMotionEvent_getY(event: i64, index: u64) -> f32;
+    fn AKeyEvent_getAction(event: i64) -> i32;
+    fn AKeyEvent_getKeyCode(event: i64) -> i32;
+    fn AKeyEvent_getMetaState(event: i64) -> i32;
+    fn ANativeActivity_showSoftInput(activity: i64, flags: u32);
+    fn ANativeActivity_hideSoftInput(activity: i64, flags: u32);
+}
 
 fn rgb(r: i64, g: i64, b: i64) -> i64 {
     return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
@@ -255,6 +310,7 @@ fn window_clear(color: i64) -> i64 {
 // reads the C, Ctrl is up again.
 fn win_push_key(k: i64) -> i64 {
     if k == 0 { return 0; }
+    win_held[k & 255] = 1;
     var next: i64 = (win_ktail + 1) & 63;
     if next == win_khead { return 0; }     // full: the oldest are kept
     win_keys[win_ktail] = k | ((win_mods & 255) << 16);
@@ -304,6 +360,44 @@ fn window_key() -> i64 {
     win_khead = (win_khead + 1) & 63;
     win_kmods = (k >> 16) & 255;
     return k & 65535;
+}
+
+// 1 while the key is held (the codes of window_key): for games
+fn window_key_down(k: i64) -> i64 {
+    if k < 0 || k > 255 { return 0; }
+    return win_held[k];
+}
+
+fn win_key_up(k: i64) -> i64 {
+    if k > 0 && k < 256 { win_held[k] = 0; }
+    return 0;
+}
+
+fn window_mouse_dx() -> i64 { return win_dx; }
+fn window_mouse_dy() -> i64 { return win_dy; }
+
+// The mouse kept by the window, for a game's camera: the pointer is hidden
+// and stays in the window, and window_mouse_dx / _dy say how far it moved
+// each frame. On the web the page asks the browser for it at the next
+// click (browsers only allow it then). 0 gives the pointer back.
+fn window_mouse_capture(on: i64) -> i64 {
+    if win_open_now == 0 {
+        fail "no window is open" hint "window_open first";
+    }
+    win_capture = on;
+    win_dx = 0;
+    win_dy = 0;
+    if app_mode != 0 {
+        return 1;
+    }
+    if win_is_web() {
+        raw { win_ignore = syscall(1008, on); }
+    } else if win_is_linux() {
+        x_capture(on);
+    } else {
+        w32_capture(on);
+    }
+    return 1;
 }
 
 fn window_mouse_x() -> i64 { return win_mx; }
@@ -395,6 +489,9 @@ fn window_open(width: i64, height: i64, title: i64) -> i64 {
     if win_open_now != 0 {
         fail "a window is already open" hint "close it with window_close first";
     }
+    if app_mode != 0 {
+        return app_open(width, height);
+    }
     if width <= 0 {
         fail "window of zero or negative size" hint "give a width and a height of at least 1";
     }
@@ -438,7 +535,11 @@ fn window_show() -> i64 {
     win_releases = 0;
     win_wheel = 0;
     win_rpresses = 0;
-    if win_is_web() {
+    win_dx = 0;
+    win_dy = 0;
+    if app_mode != 0 {
+        app_show();
+    } else if win_is_web() {
         web_show();
     } else if win_is_linux() {
         x_show();
@@ -450,7 +551,9 @@ fn window_show() -> i64 {
 
 fn window_close() -> i64 {
     if win_open_now == 0 { return 0; }
-    if win_is_web() {
+    if app_mode != 0 {
+        app_alive = 0;
+    } else if win_is_web() {
         raw { win_ignore = syscall(1007); }
     } else if win_is_linux() {
         x_close();
@@ -591,6 +694,8 @@ fn w32_show() -> i64 {
                 if (call w32_keystate(17) & 32768) != 0 { win_mods = win_mods | 4; }
                 if (call w32_keystate(16) & 32768) != 0 { win_mods = win_mods | 1; }
                 win_push_key(w32_key(wp & 255));
+            } else if m == 0x101 {
+                win_key_up(w32_key(wp & 255));
             } else if m == 0x102 {
                 win_push_char(wp & 255);
             } else if m == 0x200 {
@@ -622,6 +727,9 @@ fn w32_show() -> i64 {
         if call w32_iswindow(win_hwnd) == 0 {
             win_open_now = 0;
         }
+    }
+    if win_capture == 1 && win_open_now == 1 {
+        w32_capture_frame();
     }
     return 1;
 }
@@ -889,7 +997,7 @@ fn x_open(title: i64) -> i64 {
     x_put32(24, 0);
     x_put32(28, 0x802);                        // BackPixel | EventMask
     x_put32(32, 0);
-    x_put32(36, 0x2804D);
+    x_put32(36, 0x2804F);                      // and KeyRelease
     x_send(&x_buf, 40);
 
     // the title (WM_NAME, a STRING)
@@ -1390,6 +1498,124 @@ fn x_show() -> i64 {
             x_event();
         }
     }
+    if win_capture == 1 {
+        win_dx = win_mx - win_w / 2;
+        win_dy = win_my - win_h / 2;
+        x_warp_center();
+    }
+    return 1;
+}
+
+// X11: the pointer back to the middle of the window (WarpPointer)
+fn x_warp_center() -> i64 {
+    x_put8(0, 41);
+    x_put8(1, 0);
+    x_put16(2, 6);
+    x_put32(4, 0);
+    x_put32(8, x_wid);
+    x_put16(12, 0);
+    x_put16(14, 0);
+    x_put16(16, 0);
+    x_put16(18, 0);
+    x_put16(20, win_w / 2);
+    x_put16(22, win_h / 2);
+    x_send(&x_buf, 24);
+    win_mx = win_w / 2;
+    win_my = win_h / 2;
+    return 0;
+}
+
+// X11: hide the pointer (a cursor of one empty pixel) and keep it centred
+fn x_capture(on: i64) -> i64 {
+    if on == 1 && x_cursor_none == 0 {
+        var pix: i64 = x_wid + 3;
+        x_cursor_none = x_wid + 4;
+        x_put8(0, 53);                             // CreatePixmap, depth 1
+        x_put8(1, 1);
+        x_put16(2, 4);
+        x_put32(4, pix);
+        x_put32(8, x_wid);
+        x_put16(12, 1);
+        x_put16(14, 1);
+        x_send(&x_buf, 16);
+        x_put8(0, 93);                             // CreateCursor
+        x_put8(1, 0);
+        x_put16(2, 8);
+        x_put32(4, x_cursor_none);
+        x_put32(8, pix);
+        x_put32(12, pix);
+        var i: i64 = 16;
+        while i < 32 {
+            x_put16(i, 0);
+            i = i + 2;
+        }
+        x_send(&x_buf, 32);
+    }
+    x_put8(0, 2);                                  // ChangeWindowAttributes
+    x_put8(1, 0);
+    x_put16(2, 4);
+    x_put32(4, x_wid);
+    x_put32(8, 0x4000);                            // Cursor
+    if on == 1 {
+        x_put32(12, x_cursor_none);
+    } else {
+        x_put32(12, 0);
+    }
+    x_send(&x_buf, 16);
+    if on == 1 {
+        x_warp_center();
+    }
+    return 1;
+}
+
+// Windows: hide the pointer; each frame it goes back to the middle
+fn w32_capture(on: i64) -> i64 {
+    raw {
+        if w32_cursor_pos == 0 {
+            var user32: i64 = dll_load("user32.dll");
+            w32_cursor_pos = dll_proc(user32, "GetCursorPos");
+            w32_set_cursor = dll_proc(user32, "SetCursorPos");
+            w32_client_screen = dll_proc(user32, "ClientToScreen");
+            w32_foreground = dll_proc(user32, "GetForegroundWindow");
+            w32_show_cursor = dll_proc(user32, "ShowCursor");
+        }
+        if on == 1 {
+            win_ignore = call w32_show_cursor(0);
+            w32_center();
+        } else {
+            win_ignore = call w32_show_cursor(1);
+        }
+    }
+    return 1;
+}
+
+// the middle of the window, on the screen, into win_scratch[60..61]
+fn w32_center() -> i64 {
+    raw {
+        var pt: i64 = &win_scratch + 480;
+        poke32(pt, win_w / 2);
+        poke32(pt + 4, win_h / 2);
+        win_ignore = call w32_client_screen(win_hwnd, pt);
+        win_ignore = call w32_set_cursor(w32_signed(peek32(pt)), w32_signed(peek32(pt + 4)));
+    }
+    return 0;
+}
+
+fn w32_capture_frame() -> i64 {
+    raw {
+        if call w32_foreground() != win_hwnd {
+            return 0;                               // another program has the mouse
+        }
+        var pt: i64 = &win_scratch + 480;
+        var cur: i64 = &win_scratch + 496;
+        poke32(pt, win_w / 2);
+        poke32(pt + 4, win_h / 2);
+        win_ignore = call w32_client_screen(win_hwnd, pt);
+        win_ignore = call w32_cursor_pos(cur);
+        win_dx = w32_signed(peek32(cur)) - w32_signed(peek32(pt));
+        win_dy = w32_signed(peek32(cur + 4)) - w32_signed(peek32(pt + 4));
+        win_ignore = call w32_set_cursor(w32_signed(peek32(pt)), w32_signed(peek32(pt + 4)));
+    }
     return 1;
 }
 
@@ -1409,6 +1635,14 @@ fn x_event() -> i64 {
     if t == 2 {
         win_mods = x_get16(28);
         x_press(x_get8(1), x_get16(28));
+        return 0;
+    }
+    if t == 3 {
+        if x_kcount == 0 {
+            win_key_up(x_key(x_get8(1)));
+        } else {
+            win_key_up(x_ks_key(x_keysym(x_get8(1), 0)));
+        }
         return 0;
     }
     if t == 4 {
@@ -1600,6 +1834,7 @@ fn web_show() -> i64 {
                 win_push_key(w32_key(web_ev[1]));
             } else if t == 2 {
                 win_mods = web_ev[2];
+                win_key_up(w32_key(web_ev[1]));
             } else if t == 3 {
                 win_mx = web_ev[1];
                 win_my = web_ev[2];
@@ -1631,10 +1866,279 @@ fn web_show() -> i64 {
             } else if t == 8 {
                 win_mods = web_ev[2];
                 win_push_char(web_ev[1]);
+            } else if t == 9 {
+                win_dx = win_dx + web_ev[1];
+                win_dy = win_dy + web_ev[2];
             }
         } else {
             more = 0;
         }
     }
+    return 1;
+}
+
+// =========================================================================
+// A phone app: Android's NativeActivity, or a host app (iOS) that shows the
+// picture itself. std_app.kr starts the program's main in a thread of its
+// own once the system starts the app; here, the window is the screen.
+//
+//   window_open(0, 0, "")   the screen, in pixels of a computer's density
+//                           (a phone's are 2-3 times smaller); any other
+//                           size is scaled to fill the screen
+//   window_keyboard(1)      the screen keyboard up (0: down)
+// A touch is the left button: window_mouse_x/y where the finger is,
+// window_mouse_down while it touches. Android's back key is escape (27).
+// =========================================================================
+
+fn app_open(width: i64, height: i64) -> i64 {
+    // the screen first: Android hands the window over, the host its size
+    var waited: i64 = 0;
+    while app_screen_w == 0 {
+        if app_alive == 0 { return 0; }
+        window_sleep(10);
+        waited = waited + 1;
+        if waited > 1000 {
+            fail "the app never got its screen" hint "the system gave no window in 10 seconds";
+        }
+    }
+    // no size: the screen's, in pixels of about a computer's size -- a
+    // phone's screen is two or three times as dense -- that the system
+    // scales up; any size given is scaled to the screen the same way
+    var f: i64 = app_screen_w / 400;
+    if f < 1 { f = 1; }
+    var w: i64 = width;
+    var h: i64 = height;
+    if w <= 0 { w = app_screen_w / f; }
+    if h <= 0 { h = app_screen_h / f; }
+    while w * h > WIN_MAX_PIXELS {
+        w = w / 2;
+        h = h / 2;
+    }
+    win_w = w;
+    win_h = h;
+    window_unclip();
+    win_khead = 0;
+    win_ktail = 0;
+    win_chead = 0;
+    win_ctail = 0;
+    win_down = 0;
+    window_clear(0);
+    and_bw = 0;
+    win_open_now = 1;
+    return 1;
+}
+
+fn app_show() -> i64 {
+    if app_alive == 0 {
+        win_open_now = 0;
+        return 0;
+    }
+    if app_mode == 1 {
+        and_draw();
+        and_input();
+    } else {
+        host_publish();
+        host_input();
+    }
+    if app_alive == 0 { win_open_now = 0; }
+    return 1;
+}
+
+fn window_keyboard(on: i64) -> i64 {
+    if app_mode == 2 {
+        app_kb = on;
+        return 1;
+    }
+    if app_mode != 1 { return 0; }
+    raw {
+        if on != 0 {
+            ANativeActivity_showSoftInput(app_activity, 1);
+        } else {
+            ANativeActivity_hideSoftInput(app_activity, 0);
+        }
+    }
+    return 1;
+}
+
+// Android: the picture into the window's buffer, R and B swapped -- the
+// buffer is RGBX in memory, the picture 0x00RRGGBB
+fn and_draw() -> i64 {
+    lock_take(30);
+    var win: i64 = and_window;
+    if win == 0 {
+        lock_give(30);
+        return 0;
+    }
+    raw {
+        if and_bw != win_w {
+            win_ignore = ANativeWindow_setBuffersGeometry(win, win_w as i32, win_h as i32, 2);
+            and_bw = win_w;
+            and_bh = win_h;
+        }
+        if ANativeWindow_lock(win, &and_buf, 0) == 0 {
+            var bits: i64 = and_buf[2];
+            var stride: i64 = peek32(&and_buf + 8) & 0xFFFFFFFF;
+            var bw: i64 = peek32(&and_buf) & 0xFFFFFFFF;
+            var bh: i64 = peek32(&and_buf + 4) & 0xFFFFFFFF;
+            if bw > win_w { bw = win_w; }
+            if bh > win_h { bh = win_h; }
+            var y: i64 = 0;
+            while y < bh {
+                var s: i64 = &win_fb + y * win_w * 4;
+                var d: i64 = bits + y * stride * 4;
+                var e: i64 = s + bw * 4;
+                while s < e {
+                    var c: i64 = peek32(s);
+                    poke32(d, ((c & 255) << 16) | (c & 0xFF00) | ((c >> 16) & 255) | 0xFF000000);
+                    s = s + 4;
+                    d = d + 4;
+                }
+                y = y + 1;
+            }
+            win_ignore = ANativeWindow_unlockAndPost(win);
+        }
+    }
+    lock_give(30);
+    return 1;
+}
+
+// Android: the touches and the keys waiting in the activity's queue
+fn and_input() -> i64 {
+    lock_take(30);
+    var q: i64 = and_queue;
+    if q == 0 {
+        lock_give(30);
+        return 0;
+    }
+    raw {
+        while AInputQueue_hasEvents(q) > 0 {
+            if AInputQueue_getEvent(q, &and_ev) < 0 { break; }
+            var ev: i64 = and_ev[0];
+            if AInputQueue_preDispatchEvent(q, ev) != 0 { continue; }
+            var handled: i64 = 0;
+            var t: i64 = AInputEvent_getType(ev);
+            if t == 2 {
+                var act: i64 = AMotionEvent_getAction(ev) & 255;
+                var fx: f64 = AMotionEvent_getX(ev, 0);
+                var fy: f64 = AMotionEvent_getY(ev, 0);
+                win_mx = ((fx * (win_w as f64)) / (app_screen_w as f64)) as i64;
+                win_my = ((fy * (win_h as f64)) / (app_screen_h as f64)) as i64;
+                if act == 0 {
+                    win_down = 1;
+                    win_presses = win_presses + 1;
+                } else if act == 1 {
+                    win_down = 0;
+                    win_releases = win_releases + 1;
+                } else if act == 3 {
+                    win_down = 0;
+                }
+                handled = 1;
+            } else if t == 1 {
+                if AKeyEvent_getAction(ev) == 0 {
+                    var code: i64 = AKeyEvent_getKeyCode(ev);
+                    var shift: i64 = AKeyEvent_getMetaState(ev) & 1;
+                    handled = and_key(code, shift);
+                }
+            }
+            AInputQueue_finishEvent(q, ev, handled as i32);
+        }
+    }
+    lock_give(30);
+    return 1;
+}
+
+// an Android key code: the key Kron gives for it, and the character typed
+fn and_key(code: i64, shift: i64) -> i64 {
+    if code == 4 { win_push_key(27); return 1; }           // back
+    if code == 66 { win_push_key(13); return 1; }          // enter
+    if code == 67 { win_push_key(8); return 1; }           // delete, backwards
+    if code == 112 { win_push_key(46); return 1; }         // forward delete
+    if code == 61 { win_push_key(9); return 1; }           // tab
+    if code == 62 { win_push_key(32); win_push_char(32); return 1; }
+    if code >= 19 {
+        if code <= 22 {                                    // the arrows
+            if code == 19 { win_push_key(38); }
+            if code == 20 { win_push_key(40); }
+            if code == 21 { win_push_key(37); }
+            if code == 22 { win_push_key(39); }
+            return 1;
+        }
+    }
+    if code >= 29 {
+        if code <= 54 {                                    // A..Z
+            win_push_key(65 + code - 29);
+            if shift != 0 {
+                win_push_char(65 + code - 29);
+            } else {
+                win_push_char(97 + code - 29);
+            }
+            return 1;
+        }
+    }
+    if code >= 7 {
+        if code <= 16 {                                    // 0..9
+            win_push_key(48 + code - 7);
+            win_push_char(48 + code - 7);
+            return 1;
+        }
+    }
+    if code == 55 { win_push_char(44); return 1; }         // ,
+    if code == 56 { win_push_char(46); return 1; }         // .
+    if code == 69 { win_push_char(45); return 1; }         // -
+    if code == 77 { win_push_char(64); return 1; }         // @
+    return 0;
+}
+
+// A host app: the picture copied where the host takes it (std_app.kr's
+// kron_app_frame), eight bytes at a time
+fn host_publish() -> i64 {
+    lock_take(30);
+    raw {
+        var s: i64 = &win_fb;
+        var d: i64 = &app_frame;
+        var e: i64 = s + win_w * win_h * 4;
+        while s < e {
+            poke(d, peek(s));
+            s = s + 8;
+            d = d + 8;
+        }
+    }
+    app_fw = win_w;
+    app_fh = win_h;
+    app_seq = app_seq + 1;
+    lock_give(30);
+    return 1;
+}
+
+// A host app: its events -- 1 a touch down, 2 a move, 3 up, 4 a key, 5 a
+// character -- with x and y in the picture's pixels
+fn host_input() -> i64 {
+    lock_take(30);
+    while app_ev_head != app_ev_tail {
+        var i: i64 = app_ev_head * 4;
+        var kind: i64 = app_ev[i];
+        var x: i64 = app_ev[i + 1];
+        var y: i64 = app_ev[i + 2];
+        if kind == 1 {
+            win_mx = x;
+            win_my = y;
+            win_down = 1;
+            win_presses = win_presses + 1;
+        } else if kind == 2 {
+            win_mx = x;
+            win_my = y;
+        } else if kind == 3 {
+            win_mx = x;
+            win_my = y;
+            win_down = 0;
+            win_releases = win_releases + 1;
+        } else if kind == 4 {
+            win_push_key(x);
+        } else if kind == 5 {
+            win_push_char(x);
+        }
+        app_ev_head = (app_ev_head + 1) & 63;
+    }
+    lock_give(30);
     return 1;
 }

@@ -1,21 +1,22 @@
 ; ============================================================================
-; kron_all.asm - the whole compiler as one translation unit.
-;
-; The fourteen modules are normally assembled separately and joined by a linker.
-; Splicing them here instead lets the compiler build itself with nothing but
-; its own tools:
+; kron_all.asm - the whole compiler as one translation unit, which its own
+; kasm assembles and its own pe_writer writes out:
 ;
 ;   kronc.exe kron_all.asm --assemble --pe
 ;
-; Every module includes the same headers, so the constants and the macros
-; arrive fourteen times over; the preprocessor keeps the first of each and skips
-; the rest.
+; lexer/lexer_kr.asm is not written by hand: kronc --module makes it from
+; lexer/lexer.kr, the lexer written in Kron. BUILD.bat and BOOTSTRAP.bat
+; make it again with every compiler they build.
 ;
-; Adjust the paths below if your layout differs.
+; Every module includes the same headers, so the constants and the macros
+; arrive once per module; the preprocessor keeps the first of each and skips
+; the rest. A label, though, may be defined only once in the whole: kasm
+; reports a second one.
 ; ============================================================================
 
 %include "main.asm"
 %include "lexer/lexer.asm"
+%include "lexer/lexer_kr.asm"
 %include "parser/parser.asm"
 %include "semantic/semantic.asm"
 %include "codegen/codegen.asm"

@@ -1,0 +1,10 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer...
+test_text_bad.kr:11:11: a text with no closing quote
+    print("hello);
+          ^
+  hint: a text ends on its own "; inside one, write \" for a quote and \\ for a backslash

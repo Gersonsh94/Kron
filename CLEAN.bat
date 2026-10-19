@@ -49,9 +49,6 @@ for %%F in (*.obj) do call :kill "%%F"
 for %%F in (*.exe) do (
     set "KEEP="
     if /i "%%F"=="kronc.exe"      set "KEEP=1"
-    if /i "%%F"=="kronc_nasm.exe" set "KEEP=1"
-    if /i "%%F"=="nasm.exe"       set "KEEP=1"
-    if /i "%%F"=="GoLink.exe"     set "KEEP=1"
     if /i "%%F"=="boot1.exe"      set "KEEP=1"
     if /i "%%F"=="boot2.exe"      set "KEEP=1"
     if /i "%%F"=="boot3.exe"      set "KEEP=1"
@@ -115,6 +112,7 @@ echo     KRN_FORMAT.md                   the own executable format
 echo     kron_alloc.kr                   allocator written in Kron
 echo     kc.bat                          builds a program in one go
 echo     kron_all.asm seed\ tests\expected\ and the .bat and .ps1
+echo     lexer\lexer_kr.asm              made from lexer.kr, part of the build
 echo.
 if not defined DOFUSED echo   .fused.kr files are kept unless /fused is given.
 echo.

@@ -43,8 +43,10 @@ global xarm_error_line
 global xarm_error_text
 global xarm_error_insn
 global xarm_set_os
+global xarm_set_lib
 ; the reader of x86 text, shared with xwasm
 global xa_read_line, xa_split, xa_parse_ops, xa_streq, xa_prefix, xa_skipb
+global xa_native_skip, xa_skipping
 global xa_parse_num, xa_find_reg, xa_fail
 global xa_in, xa_in_end, xa_line_no, xa_err, xa_err_line, xa_err_msg
 global xa_err_insn, xa_line, xa_mn, xa_rest, xa_nops, xa_opt, xa_ops
@@ -109,6 +111,8 @@ section .bss
     xa_fpend     resq 1            ; register to tst before the next condition, +1
     xa_fpw       resq 1            ; that register is a w register
     xa_uniq      resq 1
+    xa_skipping  resq 1            ; inside a routine the tail supplies natively
+    xa_lib       resq 1            ; 1 for a library: __centry goes in the tail
     xa_mb        resq 1            ; addr: base register
     xa_mo        resq 1            ; addr: offset
     xa_numbuf    resb 32
@@ -382,6 +386,10 @@ section .data
     o_w17   db "w17", 0
     o_xzr   db "xzr", 0
     o_wzr   db "wzr", 0
+    xm_ns_sec   db "section", 0
+    xm_ns_ccall db "__ccall:", 0
+    xm_ns_ptent db "__pt_entry:", 0
+    xm_ns_centry db "__centry:", 0
     o_d16   db "d16", 0
 
 section .text
@@ -401,6 +409,11 @@ xarm_error_insn:
 
 xarm_set_os:
     mov  [rel xa_os], rcx
+    ret
+
+; xarm_set_lib(rcx = 1 for a library, --lib)
+xarm_set_lib:
+    mov  [rel xa_lib], rcx
     ret
 
 xarm_translate:
@@ -428,6 +441,7 @@ xarm_translate:
     mov  [rel xa_fk], rax
     mov  [rel xa_fpend], rax
     mov  [rel xa_uniq], rax
+    mov  [rel xa_skipping], rax
     lea  rax, [rel e_form]
     mov  [rel xa_err_msg], rax
     mov  byte [rel xa_err_insn], 0
@@ -441,6 +455,9 @@ xarm_translate:
     call xa_read_line
     test eax, eax
     jz   .tail
+    call xa_native_skip
+    test eax, eax
+    jnz  .line
     call xa_do_line
     jmp  .line
 .tail:
@@ -451,6 +468,16 @@ xarm_translate:
     lea  rsi, [rel xa_tail_mac]
 .tail_put:
     call xa_put
+    ; a library: where C comes in
+    cmp  qword [rel xa_lib], 0
+    je   .tail_done
+    lea  rsi, [rel xa_tail_lib]
+    cmp  qword [rel xa_os], 1
+    jne  .tail_lib
+    lea  rsi, [rel xa_tail_lib_mac]
+.tail_lib:
+    call xa_put
+.tail_done:
     mov  rax, [rel xa_out]
     sub  rax, rbp
     jmp  .out
@@ -564,6 +591,66 @@ xa_read_line:
 .eof:
     xor  eax, eax
     pop  rdi
+    pop  rsi
+    ret
+
+; xa_native_skip() -> eax = 0 when the line just read is translated, 1 when it
+; is dropped, 2 when it is the label that starts a dropped routine: it belongs
+; to a routine of the preamble that only makes sense on x86-64 and that the
+; tail supplies in ARM64 code instead -- __ccall, which speaks the system's C
+; convention, and __pt_entry, where a pthread starts. The routine ends at the
+; next label that is not local, or at a section line.
+xa_native_skip:
+    push rsi
+    lea  rsi, [rel xa_line]
+    call xa_skipb
+    mov  rcx, rsi
+    lea  rdx, [rel xm_ns_sec]
+    call xa_prefix
+    test eax, eax
+    jnz  .ns_end
+    cmp  byte [rsi], '.'
+    je   .ns_keep
+    ; a label: the first word ends in ':'
+    mov  rcx, rsi
+.ns_w:
+    mov  al, [rcx]
+    test al, al
+    jz   .ns_keep
+    cmp  al, ' '
+    je   .ns_keep
+    cmp  al, ':'
+    je   .ns_label
+    inc  rcx
+    jmp  .ns_w
+.ns_label:
+    mov  rcx, rsi
+    lea  rdx, [rel xm_ns_ccall]
+    call xa_prefix
+    test eax, eax
+    jnz  .ns_begin
+    mov  rcx, rsi
+    lea  rdx, [rel xm_ns_ptent]
+    call xa_prefix
+    test eax, eax
+    jnz  .ns_begin
+    mov  rcx, rsi
+    lea  rdx, [rel xm_ns_centry]
+    call xa_prefix
+    test eax, eax
+    jnz  .ns_begin
+.ns_end:
+    mov  qword [rel xa_skipping], 0
+    xor  eax, eax
+    pop  rsi
+    ret
+.ns_begin:
+    mov  qword [rel xa_skipping], 1
+    mov  eax, 2
+    pop  rsi
+    ret
+.ns_keep:
+    mov  rax, [rel xa_skipping]
     pop  rsi
     ret
 
@@ -3834,6 +3921,209 @@ db "    mov x6, x13", 10
 db "    mov x7, x14", 10
 db "    mov x8, x15", 10
 db "    ret", 10
+db 10
+db "; __ccall: an extern function called in the AAPCS64 convention. As on", 10
+db "; x86-64: the arguments pushed in order (the last at [x8], r10), x9 (r11) =", 10
+db "; the function's record, x0 (rax) = the shape of the call, x2 (rdx) = the", 10
+db "; widths. Integers go in x0-x7, reals in d0-d7 (s for an f32), the rest on", 10
+db "; the stack. The C code runs on sp, moved under the Kron stack (x28) first.", 10
+db "; Kron keeps x4 x5 (rsi rdi) and all of v6-v15 across a call; AAPCS64 keeps", 10
+db "; none of them whole, so they are saved here.", 10
+db "__ccall:", 10
+db "    ldr x16, [x9]", 10
+db "    cbnz x16, .cc_go", 10
+db "    stp x0, x2, [x28, #-16]!", 10
+db "    stp x8, x9, [x28, #-16]!", 10
+db "    ; the frame x86-64 would have, so that a failure's trace finds the call", 10
+db "    str x30, [x28, #-8]!", 10
+db "    str x29, [x28, #-8]!", 10
+db "    mov x29, x28", 10
+db "    mov x1, x9", 10
+db "    str x30, [x28, #-8]!", 10
+db "    bl __ext_resolve", 10
+db "    ldr x30, [x28], #8", 10
+db "    mov x16, x0", 10
+db "    ldr x29, [x28], #8", 10
+db "    ldr x30, [x28], #8", 10
+db "    ldp x8, x9, [x28], #16", 10
+db "    ldp x0, x2, [x28], #16", 10
+db "    cbz x16, .cc_none", 10
+db "    str x16, [x9]", 10
+db ".cc_go:", 10
+db "    sub x24, x28, #512", 10
+db "    and x24, x24, #0xfffffffffffffff0", 10
+db "    mov x25, sp", 10
+db "    mov sp, x24", 10
+db "    stp x4, x5, [x24, #128]", 10
+db "    stp x29, x30, [x24, #144]", 10
+db "    str q6, [x24, #176]", 10
+db "    str q7, [x24, #192]", 10
+db "    str q8, [x24, #208]", 10
+db "    str q9, [x24, #224]", 10
+db "    str q10, [x24, #240]", 10
+db "    str q11, [x24, #256]", 10
+db "    str q12, [x24, #272]", 10
+db "    str q13, [x24, #288]", 10
+db "    str q14, [x24, #304]", 10
+db "    str q15, [x24, #320]", 10
+db "    mov x26, x0", 10
+db "    mov x27, x9", 10
+db "    and x11, x26, #255", 10
+db "    lsr x3, x26, #48", 10
+db "    and x3, x3, #255", 10
+db "    mov x10, #0", 10
+db "    mov x12, #0", 10
+db "    mov x13, #0", 10
+db "    mov x14, #0", 10
+db ".cc_arg:", 10
+db "    cmp x10, x11", 10
+db "    b.hs .cc_load", 10
+db "    sub x15, x11, x10", 10
+db "    sub x15, x15, #1", 10
+db "    ldr x15, [x8, x15, lsl #3]", 10
+db "    add x16, x10, #8", 10
+db "    lsr x16, x26, x16", 10
+db "    and x16, x16, #1", 10
+db "    cbz x16, .cc_int", 10
+db "    add x16, x10, #32", 10
+db "    lsr x16, x26, x16", 10
+db "    and x16, x16, #1", 10
+db "    cbz x16, .cc_dbl", 10
+db "    fmov d16, x15", 10
+db "    fcvt s16, d16", 10
+db "    fmov w15, s16", 10
+db ".cc_dbl:", 10
+db "    cmp x13, #8", 10
+db "    b.hs .cc_spill", 10
+db "    add x16, x24, #400", 10
+db "    str x15, [x16, x13, lsl #3]", 10
+db "    add x13, x13, #1", 10
+db "    b .cc_next", 10
+db ".cc_int:", 10
+db "    cmp x12, #8", 10
+db "    b.hs .cc_spill", 10
+db "    add x16, x24, #336", 10
+db "    str x15, [x16, x12, lsl #3]", 10
+db "    add x12, x12, #1", 10
+db "    b .cc_next", 10
+db ".cc_spill:", 10
+db "    str x15, [x24, x14]", 10
+db "    add x14, x14, #8", 10
+db ".cc_next:", 10
+db "    add x10, x10, #1", 10
+db "    b .cc_arg", 10
+db ".cc_load:", 10
+db "    add x16, x24, #336", 10
+db "    ldp x0, x1, [x16]", 10
+db "    ldp x2, x3, [x16, #16]", 10
+db "    ldp x4, x5, [x16, #32]", 10
+db "    ldp x6, x7, [x16, #48]", 10
+db "    add x16, x24, #400", 10
+db "    ldp d0, d1, [x16]", 10
+db "    ldp d2, d3, [x16, #16]", 10
+db "    ldp d4, d5, [x16, #32]", 10
+db "    ldp d6, d7, [x16, #48]", 10
+db "    ldr x16, [x27]", 10
+db "    blr x16", 10
+db "    lsr x9, x26, #24", 10
+db "    and x9, x9, #255", 10
+db "    cmp x9, #1", 10
+db "    b.ne .cc_r2", 10
+db "    sxtw x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r2:", 10
+db "    cmp x9, #2", 10
+db "    b.ne .cc_r3", 10
+db "    mov w0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r3:", 10
+db "    cmp x9, #3", 10
+db "    b.ne .cc_r4", 10
+db "    and x0, x0, #255", 10
+db "    b .cc_done", 10
+db ".cc_r4:", 10
+db "    cmp x9, #4", 10
+db "    b.ne .cc_r5", 10
+db "    and x0, x0, #65535", 10
+db "    b .cc_done", 10
+db ".cc_r5:", 10
+db "    cmp x9, #5", 10
+db "    b.ne .cc_r6", 10
+db "    sxth x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r6:", 10
+db "    cmp x9, #6", 10
+db "    b.ne .cc_r9", 10
+db "    sxtb x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r9:", 10
+db "    cmp x9, #9", 10
+db "    b.ne .cc_done", 10
+db "    fcvt d0, s0", 10
+db ".cc_done:", 10
+db "    ldr q6, [x24, #176]", 10
+db "    ldr q7, [x24, #192]", 10
+db "    ldr q8, [x24, #208]", 10
+db "    ldr q9, [x24, #224]", 10
+db "    ldr q10, [x24, #240]", 10
+db "    ldr q11, [x24, #256]", 10
+db "    ldr q12, [x24, #272]", 10
+db "    ldr q13, [x24, #288]", 10
+db "    ldr q14, [x24, #304]", 10
+db "    ldr q15, [x24, #320]", 10
+db "    ldp x4, x5, [x24, #128]", 10
+db "    ldp x29, x30, [x24, #144]", 10
+db "    mov sp, x25", 10
+db "    ret", 10
+db ".cc_none:", 10
+db "    mov x0, #0", 10
+db "    fmov d0, xzr", 10
+db "    ret", 10
+db 10
+db "; __pt_entry(x0 = the thread's Kron stack): where pthread_create starts a", 10
+db "; thread of the program -- pop the function and its argument, leave the room", 10
+db "; a call has, call -- then clear the id word and wake whoever waits on it.", 10
+db "; The registers the system library expects back are kept on the pthread's", 10
+db "; own stack.", 10
+db "__pt_entry:", 10
+db "    stp x29, x30, [sp, #-16]!", 10
+db "    stp x27, x28, [sp, #-16]!", 10
+db "    stp x25, x26, [sp, #-16]!", 10
+db "    stp x23, x24, [sp, #-16]!", 10
+db "    stp x21, x22, [sp, #-16]!", 10
+db "    stp x19, x20, [sp, #-16]!", 10
+db "    stp d8, d9, [sp, #-16]!", 10
+db "    stp d10, d11, [sp, #-16]!", 10
+db "    stp d12, d13, [sp, #-16]!", 10
+db "    stp d14, d15, [sp, #-16]!", 10
+db "    mov x19, x0", 10
+db "    ldr x9, [x19]", 10
+db "    ldr x1, [x19, #8]", 10
+db "    add x28, x19, #16", 10
+db "    sub x28, x28, #32", 10
+db "    str x30, [x28, #-8]!", 10
+db "    blr x9", 10
+db "    ldr x30, [x28], #8", 10
+db "    ldr x0, [x19, #16]", 10
+db "    str wzr, [x0]", 10
+db "    mov x1, #1", 10
+db "    mov x2, #0x7fffffff", 10
+db "    mov x3, #0", 10
+db "    mov x8, #98", 10
+db "    svc #0", 10
+db "    ldp d14, d15, [sp], #16", 10
+db "    ldp d12, d13, [sp], #16", 10
+db "    ldp d10, d11, [sp], #16", 10
+db "    ldp d8, d9, [sp], #16", 10
+db "    ldp x19, x20, [sp], #16", 10
+db "    ldp x21, x22, [sp], #16", 10
+db "    ldp x23, x24, [sp], #16", 10
+db "    ldp x25, x26, [sp], #16", 10
+db "    ldp x27, x28, [sp], #16", 10
+db "    ldp x29, x30, [sp], #16", 10
+db "    mov x0, #0", 10
+db "    ret", 10
+db 10
 db "; x86-64 number -> ARM64 number, 0xffff where ARM64 has none", 10
 db "section .data", 10
 db "__sysx_tab:", 10
@@ -3858,6 +4148,211 @@ db "    dw 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
 db "    dw 242, 65535, 65535, 20, 24, 59, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535", 10
 db "    dw 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 278, 65535", 10
 db "    dw 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535", 10
+db 0
+xa_tail_lib:
+db 10
+db "section .text", 10
+db "; __centry: where C enters a function a Kron library exports, in the AAPCS64", 10
+db "; convention. x9 (r11) = the export's record (dq function, shape, widths,", 10
+db "; signed); the integers in x0-x7, the reals in d0-d7, each in order, the rest", 10
+db "; on the caller's stack. They go in a row, in the order of the parameters,", 10
+db "; to __lib_enter (Kron code, x86-64's convention lowered): until it moves to", 10
+db "; this thread's Kron stack, x28 points into the C stack, and sp 64 KB under", 10
+db "; it. C keeps x19-x29 and d8-d15; Kron uses some of them, so all are kept.", 10
+db "__centry:", 10
+db "    stp x29, x30, [sp, #-16]!", 10
+db "    stp x27, x28, [sp, #-16]!", 10
+db "    stp x25, x26, [sp, #-16]!", 10
+db "    stp x23, x24, [sp, #-16]!", 10
+db "    stp x21, x22, [sp, #-16]!", 10
+db "    stp x19, x20, [sp, #-16]!", 10
+db "    stp d8, d9, [sp, #-16]!", 10
+db "    stp d10, d11, [sp, #-16]!", 10
+db "    stp d12, d13, [sp, #-16]!", 10
+db "    stp d14, d15, [sp, #-16]!", 10
+db "    mov x19, sp", 10
+db "    sub sp, sp, #256", 10
+db "    mov x10, sp", 10
+db "    stp x0, x1, [x10]", 10
+db "    stp x2, x3, [x10, #16]", 10
+db "    stp x4, x5, [x10, #32]", 10
+db "    stp x6, x7, [x10, #48]", 10
+db "    stp d0, d1, [x10, #64]", 10
+db "    stp d2, d3, [x10, #80]", 10
+db "    stp d4, d5, [x10, #96]", 10
+db "    stp d6, d7, [x10, #112]", 10
+db "    ldr x11, [x9, #8]", 10
+db "    and x12, x11, #255", 10
+db "    mov x13, #0", 10
+db "    mov x14, #0", 10
+db "    mov x15, #0", 10
+db "    add x16, x19, #160", 10
+db "    mov x17, #0", 10
+db ".ce_arg:", 10
+db "    cmp x13, x12", 10
+db "    b.hs .ce_go", 10
+db "    add x3, x13, #8", 10
+db "    lsr x3, x11, x3", 10
+db "    and x3, x3, #1", 10
+db "    cbz x3, .ce_int", 10
+db "    cmp x15, #8", 10
+db "    b.hs .ce_stk", 10
+db "    add x3, x10, #64", 10
+db "    ldr x4, [x3, x15, lsl #3]", 10
+db "    add x15, x15, #1", 10
+db "    b .ce_put", 10
+db ".ce_int:", 10
+db "    cmp x14, #8", 10
+db "    b.hs .ce_stk", 10
+db "    ldr x4, [x10, x14, lsl #3]", 10
+db "    add x14, x14, #1", 10
+db "    b .ce_put", 10
+db ".ce_stk:", 10
+db "    ldr x4, [x16, x17]", 10
+db "    add x17, x17, #8", 10
+db ".ce_put:", 10
+db "    add x3, x10, #128", 10
+db "    str x4, [x3, x13, lsl #3]", 10
+db "    add x13, x13, #1", 10
+db "    b .ce_arg", 10
+db ".ce_go:", 10
+db "    sub x28, x10, #16", 10
+db "    mov x3, #65536", 10
+db "    sub x3, x28, x3", 10
+db "    mov sp, x3", 10
+db "    mov x1, x9", 10
+db "    add x2, x10, #128", 10
+db "    str x30, [x28, #-8]!", 10
+db "    bl __lib_enter", 10
+db "    ldr x30, [x28], #8", 10
+db "    mov sp, x19", 10
+db "    ldp d14, d15, [sp], #16", 10
+db "    ldp d12, d13, [sp], #16", 10
+db "    ldp d10, d11, [sp], #16", 10
+db "    ldp d8, d9, [sp], #16", 10
+db "    ldp x19, x20, [sp], #16", 10
+db "    ldp x21, x22, [sp], #16", 10
+db "    ldp x23, x24, [sp], #16", 10
+db "    ldp x25, x26, [sp], #16", 10
+db "    ldp x27, x28, [sp], #16", 10
+db "    ldp x29, x30, [sp], #16", 10
+db "    ret", 10
+db 0
+xa_tail_lib_mac:
+db 10
+db "section .text", 10
+db "; __centry: where C enters a function a Kron library exports, in the AAPCS64", 10
+db "; convention. x9 (r11) = the export's record (dq function, shape, widths,", 10
+db "; signed); the integers in x0-x7, the reals in d0-d7, each in order, the rest", 10
+db "; on the caller's stack, packed by width as Apple's convention has it. They go in a row, in the order of the parameters,", 10
+db "; to __lib_enter (Kron code, x86-64's convention lowered): until it moves to", 10
+db "; this thread's Kron stack, x28 points into the C stack, and sp 64 KB under", 10
+db "; it. C keeps x19-x29 and d8-d15; Kron uses some of them, so all are kept.", 10
+db "__centry:", 10
+db "    stp x29, x30, [sp, #-16]!", 10
+db "    stp x27, x28, [sp, #-16]!", 10
+db "    stp x25, x26, [sp, #-16]!", 10
+db "    stp x23, x24, [sp, #-16]!", 10
+db "    stp x21, x22, [sp, #-16]!", 10
+db "    stp x19, x20, [sp, #-16]!", 10
+db "    stp d8, d9, [sp, #-16]!", 10
+db "    stp d10, d11, [sp, #-16]!", 10
+db "    stp d12, d13, [sp, #-16]!", 10
+db "    stp d14, d15, [sp, #-16]!", 10
+db "    mov x19, sp", 10
+db "    sub sp, sp, #256", 10
+db "    mov x10, sp", 10
+db "    stp x0, x1, [x10]", 10
+db "    stp x2, x3, [x10, #16]", 10
+db "    stp x4, x5, [x10, #32]", 10
+db "    stp x6, x7, [x10, #48]", 10
+db "    stp d0, d1, [x10, #64]", 10
+db "    stp d2, d3, [x10, #80]", 10
+db "    stp d4, d5, [x10, #96]", 10
+db "    stp d6, d7, [x10, #112]", 10
+db "    ldr x11, [x9, #8]", 10
+db "    and x12, x11, #255", 10
+db "    mov x13, #0", 10
+db "    mov x14, #0", 10
+db "    mov x15, #0", 10
+db "    add x16, x19, #160", 10
+db "    mov x17, #0", 10
+db ".ce_arg:", 10
+db "    cmp x13, x12", 10
+db "    b.hs .ce_go", 10
+db "    add x3, x13, #8", 10
+db "    lsr x3, x11, x3", 10
+db "    and x3, x3, #1", 10
+db "    cbz x3, .ce_int", 10
+db "    cmp x15, #8", 10
+db "    b.hs .ce_stk", 10
+db "    add x3, x10, #64", 10
+db "    ldr x4, [x3, x15, lsl #3]", 10
+db "    add x15, x15, #1", 10
+db "    b .ce_put", 10
+db ".ce_int:", 10
+db "    cmp x14, #8", 10
+db "    b.hs .ce_stk", 10
+db "    ldr x4, [x10, x14, lsl #3]", 10
+db "    add x14, x14, #1", 10
+db "    b .ce_put", 10
+db ".ce_stk:", 10
+db "    ldr x5, [x9, #16]", 10
+db "    lsl x3, x13, #1", 10
+db "    lsr x5, x5, x3", 10
+db "    and x5, x5, #3", 10
+db "    cbz x5, .ce_s8", 10
+db "    cmp x5, #1", 10
+db "    b.eq .ce_s4", 10
+db "    cmp x5, #2", 10
+db "    b.eq .ce_s2", 10
+db "    ldrb w4, [x16, x17]", 10
+db "    add x17, x17, #1", 10
+db "    b .ce_put", 10
+db ".ce_s2:", 10
+db "    add x17, x17, #1", 10
+db "    and x17, x17, #0xfffffffffffffffe", 10
+db "    ldrh w4, [x16, x17]", 10
+db "    add x17, x17, #2", 10
+db "    b .ce_put", 10
+db ".ce_s4:", 10
+db "    add x17, x17, #3", 10
+db "    and x17, x17, #0xfffffffffffffffc", 10
+db "    ldr w4, [x16, x17]", 10
+db "    add x17, x17, #4", 10
+db "    b .ce_put", 10
+db ".ce_s8:", 10
+db "    add x17, x17, #7", 10
+db "    and x17, x17, #0xfffffffffffffff8", 10
+db "    ldr x4, [x16, x17]", 10
+db "    add x17, x17, #8", 10
+db ".ce_put:", 10
+db "    add x3, x10, #128", 10
+db "    str x4, [x3, x13, lsl #3]", 10
+db "    add x13, x13, #1", 10
+db "    b .ce_arg", 10
+db ".ce_go:", 10
+db "    sub x28, x10, #16", 10
+db "    mov x3, #65536", 10
+db "    sub x3, x28, x3", 10
+db "    mov sp, x3", 10
+db "    mov x1, x9", 10
+db "    add x2, x10, #128", 10
+db "    str x30, [x28, #-8]!", 10
+db "    bl __lib_enter", 10
+db "    ldr x30, [x28], #8", 10
+db "    mov sp, x19", 10
+db "    ldp d14, d15, [sp], #16", 10
+db "    ldp d12, d13, [sp], #16", 10
+db "    ldp d10, d11, [sp], #16", 10
+db "    ldp d8, d9, [sp], #16", 10
+db "    ldp x19, x20, [sp], #16", 10
+db "    ldp x21, x22, [sp], #16", 10
+db "    ldp x23, x24, [sp], #16", 10
+db "    ldp x25, x26, [sp], #16", 10
+db "    ldp x27, x28, [sp], #16", 10
+db "    ldp x29, x30, [sp], #16", 10
+db "    ret", 10
 db 0
 xa_tail_mac:
 db 10
@@ -4687,6 +5182,7 @@ db "; child of clone does in __thread_start -- pop the function and its argument
 db "; leave the room a call has, call -- then, the function done, clear the id", 10
 db "; word and wake whoever waits on it. The registers the system library", 10
 db "; expects back are kept on the thread's own stack.", 10
+db "__pt_entry:", 10
 db "__mac_thread:", 10
 db "    stp x29, x30, [sp, #-16]!", 10
 db "    stp x27, x28, [sp, #-16]!", 10
@@ -4723,6 +5219,198 @@ db "    ldp x25, x26, [sp], #16", 10
 db "    ldp x27, x28, [sp], #16", 10
 db "    ldp x29, x30, [sp], #16", 10
 db "    mov x0, #0", 10
+db "    ret", 10
+db 10
+db "; __ccall: an extern function called in the AAPCS64 convention. As on", 10
+db "; x86-64: the arguments pushed in order (the last at [x8], r10), x9 (r11) =", 10
+db "; the function's record, x0 (rax) = the shape of the call, x2 (rdx) = the", 10
+db "; widths. Integers go in x0-x7, reals in d0-d7 (s for an f32), the rest on", 10
+db "; the stack -- packed by width, and every variadic one there, as Apple's", 10
+db "; convention has it. The C code runs on sp, moved under the Kron stack (x28) first.", 10
+db "; Kron keeps x4 x5 (rsi rdi) and all of v6-v15 across a call; AAPCS64 keeps", 10
+db "; none of them whole, so they are saved here.", 10
+db "__ccall:", 10
+db "    ldr x16, [x9]", 10
+db "    cbnz x16, .cc_go", 10
+db "    stp x0, x2, [x28, #-16]!", 10
+db "    stp x8, x9, [x28, #-16]!", 10
+db "    ; the frame x86-64 would have, so that a failure's trace finds the call", 10
+db "    str x30, [x28, #-8]!", 10
+db "    str x29, [x28, #-8]!", 10
+db "    mov x29, x28", 10
+db "    mov x1, x9", 10
+db "    str x30, [x28, #-8]!", 10
+db "    bl __ext_resolve", 10
+db "    ldr x30, [x28], #8", 10
+db "    mov x16, x0", 10
+db "    ldr x29, [x28], #8", 10
+db "    ldr x30, [x28], #8", 10
+db "    ldp x8, x9, [x28], #16", 10
+db "    ldp x0, x2, [x28], #16", 10
+db "    cbz x16, .cc_none", 10
+db "    str x16, [x9]", 10
+db ".cc_go:", 10
+db "    sub x24, x28, #512", 10
+db "    and x24, x24, #0xfffffffffffffff0", 10
+db "    mov x25, sp", 10
+db "    mov sp, x24", 10
+db "    stp x4, x5, [x24, #128]", 10
+db "    stp x29, x30, [x24, #144]", 10
+db "    str q6, [x24, #176]", 10
+db "    str q7, [x24, #192]", 10
+db "    str q8, [x24, #208]", 10
+db "    str q9, [x24, #224]", 10
+db "    str q10, [x24, #240]", 10
+db "    str q11, [x24, #256]", 10
+db "    str q12, [x24, #272]", 10
+db "    str q13, [x24, #288]", 10
+db "    str q14, [x24, #304]", 10
+db "    str q15, [x24, #320]", 10
+db "    mov x26, x0", 10
+db "    mov x27, x9", 10
+db "    and x11, x26, #255", 10
+db "    lsr x3, x26, #48", 10
+db "    and x3, x3, #255", 10
+db "    cbnz x3, .cc_va", 10
+db "    mov x3, #255", 10
+db ".cc_va:", 10
+db "    mov x10, #0", 10
+db "    mov x12, #0", 10
+db "    mov x13, #0", 10
+db "    mov x14, #0", 10
+db ".cc_arg:", 10
+db "    cmp x10, x11", 10
+db "    b.hs .cc_load", 10
+db "    sub x15, x11, x10", 10
+db "    sub x15, x15, #1", 10
+db "    ldr x15, [x8, x15, lsl #3]", 10
+db "    add x16, x10, #8", 10
+db "    lsr x16, x26, x16", 10
+db "    and x16, x16, #1", 10
+db "    cbz x16, .cc_int", 10
+db "    add x16, x10, #32", 10
+db "    lsr x16, x26, x16", 10
+db "    and x16, x16, #1", 10
+db "    cbz x16, .cc_dbl", 10
+db "    fmov d16, x15", 10
+db "    fcvt s16, d16", 10
+db "    fmov w15, s16", 10
+db ".cc_dbl:", 10
+db "    cmp x10, x3", 10
+db "    b.hs .cc_vspill", 10
+db "    cmp x13, #8", 10
+db "    b.hs .cc_spill", 10
+db "    add x16, x24, #400", 10
+db "    str x15, [x16, x13, lsl #3]", 10
+db "    add x13, x13, #1", 10
+db "    b .cc_next", 10
+db ".cc_int:", 10
+db "    cmp x10, x3", 10
+db "    b.hs .cc_vspill", 10
+db "    cmp x12, #8", 10
+db "    b.hs .cc_spill", 10
+db "    add x16, x24, #336", 10
+db "    str x15, [x16, x12, lsl #3]", 10
+db "    add x12, x12, #1", 10
+db "    b .cc_next", 10
+db ".cc_spill:", 10
+db "    lsl x16, x10, #1", 10
+db "    lsr x16, x2, x16", 10
+db "    and x16, x16, #3", 10
+db "    cbz x16, .cc_vspill", 10
+db "    cmp x16, #1", 10
+db "    b.eq .cc_s4", 10
+db "    cmp x16, #2", 10
+db "    b.eq .cc_s2", 10
+db "    strb w15, [x24, x14]", 10
+db "    add x14, x14, #1", 10
+db "    b .cc_next", 10
+db ".cc_s2:", 10
+db "    add x14, x14, #1", 10
+db "    and x14, x14, #0xfffffffffffffffe", 10
+db "    strh w15, [x24, x14]", 10
+db "    add x14, x14, #2", 10
+db "    b .cc_next", 10
+db ".cc_s4:", 10
+db "    add x14, x14, #3", 10
+db "    and x14, x14, #0xfffffffffffffffc", 10
+db "    str w15, [x24, x14]", 10
+db "    add x14, x14, #4", 10
+db "    b .cc_next", 10
+db ".cc_vspill:", 10
+db "    add x14, x14, #7", 10
+db "    and x14, x14, #0xfffffffffffffff8", 10
+db "    str x15, [x24, x14]", 10
+db "    add x14, x14, #8", 10
+db ".cc_next:", 10
+db "    add x10, x10, #1", 10
+db "    b .cc_arg", 10
+db ".cc_load:", 10
+db "    add x16, x24, #336", 10
+db "    ldp x0, x1, [x16]", 10
+db "    ldp x2, x3, [x16, #16]", 10
+db "    ldp x4, x5, [x16, #32]", 10
+db "    ldp x6, x7, [x16, #48]", 10
+db "    add x16, x24, #400", 10
+db "    ldp d0, d1, [x16]", 10
+db "    ldp d2, d3, [x16, #16]", 10
+db "    ldp d4, d5, [x16, #32]", 10
+db "    ldp d6, d7, [x16, #48]", 10
+db "    ldr x16, [x27]", 10
+db "    blr x16", 10
+db "    lsr x9, x26, #24", 10
+db "    and x9, x9, #255", 10
+db "    cmp x9, #1", 10
+db "    b.ne .cc_r2", 10
+db "    sxtw x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r2:", 10
+db "    cmp x9, #2", 10
+db "    b.ne .cc_r3", 10
+db "    mov w0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r3:", 10
+db "    cmp x9, #3", 10
+db "    b.ne .cc_r4", 10
+db "    and x0, x0, #255", 10
+db "    b .cc_done", 10
+db ".cc_r4:", 10
+db "    cmp x9, #4", 10
+db "    b.ne .cc_r5", 10
+db "    and x0, x0, #65535", 10
+db "    b .cc_done", 10
+db ".cc_r5:", 10
+db "    cmp x9, #5", 10
+db "    b.ne .cc_r6", 10
+db "    sxth x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r6:", 10
+db "    cmp x9, #6", 10
+db "    b.ne .cc_r9", 10
+db "    sxtb x0, w0", 10
+db "    b .cc_done", 10
+db ".cc_r9:", 10
+db "    cmp x9, #9", 10
+db "    b.ne .cc_done", 10
+db "    fcvt d0, s0", 10
+db ".cc_done:", 10
+db "    ldr q6, [x24, #176]", 10
+db "    ldr q7, [x24, #192]", 10
+db "    ldr q8, [x24, #208]", 10
+db "    ldr q9, [x24, #224]", 10
+db "    ldr q10, [x24, #240]", 10
+db "    ldr q11, [x24, #256]", 10
+db "    ldr q12, [x24, #272]", 10
+db "    ldr q13, [x24, #288]", 10
+db "    ldr q14, [x24, #304]", 10
+db "    ldr q15, [x24, #320]", 10
+db "    ldp x4, x5, [x24, #128]", 10
+db "    ldp x29, x30, [x24, #144]", 10
+db "    mov sp, x25", 10
+db "    ret", 10
+db ".cc_none:", 10
+db "    mov x0, #0", 10
+db "    fmov d0, xzr", 10
 db "    ret", 10
 db 10
 db "section .data", 10

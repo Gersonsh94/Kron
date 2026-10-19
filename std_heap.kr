@@ -470,7 +470,7 @@ fn heap_fail(e: i64) -> i64 {
         case 14: { fail "the folder could not be made" hint "check that its parent exists and the name is free"; }
         case 15: { fail "not set" hint "the environment variable does not exist: check with env_has"; }
         case 16: { fail "the file is closed or was opened for something else" hint "open it with \"r\" to read, \"w\" or \"a\" to write, \"rw\" for both"; }
-        case 17: { fail "the picture could not be read" hint "PNG, or BMP of 24 or 32 bits; the file may be damaged"; }
+        case 17: { fail "the picture could not be read" hint "PNG, baseline JPEG (not progressive), or BMP of 24 or 32 bits; the file may be damaged"; }
     }
     return 0;
 }

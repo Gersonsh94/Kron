@@ -1,0 +1,39 @@
+kron_program
+kron_domain test_debug;
+kron_imports
+acquire_domain "std_text.kr";
+acquire_domain "std_list.kr";
+kron_definitions
+
+// A debug build (--debug), driven by tests/debug/test_debug.in as the
+// editor would drive it: a breakpoint, steps into and out of a call, the
+// values of every kind of local, a breakpoint removed, the end.
+
+struct Point { x: i32; y: f64; }
+
+var total: i64;
+var label: text = "sum";
+
+fn square(n: i64) -> i64 {
+    total = total + 0;
+    return n * n;
+}
+
+fn main() -> i64 {
+    var a: [i64; 3];
+    a[0] = 7;
+    a[1] = -2;
+    var p: Point;
+    p.x = 4;
+    p.y = 0.5;
+    var words: list<text> = list_new();
+    list_add(words, "one");
+    var f: f64 = 2.25;
+    var k: i64 = 0;
+    while k < 3 {
+        total = total + square(k + 1);
+        k = k + 1;
+    }
+    print(total);
+    return 0;
+}

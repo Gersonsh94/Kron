@@ -1,0 +1,13 @@
+kron_program
+kron_domain test_text_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// BAD TEST: a text with no closing quote
+// =========================================================================
+
+fn main() -> i64 {
+    print("hello);
+    return 0;
+}

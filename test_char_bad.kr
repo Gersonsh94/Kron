@@ -1,0 +1,21 @@
+kron_program
+kron_domain test_char_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// BAD TEST: a character Kron does not use
+//
+// The lexer used to stop at it as if the file ended there, so everything
+// after it vanished without a word: here, the call to a function that
+// exists nowhere.
+// =========================================================================
+
+fn main() -> i64 {
+    print(1);
+    return 0;
+}
+@
+fn other() -> i64 {
+    return nothere(2);
+}

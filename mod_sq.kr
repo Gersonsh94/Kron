@@ -1,0 +1,6 @@
+kron_program
+kron_domain mod_sq;
+kron_imports
+kron_definitions
+fn area(s: i64) -> i64 { return s * s; }
+fn twice_area(s: i64) -> i64 { return area(s) * 2; }

@@ -1,0 +1,93 @@
+kron_program
+kron_domain gpu_devices;
+kron_imports
+acquire_domain "std_audio.kr";
+acquire_domain "std_gamepad.kr";
+acquire_domain "std_time.kr";
+kron_definitions
+
+// =========================================================================
+// Test of the sound and the game controllers. Run by GPUTESTS.bat: it
+// plays three notes (you should hear them) and lists the controllers it
+// finds; press a button on one within three seconds to see it read.
+// The exit code is the number of checks that failed; a missing
+// controller is not a failure.
+// =========================================================================
+
+var failures: i64;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn main() -> i64 {
+    say("Sound and controller test");
+    var on: i64 = audio_open(48000);
+    if failed() { on = 0; }
+    report(on == 1, "the sound opens");
+    if on == 1 {
+        var c: i64 = audio_tone(523.25, 250, 0.4);
+        var e: i64 = audio_tone(659.25, 250, 0.4);
+        var g: i64 = audio_tone(783.99, 400, 0.4);
+        report(c != 0 && e != 0 && g != 0, "three notes are made");
+        var v: i64 = audio_play(c, 1.0, 0);
+        var t0: i64 = time_ms();
+        var step: i64 = 0;
+        while time_ms() - t0 < 1200 {
+            var ms: i64 = time_ms() - t0;
+            if step == 0 && ms > 300 { audio_play(e, 1.0, 0); step = 1; }
+            if step == 1 && ms > 600 { audio_play(g, 1.0, 0); step = 2; }
+            audio_update();
+            time_sleep(5);
+        }
+        report(v != 0, "the notes played (C E G: you should have heard them)");
+        audio_close();
+    }
+    // controllers
+    gamepad_poll();
+    var n: i64 = 0;
+    var p: i64 = 0;
+    while p < 4 {
+        if gamepad_connected(p) {
+            n = n + 1;
+            var t: text = text_add(text_new(), "  controller ");
+            text_add_int(t, p);
+            text_add(t, " is connected");
+            say(t);
+        }
+        p = p + 1;
+    }
+    if n == 0 {
+        say("  (no controller found: plug one in to test it)");
+    } else {
+        say("  press A (or cross) on controller 0 within 3 seconds...");
+        var t1: i64 = time_ms();
+        var seen: i64 = 0;
+        while time_ms() - t1 < 3000 && seen == 0 {
+            gamepad_poll();
+            if gamepad_pressed(0, GP_A) { seen = 1; }
+            time_sleep(10);
+        }
+        if seen == 1 {
+            say("  ok    button A read");
+        } else {
+            say("  (A was not pressed: not counted as a failure)");
+        }
+        var ax: text = text_add(text_new(), "  left stick now: ");
+        text_add_real(ax, gamepad_axis(0, GP_LX), 2);
+        text_add(ax, " ");
+        text_add_real(ax, gamepad_axis(0, GP_LY), 2);
+        say(ax);
+    }
+    if failures == 0 { say("Sound and controller test: all passed"); }
+    return failures;
+}

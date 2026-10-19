@@ -8,6 +8,6 @@
 [4/6] Semantic... OK
 [5/6] Codegen... OK
 [6/6] Linking... OK
-Written: tests\tmp\test_mmu2.asm
+Written: tests\tmp\test_mmu2_c.exe
 
 Compilation successful!

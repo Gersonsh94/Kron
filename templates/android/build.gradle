@@ -1,0 +1,5 @@
+// The Android project around a Kron app: no Java or Kotlin of its own.
+// NativeActivity loads libkronapp.so, which kronc builds from app.kr.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

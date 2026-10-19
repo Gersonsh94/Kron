@@ -1,0 +1,2419 @@
+kron_program
+kron_domain std_shader;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- shaders, written once, for every GPU.
+//
+// A shader is a small program the graphics card runs: one part for each
+// corner of a triangle (vertex), one for each pixel it covers (fragment).
+// They are written in KSL, a little language in Kron's own style, and this
+// module translates them into what each system's GPU takes:
+//
+//     SPIR-V   Vulkan: Windows, Linux, Android
+//     MSL      Metal: macOS, iOS
+//     WGSL     WebGPU: the web
+//
+// std_gpu.kr does it on its own when a program asks for a shader; the
+// functions here are for looking at the result.
+//
+//     uniform {                      // values the program sets per draw
+//         mvp: mat4;
+//         light: vec3;
+//         tint: vec4;
+//     }
+//     texture albedo;                // pictures, read with sample()
+//     in pos: vec3;                  // what each corner carries, in order
+//     in normal: vec3;
+//     in uv: vec2;
+//     var vnormal: vec3;             // from the vertex part to the pixel
+//     var vuv: vec2;                 // part, blended across the triangle
+//
+//     vertex {
+//         vnormal = normal;
+//         vuv = uv;
+//         position = mvp * vec4(pos, 1.0);
+//     }
+//     fragment {
+//         let n = normalize(vnormal);
+//         let d = max(dot(n, light), 0.0);
+//         color = sample(albedo, vuv) * tint * (0.2 + 0.8 * d);
+//     }
+//
+// Types: float, vec2, vec3, vec4, mat4, bool. Statements: let x = e;
+// var x: T = e;  x = e;  x += e (and -= *= /=);  if c { } else { }
+// for i in 0..4 { } (the count is a number: the body is repeated);
+// discard; (fragment only). Operators: + - * / with vectors, scalars and
+// matrices mixed as the GPU does, < > <= >= == != && || ! and
+// v.xyz / v.rgba swizzles. Functions: vec2 vec3 vec4 float normalize dot
+// cross length distance min max clamp mix pow sqrt abs floor fract sin cos
+// exp sign step smoothstep reflect sample.
+// position (vertex) is the corner on the screen, color (fragment) the
+// pixel's color, frag_coord (fragment) the pixel's place.
+//
+//     shader_compile(source)            a shader, or a fail with the line
+//     shader_wgsl(s)  shader_msl(s)     the translations, as texts
+//     shader_spirv(s, stage)            the words of a SPIR-V module, a
+//                                       list<i64>; stage 0 vertex, 1 fragment
+//     shader_uniform_size(s)            bytes of the uniform block
+//     shader_uniform_offset(s, name)    where a uniform is in it, -1 none
+//     shader_uniform_type(s, name)      SH_FLOAT ... SH_MAT4
+//     shader_inputs(s)  shader_input_type(s, i)  shader_textures(s)
+//     shader_error()                    the last error, a text
+//
+// The uniform block has the same layout on every system: each member at a
+// multiple of its alignment (4 a float, 8 a vec2, 16 a vec3, a vec4 and a
+// mat4) and a vec3 taking 16 bytes.
+// =========================================================================
+
+const SH_FLOAT: i64 = 1;
+const SH_VEC2: i64 = 2;
+const SH_VEC3: i64 = 3;
+const SH_VEC4: i64 = 4;
+const SH_MAT4: i64 = 5;
+const SH_BOOL: i64 = 6;
+
+// node kinds
+const NK_NUM: i64 = 1;
+const NK_NAME: i64 = 2;
+const NK_BIN: i64 = 3;
+const NK_NEG: i64 = 4;
+const NK_NOT: i64 = 5;
+const NK_CALL: i64 = 6;
+const NK_SWZ: i64 = 7;
+const NK_ARG: i64 = 8;
+const NK_LET: i64 = 20;
+const NK_VAR: i64 = 21;
+const NK_SET: i64 = 22;
+const NK_IF: i64 = 23;
+const NK_BLOCK: i64 = 24;
+const NK_LIST: i64 = 25;
+const NK_DISCARD: i64 = 26;
+const NK_FOR: i64 = 27;
+
+// what a name is
+const RS_UNI: i64 = 1;
+const RS_IN: i64 = 2;
+const RS_VARY: i64 = 3;
+const RS_LOCAL: i64 = 4;
+const RS_POS: i64 = 5;
+const RS_COLOR: i64 = 6;
+const RS_FRAG: i64 = 7;
+const RS_TEX: i64 = 8;
+const RS_LOOP: i64 = 9;
+
+// ---------------------------------------------------- compiler state ---
+var sh_src: i64;
+var sh_err: text;
+var sh_tk: i64;        // token kinds: 1 name, 2 number, 3 punctuation, 0 end
+var sh_tt: i64;        // their texts
+var sh_tl: i64;        // their lines
+var sh_p: i64;         // the token being read
+// nodes
+var nk: i64;
+var na: i64;
+var nb: i64;
+var nc: i64;
+var ntx: i64;          // a name, an operator or a swizzle (text), else 0
+var nnum: i64;         // a number (list of reals)
+var nty: i64;          // the type, once checked
+var nres: i64;         // what a name is (RS_...)
+var nidx: i64;         // and which: a uniform, an input, a declaration node
+var nline: i64;
+// declarations of the program
+var u_name: i64;
+var u_type: i64;
+var u_off: i64;
+var u_size: i64;
+var tx_name: i64;
+var in_name: i64;
+var in_type: i64;
+var vy_name: i64;
+var vy_type: i64;
+var sh_vs: i64;        // the vertex block
+var sh_fs: i64;        // the fragment block
+var sh_stage: i64;     // 0 vertex, 1 fragment, while checking
+// scopes of the part being checked
+var sc_name: i64;
+var sc_decl: i64;
+var sc_mark: i64;
+// what each shader keeps, by its number
+var pr_wgsl: i64;
+var pr_msl: i64;
+var pr_vs: i64;
+var pr_fs: i64;
+var pr_usize: i64;
+var pr_uname: i64;
+var pr_utype: i64;
+var pr_uoff: i64;
+var pr_intype: i64;
+var pr_ntex: i64;
+var pr_ready: i64;
+
+fn sh_error() -> text {
+    return sh_err;
+}
+
+fn sh_fail(msg: i64) -> i64 {
+    if text_len(sh_err) == 0 {
+        var line: i64 = 0;
+        if sh_p < list_len(sh_tl) {
+            line = list_get(sh_tl, sh_p);
+        }
+        text_add(sh_err, "shader line ");
+        text_add_int(sh_err, line);
+        text_add(sh_err, ": ");
+        text_add(sh_err, msg);
+    }
+    return 0;
+}
+
+fn sh_fail_at(node: i64, msg: i64) -> i64 {
+    if text_len(sh_err) == 0 {
+        text_add(sh_err, "shader line ");
+        text_add_int(sh_err, list_get(nline, node));
+        text_add(sh_err, ": ");
+        text_add(sh_err, msg);
+    }
+    return 0;
+}
+
+fn sh_bad() -> i64 {
+    if text_len(sh_err) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------- lexer ---
+fn sh_is_alpha(c: i64) -> i64 {
+    if c >= 97 && c <= 122 { return 1; }
+    if c >= 65 && c <= 90 { return 1; }
+    if c == 95 { return 1; }
+    return 0;
+}
+
+fn sh_is_digit(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return 1; }
+    return 0;
+}
+
+fn sh_tok(kind: i64, t: i64, line: i64) -> i64 {
+    list_add(sh_tk, kind);
+    list_add(sh_tt, t);
+    list_add(sh_tl, line);
+    return 0;
+}
+
+fn sh_lex(src: i64) -> i64 {
+    var n: i64 = text_len(src);
+    var i: i64 = 0;
+    var line: i64 = 1;
+    while i < n {
+        var c: i64 = text_at(src, i);
+        if c == 10 {
+            line = line + 1;
+            i = i + 1;
+        } else if c == 32 || c == 9 || c == 13 {
+            i = i + 1;
+        } else if c == 47 && i + 1 < n && text_at(src, i + 1) == 47 {
+            while i < n && text_at(src, i) != 10 {
+                i = i + 1;
+            }
+        } else if sh_is_alpha(c) {
+            var s: i64 = i;
+            while i < n && (sh_is_alpha(text_at(src, i)) || sh_is_digit(text_at(src, i))) {
+                i = i + 1;
+            }
+            sh_tok(1, text_part(src, s, i - s), line);
+        } else if sh_is_digit(c) || (c == 46 && i + 1 < n && sh_is_digit(text_at(src, i + 1))) {
+            var s2: i64 = i;
+            while i < n && sh_is_digit(text_at(src, i)) {
+                i = i + 1;
+            }
+            // a '.' starts the fraction unless it is the '..' of a range
+            if i < n && text_at(src, i) == 46 && !(i + 1 < n && text_at(src, i + 1) == 46) {
+                i = i + 1;
+                while i < n && sh_is_digit(text_at(src, i)) {
+                    i = i + 1;
+                }
+            }
+            if i < n && (text_at(src, i) == 101 || text_at(src, i) == 69) {
+                i = i + 1;
+                if i < n && (text_at(src, i) == 43 || text_at(src, i) == 45) {
+                    i = i + 1;
+                }
+                while i < n && sh_is_digit(text_at(src, i)) {
+                    i = i + 1;
+                }
+            }
+            sh_tok(2, text_part(src, s2, i - s2), line);
+        } else {
+            var two: i64 = 0;
+            if i + 1 < n {
+                var d: i64 = text_at(src, i + 1);
+                if d == 61 && (c == 61 || c == 33 || c == 60 || c == 62 || c == 43 || c == 45 || c == 42 || c == 47) {
+                    two = 1;
+                }
+                if c == 38 && d == 38 { two = 1; }
+                if c == 124 && d == 124 { two = 1; }
+                if c == 46 && d == 46 { two = 1; }
+            }
+            if two == 1 {
+                sh_tok(3, text_part(src, i, 2), line);
+                i = i + 2;
+            } else {
+                sh_tok(3, text_part(src, i, 1), line);
+                i = i + 1;
+            }
+        }
+    }
+    sh_tok(0, text_new(), line);
+    return 0;
+}
+
+// the current token
+fn tk_kind() -> i64 { return list_get(sh_tk, sh_p); }
+fn tk_text() -> i64 { return list_get(sh_tt, sh_p); }
+fn tk_is(s: i64) -> i64 {
+    if list_get(sh_tk, sh_p) == 0 { return 0; }
+    return text_same(list_get(sh_tt, sh_p), s);
+}
+fn tk_next() -> i64 {
+    if list_get(sh_tk, sh_p) != 0 {
+        sh_p = sh_p + 1;
+    }
+    return 0;
+}
+fn tk_expect(s: i64) -> i64 {
+    if tk_is(s) {
+        tk_next();
+        return 1;
+    }
+    var m: text = "expected '";
+    text_add(m, s);
+    text_add(m, "', found '");
+    text_add(m, tk_text());
+    text_add(m, "'");
+    sh_fail(m);
+    return 0;
+}
+fn tk_name() -> i64 {
+    if tk_kind() != 1 {
+        sh_fail("a name is expected here");
+        return text_new();
+    }
+    var t: i64 = tk_text();
+    tk_next();
+    return t;
+}
+
+// ---------------------------------------------------------------- nodes ---
+fn node(kind: i64, a: i64, b: i64, c: i64, t: i64) -> i64 {
+    var line: i64 = 0;
+    if sh_p < list_len(sh_tl) {
+        line = list_get(sh_tl, sh_p);
+    }
+    list_add(nk, kind);
+    list_add(na, a);
+    list_add(nb, b);
+    list_add(nc, c);
+    list_add(ntx, t);
+    list_add_real(nnum, 0.0);
+    list_add(nty, 0);
+    list_add(nres, 0);
+    list_add(nidx, -1);
+    list_add(nline, line);
+    return list_len(nk) - 1;
+}
+
+fn sh_type_named(t: i64) -> i64 {
+    if text_same(t, "float") || text_same(t, "f32") { return SH_FLOAT; }
+    if text_same(t, "vec2") { return SH_VEC2; }
+    if text_same(t, "vec3") { return SH_VEC3; }
+    if text_same(t, "vec4") { return SH_VEC4; }
+    if text_same(t, "mat4") { return SH_MAT4; }
+    if text_same(t, "bool") { return SH_BOOL; }
+    return 0;
+}
+
+fn sh_parse_type() -> i64 {
+    var t: i64 = tk_name();
+    var ty: i64 = sh_type_named(t);
+    if ty == 0 && !sh_bad() {
+        sh_fail("a type is expected: float, vec2, vec3, vec4, mat4 or bool");
+    }
+    return ty;
+}
+
+// ---------------------------------------------------------- expressions ---
+fn sh_primary() -> i64 {
+    if sh_bad() { return node(NK_NUM, -1, -1, -1, 0); }
+    if tk_kind() == 2 {
+        var nd: i64 = node(NK_NUM, -1, -1, -1, 0);
+        list_set_real(nnum, nd, text_to_real(tk_text()));
+        tk_next();
+        return nd;
+    }
+    if tk_is("(") {
+        tk_next();
+        var e: i64 = sh_expr();
+        tk_expect(")");
+        return e;
+    }
+    if tk_kind() == 1 {
+        var name: i64 = tk_text();
+        tk_next();
+        if tk_is("(") {
+            tk_next();
+            var first: i64 = -1;
+            var last: i64 = -1;
+            while !tk_is(")") && !sh_bad() && tk_kind() != 0 {
+                var a: i64 = node(NK_ARG, sh_expr(), -1, -1, 0);
+                if first == -1 {
+                    first = a;
+                } else {
+                    list_set(nb, last, a);
+                }
+                last = a;
+                if !tk_is(")") {
+                    tk_expect(",");
+                }
+            }
+            tk_expect(")");
+            return node(NK_CALL, first, -1, -1, name);
+        }
+        return node(NK_NAME, -1, -1, -1, name);
+    }
+    sh_fail("an expression is expected here");
+    tk_next();
+    return node(NK_NUM, -1, -1, -1, 0);
+}
+
+fn sh_postfix() -> i64 {
+    var e: i64 = sh_primary();
+    while tk_is(".") && !sh_bad() {
+        tk_next();
+        var s: i64 = tk_name();
+        e = node(NK_SWZ, e, -1, -1, s);
+    }
+    return e;
+}
+
+fn sh_unary() -> i64 {
+    if tk_is("-") {
+        tk_next();
+        return node(NK_NEG, sh_unary(), -1, -1, 0);
+    }
+    if tk_is("!") {
+        tk_next();
+        return node(NK_NOT, sh_unary(), -1, -1, 0);
+    }
+    return sh_postfix();
+}
+
+fn sh_mul() -> i64 {
+    var e: i64 = sh_unary();
+    while (tk_is("*") || tk_is("/")) && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_unary(), -1, op);
+    }
+    return e;
+}
+
+fn sh_add() -> i64 {
+    var e: i64 = sh_mul();
+    while (tk_is("+") || tk_is("-")) && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_mul(), -1, op);
+    }
+    return e;
+}
+
+fn sh_cmp() -> i64 {
+    var e: i64 = sh_add();
+    while (tk_is("<") || tk_is(">") || tk_is("<=") || tk_is(">=") || tk_is("==") || tk_is("!=")) && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_add(), -1, op);
+    }
+    return e;
+}
+
+fn sh_and() -> i64 {
+    var e: i64 = sh_cmp();
+    while tk_is("&&") && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_cmp(), -1, op);
+    }
+    return e;
+}
+
+fn sh_expr() -> i64 {
+    var e: i64 = sh_and();
+    while tk_is("||") && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_and(), -1, op);
+    }
+    return e;
+}
+
+// ----------------------------------------------------------- statements ---
+fn sh_block() -> i64 {
+    tk_expect("{");
+    var first: i64 = -1;
+    var last: i64 = -1;
+    while !tk_is("}") && tk_kind() != 0 && !sh_bad() {
+        var s: i64 = node(NK_LIST, sh_stmt(), -1, -1, 0);
+        if first == -1 {
+            first = s;
+        } else {
+            list_set(nb, last, s);
+        }
+        last = s;
+    }
+    tk_expect("}");
+    return node(NK_BLOCK, first, -1, -1, 0);
+}
+
+fn sh_stmt() -> i64 {
+    if tk_is("let") {
+        tk_next();
+        var name: i64 = tk_name();
+        tk_expect("=");
+        var e: i64 = sh_expr();
+        tk_expect(";");
+        return node(NK_LET, e, -1, -1, name);
+    }
+    if tk_is("var") {
+        tk_next();
+        var vname: i64 = tk_name();
+        var ty: i64 = 0;
+        if tk_is(":") {
+            tk_next();
+            ty = sh_parse_type();
+        }
+        var init: i64 = -1;
+        if tk_is("=") {
+            tk_next();
+            init = sh_expr();
+        }
+        if ty == 0 && init == -1 && !sh_bad() {
+            sh_fail("a var needs a type or a value");
+        }
+        tk_expect(";");
+        var v: i64 = node(NK_VAR, init, -1, -1, vname);
+        list_set(nty, v, ty);
+        return v;
+    }
+    if tk_is("if") {
+        tk_next();
+        var cond: i64 = sh_expr();
+        var then_b: i64 = sh_block();
+        var else_b: i64 = -1;
+        if tk_is("else") {
+            tk_next();
+            if tk_is("if") {
+                // else if: a block of one if
+                var inner: i64 = sh_stmt();
+                var l: i64 = node(NK_LIST, inner, -1, -1, 0);
+                else_b = node(NK_BLOCK, l, -1, -1, 0);
+            } else {
+                else_b = sh_block();
+            }
+        }
+        return node(NK_IF, cond, then_b, else_b, 0);
+    }
+    if tk_is("for") {
+        tk_next();
+        var lv: i64 = tk_name();
+        if !tk_is("in") {
+            sh_fail("for i in A..B { } is the only loop");
+        }
+        tk_next();
+        var lo: i64 = 0;
+        var hi: i64 = 0;
+        if tk_kind() == 2 {
+            lo = text_to_int(tk_text());
+            tk_next();
+        } else {
+            sh_fail("the loop's range is written in numbers: for i in 0..4");
+        }
+        tk_expect("..");
+        if tk_kind() == 2 {
+            hi = text_to_int(tk_text());
+            tk_next();
+        } else {
+            sh_fail("the loop's range is written in numbers: for i in 0..4");
+        }
+        var body: i64 = sh_block();
+        var f: i64 = node(NK_FOR, lo, hi, body, lv);
+        return f;
+    }
+    if tk_is("discard") {
+        tk_next();
+        tk_expect(";");
+        return node(NK_DISCARD, -1, -1, -1, 0);
+    }
+    // name = e;  name op= e;
+    var target: i64 = tk_name();
+    var op: i64 = 0;
+    if tk_is("+=") { op = "+"; }
+    if tk_is("-=") { op = "-"; }
+    if tk_is("*=") { op = "*"; }
+    if tk_is("/=") { op = "/"; }
+    if op == 0 {
+        tk_expect("=");
+    } else {
+        tk_next();
+    }
+    var val: i64 = sh_expr();
+    tk_expect(";");
+    if op != 0 {
+        var lhs: i64 = node(NK_NAME, -1, -1, -1, target);
+        val = node(NK_BIN, lhs, val, -1, op);
+    }
+    return node(NK_SET, val, -1, -1, target);
+}
+
+fn sh_find_text(l: i64, t: i64) -> i64 {
+    var i: i64 = 0;
+    var n: i64 = list_len(l);
+    while i < n {
+        if text_same(list_get(l, i), t) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn sh_align(t: i64) -> i64 {
+    if t == SH_VEC2 { return 8; }
+    if t == SH_VEC3 || t == SH_VEC4 || t == SH_MAT4 { return 16; }
+    return 4;
+}
+
+fn sh_size(t: i64) -> i64 {
+    if t == SH_VEC2 { return 8; }
+    if t == SH_VEC3 || t == SH_VEC4 { return 16; }
+    if t == SH_MAT4 { return 64; }
+    return 4;
+}
+
+fn sh_program() -> i64 {
+    var off: i64 = 0;
+    while tk_kind() != 0 && !sh_bad() {
+        if tk_is("uniform") {
+            tk_next();
+            tk_expect("{");
+            while !tk_is("}") && tk_kind() != 0 && !sh_bad() {
+                var un: i64 = tk_name();
+                tk_expect(":");
+                var ut: i64 = sh_parse_type();
+                tk_expect(";");
+                if ut == SH_BOOL && !sh_bad() {
+                    sh_fail("a uniform is a number, a vector or a matrix");
+                }
+                var al: i64 = sh_align(ut);
+                off = (off + al - 1) / al * al;
+                list_add(u_name, un);
+                list_add(u_type, ut);
+                list_add(u_off, off);
+                off = off + sh_size(ut);
+            }
+            tk_expect("}");
+        } else if tk_is("texture") {
+            tk_next();
+            list_add(tx_name, tk_name());
+            tk_expect(";");
+        } else if tk_is("in") {
+            tk_next();
+            list_add(in_name, tk_name());
+            tk_expect(":");
+            var it: i64 = sh_parse_type();
+            if it == SH_MAT4 || it == SH_BOOL {
+                sh_fail("an input is a float or a vector");
+            }
+            list_add(in_type, it);
+            tk_expect(";");
+        } else if tk_is("var") {
+            tk_next();
+            list_add(vy_name, tk_name());
+            tk_expect(":");
+            var vt: i64 = sh_parse_type();
+            if vt == SH_MAT4 || vt == SH_BOOL {
+                sh_fail("what the vertex part passes on is a float or a vector");
+            }
+            list_add(vy_type, vt);
+            tk_expect(";");
+        } else if tk_is("vertex") {
+            tk_next();
+            sh_vs = sh_block();
+        } else if tk_is("fragment") {
+            tk_next();
+            sh_fs = sh_block();
+        } else {
+            sh_fail("expected uniform, texture, in, var, vertex or fragment");
+        }
+    }
+    u_size = (off + 15) / 16 * 16;
+    if sh_vs == -1 && !sh_bad() {
+        sh_fail("the shader has no vertex { } part");
+    }
+    if sh_fs == -1 && !sh_bad() {
+        sh_fail("the shader has no fragment { } part");
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------- checking ---
+fn sh_comps(t: i64) -> i64 {
+    if t == SH_FLOAT { return 1; }
+    if t == SH_VEC2 { return 2; }
+    if t == SH_VEC3 { return 3; }
+    if t == SH_VEC4 { return 4; }
+    return 0;
+}
+
+fn sh_vec_of(n: i64) -> i64 {
+    if n == 1 { return SH_FLOAT; }
+    if n == 2 { return SH_VEC2; }
+    if n == 3 { return SH_VEC3; }
+    if n == 4 { return SH_VEC4; }
+    return 0;
+}
+
+fn sh_is_vec(t: i64) -> i64 {
+    if t == SH_VEC2 || t == SH_VEC3 || t == SH_VEC4 { return 1; }
+    return 0;
+}
+
+// a swizzle letter's component, or -1
+fn sh_swz_comp(c: i64) -> i64 {
+    if c == 120 || c == 114 { return 0; }
+    if c == 121 || c == 103 { return 1; }
+    if c == 122 || c == 98 { return 2; }
+    if c == 119 || c == 97 { return 3; }
+    return -1;
+}
+
+fn sc_push() -> i64 {
+    list_add(sc_mark, list_len(sc_name));
+    return 0;
+}
+
+fn sc_pop() -> i64 {
+    var m: i64 = list_pop(sc_mark);
+    while list_len(sc_name) > m {
+        list_pop(sc_name);
+        list_pop(sc_decl);
+    }
+    return 0;
+}
+
+fn sc_find(t: i64) -> i64 {
+    var i: i64 = list_len(sc_name) - 1;
+    while i >= 0 {
+        if text_same(list_get(sc_name, i), t) {
+            return list_get(sc_decl, i);
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+// resolves a name for reading or (write = 1) writing; sets nres, nidx, nty
+fn sh_resolve(nd: i64, write: i64) -> i64 {
+    var t: i64 = list_get(ntx, nd);
+    var d: i64 = sc_find(t);
+    if d != -1 {
+        var dk: i64 = list_get(nk, d);
+        if dk == NK_FOR {
+            if write == 1 {
+                return sh_fail_at(nd, "a loop's counter cannot be written");
+            }
+            list_set(nres, nd, RS_LOOP);
+            list_set(nidx, nd, d);
+            list_set(nty, nd, SH_FLOAT);
+            return 1;
+        }
+        if dk == NK_LET && write == 1 {
+            return sh_fail_at(nd, "a let cannot be written: declare it with var");
+        }
+        list_set(nres, nd, RS_LOCAL);
+        list_set(nidx, nd, d);
+        list_set(nty, nd, list_get(nty, d));
+        return 1;
+    }
+    var i: i64 = sh_find_text(vy_name, t);
+    if i != -1 {
+        if write == 1 && sh_stage == 1 {
+            return sh_fail_at(nd, "the fragment part reads what the vertex part passes on, it does not write it");
+        }
+        list_set(nres, nd, RS_VARY);
+        list_set(nidx, nd, i);
+        list_set(nty, nd, list_get(vy_type, i));
+        return 1;
+    }
+    if text_same(t, "position") && sh_stage == 0 {
+        list_set(nres, nd, RS_POS);
+        list_set(nty, nd, SH_VEC4);
+        return 1;
+    }
+    if text_same(t, "color") && sh_stage == 1 {
+        list_set(nres, nd, RS_COLOR);
+        list_set(nty, nd, SH_VEC4);
+        return 1;
+    }
+    if write == 1 {
+        return sh_fail_at(nd, "this cannot be written: a var, position (vertex) or color (fragment) can");
+    }
+    i = sh_find_text(u_name, t);
+    if i != -1 {
+        list_set(nres, nd, RS_UNI);
+        list_set(nidx, nd, i);
+        list_set(nty, nd, list_get(u_type, i));
+        return 1;
+    }
+    i = sh_find_text(in_name, t);
+    if i != -1 {
+        if sh_stage == 1 {
+            return sh_fail_at(nd, "an input reaches the vertex part only: pass it on with a var");
+        }
+        list_set(nres, nd, RS_IN);
+        list_set(nidx, nd, i);
+        list_set(nty, nd, list_get(in_type, i));
+        return 1;
+    }
+    if text_same(t, "frag_coord") && sh_stage == 1 {
+        list_set(nres, nd, RS_FRAG);
+        list_set(nty, nd, SH_VEC4);
+        return 1;
+    }
+    i = sh_find_text(tx_name, t);
+    if i != -1 {
+        list_set(nres, nd, RS_TEX);
+        list_set(nidx, nd, i);
+        list_set(nty, nd, 0);
+        return 1;
+    }
+    var m: text = "unknown name: ";
+    text_add(m, t);
+    return sh_fail_at(nd, m);
+}
+
+fn sh_arg(cn: i64, k: i64) -> i64 {
+    var a: i64 = list_get(na, cn);
+    var i: i64 = 0;
+    while a != -1 && i < k {
+        a = list_get(nb, a);
+        i = i + 1;
+    }
+    if a == -1 { return -1; }
+    return list_get(na, a);
+}
+
+fn sh_nargs(cn: i64) -> i64 {
+    var a: i64 = list_get(na, cn);
+    var n: i64 = 0;
+    while a != -1 {
+        n = n + 1;
+        a = list_get(nb, a);
+    }
+    return n;
+}
+
+// the type of the arguments taken together: the vector one when one is a
+// vector and the rest floats, 0 when they do not go together
+fn sh_common(cn: i64) -> i64 {
+    var n: i64 = sh_nargs(cn);
+    var t: i64 = SH_FLOAT;
+    var k: i64 = 0;
+    while k < n {
+        var at: i64 = list_get(nty, sh_arg(cn, k));
+        if at != SH_FLOAT {
+            if sh_is_vec(at) == 0 { return 0; }
+            if t != SH_FLOAT && t != at { return 0; }
+            t = at;
+        }
+        k = k + 1;
+    }
+    return t;
+}
+
+fn sh_check_call(nd: i64) -> i64 {
+    var f: i64 = list_get(ntx, nd);
+    var n: i64 = sh_nargs(nd);
+    var k: i64 = 0;
+    while k < n {
+        var a: i64 = sh_arg(nd, k);
+        if !(text_same(f, "sample") && k == 0) {
+            sh_check_expr(a);
+        }
+        k = k + 1;
+    }
+    if sh_bad() { return 0; }
+    var want: i64 = 0;
+    if text_same(f, "vec2") { want = 2; }
+    if text_same(f, "vec3") { want = 3; }
+    if text_same(f, "vec4") { want = 4; }
+    if want != 0 {
+        var total: i64 = 0;
+        k = 0;
+        while k < n {
+            var c: i64 = sh_comps(list_get(nty, sh_arg(nd, k)));
+            if c == 0 {
+                return sh_fail_at(nd, "a vector is made of floats and vectors");
+            }
+            total = total + c;
+            k = k + 1;
+        }
+        if !(total == want || (n == 1 && total == 1)) {
+            return sh_fail_at(nd, "the parts do not add up to the vector's size");
+        }
+        list_set(nty, nd, sh_vec_of(want));
+        return 1;
+    }
+    if text_same(f, "float") {
+        if n != 1 || list_get(nty, sh_arg(nd, 0)) != SH_FLOAT {
+            return sh_fail_at(nd, "float(x) takes one float");
+        }
+        list_set(nty, nd, SH_FLOAT);
+        return 1;
+    }
+    if text_same(f, "sample") {
+        var tn: i64 = sh_arg(nd, 0);
+        if n != 2 || list_get(nk, tn) != NK_NAME || sh_find_text(tx_name, list_get(ntx, tn)) == -1 {
+            return sh_fail_at(nd, "sample(texture, uv): a texture declared with texture, and a vec2");
+        }
+        list_set(nres, tn, RS_TEX);
+        list_set(nidx, tn, sh_find_text(tx_name, list_get(ntx, tn)));
+        if list_get(nty, sh_arg(nd, 1)) != SH_VEC2 {
+            return sh_fail_at(nd, "sample takes the place in the picture as a vec2");
+        }
+        list_set(nty, nd, SH_VEC4);
+        return 1;
+    }
+    var t0: i64 = 0;
+    if n >= 1 { t0 = list_get(nty, sh_arg(nd, 0)); }
+    // one argument, same type out
+    if text_same(f, "normalize") || text_same(f, "sqrt") || text_same(f, "abs") || text_same(f, "floor") ||
+       text_same(f, "fract") || text_same(f, "sin") || text_same(f, "cos") || text_same(f, "exp") || text_same(f, "sign") {
+        if n != 1 || sh_comps(t0) == 0 {
+            return sh_fail_at(nd, "this function takes one float or vector");
+        }
+        list_set(nty, nd, t0);
+        return 1;
+    }
+    if text_same(f, "length") {
+        if n != 1 || sh_comps(t0) == 0 {
+            return sh_fail_at(nd, "length takes one vector");
+        }
+        list_set(nty, nd, SH_FLOAT);
+        return 1;
+    }
+    if text_same(f, "dot") || text_same(f, "distance") {
+        if n != 2 || sh_comps(t0) == 0 || t0 != list_get(nty, sh_arg(nd, 1)) {
+            return sh_fail_at(nd, "this function takes two vectors of the same size");
+        }
+        list_set(nty, nd, SH_FLOAT);
+        return 1;
+    }
+    if text_same(f, "cross") {
+        if n != 2 || t0 != SH_VEC3 || list_get(nty, sh_arg(nd, 1)) != SH_VEC3 {
+            return sh_fail_at(nd, "cross takes two vec3");
+        }
+        list_set(nty, nd, SH_VEC3);
+        return 1;
+    }
+    if text_same(f, "reflect") {
+        if n != 2 || sh_is_vec(t0) == 0 || t0 != list_get(nty, sh_arg(nd, 1)) {
+            return sh_fail_at(nd, "reflect takes two vectors of the same size");
+        }
+        list_set(nty, nd, t0);
+        return 1;
+    }
+    var nargs: i64 = 0;
+    if text_same(f, "min") || text_same(f, "max") || text_same(f, "pow") || text_same(f, "step") { nargs = 2; }
+    if text_same(f, "clamp") || text_same(f, "mix") || text_same(f, "smoothstep") { nargs = 3; }
+    if nargs != 0 {
+        if n != nargs {
+            return sh_fail_at(nd, "this function has another number of arguments");
+        }
+        var ct: i64 = sh_common(nd);
+        if ct == 0 {
+            return sh_fail_at(nd, "the arguments are of sizes that do not go together");
+        }
+        list_set(nty, nd, ct);
+        return 1;
+    }
+    var m: text = "unknown function: ";
+    text_add(m, f);
+    return sh_fail_at(nd, m);
+}
+
+fn sh_check_expr(nd: i64) -> i64 {
+    if nd == -1 || sh_bad() { return 0; }
+    var k: i64 = list_get(nk, nd);
+    if k == NK_NUM {
+        list_set(nty, nd, SH_FLOAT);
+        return 1;
+    }
+    if k == NK_NAME {
+        sh_resolve(nd, 0);
+        if list_get(nres, nd) == RS_TEX {
+            return sh_fail_at(nd, "a texture is read with sample(texture, uv)");
+        }
+        return 1;
+    }
+    if k == NK_NEG {
+        sh_check_expr(list_get(na, nd));
+        var t: i64 = list_get(nty, list_get(na, nd));
+        if t == SH_BOOL { return sh_fail_at(nd, "- of a condition: use !"); }
+        list_set(nty, nd, t);
+        return 1;
+    }
+    if k == NK_NOT {
+        sh_check_expr(list_get(na, nd));
+        if list_get(nty, list_get(na, nd)) != SH_BOOL { return sh_fail_at(nd, "! takes a condition"); }
+        list_set(nty, nd, SH_BOOL);
+        return 1;
+    }
+    if k == NK_SWZ {
+        var base: i64 = list_get(na, nd);
+        sh_check_expr(base);
+        if sh_bad() { return 0; }
+        var bt: i64 = list_get(nty, base);
+        var s: i64 = list_get(ntx, nd);
+        var sl: i64 = text_len(s);
+        if sh_is_vec(bt) == 0 || sl < 1 || sl > 4 {
+            return sh_fail_at(nd, "a swizzle (.x .xy .rgb) is taken from a vector");
+        }
+        var i: i64 = 0;
+        while i < sl {
+            var c: i64 = sh_swz_comp(text_at(s, i));
+            if c == -1 || c >= sh_comps(bt) {
+                return sh_fail_at(nd, "the vector has no such component");
+            }
+            i = i + 1;
+        }
+        list_set(nty, nd, sh_vec_of(sl));
+        return 1;
+    }
+    if k == NK_CALL {
+        return sh_check_call(nd);
+    }
+    if k == NK_BIN {
+        var a: i64 = list_get(na, nd);
+        var b: i64 = list_get(nb, nd);
+        sh_check_expr(a);
+        sh_check_expr(b);
+        if sh_bad() { return 0; }
+        var ta: i64 = list_get(nty, a);
+        var tb: i64 = list_get(nty, b);
+        var op: i64 = list_get(ntx, nd);
+        if text_same(op, "&&") || text_same(op, "||") {
+            if ta != SH_BOOL || tb != SH_BOOL { return sh_fail_at(nd, "&& and || join conditions"); }
+            list_set(nty, nd, SH_BOOL);
+            return 1;
+        }
+        if text_same(op, "<") || text_same(op, ">") || text_same(op, "<=") || text_same(op, ">=") ||
+           text_same(op, "==") || text_same(op, "!=") {
+            if ta != SH_FLOAT || tb != SH_FLOAT { return sh_fail_at(nd, "a comparison is between two floats"); }
+            list_set(nty, nd, SH_BOOL);
+            return 1;
+        }
+        if ta == SH_BOOL || tb == SH_BOOL { return sh_fail_at(nd, "arithmetic on a condition"); }
+        var r: i64 = 0;
+        if ta == tb { r = ta; }
+        if ta == SH_FLOAT && sh_is_vec(tb) { r = tb; }
+        if tb == SH_FLOAT && sh_is_vec(ta) { r = ta; }
+        if text_same(op, "*") {
+            if ta == SH_MAT4 && tb == SH_VEC4 { r = SH_VEC4; }
+            if ta == SH_VEC4 && tb == SH_MAT4 { r = SH_VEC4; }
+            if ta == SH_MAT4 && tb == SH_FLOAT { r = SH_MAT4; }
+            if ta == SH_FLOAT && tb == SH_MAT4 { r = SH_MAT4; }
+        } else {
+            if (ta == SH_MAT4 || tb == SH_MAT4) && ta != tb { r = 0; }
+            if text_same(op, "/") && ta == SH_MAT4 { r = 0; }
+        }
+        if r == 0 { return sh_fail_at(nd, "these two cannot be combined with this operator"); }
+        list_set(nty, nd, r);
+        return 1;
+    }
+    return 0;
+}
+
+fn sh_check_block(blk: i64) -> i64 {
+    sc_push();
+    var l: i64 = list_get(na, blk);
+    while l != -1 && !sh_bad() {
+        sh_check_stmt(list_get(na, l));
+        l = list_get(nb, l);
+    }
+    sc_pop();
+    return 0;
+}
+
+fn sh_declare(name: i64, decl: i64) -> i64 {
+    var m: i64 = list_get(sc_mark, list_len(sc_mark) - 1);
+    var i: i64 = m;
+    while i < list_len(sc_name) {
+        if text_same(list_get(sc_name, i), name) {
+            return sh_fail_at(decl, "this name is declared twice in the same block");
+        }
+        i = i + 1;
+    }
+    list_add(sc_name, name);
+    list_add(sc_decl, decl);
+    return 1;
+}
+
+fn sh_check_stmt(s: i64) -> i64 {
+    var k: i64 = list_get(nk, s);
+    if k == NK_LET {
+        sh_check_expr(list_get(na, s));
+        if sh_bad() { return 0; }
+        list_set(nty, s, list_get(nty, list_get(na, s)));
+        return sh_declare(list_get(ntx, s), s);
+    }
+    if k == NK_VAR {
+        var init: i64 = list_get(na, s);
+        if init != -1 {
+            sh_check_expr(init);
+            if sh_bad() { return 0; }
+            var it: i64 = list_get(nty, init);
+            if list_get(nty, s) == 0 {
+                list_set(nty, s, it);
+            } else if list_get(nty, s) != it {
+                return sh_fail_at(s, "the value is not of the var's type");
+            }
+        }
+        return sh_declare(list_get(ntx, s), s);
+    }
+    if k == NK_SET {
+        var tgt: i64 = node(NK_NAME, -1, -1, -1, list_get(ntx, s));
+        list_set(nline, tgt, list_get(nline, s));
+        list_set(nb, s, tgt);
+        sh_resolve(tgt, 1);
+        sh_check_expr(list_get(na, s));
+        if sh_bad() { return 0; }
+        if list_get(nty, tgt) != list_get(nty, list_get(na, s)) {
+            return sh_fail_at(s, "the value is not of the type of what it is written to");
+        }
+        return 1;
+    }
+    if k == NK_IF {
+        sh_check_expr(list_get(na, s));
+        if sh_bad() { return 0; }
+        if list_get(nty, list_get(na, s)) != SH_BOOL {
+            return sh_fail_at(s, "if takes a condition");
+        }
+        sh_check_block(list_get(nb, s));
+        if list_get(nc, s) != -1 {
+            sh_check_block(list_get(nc, s));
+        }
+        return 1;
+    }
+    if k == NK_FOR {
+        if list_get(nb, s) - list_get(na, s) > 64 {
+            return sh_fail_at(s, "a loop runs at most 64 times");
+        }
+        sc_push();
+        sh_declare(list_get(ntx, s), s);
+        sh_check_block(list_get(nc, s));
+        sc_pop();
+        return 1;
+    }
+    if k == NK_DISCARD {
+        if sh_stage == 0 {
+            return sh_fail_at(s, "discard is for the fragment part");
+        }
+        return 1;
+    }
+    return 0;
+}
+
+fn sh_check_stage(blk: i64, stage: i64) -> i64 {
+    sh_stage = stage;
+    sc_name = list_new();
+    sc_decl = list_new();
+    sc_mark = list_new();
+    sh_check_block(blk);
+    return 0;
+}
+
+// ======================================================= text backends ===
+// WGSL and MSL differ in the words; one walk writes either (sh_msl = 1).
+var sh_msl: i64;
+var sh_out: text;
+var sh_loopv: i64;     // the value of each loop counter, by its node
+var sh_ind: i64;       // indentation
+
+fn tb_type(t: i64) -> text {
+    if sh_msl == 1 {
+        if t == SH_FLOAT { return "float"; }
+        if t == SH_VEC2 { return "float2"; }
+        if t == SH_VEC3 { return "float3"; }
+        if t == SH_VEC4 { return "float4"; }
+        if t == SH_MAT4 { return "float4x4"; }
+        return "bool";
+    }
+    if t == SH_FLOAT { return "f32"; }
+    if t == SH_VEC2 { return "vec2<f32>"; }
+    if t == SH_VEC3 { return "vec3<f32>"; }
+    if t == SH_VEC4 { return "vec4<f32>"; }
+    if t == SH_MAT4 { return "mat4x4<f32>"; }
+    return "bool";
+}
+
+fn tb_num(x: f64) -> i64 {
+    if x < 0.0 {
+        text_add(sh_out, "(");
+        text_add_real(sh_out, x, 7);
+        text_add(sh_out, ")");
+    } else {
+        text_add_real(sh_out, x, 7);
+    }
+    return 0;
+}
+
+// an argument, made a vector of type t when it is a float and t is not
+fn tb_arg_as(e: i64, t: i64) -> i64 {
+    if list_get(nty, e) == SH_FLOAT && t != SH_FLOAT {
+        text_add(sh_out, tb_type(t));
+        text_add(sh_out, "(");
+        tb_expr(e);
+        text_add(sh_out, ")");
+    } else {
+        tb_expr(e);
+    }
+    return 0;
+}
+
+fn tb_expr(e: i64) -> i64 {
+    var k: i64 = list_get(nk, e);
+    if k == NK_NUM {
+        return tb_num(list_get_real(nnum, e));
+    }
+    if k == NK_NAME {
+        var r: i64 = list_get(nres, e);
+        var t: i64 = list_get(ntx, e);
+        if r == RS_UNI {
+            text_add(sh_out, "u.");
+            text_add(sh_out, t);
+        } else if r == RS_IN {
+            text_add(sh_out, "vin.");
+            text_add(sh_out, t);
+        } else if r == RS_VARY {
+            if sh_stage == 0 {
+                text_add(sh_out, "vout.");
+            } else {
+                text_add(sh_out, "fin.");
+            }
+            text_add(sh_out, t);
+        } else if r == RS_POS {
+            text_add(sh_out, "vout.pos_");
+        } else if r == RS_COLOR {
+            text_add(sh_out, "c_out");
+        } else if r == RS_FRAG {
+            text_add(sh_out, "fin.pos_");
+        } else if r == RS_LOOP {
+            tb_num(list_get_real(sh_loopv, list_get(nidx, e)));
+        } else {
+            text_add(sh_out, t);
+            text_add(sh_out, "_");
+        }
+        return 0;
+    }
+    if k == NK_NEG {
+        text_add(sh_out, "(-");
+        tb_expr(list_get(na, e));
+        text_add(sh_out, ")");
+        return 0;
+    }
+    if k == NK_NOT {
+        text_add(sh_out, "(!");
+        tb_expr(list_get(na, e));
+        text_add(sh_out, ")");
+        return 0;
+    }
+    if k == NK_SWZ {
+        tb_expr(list_get(na, e));
+        text_add(sh_out, ".");
+        text_add(sh_out, list_get(ntx, e));
+        return 0;
+    }
+    if k == NK_BIN {
+        var a: i64 = list_get(na, e);
+        var b: i64 = list_get(nb, e);
+        var op: i64 = list_get(ntx, e);
+        var rt: i64 = list_get(nty, e);
+        text_add(sh_out, "(");
+        if text_same(op, "*") || rt == SH_BOOL {
+            tb_expr(a);
+        } else {
+            tb_arg_as(a, rt);
+        }
+        text_add(sh_out, " ");
+        text_add(sh_out, op);
+        text_add(sh_out, " ");
+        if text_same(op, "*") || rt == SH_BOOL {
+            tb_expr(b);
+        } else {
+            tb_arg_as(b, rt);
+        }
+        text_add(sh_out, ")");
+        return 0;
+    }
+    if k == NK_CALL {
+        var f: i64 = list_get(ntx, e);
+        var n: i64 = sh_nargs(e);
+        var rt2: i64 = list_get(nty, e);
+        if text_same(f, "sample") {
+            var ti: i64 = list_get(nidx, sh_arg(e, 0));
+            if sh_msl == 1 {
+                text_add(sh_out, "t");
+                text_add_int(sh_out, ti);
+                text_add(sh_out, ".sample(s");
+                text_add_int(sh_out, ti);
+                text_add(sh_out, ", ");
+            } else {
+                text_add(sh_out, "textureSample(t");
+                text_add_int(sh_out, ti);
+                text_add(sh_out, ", s");
+                text_add_int(sh_out, ti);
+                text_add(sh_out, ", ");
+            }
+            tb_expr(sh_arg(e, 1));
+            text_add(sh_out, ")");
+            return 0;
+        }
+        if text_same(f, "vec2") || text_same(f, "vec3") || text_same(f, "vec4") || text_same(f, "float") {
+            text_add(sh_out, tb_type(rt2));
+        } else {
+            text_add(sh_out, f);
+        }
+        text_add(sh_out, "(");
+        var broadcast: i64 = 0;
+        if text_same(f, "min") || text_same(f, "max") || text_same(f, "pow") || text_same(f, "step") ||
+           text_same(f, "clamp") || text_same(f, "smoothstep") {
+            broadcast = 1;
+        }
+        if text_same(f, "mix") {
+            broadcast = 2;
+        }
+        var i: i64 = 0;
+        while i < n {
+            if i > 0 {
+                text_add(sh_out, ", ");
+            }
+            if broadcast == 1 || (broadcast == 2 && i < 2) {
+                tb_arg_as(sh_arg(e, i), rt2);
+            } else {
+                tb_expr(sh_arg(e, i));
+            }
+            i = i + 1;
+        }
+        text_add(sh_out, ")");
+        return 0;
+    }
+    return 0;
+}
+
+fn tb_indent() -> i64 {
+    var i: i64 = 0;
+    while i < sh_ind {
+        text_add(sh_out, "    ");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn tb_block(blk: i64) -> i64 {
+    var l: i64 = list_get(na, blk);
+    while l != -1 {
+        tb_stmt(list_get(na, l));
+        l = list_get(nb, l);
+    }
+    return 0;
+}
+
+fn tb_stmt(s: i64) -> i64 {
+    var k: i64 = list_get(nk, s);
+    if k == NK_FOR {
+        var v: i64 = list_get(na, s);
+        while v < list_get(nb, s) {
+            list_set_real(sh_loopv, s, v as f64);
+            tb_indent();
+            text_add(sh_out, "{\n");
+            sh_ind = sh_ind + 1;
+            tb_block(list_get(nc, s));
+            sh_ind = sh_ind - 1;
+            tb_indent();
+            text_add(sh_out, "}\n");
+            v = v + 1;
+        }
+        return 0;
+    }
+    tb_indent();
+    if k == NK_LET || k == NK_VAR {
+        if sh_msl == 1 {
+            if k == NK_LET {
+                text_add(sh_out, "const ");
+            }
+            text_add(sh_out, tb_type(list_get(nty, s)));
+            text_add(sh_out, " ");
+            text_add(sh_out, list_get(ntx, s));
+            text_add(sh_out, "_");
+        } else {
+            if k == NK_LET {
+                text_add(sh_out, "let ");
+            } else {
+                text_add(sh_out, "var ");
+            }
+            text_add(sh_out, list_get(ntx, s));
+            text_add(sh_out, "_: ");
+            text_add(sh_out, tb_type(list_get(nty, s)));
+        }
+        if list_get(na, s) != -1 {
+            text_add(sh_out, " = ");
+            tb_expr(list_get(na, s));
+        } else {
+            text_add(sh_out, " = ");
+            text_add(sh_out, tb_type(list_get(nty, s)));
+            text_add(sh_out, "(");
+            if list_get(nty, s) == SH_BOOL {
+                text_add(sh_out, "false");
+            } else if list_get(nty, s) == SH_MAT4 && sh_msl == 0 {
+                text_add(sh_out, "vec4<f32>(), vec4<f32>(), vec4<f32>(), vec4<f32>()");
+            } else {
+                text_add(sh_out, "0.0");
+            }
+            text_add(sh_out, ")");
+        }
+        text_add(sh_out, ";\n");
+        return 0;
+    }
+    if k == NK_SET {
+        tb_expr(list_get(nb, s));
+        text_add(sh_out, " = ");
+        tb_expr(list_get(na, s));
+        text_add(sh_out, ";\n");
+        return 0;
+    }
+    if k == NK_IF {
+        text_add(sh_out, "if (");
+        tb_expr(list_get(na, s));
+        text_add(sh_out, ") {\n");
+        sh_ind = sh_ind + 1;
+        tb_block(list_get(nb, s));
+        sh_ind = sh_ind - 1;
+        tb_indent();
+        text_add(sh_out, "}");
+        if list_get(nc, s) != -1 {
+            text_add(sh_out, " else {\n");
+            sh_ind = sh_ind + 1;
+            tb_block(list_get(nc, s));
+            sh_ind = sh_ind - 1;
+            tb_indent();
+            text_add(sh_out, "}");
+        }
+        text_add(sh_out, "\n");
+        return 0;
+    }
+    if k == NK_DISCARD {
+        if sh_msl == 1 {
+            text_add(sh_out, "discard_fragment();\n");
+        } else {
+            text_add(sh_out, "discard;\n");
+        }
+        return 0;
+    }
+    return 0;
+}
+
+fn sh_gen_wgsl() -> text {
+    sh_msl = 0;
+    sh_out = text_new();
+    sh_ind = 1;
+    var i: i64 = 0;
+    if list_len(u_name) > 0 {
+        text_add(sh_out, "struct U {\n");
+        while i < list_len(u_name) {
+            text_add(sh_out, "    ");
+            if list_get(u_type, i) == SH_VEC3 {
+                text_add(sh_out, "@size(16) ");
+            }
+            text_add(sh_out, list_get(u_name, i));
+            text_add(sh_out, ": ");
+            text_add(sh_out, tb_type(list_get(u_type, i)));
+            text_add(sh_out, ",\n");
+            i = i + 1;
+        }
+        text_add(sh_out, "};\n@group(0) @binding(0) var<uniform> u: U;\n");
+    }
+    i = 0;
+    while i < list_len(tx_name) {
+        text_add(sh_out, "@group(1) @binding(");
+        text_add_int(sh_out, i * 2);
+        text_add(sh_out, ") var t");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ": texture_2d<f32>;\n@group(1) @binding(");
+        text_add_int(sh_out, i * 2 + 1);
+        text_add(sh_out, ") var s");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ": sampler;\n");
+        i = i + 1;
+    }
+    if list_len(in_name) > 0 {
+        text_add(sh_out, "struct VIn {\n");
+        i = 0;
+        while i < list_len(in_name) {
+            text_add(sh_out, "    @location(");
+            text_add_int(sh_out, i);
+            text_add(sh_out, ") ");
+            text_add(sh_out, list_get(in_name, i));
+            text_add(sh_out, ": ");
+            text_add(sh_out, tb_type(list_get(in_type, i)));
+            text_add(sh_out, ",\n");
+            i = i + 1;
+        }
+        text_add(sh_out, "};\n");
+    }
+    text_add(sh_out, "struct V2F {\n    @builtin(position) pos_: vec4<f32>,\n");
+    i = 0;
+    while i < list_len(vy_name) {
+        text_add(sh_out, "    @location(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ") ");
+        text_add(sh_out, list_get(vy_name, i));
+        text_add(sh_out, ": ");
+        text_add(sh_out, tb_type(list_get(vy_type, i)));
+        text_add(sh_out, ",\n");
+        i = i + 1;
+    }
+    text_add(sh_out, "};\n@vertex\nfn vs_main(");
+    if list_len(in_name) > 0 {
+        text_add(sh_out, "vin: VIn");
+    }
+    text_add(sh_out, ") -> V2F {\n    var vout: V2F;\n");
+    sh_stage = 0;
+    tb_block(sh_vs);
+    text_add(sh_out, "    return vout;\n}\n@fragment\nfn fs_main(fin: V2F) -> @location(0) vec4<f32> {\n");
+    text_add(sh_out, "    var c_out: vec4<f32> = vec4<f32>(0.0);\n");
+    sh_stage = 1;
+    tb_block(sh_fs);
+    text_add(sh_out, "    return c_out;\n}\n");
+    return sh_out;
+}
+
+fn sh_gen_msl() -> text {
+    sh_msl = 1;
+    sh_out = text_new();
+    sh_ind = 1;
+    text_add(sh_out, "#include <metal_stdlib>\nusing namespace metal;\n");
+    var i: i64 = 0;
+    if list_len(u_name) > 0 {
+        text_add(sh_out, "struct U {\n");
+        while i < list_len(u_name) {
+            text_add(sh_out, "    ");
+            text_add(sh_out, tb_type(list_get(u_type, i)));
+            text_add(sh_out, " ");
+            text_add(sh_out, list_get(u_name, i));
+            text_add(sh_out, ";\n");
+            i = i + 1;
+        }
+        text_add(sh_out, "};\n");
+    }
+    text_add(sh_out, "struct VIn {\n");
+    i = 0;
+    while i < list_len(in_name) {
+        text_add(sh_out, "    ");
+        text_add(sh_out, tb_type(list_get(in_type, i)));
+        text_add(sh_out, " ");
+        text_add(sh_out, list_get(in_name, i));
+        text_add(sh_out, " [[attribute(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ")]];\n");
+        i = i + 1;
+    }
+    text_add(sh_out, "};\nstruct V2F {\n    float4 pos_ [[position]];\n");
+    i = 0;
+    while i < list_len(vy_name) {
+        text_add(sh_out, "    ");
+        text_add(sh_out, tb_type(list_get(vy_type, i)));
+        text_add(sh_out, " ");
+        text_add(sh_out, list_get(vy_name, i));
+        text_add(sh_out, ";\n");
+        i = i + 1;
+    }
+    text_add(sh_out, "};\nvertex V2F vs_main(VIn vin [[stage_in]]");
+    if list_len(u_name) > 0 {
+        text_add(sh_out, ", constant U& u [[buffer(1)]]");
+    }
+    text_add(sh_out, ") {\n    V2F vout;\n");
+    sh_stage = 0;
+    tb_block(sh_vs);
+    text_add(sh_out, "    return vout;\n}\nfragment float4 fs_main(V2F fin [[stage_in]]");
+    if list_len(u_name) > 0 {
+        text_add(sh_out, ", constant U& u [[buffer(1)]]");
+    }
+    i = 0;
+    while i < list_len(tx_name) {
+        text_add(sh_out, ", texture2d<float> t");
+        text_add_int(sh_out, i);
+        text_add(sh_out, " [[texture(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ")]], sampler s");
+        text_add_int(sh_out, i);
+        text_add(sh_out, " [[sampler(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ")]]");
+        i = i + 1;
+    }
+    text_add(sh_out, ") {\n    float4 c_out = float4(0.0);\n");
+    sh_stage = 1;
+    tb_block(sh_fs);
+    text_add(sh_out, "    return c_out;\n}\n");
+    return sh_out;
+}
+
+// ============================================================== SPIR-V ===
+// Each part is a module of its own. The sections are kept apart while the
+// module is written and joined at the end, in the order SPIR-V wants.
+var sv_next: i64;      // the next id
+var sv_types: i64;     // types, constants, global variables
+var sv_deco: i64;
+var sv_fvars: i64;     // the function's variables, at its first block
+var sv_body: i64;
+var sv_tcache: i64;    // type ids by key
+var sv_ccache: i64;    // float constants by their bits
+var sv_icache: i64;    // integer constants
+var sv_glsl: i64;      // the GLSL.std.450 import
+var sv_ubo: i64;       // the uniform block variable
+var sv_in: i64;        // the inputs' variables
+var sv_vy: i64;        // the varyings'
+var sv_tex: i64;       // the textures'
+var sv_pos: i64;
+var sv_col: i64;
+var sv_frag: i64;
+var sv_iface: i64;     // the interface of the entry point
+var sv_term: i64;      // the current block ended (discard)
+var sv_declid: i64;    // a let's value or a var's variable, by node
+
+fn sv_id() -> i64 {
+    var i: i64 = sv_next;
+    sv_next = sv_next + 1;
+    return i;
+}
+
+fn sv_op(l: i64, opcode: i64, words: i64) -> i64 {
+    list_add(l, (words << 16) | opcode);
+    return 0;
+}
+fn sv_i1(l: i64, opc: i64, a: i64) -> i64 {
+    sv_op(l, opc, 2); list_add(l, a); return 0;
+}
+fn sv_i2(l: i64, opc: i64, a: i64, b: i64) -> i64 {
+    sv_op(l, opc, 3); list_add(l, a); list_add(l, b); return 0;
+}
+fn sv_i3(l: i64, opc: i64, a: i64, b: i64, c: i64) -> i64 {
+    sv_op(l, opc, 4); list_add(l, a); list_add(l, b); list_add(l, c); return 0;
+}
+fn sv_i4(l: i64, opc: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    sv_op(l, opc, 5); list_add(l, a); list_add(l, b); list_add(l, c); list_add(l, d); return 0;
+}
+fn sv_i5(l: i64, opc: i64, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    sv_op(l, opc, 6); list_add(l, a); list_add(l, b); list_add(l, c); list_add(l, d); list_add(l, e); return 0;
+}
+
+// a string as SPIR-V words: four bytes a word, NUL-ended
+fn sv_str_words(s: i64) -> i64 {
+    var n: i64 = text_len(s);
+    return n / 4 + 1;
+}
+fn sv_str(l: i64, s: i64) -> i64 {
+    var n: i64 = text_len(s);
+    var w: i64 = 0;
+    var i: i64 = 0;
+    while i <= n / 4 * 4 + 3 {
+        var c: i64 = 0;
+        if i < n { c = text_at(s, i); }
+        w = w | (c << ((i % 4) * 8));
+        if i % 4 == 3 {
+            list_add(l, w);
+            w = 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// a type id, made once: void 0, the shader types 1-6, int 7, fn void 8,
+// image 9, sampled image 10; a pointer is 100 * (storage + 1) + type
+fn sv_type(t: i64) -> i64 {
+    if map_ihas(sv_tcache, t) {
+        return map_iget(sv_tcache, t);
+    }
+    var id: i64 = 0;
+    if t >= 100 {
+        var base: i64 = sv_type(t % 100);
+        id = sv_id();
+        sv_i3(sv_types, 32, id, t / 100 - 1, base);
+    } else if t == 0 {
+        id = sv_id();
+        sv_i1(sv_types, 19, id);
+    } else if t == SH_FLOAT {
+        id = sv_id();
+        sv_i2(sv_types, 22, id, 32);
+    } else if t == SH_VEC2 || t == SH_VEC3 || t == SH_VEC4 {
+        var f: i64 = sv_type(SH_FLOAT);
+        id = sv_id();
+        sv_i3(sv_types, 23, id, f, sh_comps(t));
+    } else if t == SH_MAT4 {
+        var c: i64 = sv_type(SH_VEC4);
+        id = sv_id();
+        sv_i3(sv_types, 24, id, c, 4);
+    } else if t == SH_BOOL {
+        id = sv_id();
+        sv_i1(sv_types, 20, id);
+    } else if t == 7 {
+        id = sv_id();
+        sv_i3(sv_types, 21, id, 32, 1);
+    } else if t == 8 {
+        var v: i64 = sv_type(0);
+        id = sv_id();
+        sv_i2(sv_types, 33, id, v);
+    } else if t == 9 {
+        var f2: i64 = sv_type(SH_FLOAT);
+        id = sv_id();
+        sv_op(sv_types, 25, 9);
+        list_add(sv_types, id);
+        list_add(sv_types, f2);
+        list_add(sv_types, 1);
+        list_add(sv_types, 0);
+        list_add(sv_types, 0);
+        list_add(sv_types, 0);
+        list_add(sv_types, 1);
+        list_add(sv_types, 0);
+    } else if t == 10 {
+        var img: i64 = sv_type(9);
+        id = sv_id();
+        sv_i2(sv_types, 27, id, img);
+    }
+    map_iset(sv_tcache, t, id);
+    return id;
+}
+
+fn sv_ptr(storage: i64, t: i64) -> i64 {
+    return sv_type((storage + 1) * 100 + t);
+}
+
+fn sv_fbits(x: f64) -> i64 {
+    var a: [f32; 1];
+    a[0] = x;
+    var b: i64 = 0;
+    raw { b = peek32(&a); }
+    return b;
+}
+
+fn sv_const(x: f64) -> i64 {
+    var bits: i64 = sv_fbits(x);
+    if map_ihas(sv_ccache, bits) {
+        return map_iget(sv_ccache, bits);
+    }
+    var ft: i64 = sv_type(SH_FLOAT);
+    var id: i64 = sv_id();
+    sv_i3(sv_types, 43, ft, id, bits);
+    map_iset(sv_ccache, bits, id);
+    return id;
+}
+
+fn sv_iconst(n: i64) -> i64 {
+    if map_ihas(sv_icache, n) {
+        return map_iget(sv_icache, n);
+    }
+    var it: i64 = sv_type(7);
+    var id: i64 = sv_id();
+    sv_i3(sv_types, 43, it, id, n);
+    map_iset(sv_icache, n, id);
+    return id;
+}
+
+fn sv_var(storage: i64, t: i64) -> i64 {
+    var p: i64 = sv_ptr(storage, t);
+    var id: i64 = sv_id();
+    sv_i3(sv_types, 59, p, id, storage);
+    return id;
+}
+
+fn sv_load(t: i64, pt: i64) -> i64 {
+    var id: i64 = sv_id();
+    sv_i3(sv_body, 61, sv_type(t), id, pt);
+    return id;
+}
+
+// a float made a vector of type t
+fn sv_splat(x: i64, t: i64) -> i64 {
+    var n: i64 = sh_comps(t);
+    var id: i64 = sv_id();
+    sv_op(sv_body, 80, 3 + n);
+    list_add(sv_body, sv_type(t));
+    list_add(sv_body, id);
+    var i: i64 = 0;
+    while i < n {
+        list_add(sv_body, x);
+        i = i + 1;
+    }
+    return id;
+}
+
+fn sv_as(e: i64, t: i64) -> i64 {
+    var v: i64 = sv_expr(e);
+    if list_get(nty, e) == SH_FLOAT && t != SH_FLOAT {
+        return sv_splat(v, t);
+    }
+    return v;
+}
+
+fn sv_bin(opc: i64, t: i64, a: i64, b: i64) -> i64 {
+    var id: i64 = sv_id();
+    sv_i4(sv_body, opc, sv_type(t), id, a, b);
+    return id;
+}
+
+fn sv_ext(t: i64, inst: i64, args: i64) -> i64 {
+    var n: i64 = list_len(args);
+    var id: i64 = sv_id();
+    sv_op(sv_body, 12, 5 + n);
+    list_add(sv_body, sv_type(t));
+    list_add(sv_body, id);
+    list_add(sv_body, sv_glsl);
+    list_add(sv_body, inst);
+    var i: i64 = 0;
+    while i < n {
+        list_add(sv_body, list_get(args, i));
+        i = i + 1;
+    }
+    return id;
+}
+
+fn sv_name_ptr(e: i64) -> i64 {
+    var r: i64 = list_get(nres, e);
+    var i: i64 = list_get(nidx, e);
+    if r == RS_IN { return list_get(sv_in, i); }
+    if r == RS_VARY { return list_get(sv_vy, i); }
+    if r == RS_POS { return sv_pos; }
+    if r == RS_COLOR { return sv_col; }
+    if r == RS_FRAG { return sv_frag; }
+    if r == RS_LOCAL { return list_get(sv_declid, i); }
+    return 0;
+}
+
+fn sv_expr(e: i64) -> i64 {
+    var k: i64 = list_get(nk, e);
+    var t: i64 = list_get(nty, e);
+    if k == NK_NUM {
+        return sv_const(list_get_real(nnum, e));
+    }
+    if k == NK_NAME {
+        var r: i64 = list_get(nres, e);
+        if r == RS_LOOP {
+            return sv_const(list_get_real(sh_loopv, list_get(nidx, e)));
+        }
+        if r == RS_UNI {
+            var ac: i64 = sv_id();
+            sv_i4(sv_body, 65, sv_ptr(2, t), ac, sv_ubo, sv_iconst(list_get(nidx, e)));
+            return sv_load(t, ac);
+        }
+        if r == RS_LOCAL {
+            var d: i64 = list_get(nidx, e);
+            if list_get(nk, d) == NK_LET {
+                return list_get(sv_declid, d);
+            }
+        }
+        return sv_load(t, sv_name_ptr(e));
+    }
+    if k == NK_NEG {
+        var v: i64 = sv_expr(list_get(na, e));
+        var id: i64 = sv_id();
+        sv_i3(sv_body, 127, sv_type(t), id, v);
+        return id;
+    }
+    if k == NK_NOT {
+        var v2: i64 = sv_expr(list_get(na, e));
+        var id2: i64 = sv_id();
+        sv_i3(sv_body, 168, sv_type(SH_BOOL), id2, v2);
+        return id2;
+    }
+    if k == NK_SWZ {
+        var base: i64 = list_get(na, e);
+        var bv: i64 = sv_expr(base);
+        var s: i64 = list_get(ntx, e);
+        var sl: i64 = text_len(s);
+        var id3: i64 = sv_id();
+        if sl == 1 {
+            sv_i4(sv_body, 81, sv_type(t), id3, bv, sh_swz_comp(text_at(s, 0)));
+            return id3;
+        }
+        sv_op(sv_body, 79, 5 + sl);
+        list_add(sv_body, sv_type(t));
+        list_add(sv_body, id3);
+        list_add(sv_body, bv);
+        list_add(sv_body, bv);
+        var i: i64 = 0;
+        while i < sl {
+            list_add(sv_body, sh_swz_comp(text_at(s, i)));
+            i = i + 1;
+        }
+        return id3;
+    }
+    if k == NK_BIN {
+        var a: i64 = list_get(na, e);
+        var b: i64 = list_get(nb, e);
+        var op: i64 = list_get(ntx, e);
+        var ta: i64 = list_get(nty, a);
+        var tb: i64 = list_get(nty, b);
+        if text_same(op, "&&") {
+            return sv_bin(167, SH_BOOL, sv_expr(a), sv_expr(b));
+        }
+        if text_same(op, "||") {
+            return sv_bin(166, SH_BOOL, sv_expr(a), sv_expr(b));
+        }
+        var cmp: i64 = 0;
+        if text_same(op, "==") { cmp = 180; }
+        if text_same(op, "!=") { cmp = 182; }
+        if text_same(op, "<") { cmp = 184; }
+        if text_same(op, ">") { cmp = 186; }
+        if text_same(op, "<=") { cmp = 188; }
+        if text_same(op, ">=") { cmp = 190; }
+        if cmp != 0 {
+            return sv_bin(cmp, SH_BOOL, sv_expr(a), sv_expr(b));
+        }
+        if text_same(op, "*") {
+            if ta == SH_MAT4 && tb == SH_VEC4 { return sv_bin(145, t, sv_expr(a), sv_expr(b)); }
+            if ta == SH_VEC4 && tb == SH_MAT4 { return sv_bin(144, t, sv_expr(a), sv_expr(b)); }
+            if ta == SH_MAT4 && tb == SH_MAT4 { return sv_bin(146, t, sv_expr(a), sv_expr(b)); }
+            if ta == SH_MAT4 && tb == SH_FLOAT { return sv_bin(143, t, sv_expr(a), sv_expr(b)); }
+            if ta == SH_FLOAT && tb == SH_MAT4 {
+                var sa: i64 = sv_expr(a);
+                return sv_bin(143, t, sv_expr(b), sa);
+            }
+            if sh_is_vec(ta) && tb == SH_FLOAT { return sv_bin(142, t, sv_expr(a), sv_expr(b)); }
+            if ta == SH_FLOAT && sh_is_vec(tb) {
+                var sa2: i64 = sv_expr(a);
+                return sv_bin(142, t, sv_expr(b), sa2);
+            }
+            return sv_bin(133, t, sv_expr(a), sv_expr(b));
+        }
+        var opc: i64 = 129;
+        if text_same(op, "-") { opc = 131; }
+        if text_same(op, "/") { opc = 136; }
+        var va: i64 = sv_as(a, t);
+        var vb: i64 = sv_as(b, t);
+        return sv_bin(opc, t, va, vb);
+    }
+    if k == NK_CALL {
+        return sv_call(e);
+    }
+    return 0;
+}
+
+fn sv_call(e: i64) -> i64 {
+    var f: i64 = list_get(ntx, e);
+    var t: i64 = list_get(nty, e);
+    var n: i64 = sh_nargs(e);
+    if text_same(f, "sample") {
+        var ti: i64 = list_get(nidx, sh_arg(e, 0));
+        var simg: i64 = sv_load(10, list_get(sv_tex, ti));
+        var uv: i64 = sv_expr(sh_arg(e, 1));
+        var id: i64 = sv_id();
+        sv_i4(sv_body, 87, sv_type(SH_VEC4), id, simg, uv);
+        return id;
+    }
+    if text_same(f, "float") {
+        return sv_expr(sh_arg(e, 0));
+    }
+    if text_same(f, "vec2") || text_same(f, "vec3") || text_same(f, "vec4") {
+        if n == 1 && list_get(nty, sh_arg(e, 0)) == SH_FLOAT {
+            return sv_splat(sv_expr(sh_arg(e, 0)), t);
+        }
+        var parts: i64 = list_new();
+        var i: i64 = 0;
+        while i < n {
+            list_add(parts, sv_expr(sh_arg(e, i)));
+            i = i + 1;
+        }
+        var id2: i64 = sv_id();
+        sv_op(sv_body, 80, 3 + n);
+        list_add(sv_body, sv_type(t));
+        list_add(sv_body, id2);
+        i = 0;
+        while i < n {
+            list_add(sv_body, list_get(parts, i));
+            i = i + 1;
+        }
+        return id2;
+    }
+    if text_same(f, "dot") {
+        var a: i64 = sv_expr(sh_arg(e, 0));
+        var b: i64 = sv_expr(sh_arg(e, 1));
+        if list_get(nty, sh_arg(e, 0)) == SH_FLOAT {
+            return sv_bin(133, SH_FLOAT, a, b);
+        }
+        return sv_bin(148, SH_FLOAT, a, b);
+    }
+    var inst: i64 = 0;
+    var bc: i64 = 0;            // 1 every argument made of type t, 2 the first two
+    if text_same(f, "normalize") { inst = 69; }
+    if text_same(f, "length") { inst = 66; }
+    if text_same(f, "distance") { inst = 67; }
+    if text_same(f, "cross") { inst = 68; }
+    if text_same(f, "reflect") { inst = 71; }
+    if text_same(f, "sqrt") { inst = 31; }
+    if text_same(f, "abs") { inst = 4; }
+    if text_same(f, "floor") { inst = 8; }
+    if text_same(f, "fract") { inst = 10; }
+    if text_same(f, "sin") { inst = 13; }
+    if text_same(f, "cos") { inst = 14; }
+    if text_same(f, "exp") { inst = 27; }
+    if text_same(f, "sign") { inst = 6; }
+    if text_same(f, "pow") { inst = 26; bc = 1; }
+    if text_same(f, "min") { inst = 37; bc = 1; }
+    if text_same(f, "max") { inst = 40; bc = 1; }
+    if text_same(f, "clamp") { inst = 43; bc = 1; }
+    if text_same(f, "mix") { inst = 46; bc = 1; }
+    if text_same(f, "step") { inst = 48; bc = 1; }
+    if text_same(f, "smoothstep") { inst = 49; bc = 1; }
+    var args: i64 = list_new();
+    var j: i64 = 0;
+    while j < n {
+        if bc == 1 {
+            list_add(args, sv_as(sh_arg(e, j), t));
+        } else {
+            list_add(args, sv_expr(sh_arg(e, j)));
+        }
+        j = j + 1;
+    }
+    return sv_ext(t, inst, args);
+}
+
+fn sv_label(id: i64) -> i64 {
+    sv_i1(sv_body, 248, id);
+    sv_term = 0;
+    return 0;
+}
+
+fn sv_block(blk: i64) -> i64 {
+    var l: i64 = list_get(na, blk);
+    while l != -1 && sv_term == 0 {
+        sv_stmt(list_get(na, l));
+        l = list_get(nb, l);
+    }
+    return 0;
+}
+
+fn sv_stmt(s: i64) -> i64 {
+    var k: i64 = list_get(nk, s);
+    if k == NK_LET {
+        list_set(sv_declid, s, sv_expr(list_get(na, s)));
+        return 0;
+    }
+    if k == NK_VAR {
+        var t: i64 = list_get(nty, s);
+        var v: i64 = sv_id();
+        sv_i3(sv_fvars, 59, sv_ptr(7, t), v, 7);
+        list_set(sv_declid, s, v);
+        if list_get(na, s) != -1 {
+            sv_i2(sv_body, 62, v, sv_expr(list_get(na, s)));
+        }
+        return 0;
+    }
+    if k == NK_SET {
+        var val: i64 = sv_expr(list_get(na, s));
+        sv_i2(sv_body, 62, sv_name_ptr(list_get(nb, s)), val);
+        return 0;
+    }
+    if k == NK_DISCARD {
+        sv_op(sv_body, 252, 1);
+        sv_term = 1;
+        return 0;
+    }
+    if k == NK_FOR {
+        var i: i64 = list_get(na, s);
+        while i < list_get(nb, s) && sv_term == 0 {
+            list_set_real(sh_loopv, s, i as f64);
+            sv_block(list_get(nc, s));
+            i = i + 1;
+        }
+        return 0;
+    }
+    if k == NK_IF {
+        var cond: i64 = sv_expr(list_get(na, s));
+        var lthen: i64 = sv_id();
+        var lmerge: i64 = sv_id();
+        var lelse: i64 = lmerge;
+        if list_get(nc, s) != -1 {
+            lelse = sv_id();
+        }
+        sv_i2(sv_body, 247, lmerge, 0);
+        sv_i3(sv_body, 250, cond, lthen, lelse);
+        sv_label(lthen);
+        sv_block(list_get(nb, s));
+        var ended: i64 = sv_term;
+        if sv_term == 0 {
+            sv_i1(sv_body, 249, lmerge);
+        }
+        if list_get(nc, s) != -1 {
+            sv_label(lelse);
+            sv_block(list_get(nc, s));
+            ended = ended & sv_term;
+            if sv_term == 0 {
+                sv_i1(sv_body, 249, lmerge);
+            }
+        } else {
+            ended = 0;
+        }
+        sv_label(lmerge);
+        if ended == 1 {
+            // both ways discarded: nothing comes here
+            sv_op(sv_body, 255, 1);
+            sv_term = 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+fn sv_module(stage: i64) -> i64 {
+    sh_stage = stage;
+    sv_next = 1;
+    sv_types = list_new();
+    sv_deco = list_new();
+    sv_fvars = list_new();
+    sv_body = list_new();
+    sv_tcache = map_new();
+    sv_ccache = map_new();
+    sv_icache = map_new();
+    sv_in = list_new();
+    sv_vy = list_new();
+    sv_tex = list_new();
+    sv_iface = list_new();
+    sv_term = 0;
+    sv_glsl = sv_id();
+    var main_id: i64 = sv_id();
+    // the uniform block
+    sv_ubo = 0;
+    var i: i64 = 0;
+    if list_len(u_name) > 0 {
+        var members: i64 = list_new();
+        while i < list_len(u_name) {
+            list_add(members, sv_type(list_get(u_type, i)));
+            i = i + 1;
+        }
+        var st: i64 = sv_id();
+        sv_op(sv_types, 30, 2 + list_len(members));
+        list_add(sv_types, st);
+        i = 0;
+        while i < list_len(members) {
+            list_add(sv_types, list_get(members, i));
+            i = i + 1;
+        }
+        sv_i2(sv_deco, 71, st, 2);
+        i = 0;
+        while i < list_len(u_name) {
+            sv_i4(sv_deco, 72, st, i, 35, list_get(u_off, i));
+            if list_get(u_type, i) == SH_MAT4 {
+                sv_i3(sv_deco, 72, st, i, 5);
+                sv_i4(sv_deco, 72, st, i, 7, 16);
+            }
+            i = i + 1;
+        }
+        var pst: i64 = sv_id();
+        sv_i3(sv_types, 32, pst, 2, st);
+        // pointers to the members
+        i = 0;
+        while i < list_len(u_name) {
+            sv_ptr(2, list_get(u_type, i));
+            i = i + 1;
+        }
+        sv_ubo = sv_id();
+        sv_i3(sv_types, 59, pst, sv_ubo, 2);
+        sv_i3(sv_deco, 71, sv_ubo, 34, 0);
+        sv_i3(sv_deco, 71, sv_ubo, 33, 0);
+    }
+    i = 0;
+    while i < list_len(tx_name) {
+        var tv: i64 = sv_var(0, 10);
+        list_add(sv_tex, tv);
+        sv_i3(sv_deco, 71, tv, 34, 1);
+        sv_i3(sv_deco, 71, tv, 33, i);
+        i = i + 1;
+    }
+    if stage == 0 {
+        i = 0;
+        while i < list_len(in_name) {
+            var iv: i64 = sv_var(1, list_get(in_type, i));
+            list_add(sv_in, iv);
+            list_add(sv_iface, iv);
+            sv_i3(sv_deco, 71, iv, 30, i);
+            i = i + 1;
+        }
+    }
+    i = 0;
+    while i < list_len(vy_name) {
+        var storage: i64 = 3;
+        if stage == 1 { storage = 1; }
+        var vv: i64 = sv_var(storage, list_get(vy_type, i));
+        list_add(sv_vy, vv);
+        list_add(sv_iface, vv);
+        sv_i3(sv_deco, 71, vv, 30, i);
+        i = i + 1;
+    }
+    if stage == 0 {
+        sv_pos = sv_var(3, SH_VEC4);
+        list_add(sv_iface, sv_pos);
+        sv_i3(sv_deco, 71, sv_pos, 11, 0);
+    } else {
+        sv_col = sv_var(3, SH_VEC4);
+        list_add(sv_iface, sv_col);
+        sv_i3(sv_deco, 71, sv_col, 30, 0);
+        sv_frag = sv_var(1, SH_VEC4);
+        list_add(sv_iface, sv_frag);
+        sv_i3(sv_deco, 71, sv_frag, 11, 15);
+    }
+    // the function
+    var label: i64 = sv_id();
+    if stage == 1 {
+        // the color starts as transparent black
+        var zero: i64 = sv_const(0.0);
+        var v4t: i64 = sv_type(SH_VEC4);
+        var z4: i64 = sv_id();
+        sv_op(sv_types, 44, 7);
+        list_add(sv_types, v4t);
+        list_add(sv_types, z4);
+        list_add(sv_types, zero);
+        list_add(sv_types, zero);
+        list_add(sv_types, zero);
+        list_add(sv_types, zero);
+        sv_i2(sv_body, 62, sv_col, z4);
+    }
+    if stage == 0 {
+        sv_block(sh_vs);
+    } else {
+        sv_block(sh_fs);
+    }
+    if sv_term == 0 {
+        sv_op(sv_body, 253, 1);
+    }
+    // the module, section by section
+    var m: i64 = list_new();
+    list_add(m, 119734787);           // 0x07230203
+    list_add(m, 65536);               // version 1.0
+    list_add(m, 0);
+    list_add(m, sv_next);
+    list_add(m, 0);
+    sv_i1(m, 17, 1);                  // Capability Shader
+    sv_op(m, 11, 2 + sv_str_words("GLSL.std.450"));
+    list_add(m, sv_glsl);
+    sv_str(m, "GLSL.std.450");
+    sv_i2(m, 14, 0, 1);               // Logical GLSL450
+    var model: i64 = 0;
+    if stage == 1 { model = 4; }
+    sv_op(m, 15, 3 + sv_str_words("main") + list_len(sv_iface));
+    list_add(m, model);
+    list_add(m, main_id);
+    sv_str(m, "main");
+    i = 0;
+    while i < list_len(sv_iface) {
+        list_add(m, list_get(sv_iface, i));
+        i = i + 1;
+    }
+    if stage == 1 {
+        sv_i2(m, 16, main_id, 7);     // OriginUpperLeft
+    }
+    sh_append(m, sv_deco);
+    // the function's type before the function
+    var fnt: i64 = sv_type(8);
+    var vt: i64 = sv_type(0);
+    sh_append(m, sv_types);
+    sv_i4(m, 54, vt, main_id, 0, fnt);
+    sv_i1(m, 248, label);
+    sh_append(m, sv_fvars);
+    sh_append(m, sv_body);
+    sv_op(m, 56, 1);
+    // the bound: ids made after the header was written
+    list_set(m, 3, sv_next);
+    return m;
+}
+
+fn sh_append(dst: i64, src: i64) -> i64 {
+    var i: i64 = 0;
+    var n: i64 = list_len(src);
+    while i < n {
+        list_add(dst, list_get(src, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ============================================================= the API ===
+fn sh_reset() -> i64 {
+    sh_err = text_new();
+    sh_tk = list_new();
+    sh_tt = list_new();
+    sh_tl = list_new();
+    sh_p = 0;
+    nk = list_new();
+    na = list_new();
+    nb = list_new();
+    nc = list_new();
+    ntx = list_new();
+    nnum = list_new();
+    nty = list_new();
+    nres = list_new();
+    nidx = list_new();
+    nline = list_new();
+    u_name = list_new();
+    u_type = list_new();
+    u_off = list_new();
+    u_size = 0;
+    tx_name = list_new();
+    in_name = list_new();
+    in_type = list_new();
+    vy_name = list_new();
+    vy_type = list_new();
+    sh_vs = -1;
+    sh_fs = -1;
+    if pr_ready == 0 {
+        pr_wgsl = list_new();
+        pr_msl = list_new();
+        pr_vs = list_new();
+        pr_fs = list_new();
+        pr_usize = list_new();
+        pr_uname = list_new();
+        pr_utype = list_new();
+        pr_uoff = list_new();
+        pr_intype = list_new();
+        pr_ntex = list_new();
+        pr_ready = 1;
+    }
+    return 0;
+}
+
+fn shader_error() -> text {
+    return sh_err;
+}
+
+// a shader from its KSL source: its number, or a fail with the line
+fn shader_compile(source: i64) -> i64 {
+    sh_reset();
+    sh_src = source;
+    sh_lex(source);
+    sh_program();
+    if !sh_bad() {
+        sh_check_stage(sh_vs, 0);
+    }
+    if !sh_bad() {
+        sh_check_stage(sh_fs, 1);
+    }
+    if sh_bad() {
+        fail "the shader has an error" hint "shader_error() says what and on which line";
+    }
+    sh_loopv = list_new();
+    sv_declid = list_new();
+    var i: i64 = 0;
+    while i < list_len(nk) {
+        list_add_real(sh_loopv, 0.0);
+        list_add(sv_declid, 0);
+        i = i + 1;
+    }
+    list_add(pr_wgsl, sh_gen_wgsl());
+    list_add(pr_msl, sh_gen_msl());
+    list_add(pr_vs, sv_module(0));
+    list_add(pr_fs, sv_module(1));
+    list_add(pr_usize, u_size);
+    list_add(pr_uname, u_name);
+    list_add(pr_utype, u_type);
+    list_add(pr_uoff, u_off);
+    list_add(pr_intype, in_type);
+    list_add(pr_ntex, list_len(tx_name));
+    return list_len(pr_wgsl);
+}
+
+// the shader's number again when it is one (it counts from 1), else a fail
+fn sh_check(s: i64) -> i64 {
+    if pr_ready == 0 || s < 1 || s > list_len(pr_wgsl) {
+        fail "no such shader" hint "use the number shader_compile gave";
+    }
+    return s;
+}
+
+fn shader_wgsl(s: i64) -> text {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return text_new(); }
+    return list_get(pr_wgsl, i);
+}
+
+fn shader_msl(s: i64) -> text {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return text_new(); }
+    return list_get(pr_msl, i);
+}
+
+fn shader_spirv(s: i64, stage: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return list_new(); }
+    if stage == 0 {
+        return list_get(pr_vs, i);
+    }
+    return list_get(pr_fs, i);
+}
+
+fn shader_uniform_size(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(pr_usize, i);
+}
+
+fn shader_uniform_offset(s: i64, name: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return -1; }
+    var k: i64 = sh_find_text(list_get(pr_uname, i), name);
+    if k == -1 { return -1; }
+    return list_get(list_get(pr_uoff, i), k);
+}
+
+fn shader_uniform_type(s: i64, name: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    var k: i64 = sh_find_text(list_get(pr_uname, i), name);
+    if k == -1 { return 0; }
+    return list_get(list_get(pr_utype, i), k);
+}
+
+fn shader_inputs(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_len(list_get(pr_intype, i));
+}
+
+fn shader_input_type(s: i64, k: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(list_get(pr_intype, i), k);
+}
+
+fn shader_textures(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(pr_ntex, i);
+}

@@ -1,0 +1,46 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "std_math.kr" as m;
+acquire_domain "std_list.kr";
+kron_definitions
+struct Pair<A, B> { first: A; second: B; }
+fn biggest<T>(a: T, b: T) -> T {
+    if a > b { return a; }
+    return b;
+}
+fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+    var r: Pair<B, A>;
+    r.first = p.second;
+    r.second = p.first;
+    return r;
+}
+fn sum<T>(l: list<T>) -> T {
+    var s: T = 0;
+    for x in l { s = s + x; }
+    return s;
+}
+struct Box<T> { v: T; n: i64; }
+fn boxed<T>(v: T) -> Box<T> { return Box<T> { v: v, n: 1 }; }
+fn main() {
+    print(biggest<i64>(3, 9));
+    print(biggest<f64>(2.5, 1.5));
+    var p: Pair<i64, f64> = Pair<i64, f64> { first: 7, second: 0.5 };
+    var q: Pair<f64, i64> = swap<i64, f64>(p);
+    print(q.first); print(q.second);
+    var l: list<i64> = [1, 2, 3, 4];
+    print(sum<i64>(l));
+    var lf: list<f64> = [0.5, 0.25];
+    print(sum<f64>(lf));
+    var b: Box<Pair<i64, i64>>;
+    b.v.first = 11;
+    print(b.v.first);
+    var bb: Box<f64> = boxed<f64>(2.0);
+    print(bb.v); print(bb.n);
+    print(m.fsqrt(16.0));
+    print(std_math.fabs(-3.0));
+    var lp: list<Pair<i64, i64>>;
+    list_add(lp, Pair<i64, i64> { first: 1, second: 2 });
+    var e: Pair<i64, i64> = lp[0];
+    print(e.second);
+}

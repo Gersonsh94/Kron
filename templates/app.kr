@@ -1,0 +1,79 @@
+kron_program
+kron_domain phone_app;
+kron_imports
+acquire_domain "std_app.kr";
+acquire_domain "std_ui.kr";
+kron_definitions
+
+// A phone app written in Kron, the same source for Android and iOS:
+//
+//   Android:  kronc app.kr --target=android --lib -o android\app\src\main\jniLibs\arm64-v8a\libkronapp.so
+//   iOS:      kronc app.kr --target=ios --lib -o ios\KronApp.framework\KronApp
+//
+// main is written as on a computer: std_app.kr starts it when the system
+// starts the app, window_open(0, 0, "") takes the whole screen, a touch is
+// the mouse's left button, and the boxes to type in bring up the screen's
+// keyboard by themselves. It runs on a computer as it is, too:
+//
+//   kronc app.kr      (a window 400 x 700)
+
+var count: i64 = 0;
+var name: [u8; 64];
+
+fn main() {
+    if window_open(0, 0, "Kron") == 0 {
+        window_open(400, 700, "Kron");
+    }
+    ui_dark(1);
+    while window_show() {
+        ui_begin();
+        var w: i64 = window_width();
+        ui_title(24, 32, "Kron");
+        ui_muted(24, 72, "the same program on a phone and a computer");
+        ui_card(16, 110, w - 32, 200, "Counter");
+        var line: [u8; 32];
+        ui_label(40, 165, "Taps so far:");
+        ui_bold(160, 165, num_text(count, &line));
+        if ui_button(40, 220, w - 80, 56, "Tap") {
+            count = count + 1;
+        }
+        ui_card(16, 330, w - 32, 170, "Your name");
+        ui_input_hint(40, 385, w - 80, &name, 64, "type it here");
+        if name[0] != 0 {
+            ui_label(40, 440, "Hello,");
+            ui_bold(100, 440, &name);
+        }
+        if ui_button_alt(40, 520, w - 80, 48, "Reset") {
+            count = 0;
+            name[0] = 0;
+        }
+        ui_end();
+        if window_key() == 27 { window_close(); }
+        window_sleep(16);
+    }
+}
+
+// the digits of n in buf, ending in 0; its address
+fn num_text(n: i64, buf: i64) -> i64 {
+    var digits: [u8; 24];
+    var k: i64 = 0;
+    var v: i64 = n;
+    if v == 0 {
+        digits[0] = 48;
+        k = 1;
+    }
+    while v > 0 {
+        digits[k] = 48 + v % 10;
+        v = v / 10;
+        k = k + 1;
+    }
+    var i: i64 = 0;
+    raw {
+        while i < k {
+            poke8(buf + i, digits[k - 1 - i]);
+            i = i + 1;
+        }
+        poke8(buf + k, 0);
+    }
+    return buf;
+}

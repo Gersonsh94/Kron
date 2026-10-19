@@ -1,0 +1,58 @@
+kron_program
+kron_domain test_garray;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Global arrays given their first values. They are data in the program,
+// at the width of their elements; the elements not given are zero.
+// =========================================================================
+
+var ids: [i64; 6] = [100, -101, 0x1F, 103];
+var bytes: [u8; 5] = [1, 255, -1];
+var words: [u16; 3] = [65535, 7];
+var dwords: [i32; 3] = [-2, 70000];
+var reals: [f64; 3] = [1.5, -2.25, 3];
+var singles: [f32; 3] = [0.5, -1e2, 2.5e-1];
+var after: i64 = 42;
+
+fn total(n: i64) -> i64 {
+    var s: i64 = 0;
+    var i: i64 = 0;
+    while i < n {
+        s = s + ids[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i64 {
+    var i: i64 = 0;
+    while i < 6 {
+        print(ids[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 5 {
+        print(bytes[i]);
+        i = i + 1;
+    }
+    print(words[0]);
+    print(words[1]);
+    print(words[2]);
+    print(dwords[0]);
+    print(dwords[1]);
+    print(dwords[2]);
+    print(reals[0]);
+    print(reals[1]);
+    print(reals[2]);
+    print(singles[0]);
+    print(singles[1]);
+    print(singles[2]);
+    // the global after the arrays is where it was
+    print(after);
+    // and they are variables like the others
+    ids[4] = 5;
+    print(total(6));
+    return 0;
+}

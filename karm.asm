@@ -239,6 +239,7 @@ global karm_get_error_line_at
 global karm_get_error_mnem
 global karm_get_error_text
 global karm_set_align, karm_get_code_len, karm_get_data_len, karm_label
+global karm_get_data_off
 global karm_reloc_count, karm_reloc_at, karm_reloc_text
 
 ; mnemonic dispatch: compare ka_mnem with a name, jump on a match
@@ -282,6 +283,36 @@ ka_align:
     not  rax
     and  rdx, rax
     pop  rax
+    ret
+
+; ka_align_code(rdx = the length of the code) -> rdx = where .data starts in
+; the image: the first address on a section boundary in MEMORY. With a base
+; on a boundary -- every executable -- that is the length rounded up; a
+; library's image starts 512 bytes into its first page, and its .data has
+; to start on a page of its own all the same.
+ka_align_code:
+    push rax
+    push rcx
+    mov  rax, [rel ka_salign]
+    dec  rax
+    mov  rcx, [rel ka_base]
+    and  rcx, rax
+    add  rdx, rcx
+    add  rdx, rax
+    not  rax
+    and  rdx, rax
+    sub  rdx, rcx
+    pop  rcx
+    pop  rax
+    ret
+
+; karm_get_data_off() -> rax = where .data starts, from the image's start
+karm_get_data_off:
+    push rdx
+    mov  rdx, [rel ka_code_len]
+    call ka_align_code
+    mov  rax, rdx
+    pop  rdx
     ret
 
 karm_get_code_len:
@@ -369,7 +400,7 @@ karm_build_image:
     push rsi
     push rdi
     mov  rdx, [rel ka_code_len]
-    call ka_align
+    call ka_align_code
     mov  rax, rdx
     mov  rdi, rax
     mov  rcx, [rel ka_code_len]
@@ -1283,7 +1314,7 @@ ka_label_addr:
     cmp  ecx, 0
     je   .out
     mov  rdx, [rel ka_final_code]
-    call ka_align
+    call ka_align_code
     add  rax, rdx
     cmp  ecx, 1
     je   .out
@@ -1306,7 +1337,7 @@ ka_pc:
     cmp  qword [rel ka_sec], 0
     je   .out
     mov  rdx, [rel ka_final_code]
-    call ka_align
+    call ka_align_code
     add  rax, rdx
     cmp  qword [rel ka_sec], 1
     je   .out

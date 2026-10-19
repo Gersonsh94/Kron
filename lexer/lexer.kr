@@ -1,0 +1,632 @@
+kron_program
+kron_domain lexer;
+kron_imports
+acquire_domain "tokens.kr";
+kron_definitions
+
+// =========================================================================
+// THE LEXER
+//
+// The first part of the compiler written in Kron. kronc --module turns this
+// file into lexer_kr.asm, which kron_all.asm includes; lexer.asm beside it
+// is the small hand-written door the rest of the compiler calls through.
+//
+//     klx_init(src, len, buf, count_ptr, cap)   start on a source
+//     klx_run()                                 every token, then TOK_EOF;
+//                                               their number, -1 on error
+//     klx_keyword_name(type)                    a keyword's text, 0 if none
+//     klx_error_kind() / klx_error_token()      what stopped klx_run
+//
+// A token is 24 bytes in the buffer the compiler gives:
+//     +0  type     8 bytes
+//     +8  value    8 bytes: where its text starts in the source
+//     +16 length   4 bytes
+//     +20 line     2 bytes
+//     +22 column   2 bytes, of its first character
+//
+// It runs inside the compiler, where there is no runtime: no texts, no
+// lists, no fail. Memory is reached with peek and poke, and every array
+// through its address, so that nothing calls a bounds check.
+//
+// Columns are counted as the compiler always counted them, which error
+// messages and the debugger's line tables depend on: a character of an
+// identifier, a digit, a blank and the first character of an operator
+// count one; the point of a real, its exponent, a hex number, a "..." text
+// and the second character of an operator count none.
+// =========================================================================
+
+const KLX_TOKEN_SIZE: i64 = 24;
+const KLX_KW_MAX: i64 = 192;
+
+// what stopped klx_run, for klx_error_kind
+const KLX_ERR_CHAR: i64 = 1;       // a character Kron does not use
+const KLX_ERR_TEXT: i64 = 2;       // a "..." text with no closing quote
+const KLX_ERR_FULL: i64 = 3;       // more tokens than the buffer holds
+
+var klx_src: i64;                  // the source
+var klx_len: i64;
+var klx_pos: i64;                  // the next character to read
+var klx_line: i64;
+var klx_col: i64;
+var klx_tok_line: i64;             // where the token being read starts
+var klx_tok_col: i64;
+var klx_buf: i64;                  // the tokens
+var klx_cap: i64;                  // how many fit, the TOK_EOF included
+var klx_count_ptr: i64;            // where the count goes, 0 for nowhere
+
+// the keywords: text (NUL-ended), length and token type, by index
+var klx_kw_text: [i64; 192];
+var klx_kw_len: [i64; 192];
+var klx_kw_type: [i64; 192];
+var klx_kw_n: i64;
+
+var klx_err_kind: i64;
+var klx_err_tok: [i64; 3];         // a token where the error is
+
+// -------------------------------------------------------------------------
+// the keyword table
+// -------------------------------------------------------------------------
+
+fn klx_kw(text: i64, kind: i64) -> i64 {
+    var n: i64 = 0;
+    var i: i64 = klx_kw_n;
+    if i >= KLX_KW_MAX {
+        return 0;
+    }
+    raw {
+        while peek8(text + n) != 0 {
+            n += 1;
+        }
+        poke(&klx_kw_text + i * 8, text);
+        poke(&klx_kw_len + i * 8, n);
+        poke(&klx_kw_type + i * 8, kind);
+    }
+    klx_kw_n = i + 1;
+    return 1;
+}
+
+// In this order: a type with two spellings is named, in error messages, by
+// the first one here.
+fn klx_kw_fill() -> i64 {
+    klx_kw("var", KW_VAR);
+    klx_kw("const", KW_CONST);
+    klx_kw("fn", KW_FN);
+    klx_kw("return", KW_RETURN);
+    klx_kw("if", KW_IF);
+    klx_kw("else", KW_ELSE);
+    klx_kw("switch", KW_SWITCH);
+    klx_kw("case", KW_CASE);
+    klx_kw("default", KW_DEFAULT);
+    klx_kw("loop", KW_LOOP);
+    klx_kw("in", KW_IN);
+    klx_kw("while", KW_WHILE);
+    klx_kw("for", KW_FOR);
+    klx_kw("break", KW_BREAK);
+    klx_kw("continue", KW_CONTINUE);
+    klx_kw("raw", KW_RAW);
+    klx_kw("slice", KW_SLICE);
+    klx_kw("print", KW_PRINT);
+    klx_kw("printc", KW_PRINTC);
+    klx_kw("range", KW_RANGE);
+    klx_kw("true", KW_TRUE);
+    klx_kw("false", KW_FALSE);
+    klx_kw("null", KW_NULL);
+    klx_kw("import", KW_IMPORT);
+    klx_kw("from", KW_FROM);
+    klx_kw("module", KW_MODULE);
+    klx_kw("struct", KW_STRUCT);
+    klx_kw("enum", KW_ENUM);
+    klx_kw("new", KW_NEW);
+    klx_kw("delete", KW_DELETE);
+    klx_kw("uint8", KW_U8);
+    klx_kw("uint16", KW_U16);
+    klx_kw("uint32", KW_U32);
+    klx_kw("uint64", KW_U64);
+    klx_kw("int8", KW_I8);
+    klx_kw("int16", KW_I16);
+    klx_kw("int32", KW_I32);
+    klx_kw("int64", KW_I64);
+    klx_kw("i8", KW_I8);
+    klx_kw("i16", KW_I16);
+    klx_kw("i32", KW_I32);
+    klx_kw("i64", KW_I64);
+    klx_kw("u8", KW_U8);
+    klx_kw("u16", KW_U16);
+    klx_kw("u32", KW_U32);
+    klx_kw("u64", KW_U64);
+    klx_kw("f32", KW_F32);
+    klx_kw("f64", KW_F64);
+    klx_kw("bool", KW_BOOL);
+    klx_kw("real32", KW_F32);
+    klx_kw("real64", KW_F64);
+    klx_kw("hardware_bit", KW_BOOL);
+    klx_kw("utf8_stream", KW_STR);
+    klx_kw("stream", KW_STR);
+    klx_kw("as", KW_AS);
+    klx_kw("fail", KW_FAIL);
+    klx_kw("hint", KW_HINT);
+    klx_kw("failed", KW_FAILED);
+    klx_kw("print_fail", KW_PRINTFAIL);
+    klx_kw("sizeof", KW_SIZEOF);
+    klx_kw("loadfile", KW_LOADFILE);
+    klx_kw("thread_start", KW_THREAD_START);
+    klx_kw("thread_wait", KW_THREAD_WAIT);
+    klx_kw("lock_init", KW_LOCK_INIT);
+    klx_kw("lock_take", KW_LOCK_TAKE);
+    klx_kw("lock_give", KW_LOCK_GIVE);
+    klx_kw("cpu_count", KW_CPU_COUNT);
+    klx_kw("thread_yield", KW_THREAD_YIELD);
+    klx_kw("shared", KW_SHARED);
+    klx_kw("dll_load", KW_DLL_LOAD);
+    klx_kw("dll_proc", KW_DLL_PROC);
+    klx_kw("arg_count", KW_ARG_COUNT);
+    klx_kw("arg_get", KW_ARG_GET);
+    klx_kw("target_os", KW_TARGET_OS);
+    klx_kw("ticks", KW_TICKS);
+    klx_kw("ticks_per_sec", KW_TICKS_PER_SEC);
+    klx_kw("vec2_load", KW_VEC2_LOAD);
+    klx_kw("vec2_store", KW_VEC2_STORE);
+    klx_kw("vec2_add", KW_VEC2_ADD);
+    klx_kw("vec2_sub", KW_VEC2_SUB);
+    klx_kw("vec2_mul", KW_VEC2_MUL);
+    klx_kw("void", KW_VOID);
+    klx_kw("boot", KW_BOOT_SEQUENCE);
+    klx_kw("mmu", KW_MMU_CONFIGURATION);
+    klx_kw("scheduler", KW_SCHEDULER_DOMAIN);
+    klx_kw("syscalls", KW_SYSCALL_DISPATCH);
+    klx_kw("filesystem", KW_FILESYSTEM_VOLUME);
+    klx_kw("netkernel", KW_NETWORK_KERNEL);
+    klx_kw("driver", KW_HARDWARE_DRIVER);
+    klx_kw("isr", KW_INTERRUPT_SERVICE);
+    klx_kw("dma", KW_DMA_CHANNEL);
+    klx_kw("kron3d_context", KW_KRON3D_CONTEXT);
+    klx_kw("kron_isa_dynamic", KW_KRON_ISA);
+    klx_kw("execution", KW_EXECUTION_MODEL);
+    klx_kw("kernel", KW_KERNEL_ARCHITECTURE);
+    klx_kw("security", KW_SECURITY_MODEL);
+    klx_kw("kron_hypervisor", KW_KRON_HYPERVISOR);
+    klx_kw("deployment", KW_DEPLOYMENT_MODEL);
+    klx_kw("hmi", KW_HUMAN_MACHINE);
+    klx_kw("power", KW_POWER_MANAGER);
+    klx_kw("packages", KW_PACKAGE_MANAGER);
+    klx_kw("loader", KW_EXECUTABLE_LOADER);
+    klx_kw("ring", KW_SECURITY_RING);
+    klx_kw("outb", KW_OUTB);
+    klx_kw("inb", KW_INB);
+    klx_kw("poke", KW_POKE);
+    klx_kw("peek", KW_PEEK);
+    klx_kw("trunc", KW_TRUNC);
+    klx_kw("savefile", KW_SAVEFILE);
+    klx_kw("readkey", KW_READKEY);
+    klx_kw("beep", KW_BEEP);
+    klx_kw("readmouse", KW_READMOUSE);
+    klx_kw("mousex", KW_MOUSEX);
+    klx_kw("mousey", KW_MOUSEY);
+    klx_kw("asm", KW_ASM);
+    klx_kw("ptr", KW_PTR);
+    klx_kw("ArenaAllocationToken", KW_ARENA_TOKEN);
+    klx_kw("rotl", KW_ROTL);
+    klx_kw("rotr", KW_ROTR);
+    klx_kw("invcache", KW_INVCACHE);
+    klx_kw("prefetch", KW_PREFETCH0);
+    klx_kw("register8", KW_U8);
+    klx_kw("register16", KW_U16);
+    klx_kw("register32", KW_U32);
+    klx_kw("register64", KW_U64);
+    klx_kw("physical_ptr", KW_U64);
+    klx_kw("virtual_ptr", KW_U64);
+    klx_kw("kron_program", KW_KRON_PROGRAM);
+    klx_kw("kron_imports", KW_KRON_IMPORTS);
+    klx_kw("kron_definitions", KW_KRON_DEFINITIONS);
+    klx_kw("kron_domain", KW_KRON_DOMAIN);
+    klx_kw("epoch", KW_EPOCH);
+    klx_kw("aliased", KW_ALIASED);
+    klx_kw("poke8", KW_POKE8);
+    klx_kw("poke16", KW_POKE16);
+    klx_kw("poke32", KW_POKE32);
+    klx_kw("peek8", KW_PEEK8);
+    klx_kw("peek16", KW_PEEK16);
+    klx_kw("peek32", KW_PEEK32);
+    klx_kw("public", KW_GLOBAL_VISIBLE);
+    klx_kw("private", KW_DOMAIN_ISOLATED);
+    klx_kw("export", KW_INTER_CLUSTER_EXPORT);
+    klx_kw("call", KW_CALL);
+    klx_kw("extern", KW_EXTERN);
+    return klx_kw_n;
+}
+
+// klx_keyword(text, n): the token type of the n characters at text --
+// a keyword's, or TOK_IDENTIFIER
+fn klx_keyword(text: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var k: i64 = 0;
+    var first: i64 = 0;
+    var same: i64 = 0;
+    raw {
+        first = peek8(text);
+        while i < klx_kw_n {
+            if peek(&klx_kw_len + i * 8) == n {
+                k = peek(&klx_kw_text + i * 8);
+                if peek8(k) == first {
+                    same = 1;
+                    j = 1;
+                    while j < n {
+                        if peek8(k + j) != peek8(text + j) {
+                            same = 0;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if same == 1 {
+                        return peek(&klx_kw_type + i * 8);
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    return TOK_IDENTIFIER;
+}
+
+fn klx_keyword_name(kind: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < klx_kw_n {
+            if peek(&klx_kw_type + i * 8) == kind {
+                return peek(&klx_kw_text + i * 8);
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// characters
+// -------------------------------------------------------------------------
+
+// klx_at(p): the character at position p of the source, -1 past its end
+fn klx_at(p: i64) -> i64 {
+    var c: i64 = -1;
+    if p < klx_len {
+        raw {
+            c = peek8(klx_src + p);
+        }
+    }
+    return c;
+}
+
+fn klx_is_letter(c: i64) -> i64 {
+    if c == 95 { return 1; }                   // _
+    if c >= 97 && c <= 122 { return 1; }       // a-z
+    if c >= 65 && c <= 90 { return 1; }        // A-Z
+    return 0;
+}
+
+fn klx_is_digit(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return 1; }
+    return 0;
+}
+
+fn klx_is_hex(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return 1; }
+    if c >= 97 && c <= 102 { return 1; }       // a-f
+    if c >= 65 && c <= 70 { return 1; }        // A-F
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the kinds of token
+// -------------------------------------------------------------------------
+
+// klx_skip(): past blanks, line ends and // comments
+fn klx_skip() -> i64 {
+    var c: i64 = 0;
+    while klx_pos < klx_len {
+        c = klx_at(klx_pos);
+        if c == 32 || c == 9 {
+            klx_pos += 1;
+            klx_col += 1;
+        } else if c == 13 {
+            klx_pos += 1;                      // a CR takes no column
+        } else if c == 10 {
+            klx_pos += 1;
+            klx_line += 1;
+            klx_col = 1;
+        } else if c == 47 && klx_at(klx_pos + 1) == 47 {
+            // to the end of the line; the LF is the next round's
+            klx_pos += 1;
+            while klx_pos < klx_len && klx_at(klx_pos) != 10 {
+                klx_pos += 1;
+            }
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// klx_number(): an integer, or a real with a point or an exponent. An
+// exponent is one only with digits after it (and an optional sign), so a
+// name glued to a number is not swallowed.
+fn klx_number() -> i64 {
+    var real: i64 = 0;
+    var c: i64 = 0;
+    var p: i64 = 0;
+    while klx_pos < klx_len {
+        c = klx_at(klx_pos);
+        if klx_is_digit(c) == 1 {
+            klx_pos += 1;
+            klx_col += 1;
+        } else if c == 46 {
+            real = 1;                          // the point counts no column
+            klx_pos += 1;
+        } else if c == 101 || c == 69 {
+            p = klx_pos + 1;
+            c = klx_at(p);
+            if c == 43 || c == 45 {
+                p += 1;
+                c = klx_at(p);
+            }
+            if klx_is_digit(c) == 0 {
+                break;
+            }
+            real = 1;
+            klx_pos = p;
+            while klx_is_digit(klx_at(klx_pos)) == 1 {
+                klx_pos += 1;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    if real == 1 {
+        return TOK_FLOAT;
+    }
+    return TOK_INTEGER;
+}
+
+// klx_punct(c): an operator or a mark, after its first character c. Two
+// and three characters are taken when they make one: += -> == >>> ::
+// -1 when c is no character of Kron's.
+fn klx_punct(c: i64) -> i64 {
+    var n: i64 = klx_at(klx_pos + 1);
+    klx_pos += 1;
+    klx_col += 1;
+    if c == 123 { return TOK_LBRACE; }         // {
+    if c == 125 { return TOK_RBRACE; }         // }
+    if c == 40 { return TOK_LPAREN; }          // (
+    if c == 41 { return TOK_RPAREN; }          // )
+    if c == 91 { return TOK_LBRACKET; }        // [
+    if c == 93 { return TOK_RBRACKET; }        // ]
+    if c == 59 { return TOK_SEMICOLON; }       // ;
+    if c == 44 { return TOK_COMMA; }           // ,
+    if c == 46 { return TOK_DOT; }             // .
+    if c == 37 { return TOK_PERCENT; }         // %
+    if c == 126 { return TOK_TILDE; }          // ~
+    if c == 43 {                               // + +=
+        if n == 61 { klx_pos += 1; return TOK_PLUS_ASSIGN; }
+        return TOK_PLUS;
+    }
+    if c == 45 {                               // - -= ->
+        if n == 61 { klx_pos += 1; return TOK_MINUS_ASSIGN; }
+        if n == 62 { klx_pos += 1; return TOK_ARROW; }
+        return TOK_MINUS;
+    }
+    if c == 42 {                               // * *=
+        if n == 61 { klx_pos += 1; return TOK_STAR_ASSIGN; }
+        return TOK_STAR;
+    }
+    if c == 47 {                               // / /=
+        if n == 61 { klx_pos += 1; return TOK_SLASH_ASSIGN; }
+        return TOK_SLASH;
+    }
+    if c == 38 {                               // & &&
+        if n == 38 { klx_pos += 1; return TOK_AND; }
+        return TOK_AMPERSAND;
+    }
+    if c == 124 {                              // | ||
+        if n == 124 { klx_pos += 1; return TOK_OR; }
+        return TOK_PIPE;
+    }
+    if c == 94 {                               // ^ ^=
+        if n == 61 { klx_pos += 1; return TOK_XOR_ASSIGN; }
+        return TOK_CARET;
+    }
+    if c == 33 {                               // ! !=
+        if n == 61 { klx_pos += 1; return TOK_NEQ; }
+        return TOK_NOT;
+    }
+    if c == 61 {                               // = ==
+        if n == 61 { klx_pos += 1; return TOK_EQ; }
+        return TOK_ASSIGN;
+    }
+    if c == 60 {                               // < <= <<
+        if n == 61 { klx_pos += 1; return TOK_LTE; }
+        if n == 60 { klx_pos += 1; return TOK_LSHIFT; }
+        return TOK_LT;
+    }
+    if c == 62 {                               // > >= >> >>>
+        if n == 61 { klx_pos += 1; return TOK_GTE; }
+        if n == 62 {
+            klx_pos += 1;
+            if klx_at(klx_pos) == 62 { klx_pos += 1; return TOK_URSHIFT; }
+            return TOK_RSHIFT;
+        }
+        return TOK_GT;
+    }
+    if c == 58 {                               // : ::
+        if n == 58 { klx_pos += 1; return TOK_DOUBLE_COLON; }
+        return TOK_COLON;
+    }
+    return -1;
+}
+
+// klx_put(t, kind, start): the token at t, from start to here
+fn klx_put(t: i64, kind: i64, start: i64) -> i64 {
+    raw {
+        poke(t, kind);
+        poke(t + 8, klx_src + start);
+        poke32(t + 16, klx_pos - start);
+        poke16(t + 20, klx_tok_line);
+        poke16(t + 22, klx_tok_col);
+    }
+    return 0;
+}
+
+// klx_fail(kind, start, n): klx_run stops; the error points at the n
+// characters from start, on the line and column the token began
+fn klx_fail(kind: i64, start: i64, n: i64) -> i64 {
+    klx_err_kind = kind;
+    raw {
+        var t: i64 = &klx_err_tok;
+        poke(t, 0);
+        poke(t + 8, klx_src + start);
+        poke32(t + 16, n);
+        poke16(t + 20, klx_tok_line);
+        poke16(t + 22, klx_tok_col);
+    }
+    return -1;
+}
+
+// klx_next(t): the next token, written at t. 1 for a token, 2 for TOK_EOF,
+// -1 for an error.
+fn klx_next(t: i64) -> i64 {
+    klx_skip();
+    if klx_pos >= klx_len {
+        raw {
+            poke(t, TOK_EOF);
+            poke(t + 8, 0);
+            poke32(t + 16, 0);
+            poke16(t + 20, klx_line);
+            poke16(t + 22, klx_col);
+        }
+        return 2;
+    }
+    klx_tok_line = klx_line;
+    klx_tok_col = klx_col;
+    var start: i64 = klx_pos;
+    var c: i64 = klx_at(start);
+    var kind: i64 = 0;
+    var n: i64 = 0;
+    if klx_is_letter(c) == 1 {
+        // an identifier or a keyword
+        while klx_pos < klx_len && (klx_is_letter(klx_at(klx_pos)) == 1 || klx_is_digit(klx_at(klx_pos)) == 1) {
+            klx_pos += 1;
+            klx_col += 1;
+        }
+        kind = klx_keyword(klx_src + start, klx_pos - start);
+    } else if klx_is_digit(c) == 1 {
+        n = klx_at(start + 1);
+        if c == 48 && (n == 120 || n == 88) {
+            // 0x...: a hex number, no columns counted
+            klx_pos = start + 2;
+            while klx_is_hex(klx_at(klx_pos)) == 1 {
+                klx_pos += 1;
+            }
+            kind = TOK_HEX;
+        } else {
+            kind = klx_number();
+        }
+    } else if c == 34 {
+        // "...", its quotes included; \x takes two characters. The text
+        // counts no column and no line.
+        klx_pos += 1;
+        n = klx_at(klx_pos);
+        while n != 34 {
+            if n == -1 {
+                return klx_fail(KLX_ERR_TEXT, start, 1);
+            }
+            if n == 92 {
+                klx_pos += 2;
+            } else {
+                klx_pos += 1;
+            }
+            n = klx_at(klx_pos);
+        }
+        klx_pos += 1;
+        kind = TOK_STRING;
+    } else {
+        kind = klx_punct(c);
+        if kind == -1 {
+            // the whole character, when it is a UTF-8 one of several bytes
+            n = 1;
+            if c >= 192 && c < 224 { n = 2; }
+            if c >= 224 && c < 240 { n = 3; }
+            if c >= 240 && c < 248 { n = 4; }
+            if start + n > klx_len { n = klx_len - start; }
+            return klx_fail(KLX_ERR_CHAR, start, n);
+        }
+    }
+    klx_put(t, kind, start);
+    return 1;
+}
+
+// -------------------------------------------------------------------------
+// the door
+// -------------------------------------------------------------------------
+
+fn klx_init(src: i64, len: i64, buf: i64, count_ptr: i64, cap: i64) -> i64 {
+    if klx_kw_n == 0 {
+        klx_kw_fill();
+    }
+    klx_src = src;
+    klx_len = len;
+    klx_buf = buf;
+    klx_count_ptr = count_ptr;
+    klx_cap = cap;
+    klx_pos = 0;
+    klx_err_kind = 0;
+    // a UTF-8 byte order mark: every Windows editor writes one, and the
+    // file is no less a program for it
+    if klx_at(0) == 0xEF && klx_at(1) == 0xBB && klx_at(2) == 0xBF {
+        klx_pos = 3;
+    }
+    if count_ptr != 0 {
+        raw {
+            poke(count_ptr, 0);
+        }
+    }
+    klx_line = 1;
+    klx_col = 1;
+    klx_tok_line = 1;
+    klx_tok_col = 1;
+    return 1;
+}
+
+fn klx_run() -> i64 {
+    var count: i64 = 0;
+    var r: i64 = 0;
+    while r != 2 {
+        if count >= klx_cap {
+            klx_tok_line = klx_line;
+            klx_tok_col = klx_col;
+            return klx_fail(KLX_ERR_FULL, klx_pos, 0);
+        }
+        r = klx_next(klx_buf + count * KLX_TOKEN_SIZE);
+        if r == -1 {
+            return -1;
+        }
+        count += 1;
+    }
+    if klx_count_ptr != 0 {
+        raw {
+            poke(klx_count_ptr, count);
+        }
+    }
+    return count;
+}
+
+fn klx_error_kind() -> i64 {
+    return klx_err_kind;
+}
+
+fn klx_error_token() -> i64 {
+    var t: i64 = 0;
+    raw {
+        t = &klx_err_tok;
+    }
+    return t;
+}

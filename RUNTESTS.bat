@@ -83,6 +83,7 @@ set RUNLIST=%RUNLIST% test_text test_list test_map test_files test_os
 set RUNLIST=%RUNLIST% test_libthreads
 set RUNLIST=%RUNLIST% test_exp_lit
 set RUNLIST=%RUNLIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
+set RUNLIST=%RUNLIST% test_extern test_callback test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray
 
 REM ---- Slow tests (3D rendering): only with /slow ----
 set SLOWLIST=tri bmp solidcube cube3d
@@ -103,13 +104,17 @@ set BADLIST=%BADLIST% test_diag test_diag2 test_diag3 test_diag4 use_mod test_17
 set BADLIST=%BADLIST% test_raw_bad test_raw_bad2 test_raw_bad3 test_raw_bad4 test_slice_bad
 set BADLIST=%BADLIST% test_shared_bad test_shared_bad2 test_syscall_bad
 set BADLIST=%BADLIST% test_aw_bad test_list_bad test_listshow_bad test_nofn_bad test_fieldcall_bad test_stray_bad
+set BADLIST=%BADLIST% test_extern_bad test_generic_bad test_modnames_bad test_garray_bad test_char_bad test_text_bad
 
-REM  --- encodings: assemble the same file with NASM and with kasm and compare
-REM  the opcode bytes. These exist because a multi-character literal was being
-REM  truncated for months without anything noticing: the compiler simply did
-REM  not use that path, so no test exercised it. The day it did, imports
-REM  stopped expanding and the fixpoint still reported success.
-set ENCLIST=kasmchar kasmsimd kasmnew kasmrex kasmalu kasmxmm kasmxmm16 kasmdb
+REM  --- encodings: kasm assembles each file and its bytes must be the ones in
+REM  tests\enc\NAME.bin, which were checked opcode by opcode against another
+REM  assembler when they were made. These exist because a multi-character
+REM  literal was being truncated for months without anything noticing: the
+REM  compiler simply did not use that path, so no test exercised it. The day
+REM  it did, imports stopped expanding and the fixpoint still reported
+REM  success. mbr is the boot sector of BUILDOS.bat (16-bit code written as
+REM  bytes, 'org', expressions of labels), checked by booting it.
+set ENCLIST=kasmchar kasmsimd kasmnew kasmrex kasmalu kasmxmm kasmxmm16 kasmdb mbr
 REM
 REM  Hand-written assembler programs, built by kasm alone and run. They test
 REM  the assembler, not the language, which is why they have no .kr: test_scope
@@ -118,6 +123,11 @@ REM  It sat in RUNLIST for a long time, where it could only ever be OMITTED.
 REM  test_kasmfix: byte compares and tests on [base + index +- N], and stores
 REM  to [rel label + N], which kasm got wrong without saying so.
 set ASMLIST=test_scope test_kasmfix
+REM
+REM  Debug builds (--debug): built as the editor builds them and driven as it
+REM  drives them, with the commands of tests\debug\NAME.in on the standard
+REM  input (breakpoints, steps); the reference holds what the debugger is told.
+set DEBUGLIST=test_debug
 REM
 REM  peek and poke outside raw { } are a compile error: test_raw_bad, _bad2
 REM  and _bad3, in BADLIST, hide one in a statement, a call argument and a
@@ -149,12 +159,16 @@ echo --- negative tests ^(must be rejected^) ---
 for %%T in (%BADLIST%) do call :badtest %%T
 
 echo.
-echo --- encodings ^(kasm against NASM, byte by byte^) ---
+echo --- encodings ^(kasm against tests\enc, byte by byte^) ---
 for %%T in (%ENCLIST%) do call :enctest %%T
 
 echo.
 echo --- assembler programs ^(kasm, run^) ---
 for %%T in (%ASMLIST%) do call :asmtest %%T
+
+echo.
+echo --- debug builds ^(--debug, driven by tests\debug\NAME.in^) ---
+for %%T in (%DEBUGLIST%) do call :debugtest %%T
 
 
 
@@ -181,7 +195,7 @@ pause
 goto :end
 
 REM ============================================================
-REM  :runtest NAME   compiles, assembles, links, runs, compares
+REM  :runtest NAME   builds with kronc, runs, compares
 REM ============================================================
 :runtest
 set "N=%~1"
@@ -200,38 +214,19 @@ if not exist "%SRC%" (
     goto :eof
 )
 
-REM Delete earlier outputs so no stale result is read
-if exist "%TMPDIR%\!B!.asm" del "%TMPDIR%\!B!.asm" >nul 2>&1
-if exist "%N%_t.obj" del "%N%_t.obj" >nul 2>&1
-if exist "%N%_t.exe" del "%N%_t.exe" >nul 2>&1
-
-REM  The audit path needs the generated assembly: -S writes it, -o keeps it
-REM  in the suite's temporary folder.
-"%JC%" "%SRC%" -S -o "%TMPDIR%\!B!.asm" >"%TMPDIR%\%N%.build" 2>&1
-if not exist "%TMPDIR%\!B!.asm" (
-    echo   FAIL  %N%  ^(kronc wrote no .asm^)
+REM  One build, the one 'kronc prog.kr' really takes: kasm and pe_writer,
+REM  nothing else on the machine.
+if exist "%TMPDIR%\%N%_k.exe" del "%TMPDIR%\%N%_k.exe" >nul 2>&1
+"%JC%" "%SRC%" -o "%TMPDIR%\%N%_k.exe" >"%TMPDIR%\%N%.kbuild" 2>&1
+if not exist "%TMPDIR%\%N%_k.exe" (
+    echo   FAIL  %N%  ^(does not build - see %TMPDIR%\%N%.kbuild^)
     set /a FAIL+=1
-    goto :eof
+    goto :cleanup
 )
-
-.\nasm.exe -f win64 -o "%N%_t.obj" "%TMPDIR%\!B!.asm" >>"%TMPDIR%\%N%.build" 2>&1
-if not exist "%N%_t.obj" (
-    echo   FAIL  %N%  ^(nasm failed - see %TMPDIR%\%N%.build^)
-    set /a FAIL+=1
-    goto :eof
-)
-
-.\GoLink.exe /fo "%N%_t.exe" /entry main /console "%N%_t.obj" kernel32.dll >>"%TMPDIR%\%N%.build" 2>&1
-if not exist "%N%_t.exe" (
-    echo   FAIL  %N%  ^(GoLink failed - see %TMPDIR%\%N%.build^)
-    set /a FAIL+=1
-    goto :eof
-)
-
-.\%N%_t.exe >"%TMPDIR%\%N%.out" 2>&1
+"%TMPDIR%\%N%_k.exe" >"%TMPDIR%\%N%.kout" 2>&1
 
 if "%MODE%"=="baseline" (
-    copy /y "%TMPDIR%\%N%.out" "%EXPDIR%\%N%.txt" >nul
+    copy /y "%TMPDIR%\%N%.kout" "%EXPDIR%\%N%.txt" >nul
     for %%S in ("%EXPDIR%\%N%.txt") do set BYTES=%%~zS
     echo   REF   %N%  ^(!BYTES! bytes^)
     set /a NEWB+=1
@@ -244,31 +239,9 @@ if not exist "%EXPDIR%\%N%.txt" (
     goto :cleanup
 )
 
-fc "%TMPDIR%\%N%.out" "%EXPDIR%\%N%.txt" >nul 2>&1
-if errorlevel 1 (
-    echo   FAIL  %N%
-    echo         --- expected vs got ---
-    fc /N "%EXPDIR%\%N%.txt" "%TMPDIR%\%N%.out"
-    set /a FAIL+=1
-    goto :cleanup
-)
-
-REM  Second path: the one 'kronc prog.kr' really takes -- kasm and pe_writer,
-REM  no NASM. Until this check existed the suite only ever built through NASM,
-REM  so a store kasm could not encode and a .bss that pe_writer left full of
-REM  leftover bytes both passed every test while the plain compiler failed.
-REM  A test passes only when BOTH builds print the reference.
-if exist "%TMPDIR%\%N%_k.exe" del "%TMPDIR%\%N%_k.exe" >nul 2>&1
-"%JC%" "%SRC%" -o "%TMPDIR%\%N%_k.exe" >"%TMPDIR%\%N%.kbuild" 2>&1
-if not exist "%TMPDIR%\%N%_k.exe" (
-    echo   FAIL  %N%  ^(direct build failed - see %TMPDIR%\%N%.kbuild^)
-    set /a FAIL+=1
-    goto :cleanup
-)
-"%TMPDIR%\%N%_k.exe" >"%TMPDIR%\%N%.kout" 2>&1
 fc "%TMPDIR%\%N%.kout" "%EXPDIR%\%N%.txt" >nul 2>&1
 if errorlevel 1 (
-    echo   FAIL  %N%  ^(direct build: kasm + pe_writer^)
+    echo   FAIL  %N%
     echo         --- expected vs got ---
     fc /N "%EXPDIR%\%N%.txt" "%TMPDIR%\%N%.kout"
     set /a FAIL+=1
@@ -278,9 +251,44 @@ echo   PASS  %N%
 set /a PASS+=1
 
 :cleanup
-if exist "%N%_t.obj" del "%N%_t.obj" >nul 2>&1
-if exist "%N%_t.exe" del "%N%_t.exe" >nul 2>&1
 if exist "%TMPDIR%\%N%_k.exe" del "%TMPDIR%\%N%_k.exe" >nul 2>&1
+goto :eof
+
+REM ============================================================
+REM  :debugtest NAME   --debug build, commands from tests\debug\NAME.in
+REM ============================================================
+:debugtest
+set "N=%~1"
+if not exist "%N%.kr" (
+    echo   OMIT  %N%  ^(no .kr file^)
+    set /a SKIP+=1
+    goto :eof
+)
+if exist "%TMPDIR%\%N%_d.exe" del "%TMPDIR%\%N%_d.exe" >nul 2>&1
+"%JC%" "%N%.kr" --debug -o "%TMPDIR%\%N%_d.exe" >"%TMPDIR%\%N%.dbuild" 2>&1
+if not exist "%TMPDIR%\%N%_d.exe" (
+    echo   FAIL  %N%  ^(the debug build failed - see %TMPDIR%\%N%.dbuild^)
+    set /a FAIL+=1
+    goto :eof
+)
+"%TMPDIR%\%N%_d.exe" < "tests\debug\%N%.in" >"%TMPDIR%\%N%.dout" 2>&1
+if "%MODE%"=="baseline" (
+    copy /y "%TMPDIR%\%N%.dout" "%EXPDIR%\%N%.txt" >nul
+    echo   REF   %N%
+    set /a NEWB+=1
+    goto :eof
+)
+fc "%TMPDIR%\%N%.dout" "%EXPDIR%\%N%.txt" >nul 2>&1
+if errorlevel 1 (
+    echo   FAIL  %N%  ^(debug build^)
+    echo         --- expected vs got ---
+    fc /N "%EXPDIR%\%N%.txt" "%TMPDIR%\%N%.dout"
+    set /a FAIL+=1
+) else (
+    echo   PASS  %N%  ^(debug build^)
+    set /a PASS+=1
+)
+if exist "%TMPDIR%\%N%_d.exe" del "%TMPDIR%\%N%_d.exe" >nul 2>&1
 goto :eof
 
 REM ============================================================
@@ -302,26 +310,14 @@ if not exist "%SRC%" (
     set /a SKIP+=1
     goto :eof
 )
-if exist "%TMPDIR%\!B!.asm" del "%TMPDIR%\!B!.asm" >nul 2>&1
-if exist "%N%_t.obj" del "%N%_t.obj" >nul 2>&1
-
-"%JC%" "%SRC%" -S -o "%TMPDIR%\!B!.asm" >"%TMPDIR%\%N%.build" 2>&1
-if not exist "%TMPDIR%\!B!.asm" (
-    echo   FAIL  %N%  ^(does not compile - see %TMPDIR%\%N%.build^)
+if exist "%TMPDIR%\%N%_c.exe" del "%TMPDIR%\%N%_c.exe" >nul 2>&1
+"%JC%" "%SRC%" -o "%TMPDIR%\%N%_c.exe" >"%TMPDIR%\%N%.build" 2>&1
+if not exist "%TMPDIR%\%N%_c.exe" (
+    echo   FAIL  %N%  ^(does not compile and assemble - see %TMPDIR%\%N%.build^)
     set /a FAIL+=1
     goto :eof
 )
-
-REM  Writing the .asm is not enough: it also has to assemble. Without this
-REM  step test_boot2 emitted  mov cr4, 0x6A0  -- not an x86 instruction --
-REM  and passed. These tests have no main, so they are not linked.
-.\nasm.exe -f win64 -o "%N%_t.obj" "%TMPDIR%\!B!.asm" >>"%TMPDIR%\%N%.build" 2>&1
-if not exist "%N%_t.obj" (
-    echo   FAIL  %N%  ^(compiles but does not assemble - see %TMPDIR%\%N%.build^)
-    set /a FAIL+=1
-    goto :eof
-)
-del "%N%_t.obj" >nul 2>&1
+del "%TMPDIR%\%N%_c.exe" >nul 2>&1
 
 echo   PASS  %N%  ^(compiles and assembles^)
 set /a PASS+=1
@@ -359,60 +355,36 @@ if not errorlevel 1 (
 goto :eof
 
 REM ===========================================================================
-REM  :enctest NAME   assemble NAME.asm both ways and compare the bytes
-REM
-REM  kasm and NASM do not produce identical files: kasm uses movabs where a
-REM  shorter form exists, pads the data section to sixteen bytes, and picks a
-REM  32-bit displacement where an 8-bit one would do. All of that is legal and
-REM  only affects size. What must never differ is the OPCODE, so only the
-REM  bytes the two files have in common are compared, and only up to the
-REM  length of the shorter one.
+REM  :enctest NAME   kasm assembles NAME.asm; the bytes must be tests\enc\NAME.bin
 REM ===========================================================================
 :enctest
 set "N=%~1"
-REM  These take a hand-written .asm, not a .kr, so the fused-source logic
-REM  above does not apply to them.
 if not exist "%N%.asm" (
     echo   OMIT  %N%  ^(no .asm file^)
     set /a SKIP+=1
     goto :eof
 )
-if exist "%TMPDIR%\%N%.nbin" del "%TMPDIR%\%N%.nbin" >nul 2>&1
+if not exist "tests\enc\%N%.bin" (
+    echo   OMIT  %N%  ^(no reference in tests\enc^)
+    set /a SKIP+=1
+    goto :eof
+)
 if exist "%N%.kbin" del "%N%.kbin" >nul 2>&1
-
-nasm.exe -f bin -o "%TMPDIR%\%N%.nbin" "%N%.asm" >"%TMPDIR%\%N%.build" 2>&1
-if not exist "%TMPDIR%\%N%.nbin" (
-    echo   FAIL  %N%  ^(nasm could not assemble it^)
-    set /a FAIL+=1
-    goto :eof
-)
-
-"%JC%" "%N%.asm" --assemble >>"%TMPDIR%\%N%.build" 2>&1
+"%JC%" "%N%.asm" --assemble >"%TMPDIR%\%N%.build" 2>&1
 if not exist "%N%.kbin" (
-    echo   FAIL  %N%  ^(kasm could not assemble it^)
+    echo   FAIL  %N%  ^(kasm could not assemble it - see %TMPDIR%\%N%.build^)
     set /a FAIL+=1
     goto :eof
 )
-
-REM  Compare only the bytes the two files share. fc /b on the whole pair
-REM  always reports a length difference -- kasm pads the data section to
-REM  sixteen bytes -- so the reference is truncated to kasm's length first,
-REM  and any remaining difference is a real opcode mismatch.
-for %%Z in ("%N%.kbin") do set "JLEN=%%~zZ"
-powershell -NoProfile -Command ^
-  "$a=[IO.File]::ReadAllBytes('%TMPDIR%\%N%.nbin');" ^
-  "$b=[IO.File]::ReadAllBytes('%N%.kbin');" ^
-  "$n=[Math]::Min($a.Length,$b.Length);" ^
-  "$d=0; for($i=0;$i -lt $n;$i++){ if($a[$i] -ne $b[$i]){ $d=$i+1; break } };" ^
-  "if($d -eq 0){ exit 0 } else { Write-Output ('first differing byte at '+($d-1)); exit 1 }" ^
-  >"%TMPDIR%\%N%.cmp" 2>&1
+fc /b "%N%.kbin" "tests\enc\%N%.bin" >"%TMPDIR%\%N%.cmp" 2>&1
 if errorlevel 1 (
-    echo   FAIL  %N%  ^(opcodes differ - see %TMPDIR%\%N%.cmp^)
+    echo   FAIL  %N%  ^(bytes differ - see %TMPDIR%\%N%.cmp^)
     set /a FAIL+=1
 ) else (
-    echo   PASS  %N%  ^(same opcodes^)
+    echo   PASS  %N%  ^(same bytes^)
     set /a PASS+=1
 )
+del "%N%.kbin" >nul 2>&1
 goto :eof
 
 REM ===========================================================================

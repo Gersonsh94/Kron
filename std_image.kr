@@ -2,6 +2,7 @@ kron_program
 kron_domain std_image;
 kron_imports
 acquire_domain "std_file.kr";
+acquire_domain "std_math.kr";
 kron_definitions
 
 // =========================================================================
@@ -17,6 +18,7 @@ kron_definitions
 //   image_new(width, height)       a transparent picture
 //   image_width(img)  image_height(img)
 //   image_get(img, x, y)           0xAARRGGBB: alpha 255 is opaque
+//   (image_load reads PNG, baseline JPEG and BMP)
 //   image_set(img, x, y, color)
 //   image_save_bmp(img, path)      a 32-bit BMP any program opens
 //   image_free(img)
@@ -757,7 +759,500 @@ fn im_bmp(p: i64, n: i64) -> i64 {
     return img;
 }
 
+// ------------------------------------------------------------- JPEG ---
+// Baseline JPEG (sequential, Huffman: what cameras and most programs
+// write): grey or YCbCr, any sampling, restart markers. A progressive
+// JPEG is not read: it fails like any picture Kron cannot read.
+shared var jq: [i64; 256];            // four quantisation tables, in zigzag order
+shared var jh_count: [i64; 136];      // eight Huffman tables (DC 0-3, AC 4-7)
+shared var jh_val: [i64; 2048];
+shared var jh_max: [i64; 144];        // by table * 18 + length: largest code
+shared var jh_ptr: [i64; 144];
+shared var jh_min: [i64; 144];
+shared var jc_id: [i64; 4];
+shared var jc_h: [i64; 4];
+shared var jc_v: [i64; 4];
+shared var jc_tq: [i64; 4];
+shared var jc_td: [i64; 4];
+shared var jc_ta: [i64; 4];
+shared var jc_pred: [i64; 4];
+shared var jc_plane: [i64; 4];        // the decoded samples, one byte each
+shared var jc_pw: [i64; 4];           // a plane's width
+shared var jn: i64;                   // components
+shared var jpos: i64;
+shared var jend: i64;
+shared var jbits: i64;
+shared var jnbits: i64;
+shared var jbad: i64;
+shared var jzz: [i64; 64];
+shared var jcs: [f64; 64];
+shared var jblk: [f64; 64];
+shared var jtmp: [f64; 64];
+shared var jready: i64;
+
+fn jp_tables() -> i64 {
+    if jready == 1 { return 0; }
+    // the zigzag order: position k of the stream is natural index jzz[k]
+    var k: i64 = 0;
+    var x: i64 = 0;
+    var y: i64 = 0;
+    var up: i64 = 1;
+    while k < 64 {
+        jzz[k] = y * 8 + x;
+        if up == 1 {
+            if x == 7 { y = y + 1; up = 0; }
+            else if y == 0 { x = x + 1; up = 0; }
+            else { x = x + 1; y = y - 1; }
+        } else {
+            if y == 7 { x = x + 1; up = 1; }
+            else if x == 0 { y = y + 1; up = 1; }
+            else { x = x - 1; y = y + 1; }
+        }
+        k = k + 1;
+    }
+    var i: i64 = 0;
+    while i < 8 {
+        var u: i64 = 0;
+        while u < 8 {
+            var c: f64 = 1.0;
+            if u == 0 { c = 0.7071067811865476; }
+            jcs[i * 8 + u] = c * fcos((2 * i + 1) * u * 3.141592653589793 / 16.0) * 0.5;
+            u = u + 1;
+        }
+        i = i + 1;
+    }
+    jready = 1;
+    return 0;
+}
+
+fn jp_byte() -> i64 {
+    if jpos >= jend {
+        jbad = 1;
+        return 0;
+    }
+    var b: i64 = 0;
+    raw { b = peek8(jpos); }
+    jpos = jpos + 1;
+    return b;
+}
+
+fn jp_bit() -> i64 {
+    if jnbits == 0 {
+        var b: i64 = 0;
+        if jpos < jend {
+            raw { b = peek8(jpos); }
+            if b == 255 {
+                var b2: i64 = 0;
+                if jpos + 1 < jend {
+                    raw { b2 = peek8(jpos + 1); }
+                }
+                if b2 == 0 {
+                    jpos = jpos + 2;
+                } else {
+                    b = 0;                     // a marker: zeros until it is read
+                }
+            } else {
+                jpos = jpos + 1;
+            }
+        }
+        jbits = b;
+        jnbits = 8;
+    }
+    jnbits = jnbits - 1;
+    return (jbits >> jnbits) & 1;
+}
+
+fn jp_receive(s: i64) -> i64 {
+    var v: i64 = 0;
+    var i: i64 = 0;
+    while i < s {
+        v = (v << 1) | jp_bit();
+        i = i + 1;
+    }
+    return v;
+}
+
+fn jp_extend(v: i64, s: i64) -> i64 {
+    if s == 0 { return 0; }
+    if v < (1 << (s - 1)) {
+        return v - (1 << s) + 1;
+    }
+    return v;
+}
+
+fn jp_decode(t: i64) -> i64 {
+    var code: i64 = jp_bit();
+    var l: i64 = 1;
+    while l <= 16 {
+        if code <= jh_max[t * 18 + l] {
+            return jh_val[t * 256 + jh_ptr[t * 18 + l] + code - jh_min[t * 18 + l]];
+        }
+        code = (code << 1) | jp_bit();
+        l = l + 1;
+    }
+    jbad = 1;
+    return 0;
+}
+
+// the codes of a table from its counts (F.15, F.16)
+fn jp_build(t: i64) -> i64 {
+    var code: i64 = 0;
+    var k: i64 = 0;
+    var l: i64 = 1;
+    while l <= 16 {
+        var c: i64 = jh_count[t * 17 + l];
+        jh_ptr[t * 18 + l] = k;
+        jh_min[t * 18 + l] = code;
+        code = code + c;
+        k = k + c;
+        if c > 0 {
+            jh_max[t * 18 + l] = code - 1;
+        } else {
+            jh_max[t * 18 + l] = -1;
+        }
+        code = code << 1;
+        l = l + 1;
+    }
+    return 0;
+}
+
+// one 8 x 8 block of component c, into its plane at (bx, by)
+fn jp_block(c: i64, bx: i64, by: i64) -> i64 {
+    var k: i64 = 0;
+    while k < 64 {
+        jblk[k] = 0.0;
+        k = k + 1;
+    }
+    var q: i64 = jc_tq[c] * 64;
+    var t: i64 = jp_decode(jc_td[c]);
+    var diff: i64 = jp_extend(jp_receive(t), t);
+    jc_pred[c] = jc_pred[c] + diff;
+    jblk[0] = (jc_pred[c] * jq[q]) as f64;
+    k = 1;
+    while k < 64 && jbad == 0 {
+        var rs: i64 = jp_decode(4 + jc_ta[c]);
+        var r: i64 = rs >> 4;
+        var sz: i64 = rs & 15;
+        if sz == 0 {
+            if r != 15 {
+                k = 64;
+            } else {
+                k = k + 16;
+            }
+        } else {
+            k = k + r;
+            if k < 64 {
+                jblk[jzz[k]] = (jp_extend(jp_receive(sz), sz) * jq[q + k]) as f64;
+            }
+            k = k + 1;
+        }
+    }
+    // the inverse DCT, rows then columns
+    var y: i64 = 0;
+    while y < 8 {
+        var x: i64 = 0;
+        while x < 8 {
+            var sum: f64 = 0.0;
+            var u: i64 = 0;
+            while u < 8 {
+                sum = sum + jcs[x * 8 + u] * jblk[y * 8 + u];
+                u = u + 1;
+            }
+            jtmp[y * 8 + x] = sum;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var plane: i64 = jc_plane[c];
+    var pw: i64 = jc_pw[c];
+    var x2: i64 = 0;
+    while x2 < 8 {
+        var y2: i64 = 0;
+        while y2 < 8 {
+            var sum2: f64 = 0.0;
+            var v: i64 = 0;
+            while v < 8 {
+                sum2 = sum2 + jcs[y2 * 8 + v] * jtmp[v * 8 + x2];
+                v = v + 1;
+            }
+            var px: i64 = (sum2 + 128.5) as i64;
+            if px < 0 { px = 0; }
+            if px > 255 { px = 255; }
+            raw { poke8(plane + (by + y2) * pw + bx + x2, px); }
+            y2 = y2 + 1;
+        }
+        x2 = x2 + 1;
+    }
+    return 0;
+}
+
+fn jp_be16(p: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = (peek8(p) << 8) | peek8(p + 1); }
+    return v;
+}
+
+fn im_jpeg(p: i64, n: i64) -> i64 {
+    jp_tables();
+    jbad = 0;
+    jn = 0;
+    var w: i64 = 0;
+    var h: i64 = 0;
+    var restart: i64 = 0;
+    var at: i64 = 2;
+    var img: i64 = 0;
+    while at + 4 <= n && jbad == 0 {
+        var b: i64 = 0;
+        var m: i64 = 0;
+        raw {
+            b = peek8(p + at);
+            m = peek8(p + at + 1);
+        }
+        if b != 255 {
+            at = at + 1;
+        } else if m == 216 || (m >= 208 && m <= 215) || m == 1 || m == 255 {
+            at = at + 2;
+        } else if m == 217 {
+            at = n;
+        } else {
+            var len: i64 = jp_be16(p + at + 2);
+            var seg: i64 = p + at + 4;
+            if m == 219 {
+                // DQT: tables of 8-bit (or 16-bit) values
+                var o: i64 = 0;
+                while o < len - 2 {
+                    var pq: i64 = 0;
+                    raw { pq = peek8(seg + o); }
+                    var tq: i64 = pq & 3;
+                    var i: i64 = 0;
+                    while i < 64 {
+                        if (pq >> 4) == 0 {
+                            raw { jq[tq * 64 + i] = peek8(seg + o + 1 + i); }
+                        } else {
+                            jq[tq * 64 + i] = jp_be16(seg + o + 1 + i * 2);
+                        }
+                        i = i + 1;
+                    }
+                    if (pq >> 4) == 0 { o = o + 65; } else { o = o + 129; }
+                }
+            } else if m == 192 || m == 193 {
+                raw {
+                    h = jp_be16(seg + 1);
+                    w = jp_be16(seg + 3);
+                    jn = peek8(seg + 5);
+                }
+                if jn != 1 && jn != 3 || w <= 0 || h <= 0 {
+                    hp_err = 17;
+                    return 0;
+                }
+                var c: i64 = 0;
+                while c < jn {
+                    raw {
+                        jc_id[c] = peek8(seg + 6 + c * 3);
+                        jc_h[c] = peek8(seg + 7 + c * 3) >> 4;
+                        jc_v[c] = peek8(seg + 7 + c * 3) & 15;
+                        jc_tq[c] = peek8(seg + 8 + c * 3) & 3;
+                    }
+                    c = c + 1;
+                }
+            } else if m == 194 || m == 195 || (m >= 197 && m <= 207 && m != 200 && m != 204) {
+                hp_err = 17;                   // progressive, lossless, arithmetic
+                return 0;
+            } else if m == 196 {
+                var o2: i64 = 0;
+                while o2 < len - 2 {
+                    var tc: i64 = 0;
+                    raw { tc = peek8(seg + o2); }
+                    var t: i64 = (tc >> 4) * 4 + (tc & 3);
+                    var total: i64 = 0;
+                    var l: i64 = 1;
+                    while l <= 16 {
+                        raw { jh_count[t * 17 + l] = peek8(seg + o2 + l); }
+                        total = total + jh_count[t * 17 + l];
+                        l = l + 1;
+                    }
+                    var i2: i64 = 0;
+                    while i2 < total && i2 < 256 {
+                        raw { jh_val[t * 256 + i2] = peek8(seg + o2 + 17 + i2); }
+                        i2 = i2 + 1;
+                    }
+                    jp_build(t);
+                    o2 = o2 + 17 + total;
+                }
+            } else if m == 221 {
+                restart = jp_be16(seg);
+            } else if m == 218 {
+                img = jp_scan(p, n, seg, w, h, restart);
+                return img;
+            }
+            at = at + 2 + len;
+        }
+    }
+    hp_err = 17;
+    return 0;
+}
+
+// SOS and the data after it: the whole picture, one scan
+fn jp_scan(p: i64, n: i64, seg: i64, w: i64, h: i64, restart: i64) -> i64 {
+    var ns: i64 = 0;
+    raw { ns = peek8(seg); }
+    if ns != jn || w == 0 {
+        hp_err = 17;
+        return 0;
+    }
+    var k: i64 = 0;
+    while k < ns {
+        var cid: i64 = 0;
+        var tt: i64 = 0;
+        raw {
+            cid = peek8(seg + 1 + k * 2);
+            tt = peek8(seg + 2 + k * 2);
+        }
+        var c: i64 = 0;
+        while c < jn {
+            if jc_id[c] == cid {
+                jc_td[c] = tt >> 4;
+                jc_ta[c] = tt & 15;
+            }
+            c = c + 1;
+        }
+        k = k + 1;
+    }
+    var hmax: i64 = 1;
+    var vmax: i64 = 1;
+    var c2: i64 = 0;
+    while c2 < jn {
+        if jn == 1 { jc_h[c2] = 1; jc_v[c2] = 1; }
+        if jc_h[c2] > hmax { hmax = jc_h[c2]; }
+        if jc_v[c2] > vmax { vmax = jc_v[c2]; }
+        c2 = c2 + 1;
+    }
+    var mcux: i64 = (w + 8 * hmax - 1) / (8 * hmax);
+    var mcuy: i64 = (h + 8 * vmax - 1) / (8 * vmax);
+    c2 = 0;
+    while c2 < jn {
+        jc_pw[c2] = mcux * jc_h[c2] * 8;
+        jc_plane[c2] = hp_alloc(jc_pw[c2] * mcuy * jc_v[c2] * 8 + 16);
+        jc_pred[c2] = 0;
+        if jc_plane[c2] == 0 { return 0; }
+        c2 = c2 + 1;
+    }
+    jpos = seg + 1 + ns * 2 + 3;
+    jend = p + n;
+    jnbits = 0;
+    var count: i64 = 0;
+    var my: i64 = 0;
+    while my < mcuy && jbad == 0 {
+        var mx: i64 = 0;
+        while mx < mcux && jbad == 0 {
+            if restart > 0 && count > 0 && count % restart == 0 {
+                // RSTn: the bits start again at the next byte
+                jnbits = 0;
+                while jpos + 1 < jend && !(jp_peek(jpos) == 255 && jp_peek(jpos + 1) >= 208 && jp_peek(jpos + 1) <= 215) {
+                    jpos = jpos + 1;
+                }
+                jpos = jpos + 2;
+                var r: i64 = 0;
+                while r < jn {
+                    jc_pred[r] = 0;
+                    r = r + 1;
+                }
+            }
+            var c3: i64 = 0;
+            while c3 < jn {
+                var v: i64 = 0;
+                while v < jc_v[c3] {
+                    var hh: i64 = 0;
+                    while hh < jc_h[c3] {
+                        jp_block(c3, (mx * jc_h[c3] + hh) * 8, (my * jc_v[c3] + v) * 8);
+                        hh = hh + 1;
+                    }
+                    v = v + 1;
+                }
+                c3 = c3 + 1;
+            }
+            count = count + 1;
+            mx = mx + 1;
+        }
+        my = my + 1;
+    }
+    var img: i64 = im_new(w, h);
+    if img != 0 {
+        var q: i64 = im_block(img);
+        var y: i64 = 0;
+        while y < h {
+            var x: i64 = 0;
+            while x < w {
+                var yy: i64 = jp_sample(0, x, y, hmax, vmax);
+                var rgb: i64 = 0;
+                if jn == 1 {
+                    rgb = (yy << 16) | (yy << 8) | yy;
+                } else {
+                    var cb: i64 = jp_sample(1, x, y, hmax, vmax) - 128;
+                    var cr: i64 = jp_sample(2, x, y, hmax, vmax) - 128;
+                    // in 1/65536: 1.402, 0.344136, 0.714136, 1.772
+                    var r2: i64 = yy + ((91881 * cr + 32768) >> 16);
+                    var g: i64 = yy - ((22554 * cb + 46802 * cr - 32768) >> 16);
+                    var b: i64 = yy + ((116130 * cb + 32768) >> 16);
+                    if r2 < 0 { r2 = 0; } if r2 > 255 { r2 = 255; }
+                    if g < 0 { g = 0; } if g > 255 { g = 255; }
+                    if b < 0 { b = 0; } if b > 255 { b = 255; }
+                    rgb = (r2 << 16) | (g << 8) | b;
+                }
+                raw { poke32(q + 16 + (y * w + x) * 4, 0xFF000000 | rgb); }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+    c2 = 0;
+    while c2 < jn {
+        hp_release(jc_plane[c2]);
+        c2 = c2 + 1;
+    }
+    return img;
+}
+
+fn jp_peek(a: i64) -> i64 {
+    var b: i64 = 0;
+    raw { b = peek8(a); }
+    return b;
+}
+
+fn jp_sample(c: i64, x: i64, y: i64, hmax: i64, vmax: i64) -> i64 {
+    var sx: i64 = x * jc_h[c] / hmax;
+    var sy: i64 = y * jc_v[c] / vmax;
+    var v: i64 = 0;
+    raw { v = peek8(jc_plane[c] + sy * jc_pw[c] + sx); }
+    return v;
+}
+
 // ---------------------------------------------------------- the calls ---
+
+// the picture in n bytes at p, whatever its kind; the lock is held
+fn im_decode_any(p: i64, n: i64) -> i64 {
+    var b0: i64 = 0;
+    var b1: i64 = 0;
+    if n < 2 {
+        hp_err = 17;
+        return 0;
+    }
+    raw {
+        b0 = peek8(p);
+        b1 = peek8(p + 1);
+    }
+    if n >= 8 && b0 == 137 && b1 == 80 {
+        return im_png(p, n);
+    }
+    if b0 == 66 && b1 == 77 {
+        return im_bmp(p, n);
+    }
+    if n >= 4 && b0 == 255 && b1 == 216 {
+        return im_jpeg(p, n);
+    }
+    hp_err = 17;
+    return 0;
+}
 
 fn image_load(path: i64) -> i64 {
     lock_take(HP_LOCK);
@@ -766,24 +1261,18 @@ fn image_load(path: i64) -> i64 {
     if t != 0 {
         var q: i64 = ob_get(t, OB_TEXT);
         var n: i64 = 0;
-        var b0: i64 = 0;
-        var b1: i64 = 0;
-        raw {
-            n = peek(q);
-            b0 = peek8(q + 8);
-            b1 = peek8(q + 9);
-        }
-        if n >= 8 && b0 == 137 && b1 == 80 {
-            img = im_png(q + 8, n);
-        } else if n >= 2 && b0 == 66 && b1 == 77 {
-            img = im_bmp(q + 8, n);
-        } else {
-            hp_err = 17;
-        }
+        raw { n = peek(q); }
+        img = im_decode_any(q + 8, n);
         ob_drop(t);
         hp_release(q);
     }
     return text_end(img);
+}
+
+// a picture from the bytes of a PNG, JPEG or BMP file already in memory
+fn image_from_bytes(address: i64, n: i64) -> i64 {
+    lock_take(HP_LOCK);
+    return text_end(im_decode_any(address, n));
 }
 
 fn image_new(width: i64, height: i64) -> i64 {

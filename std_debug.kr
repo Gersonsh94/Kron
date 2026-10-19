@@ -1,0 +1,621 @@
+kron_program
+kron_domain std_debug;
+kron_imports
+acquire_domain "std_text.kr";
+acquire_domain "std_list.kr";
+acquire_domain "std_map.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- the debugger's side inside a program.
+//
+// Not imported by hand: kronc adds it to a build made with --debug, which
+// also puts a call before every statement of the program's own files (the
+// std_*.kr modules run at full speed, without stops) and keeps every local
+// in its place in the frame, where this module reads it. The editor (the
+// Kron extension for VS Code) starts the program and talks to it through
+// its standard input and output:
+//
+//   the program says, on lines of their own starting with "@@kdbg ":
+//     hello N             then "file I NAME" for each of its N files, "ready"
+//     stop REASON         entry, step or breakpoint; then the frames,
+//                         innermost first: "frame K FILE LINE FUNCTION",
+//                         the values: "var K PATH TYPE VALUE" (K is a frame,
+//                         or g for the globals; PATH like p, p.x, a[3]),
+//                         and "end"
+//   the editor answers, a line each:
+//     b FILE LINE         a breakpoint (FILE: the number from hello)
+//     c                   no breakpoints
+//     run                 go on until a breakpoint
+//     step                stop at the next statement, entering calls
+//     next                the next statement of this function (or of the
+//                         one it returns to)
+//     out                 the first statement after this function returns
+//
+// The main thread is the one followed; other threads run without stops.
+// What the program reads from its standard input while debugged goes to
+// it only after the debugger's lines.
+// =========================================================================
+
+const KD_MAX_BP: i64 = 1024;
+const KD_MAX_FRAMES: i64 = 256;
+const KD_SHOW: i64 = 64;           // elements shown of an array or a list
+
+var kd_started: i64;
+var kd_mode: i64;                  // 0 run, 1 step, 2 next, 3 out
+var kd_ref: i64;                   // the frame next and out measure from
+var kd_bps: [i64; 1024];
+var kd_nbp: i64;
+var kd_tid: i64;
+var kd_info: i64;
+var kd_ss_bp: [i64; 256];          // the program's frames: frame pointer,
+var kd_ss_pc: [i64; 256];          // where it is, and its line
+var kd_ss_code: [i64; 256];
+var kd_ss_n: i64;
+var kd_in: [u8; 4096];
+var kd_inn: i64;
+var kd_inp: i64;
+var kd_rf: i64;                    // Windows: ReadFile, the input, the thread
+var kd_hin: i64;
+var kd_gtid: i64;
+var kd_real: [f64; 1];
+var kd_real32: [f32; 1];
+
+// ------------------------------------------------------------- the host ---
+fn kd_win() -> i64 {
+    return target_os() == 1;
+}
+
+fn kd_load() -> i64 {
+    if kd_win() && kd_rf == 0 {
+        raw {
+            var k: i64 = dll_load("kernel32.dll");
+            kd_rf = dll_proc(k, "ReadFile");
+            kd_gtid = dll_proc(k, "GetCurrentThreadId");
+            var gsh: i64 = dll_proc(k, "GetStdHandle");
+            kd_hin = call gsh(0 - 10);
+        }
+    }
+    return 0;
+}
+
+fn kd_thread() -> i64 {
+    var t: i64 = 0;
+    raw {
+        if kd_win() {
+            t = call kd_gtid();
+        } else {
+            t = syscall(186);
+        }
+    }
+    return t;
+}
+
+// the next byte of the standard input, -1 at its end
+fn kd_getc() -> i64 {
+    if kd_inp >= kd_inn {
+        var n: i64 = 0;
+        raw {
+            if kd_win() {
+                var got: [i64; 1];
+                got[0] = 0;
+                var ok: i64 = call kd_rf(kd_hin, &kd_in[0], 4096, &got[0], 0);
+                n = got[0] & 4294967295;
+                if ok == 0 { n = 0; }
+            } else {
+                n = syscall(0, 0, &kd_in[0], 4096);
+            }
+        }
+        if n <= 0 { return -1; }
+        kd_inn = n;
+        kd_inp = 0;
+    }
+    var c: i64 = kd_in[kd_inp];
+    kd_inp = kd_inp + 1;
+    return c;
+}
+
+// a line of the input without its end, or "" with *eof set
+var kd_eof: i64;
+fn kd_readline() -> text {
+    var t: text = text_new();
+    var c: i64 = kd_getc();
+    if c < 0 {
+        kd_eof = 1;
+        return t;
+    }
+    while c >= 0 && c != 10 {
+        if c != 13 { text_add_char(t, c); }
+        c = kd_getc();
+    }
+    return t;
+}
+
+fn kd_say(t: i64) -> i64 {
+    var line: text = text_add(text_new(), "@@kdbg ");
+    text_add(line, t);
+    say(line);
+    return 0;
+}
+
+// --------------------------------------------------------------- memory ---
+fn kd_peek(a: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek(a); }
+    return v;
+}
+
+fn kd_cstr(a: i64) -> text {
+    var t: text = text_new();
+    if a == 0 { return t; }
+    var i: i64 = 0;
+    var c: i64 = 0;
+    raw { c = peek8(a); }
+    while c != 0 && i < 200 {
+        text_add_char(t, c);
+        i = i + 1;
+        raw { c = peek8(a + i); }
+    }
+    return t;
+}
+
+// a value of w bytes at a, as the type says
+fn kd_scalar(a: i64, w: i64, flags: i64) -> text {
+    var t: text = text_new();
+    var v: i64 = 0;
+    if (flags & 1) != 0 {
+        if w == 4 {
+            raw {
+                poke32(&kd_real32[0], peek32(a));
+            }
+            text_add_real(t, kd_real32[0], 6);
+        } else {
+            raw {
+                poke(&kd_real[0], peek(a));
+            }
+            text_add_real(t, kd_real[0], 6);
+        }
+        return kd_trim(t);
+    }
+    raw {
+        if w == 1 { v = peek8(a); }
+        else if w == 2 { v = peek16(a); }
+        else if w == 4 { v = peek32(a); }
+        else { v = peek(a); }
+    }
+    if (flags & 2) == 0 {
+        if w == 1 && v >= 128 { v = v - 256; }
+        if w == 2 && v >= 32768 { v = v - 65536; }
+        if w == 4 && v >= 2147483648 { v = v - 4294967296; }
+    }
+    if (flags & 8) != 0 {
+        return kd_hex(v);
+    }
+    text_add_int(t, v);
+    return t;
+}
+
+fn kd_hex(v: i64) -> text {
+    var t: text = text_add(text_new(), "0x");
+    var k: i64 = 60;
+    var started: i64 = 0;
+    while k >= 0 {
+        var d: i64 = (v >> k) & 15;
+        if d != 0 || started == 1 || k == 0 {
+            started = 1;
+            if d < 10 { text_add_char(t, 48 + d); } else { text_add_char(t, 87 + d); }
+        }
+        k = k - 4;
+    }
+    return t;
+}
+
+// 2.500000 -> 2.5
+fn kd_trim(t: i64) -> text {
+    var n: i64 = text_len(t);
+    if text_find(t, ".") < 0 { return t; }
+    while n > 1 && text_at(t, n - 1) == 48 { n = n - 1; }
+    if text_at(t, n - 1) == 46 { n = n + 1; }
+    return text_part(t, 0, n);
+}
+
+// what a text holds (a text of std_text or a "..." of the program), quoted,
+// without failing on a bad one
+fn kd_text(h: i64) -> text {
+    var t: text = text_new();
+    lock_take(HP_LOCK);
+    var e0: i64 = hp_err;
+    var ok: i64 = tv_view(h);
+    var p: i64 = tv_p;
+    var n: i64 = tv_n;
+    hp_err = e0;
+    lock_give(HP_LOCK);
+    if ok == 0 {
+        text_add(t, "(not a text)");
+        return t;
+    }
+    text_add_char(t, 34);
+    var i: i64 = 0;
+    while i < n && i < 120 {
+        var c: i64 = 0;
+        raw { c = peek8(p + i); }
+        if c == 10 { text_add(t, "\\n"); }
+        else if c == 9 { text_add(t, "\\t"); }
+        else if c == 34 { text_add(t, "\\\""); }
+        else if c < 32 { text_add(t, "?"); }
+        else { text_add_char(t, c); }
+        i = i + 1;
+    }
+    if n > 120 { text_add(t, "..."); }
+    text_add_char(t, 34);
+    return t;
+}
+
+// a list's block, 0 when the handle is not a list
+fn kd_list(h: i64) -> i64 {
+    if h == 0 { return 0; }
+    lock_take(HP_LOCK);
+    var e0: i64 = hp_err;
+    var q: i64 = ob_get(h, OB_LIST);
+    hp_err = e0;
+    lock_give(HP_LOCK);
+    return q;
+}
+
+fn kd_map_count(h: i64) -> i64 {
+    if h == 0 { return -1; }
+    lock_take(HP_LOCK);
+    var e0: i64 = hp_err;
+    var q: i64 = ob_get(h, OB_MAP);
+    hp_err = e0;
+    lock_give(HP_LOCK);
+    if q == 0 { return -1; }
+    var n: i64 = 0;
+    raw { n = peek(q); }
+    return n;
+}
+
+// a value of a list: tag 1 a text, 2 a real, else an integer
+fn kd_item(v: i64, tag: i64) -> text {
+    if tag == 1 { return kd_text(v); }
+    if tag == 2 {
+        var t: text = text_new();
+        raw { poke(&kd_real[0], v); }
+        text_add_real(t, kd_real[0], 6);
+        return kd_trim(t);
+    }
+    return text_add_int(text_new(), v);
+}
+
+// ------------------------------------------------------------- the tables
+fn kd_info_at(i: i64) -> i64 { return kd_peek(kd_info + i * 8); }
+
+fn kd_struct_bytes(sid: i64) -> i64 {
+    return kd_peek(kd_info_at(4) + sid * 32 + 24);
+}
+
+fn kd_struct_name(sid: i64) -> text {
+    return kd_cstr(kd_peek(kd_info_at(4) + sid * 32));
+}
+
+// the type of a value, as a word
+fn kd_type(flags: i64, w: i64, sid1: i64, vtag: i64) -> text {
+    var t: text = text_new();
+    if sid1 > 0 { return kd_struct_name(sid1 - 1); }
+    var k: i64 = vtag & 15;
+    if k == 1 { return text_add(t, "text"); }
+    if k == 2 { return text_add(t, "list"); }
+    if k == 3 { return text_add(t, "map"); }
+    if (flags & 8) != 0 { return text_add(t, "ptr"); }
+    if (flags & 1) != 0 {
+        if w == 4 { return text_add(t, "f32"); }
+        return text_add(t, "f64");
+    }
+    if (flags & 2) != 0 { text_add(t, "u"); } else { text_add(t, "i"); }
+    var bits: i64 = w * 8;
+    if w == 0 { bits = 64; }
+    text_add_int(t, bits);
+    return t;
+}
+
+fn kd_var(frame: i64, path: i64, ty: i64, value: i64) -> i64 {
+    var t: text = text_new();
+    text_add(t, "var ");
+    text_add(t, frame);
+    text_add(t, " ");
+    text_add(t, path);
+    text_add(t, " ");
+    text_add(t, ty);
+    text_add(t, " ");
+    text_add(t, value);
+    kd_say(t);
+    return 0;
+}
+
+// one value at address a, and what is inside it, under path
+fn kd_show(frame: i64, path: i64, a: i64, w: i64, flags: i64, arrlen: i64, sid1: i64, vtag: i64, depth: i64) -> i64 {
+    if depth > 4 { return 0; }
+    // an array: its elements
+    if arrlen > 0 {
+        var base: i64 = a;
+        if (flags & 4) != 0 { base = kd_peek(a); }
+        var ew: i64 = w;
+        if ew == 0 { ew = 8; }
+        if sid1 > 0 { ew = kd_struct_bytes(sid1 - 1); }
+        var ty: text = kd_type(flags & 11, w, sid1, vtag);
+        text_add(ty, "[");
+        text_add_int(ty, arrlen);
+        text_add(ty, "]");
+        var sum: text = text_add(text_new(), "[");
+        var i: i64 = 0;
+        while i < arrlen && i < 8 && sid1 == 0 && (vtag & 15) == 0 {
+            if i > 0 { text_add(sum, ", "); }
+            text_add(sum, kd_scalar(base + i * ew, ew, flags & 11));
+            i = i + 1;
+        }
+        if arrlen > 8 || sid1 > 0 || (vtag & 15) != 0 { text_add(sum, "..."); }
+        text_add(sum, "]");
+        kd_var(frame, path, ty, sum);
+        i = 0;
+        while i < arrlen && i < KD_SHOW {
+            var p: text = text_add(text_new(), path);
+            text_add(p, "[");
+            text_add_int(p, i);
+            text_add(p, "]");
+            kd_show(frame, p, base + i * ew, ew, flags & 11, 0, sid1, vtag, depth + 1);
+            i = i + 1;
+        }
+        return 0;
+    }
+    // a struct: its fields
+    if sid1 > 0 {
+        var sbase: i64 = a;
+        if (flags & 4) != 0 { sbase = kd_peek(a); }
+        var st: i64 = kd_info_at(4) + (sid1 - 1) * 32;
+        var first: i64 = kd_peek(st + 8);
+        var nf: i64 = kd_peek(st + 16);
+        kd_var(frame, path, kd_struct_name(sid1 - 1), "{...}");
+        var f: i64 = 0;
+        while f < nf {
+            var fe: i64 = kd_info_at(5) + (first + f) * 48;
+            var fp: text = text_add(text_new(), path);
+            text_add(fp, ".");
+            text_add(fp, kd_cstr(kd_peek(fe)));
+            var fsid1: i64 = kd_peek(fe + 32);
+            kd_show(frame, fp, sbase + kd_peek(fe + 8), kd_peek(fe + 16), kd_peek(fe + 24), 0, fsid1, kd_peek(fe + 40), depth + 1);
+            f = f + 1;
+        }
+        return 0;
+    }
+    var k: i64 = vtag & 15;
+    var h: i64 = kd_peek(a);
+    if k == 1 {
+        kd_var(frame, path, "text", kd_text(h));
+        return 0;
+    }
+    if k == 2 {
+        var q: i64 = kd_list(h);
+        if q == 0 {
+            kd_var(frame, path, "list", "(none)");
+            return 0;
+        }
+        var n: i64 = kd_peek(q);
+        var tag: i64 = (vtag >> 4) & 15;
+        var lt: text = text_add(text_new(), "list(");
+        text_add_int(lt, n);
+        text_add(lt, ")");
+        var ls: text = text_add(text_new(), "[");
+        var j: i64 = 0;
+        while j < n && j < 8 {
+            if j > 0 { text_add(ls, ", "); }
+            text_add(ls, kd_item(kd_peek(q + 8 + j * 8), tag));
+            j = j + 1;
+        }
+        if n > 8 { text_add(ls, ", ..."); }
+        text_add(ls, "]");
+        kd_var(frame, path, lt, ls);
+        j = 0;
+        while j < n && j < KD_SHOW {
+            var lp: text = text_add(text_new(), path);
+            text_add(lp, "[");
+            text_add_int(lp, j);
+            text_add(lp, "]");
+            kd_var(frame, lp, "item", kd_item(kd_peek(q + 8 + j * 8), tag));
+            j = j + 1;
+        }
+        return 0;
+    }
+    if k == 3 {
+        var mc: i64 = kd_map_count(h);
+        var mv: text = text_new();
+        if mc < 0 {
+            text_add(mv, "(none)");
+        } else {
+            text_add(mv, "{");
+            text_add_int(mv, mc);
+            text_add(mv, " entries}");
+        }
+        kd_var(frame, path, "map", mv);
+        return 0;
+    }
+    var sw: i64 = w;
+    if sw == 0 { sw = 8; }
+    kd_var(frame, path, kd_type(flags, sw, 0, 0), kd_scalar(a, sw, flags));
+    return 0;
+}
+
+// the record of the function holding pc, 0 when none
+fn kd_record(pc: i64) -> i64 {
+    var r: i64 = kd_info_at(0);
+    var guard: i64 = 0;
+    while r != 0 && guard < 100000 {
+        if pc >= kd_peek(r + 8) && pc < kd_peek(r + 16) { return r; }
+        r = kd_peek(r);
+        guard = guard + 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------- stopping ---
+fn kd_hello() -> i64 {
+    var n: i64 = kd_info_at(1);
+    kd_say(text_add_int(text_add(text_new(), "hello "), n));
+    var i: i64 = 0;
+    while i < n {
+        var t: text = text_add(text_new(), "file ");
+        text_add_int(t, i);
+        text_add(t, " ");
+        text_add(t, kd_cstr(kd_peek(kd_info_at(2) + i * 8)));
+        kd_say(t);
+        i = i + 1;
+    }
+    kd_say("ready");
+    return 0;
+}
+
+fn kd_stop(reason: i64) -> i64 {
+    var t: text = text_add(text_new(), "stop ");
+    if reason == 1 { text_add(t, "step"); }
+    if reason == 2 { text_add(t, "breakpoint"); }
+    if reason == 3 { text_add(t, "entry"); }
+    kd_say(t);
+    // the frames, innermost first
+    var k: i64 = 0;
+    var i: i64 = kd_ss_n - 1;
+    while i >= 0 {
+        var code: i64 = kd_ss_code[i];
+        var r: i64 = kd_record(kd_ss_pc[i]);
+        var f: text = text_add(text_new(), "frame ");
+        text_add_int(f, k);
+        text_add(f, " ");
+        text_add_int(f, code >> 20);
+        text_add(f, " ");
+        text_add_int(f, code & 1048575);
+        text_add(f, " ");
+        if r != 0 {
+            text_add(f, kd_cstr(kd_peek(r + 24)));
+        } else {
+            text_add(f, "?");
+        }
+        kd_say(f);
+        k = k + 1;
+        i = i - 1;
+    }
+    // the locals of each frame
+    k = 0;
+    i = kd_ss_n - 1;
+    while i >= 0 && k < 32 {
+        var r2: i64 = kd_record(kd_ss_pc[i]);
+        if r2 != 0 {
+            var nl: i64 = kd_peek(r2 + 40);
+            var j: i64 = 0;
+            var fr: text = text_add_int(text_new(), k);
+            while j < nl {
+                var e: i64 = r2 + 48 + j * 56;
+                var addr: i64 = kd_ss_bp[i] - kd_peek(e);
+                kd_show(fr, kd_cstr(kd_peek(e + 48)), addr, kd_peek(e + 24), kd_peek(e + 8), kd_peek(e + 16), kd_peek(e + 32), kd_peek(e + 40), 0);
+                j = j + 1;
+            }
+        }
+        k = k + 1;
+        i = i - 1;
+    }
+    // the globals of the program's files
+    var ng: i64 = kd_info_at(6);
+    var g: i64 = 0;
+    while g < ng {
+        var ge: i64 = kd_info_at(7) + g * 56;
+        kd_show("g", kd_cstr(kd_peek(ge + 48)), kd_peek(ge), kd_peek(ge + 24), kd_peek(ge + 8), kd_peek(ge + 16), kd_peek(ge + 32), kd_peek(ge + 40), 0);
+        g = g + 1;
+    }
+    kd_say("end");
+    return 0;
+}
+
+// commands until one says to go on
+fn kd_commands(bp: i64) -> i64 {
+    var going: i64 = 1;
+    while going == 1 {
+        var line: text = kd_readline();
+        if kd_eof == 1 {
+            // the editor is gone: run to the end
+            kd_mode = 0;
+            kd_nbp = 0;
+            return 0;
+        }
+        var w: i64 = text_split(line, " ");
+        if list_len(w) > 0 {
+            var cmd: text = list_get(w, 0);
+            if text_same(cmd, "b") && list_len(w) >= 3 && kd_nbp < KD_MAX_BP {
+                kd_bps[kd_nbp] = (text_to_int(list_get(w, 1)) << 20) | text_to_int(list_get(w, 2));
+                kd_nbp = kd_nbp + 1;
+            } else if text_same(cmd, "c") {
+                kd_nbp = 0;
+            } else if text_same(cmd, "run") {
+                kd_mode = 0;
+                return 0;
+            } else if text_same(cmd, "step") {
+                kd_mode = 1;
+                return 0;
+            } else if text_same(cmd, "next") {
+                kd_mode = 2;
+                kd_ref = bp;
+                return 0;
+            } else if text_same(cmd, "out") {
+                kd_mode = 3;
+                kd_ref = bp;
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// before every statement of a debug build (called by __dbg_stmt)
+fn kdbg_hook(code: i64, bp: i64, pc: i64, info: i64) -> i64 {
+    if kd_started == 0 {
+        kd_started = 1;
+        kd_info = info;
+        kd_load();
+        kd_tid = kd_thread();
+        kd_hello();
+        kd_ss_n = 0;
+        kd_commands(bp);
+    }
+    if kd_thread() != kd_tid { return 0; }
+    // the frames that returned are gone; this one is new, or moved on
+    while kd_ss_n > 0 && kd_ss_bp[kd_ss_n - 1] < bp {
+        kd_ss_n = kd_ss_n - 1;
+    }
+    if kd_ss_n > 0 && kd_ss_bp[kd_ss_n - 1] == bp {
+        kd_ss_pc[kd_ss_n - 1] = pc;
+        kd_ss_code[kd_ss_n - 1] = code;
+    } else if kd_ss_n < KD_MAX_FRAMES {
+        kd_ss_bp[kd_ss_n] = bp;
+        kd_ss_pc[kd_ss_n] = pc;
+        kd_ss_code[kd_ss_n] = code;
+        kd_ss_n = kd_ss_n + 1;
+    }
+    var reason: i64 = 0;
+    if kd_mode == 1 {
+        reason = 1;
+    } else if kd_mode == 2 && bp >= kd_ref {
+        reason = 1;
+    } else if kd_mode == 3 && bp > kd_ref {
+        reason = 1;
+    }
+    if reason == 0 && kd_nbp > 0 {
+        var i: i64 = 0;
+        while i < kd_nbp {
+            if kd_bps[i] == code {
+                reason = 2;
+                i = kd_nbp;
+            }
+            i = i + 1;
+        }
+    }
+    if reason == 0 { return 0; }
+    kd_stop(reason);
+    kd_commands(bp);
+    return 0;
+}

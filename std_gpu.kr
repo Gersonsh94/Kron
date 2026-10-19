@@ -1,0 +1,1813 @@
+kron_program
+kron_domain std_gpu;
+kron_imports
+acquire_domain "std_shader.kr";
+acquire_domain "std_math3d.kr";
+acquire_domain "std_image.kr";
+acquire_domain "std_window.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- 3D on the graphics card.
+//
+//     window_open(1280, 720, "demo");
+//     gpu_open(1280, 720);
+//     var prog: i64 = gpu_shader(source);         // KSL, see std_shader.kr
+//     var cube: i64 = gpu_cube();
+//     var tex: i64 = gpu_texture(image_load("crate.png"));
+//     while window_show() {
+//         gpu_begin(color4(20, 24, 32, 255));
+//         gpu_set_mat4(prog, "mvp", mvp);
+//         gpu_draw(prog, cube, tex);
+//         gpu_end();                               // the frame is in the window
+//     }
+//
+// The same program draws with Vulkan on Windows, Linux and Android, Metal
+// on macOS and iOS, and WebGPU on the web; the shader is translated for
+// each (std_shader.kr). The card draws the frame and the window shows it;
+// without a window it is drawn all the same, for gpu_pixel and
+// gpu_save_bmp (tests, pictures, servers).
+//
+//     gpu_open(w, h)                    the card, drawing w x h
+//     gpu_name()                        which card, as a text
+//     gpu_shader(source)                a shader program
+//     gpu_mesh(vertices, nverts, floats_per_vertex, indices, nindices)
+//                                       a mesh from an [f32] and a [u32]
+//                                       array (their addresses)
+//     gpu_cube() gpu_plane(size) gpu_sphere(rings, segments)
+//                                       ready meshes: position, normal, uv
+//     gpu_texture(img)                  a picture of std_image on the card
+//     gpu_begin(clear_color)  gpu_end() a frame
+//     gpu_set_mat4/vec4/vec3/vec2/float(prog, "name", value)
+//                                       a uniform, for the next draws
+//     gpu_draw(prog, mesh, tex)         tex 0: white
+//     gpu_draw_textures(prog, mesh, t0, t1, t2, t3)
+//     gpu_cull(on)  gpu_depth(on)  gpu_blend(on)   for the shaders made after
+//     gpu_pixel(x, y)  gpu_save_bmp(path)          the last frame
+//     gpu_close()
+//
+// The vertices of a mesh are floats, one corner after another, each with
+// the shader's inputs in their order: in pos: vec3; in normal: vec3;
+// in uv: vec2 is eight floats a corner. Triangles are counter-clockwise
+// seen from the front.
+// =========================================================================
+
+const GPU_MAX_DRAWS: i64 = 8192;
+const GPU_UNIFORM_STEP: i64 = 256;   // every GPU accepts this alignment
+const GPU_MAX_UNIFORM: i64 = 2048;
+
+var gpu_on: i64;
+var gpu_kind: i64;        // 1 Vulkan, 2 Metal, 3 WebGPU
+var gpu_w: i64;
+var gpu_h: i64;
+var gpu_cull_on: i64;
+var gpu_depth_on: i64;
+var gpu_blend_on: i64;
+var gpu_names: text;
+var gpu_read: [u8; 8388608];          // the last frame, B G R A per pixel
+// programs: what the front keeps for each
+var gp_shader: i64;       // the std_shader number
+var gp_usize: i64;        // bytes of its uniform block
+var gp_stride: i64;       // bytes per vertex it takes
+var gp_ntex: i64;
+var gp_pipe: i64;         // backend objects
+var gp_set: i64;
+var gp_ublock: [u8; 524288];          // each program's uniforms, 2 KB each
+// meshes
+var gm_vbuf: i64;
+var gm_ibuf: i64;
+var gm_vmem: i64;
+var gm_imem: i64;
+var gm_count: i64;        // indices
+var gm_stride: i64;
+// textures
+var gt_img: i64;
+var gt_mem: i64;
+var gt_view: i64;
+var gt_w: i64;
+var gt_h: i64;
+var gpu_white: i64;
+// this frame
+var gpu_in_frame: i64;
+var gpu_draws: i64;
+
+fn gpu_lists() -> i64 {
+    gp_shader = list_new();
+    gp_usize = list_new();
+    gp_stride = list_new();
+    gp_ntex = list_new();
+    gp_pipe = list_new();
+    gp_set = list_new();
+    gm_vbuf = list_new();
+    gm_ibuf = list_new();
+    gm_vmem = list_new();
+    gm_imem = list_new();
+    gm_count = list_new();
+    gm_stride = list_new();
+    gt_img = list_new();
+    gt_mem = list_new();
+    gt_view = list_new();
+    gt_w = list_new();
+    gt_h = list_new();
+    return 0;
+}
+
+// ======================================================== Vulkan ===
+extern "vulkan-1.dll", "libvulkan.so.1", "libvulkan.so" {
+    fn vkCreateInstance(info: i64, alloc: i64, out: i64) -> i32;
+    fn vkEnumeratePhysicalDevices(inst: i64, count: i64, out: i64) -> i32;
+    fn vkGetPhysicalDeviceProperties(pd: i64, out: i64);
+    fn vkGetPhysicalDeviceQueueFamilyProperties(pd: i64, count: i64, out: i64);
+    fn vkGetPhysicalDeviceMemoryProperties(pd: i64, out: i64);
+    fn vkCreateDevice(pd: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkGetDeviceQueue(dev: i64, family: u32, index: u32, out: i64);
+    fn vkCreateCommandPool(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkAllocateCommandBuffers(dev: i64, info: i64, out: i64) -> i32;
+    fn vkCreateImage(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkGetImageMemoryRequirements(dev: i64, img: i64, out: i64);
+    fn vkAllocateMemory(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkBindImageMemory(dev: i64, img: i64, mem: i64, off: u64) -> i32;
+    fn vkCreateImageView(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateBuffer(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkGetBufferMemoryRequirements(dev: i64, buf: i64, out: i64);
+    fn vkBindBufferMemory(dev: i64, buf: i64, mem: i64, off: u64) -> i32;
+    fn vkMapMemory(dev: i64, mem: i64, off: u64, size: u64, flags: u32, out: i64) -> i32;
+    fn vkCreateRenderPass(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateFramebuffer(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateShaderModule(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateDescriptorSetLayout(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreatePipelineLayout(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateGraphicsPipelines(dev: i64, cache: i64, count: u32, infos: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateDescriptorPool(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkResetDescriptorPool(dev: i64, pool: i64, flags: u32) -> i32;
+    fn vkAllocateDescriptorSets(dev: i64, info: i64, out: i64) -> i32;
+    fn vkUpdateDescriptorSets(dev: i64, nwrite: u32, writes: i64, ncopy: u32, copies: i64);
+    fn vkCreateSampler(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkCreateFence(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkWaitForFences(dev: i64, count: u32, fences: i64, all: u32, timeout: u64) -> i32;
+    fn vkResetFences(dev: i64, count: u32, fences: i64) -> i32;
+    fn vkBeginCommandBuffer(cmd: i64, info: i64) -> i32;
+    fn vkEndCommandBuffer(cmd: i64) -> i32;
+    fn vkResetCommandBuffer(cmd: i64, flags: u32) -> i32;
+    fn vkQueueSubmit(queue: i64, count: u32, submits: i64, fence: i64) -> i32;
+    fn vkQueueWaitIdle(queue: i64) -> i32;
+    fn vkDeviceWaitIdle(dev: i64) -> i32;
+    fn vkCmdBeginRenderPass(cmd: i64, info: i64, contents: u32);
+    fn vkCmdEndRenderPass(cmd: i64);
+    fn vkCmdBindPipeline(cmd: i64, point: u32, pipe: i64);
+    fn vkCmdSetViewport(cmd: i64, first: u32, count: u32, vp: i64);
+    fn vkCmdSetScissor(cmd: i64, first: u32, count: u32, rects: i64);
+    fn vkCmdBindDescriptorSets(cmd: i64, point: u32, layout: i64, first: u32, count: u32, sets: i64, ndyn: u32, dyn: i64);
+    fn vkCmdBindVertexBuffers(cmd: i64, first: u32, count: u32, bufs: i64, offs: i64);
+    fn vkCmdBindIndexBuffer(cmd: i64, buf: i64, off: u64, kind: u32);
+    fn vkCmdDrawIndexed(cmd: i64, count: u32, instances: u32, first: u32, voff: i32, firstinst: u32);
+    fn vkCmdCopyImageToBuffer(cmd: i64, img: i64, layout: u32, buf: i64, n: u32, regions: i64);
+    fn vkCmdCopyBufferToImage(cmd: i64, buf: i64, img: i64, layout: u32, n: u32, regions: i64);
+    fn vkCmdCopyBuffer(cmd: i64, src: i64, dst: i64, n: u32, regions: i64);
+    fn vkCmdPipelineBarrier(cmd: i64, src: u32, dst: u32, flags: u32, nmem: u32, mem: i64, nbuf: u32, buf: i64, nimg: u32, img: i64);
+}
+
+var vk_inst: i64;
+var vk_pd: i64;
+var vk_dev: i64;
+var vk_queue: i64;
+var vk_family: i64;
+var vk_pool: i64;
+var vk_cmd: i64;
+var vk_fence: i64;
+var vk_color: i64;
+var vk_color_mem: i64;
+var vk_color_view: i64;
+var vk_depth: i64;
+var vk_depth_mem: i64;
+var vk_depth_view: i64;
+var vk_pass: i64;
+var vk_fb: i64;
+var vk_read_buf: i64;
+var vk_read_mem: i64;
+var vk_read_map: i64;
+var vk_ubo: i64;
+var vk_ubo_mem: i64;
+var vk_ubo_map: i64;
+var vk_set0_layout: i64;
+var vk_set1_layout: i64;
+var vk_layout: i64;
+var vk_dpool: i64;        // the programs' uniform sets
+var vk_fpool: i64;        // the textures' sets, made again every frame
+var vk_sampler: i64;
+var vk_memprops: [u8; 520];
+var vk_props: [u8; 1024];
+var vk_s: [u8; 16384];    // structures handed to Vulkan, built in place
+var vk_sn: i64;
+var vk_out: [i64; 64];
+var vk_res: i64;
+
+// a zeroed run of n bytes of vk_s, aligned to 8
+fn vs(n: i64) -> i64 {
+    var a: i64 = (vk_sn + 7) / 8 * 8;
+    if a + n > 16384 {
+        a = 0;
+    }
+    vk_sn = a + n;
+    var p: i64 = 0;
+    raw {
+        p = &vk_s[0] + a;
+        var i: i64 = 0;
+        while i < n {
+            poke(p + i, 0);
+            i = i + 8;
+        }
+    }
+    return p;
+}
+
+fn w32(p: i64, off: i64, v: i64) -> i64 {
+    raw { poke32(p + off, v); }
+    return 0;
+}
+fn w64(p: i64, off: i64, v: i64) -> i64 {
+    raw { poke(p + off, v); }
+    return 0;
+}
+fn wf32(p: i64, off: i64, x: f64) -> i64 {
+    var a: [f32; 1];
+    a[0] = x;
+    raw { poke32(p + off, peek32(&a)); }
+    return 0;
+}
+fn r32(p: i64, off: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek32(p + off); }
+    return v;
+}
+fn r64(p: i64, off: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek(p + off); }
+    return v;
+}
+fn vk_slot(k: i64) -> i64 {
+    var p: i64 = 0;
+    raw { p = &vk_out[0] + k * 8; }
+    return p;
+}
+fn vk_got(k: i64) -> i64 {
+    return vk_out[k];
+}
+
+fn vk_check(r: i64, what: i64) -> i64 {
+    if r != 0 {
+        var m: text = "Vulkan refused: ";
+        text_add(m, what);
+        text_add(m, " (VkResult ");
+        text_add_int(m, r);
+        text_add(m, ")");
+        say(m);
+        fail "the graphics card refused an operation" hint "the line above says which; update the GPU driver";
+    }
+    return 1;
+}
+
+// a memory type with the bits asked for, among those allowed
+fn vk_memtype(allowed: i64, want: i64) -> i64 {
+    var p: i64 = 0;
+    raw { p = &vk_memprops[0]; }
+    var n: i64 = r32(p, 0);
+    var i: i64 = 0;
+    while i < n {
+        if ((allowed >> i) & 1) == 1 {
+            var f: i64 = r32(p, 4 + i * 8);
+            if (f & want) == want {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn vk_alloc_for(req: i64, want: i64) -> i64 {
+    var size: i64 = r64(req, 0);
+    var bits: i64 = r32(req, 16);
+    var t: i64 = vk_memtype(bits, want);
+    if t == -1 {
+        t = vk_memtype(bits, want & 6);
+    }
+    if t == -1 {
+        fail "no memory of the kind needed on the graphics card" hint "the driver offers no such memory";
+    }
+    var ai: i64 = vs(32);
+    w32(ai, 0, 5);
+    w64(ai, 16, size);
+    w32(ai, 24, t);
+    raw { vk_res = vkAllocateMemory(vk_dev, ai, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkAllocateMemory") { return 0; }
+    return vk_got(0);
+}
+
+fn vk_buffer(size: i64, usage: i64, want: i64) -> i64 {
+    var bi: i64 = vs(56);
+    w32(bi, 0, 12);
+    w64(bi, 24, size);
+    w32(bi, 32, usage);
+    raw { vk_res = vkCreateBuffer(vk_dev, bi, 0, vk_slot(1)); }
+    if !vk_check(vk_res, "vkCreateBuffer") { return 0; }
+    var buf: i64 = vk_got(1);
+    var req: i64 = vs(24);
+    raw { vkGetBufferMemoryRequirements(vk_dev, buf, req); }
+    var mem: i64 = vk_alloc_for(req, want);
+    if mem == 0 { return 0; }
+    raw { vk_res = vkBindBufferMemory(vk_dev, buf, mem, 0); }
+    if !vk_check(vk_res, "vkBindBufferMemory") { return 0; }
+    vk_out[2] = buf;
+    vk_out[3] = mem;
+    return buf;
+}
+
+fn vk_map(mem: i64) -> i64 {
+    raw { vk_res = vkMapMemory(vk_dev, mem, 0, 0 - 1, 0, vk_slot(4)); }
+    if !vk_check(vk_res, "vkMapMemory") { return 0; }
+    return vk_got(4);
+}
+
+fn vk_image(w: i64, h: i64, format: i64, usage: i64) -> i64 {
+    var ii: i64 = vs(88);
+    w32(ii, 0, 14);
+    w32(ii, 20, 1);
+    w32(ii, 24, format);
+    w32(ii, 28, w);
+    w32(ii, 32, h);
+    w32(ii, 36, 1);
+    w32(ii, 40, 1);
+    w32(ii, 44, 1);
+    w32(ii, 48, 1);
+    w32(ii, 56, usage);
+    raw { vk_res = vkCreateImage(vk_dev, ii, 0, vk_slot(5)); }
+    if !vk_check(vk_res, "vkCreateImage") { return 0; }
+    var img: i64 = vk_got(5);
+    var req: i64 = vs(24);
+    raw { vkGetImageMemoryRequirements(vk_dev, img, req); }
+    var mem: i64 = vk_alloc_for(req, 1);
+    if mem == 0 { return 0; }
+    raw { vk_res = vkBindImageMemory(vk_dev, img, mem, 0); }
+    if !vk_check(vk_res, "vkBindImageMemory") { return 0; }
+    var vi: i64 = vs(80);
+    w32(vi, 0, 15);
+    w64(vi, 24, img);
+    w32(vi, 32, 1);
+    w32(vi, 36, format);
+    var aspect: i64 = 1;
+    if format == 126 { aspect = 2; }
+    w32(vi, 56, aspect);
+    w32(vi, 64, 1);
+    w32(vi, 72, 1);
+    raw { vk_res = vkCreateImageView(vk_dev, vi, 0, vk_slot(6)); }
+    if !vk_check(vk_res, "vkCreateImageView") { return 0; }
+    vk_out[7] = img;
+    vk_out[8] = mem;
+    vk_out[9] = vk_got(6);
+    return img;
+}
+
+// a command buffer for one job, run to its end before this returns
+fn vk_once_begin() -> i64 {
+    raw { vk_res = vkResetCommandBuffer(vk_cmd, 0); }
+    var bi: i64 = vs(32);
+    w32(bi, 0, 42);
+    w32(bi, 16, 1);
+    raw { vk_res = vkBeginCommandBuffer(vk_cmd, bi); }
+    return vk_check(vk_res, "vkBeginCommandBuffer");
+}
+
+fn vk_once_end() -> i64 {
+    raw { vk_res = vkEndCommandBuffer(vk_cmd); }
+    if !vk_check(vk_res, "vkEndCommandBuffer") { return 0; }
+    var si: i64 = vs(72);
+    var cmds: i64 = vs(8);
+    w64(cmds, 0, vk_cmd);
+    w32(si, 0, 4);
+    w32(si, 40, 1);
+    w64(si, 48, cmds);
+    var fences: i64 = vs(8);
+    w64(fences, 0, vk_fence);
+    raw { vk_res = vkResetFences(vk_dev, 1, fences); }
+    raw { vk_res = vkQueueSubmit(vk_queue, 1, si, vk_fence); }
+    if !vk_check(vk_res, "vkQueueSubmit") { return 0; }
+    raw { vk_res = vkWaitForFences(vk_dev, 1, fences, 1, 0 - 1); }
+    return vk_check(vk_res, "vkWaitForFences");
+}
+
+fn vk_barrier(img: i64, old: i64, nl: i64, src_access: i64, dst_access: i64, src_stage: i64, dst_stage: i64) -> i64 {
+    var b: i64 = vs(72);
+    w32(b, 0, 45);
+    w32(b, 16, src_access);
+    w32(b, 20, dst_access);
+    w32(b, 24, old);
+    w32(b, 28, nl);
+    w32(b, 32, 0 - 1);
+    w32(b, 36, 0 - 1);
+    w64(b, 40, img);
+    w32(b, 48, 1);
+    w32(b, 56, 1);
+    w32(b, 64, 1);
+    raw { vkCmdPipelineBarrier(vk_cmd, src_stage, dst_stage, 0, 0, 0, 0, 0, 1, b); }
+    return 0;
+}
+
+fn vk_open(w: i64, h: i64) -> i64 {
+    vk_sn = 0;
+    // the instance
+    var app: i64 = vs(48);
+    w32(app, 0, 0);
+    raw { w64(app, 16, "Kron"); w64(app, 32, "Kron"); }
+    w32(app, 44, 4198400);              // Vulkan 1.1: the viewport turned over
+    var ci: i64 = vs(64);
+    w32(ci, 0, 1);
+    w64(ci, 24, app);
+    raw { vk_res = vkCreateInstance(ci, 0, vk_slot(0)); }
+    if failed() {
+        fail "there is no Vulkan on this computer" hint "install the graphics card's driver (it brings vulkan-1.dll / libvulkan.so.1)";
+    }
+    if !vk_check(vk_res, "vkCreateInstance") { return 0; }
+    vk_inst = vk_got(0);
+    // the card: a discrete one first
+    var cnt: i64 = vs(8);
+    w32(cnt, 0, 16);
+    var pds: i64 = vs(128);
+    raw { vk_res = vkEnumeratePhysicalDevices(vk_inst, cnt, pds); }
+    var n: i64 = r32(cnt, 0);
+    if n == 0 {
+        fail "no graphics card Vulkan can use" hint "install the graphics card's driver";
+    }
+    vk_pd = r64(pds, 0);
+    var i: i64 = 0;
+    var props: i64 = 0;
+    raw { props = &vk_props[0]; }
+    while i < n {
+        raw { vkGetPhysicalDeviceProperties(r64(pds, i * 8), props); }
+        if r32(props, 16) == 2 {
+            vk_pd = r64(pds, i * 8);
+            i = n;
+        }
+        i = i + 1;
+    }
+    raw {
+        vkGetPhysicalDeviceProperties(vk_pd, props);
+        var z: i64 = 0;
+        while z < 255 && peek8(props + 20 + z) != 0 {
+            z = z + 1;
+        }
+        gpu_names = text_from_bytes(props + 20, z);
+        vkGetPhysicalDeviceMemoryProperties(vk_pd, &vk_memprops[0]);
+    }
+    // a queue that draws
+    var qn: i64 = vs(8);
+    var qf: i64 = vs(24 * 32);
+    w32(qn, 0, 32);
+    raw { vkGetPhysicalDeviceQueueFamilyProperties(vk_pd, qn, qf); }
+    vk_family = -1;
+    i = 0;
+    while i < r32(qn, 0) {
+        if (r32(qf, i * 24) & 1) == 1 && vk_family == -1 {
+            vk_family = i;
+        }
+        i = i + 1;
+    }
+    if vk_family == -1 {
+        fail "the graphics card has no queue that draws" hint "a compute-only device cannot show 3D";
+    }
+    var prio: i64 = vs(8);
+    wf32(prio, 0, 1.0);
+    var qi: i64 = vs(40);
+    w32(qi, 0, 2);
+    w32(qi, 20, vk_family);
+    w32(qi, 24, 1);
+    w64(qi, 32, prio);
+    var di: i64 = vs(72);
+    w32(di, 0, 3);
+    w32(di, 20, 1);
+    w64(di, 24, qi);
+    raw { vk_res = vkCreateDevice(vk_pd, di, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDevice") { return 0; }
+    vk_dev = vk_got(0);
+    raw { vkGetDeviceQueue(vk_dev, vk_family, 0, vk_slot(0)); }
+    vk_queue = vk_got(0);
+    // commands and a fence
+    var pi: i64 = vs(24);
+    w32(pi, 0, 39);
+    w32(pi, 16, 2);
+    w32(pi, 20, vk_family);
+    raw { vk_res = vkCreateCommandPool(vk_dev, pi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateCommandPool") { return 0; }
+    vk_pool = vk_got(0);
+    var ai: i64 = vs(32);
+    w32(ai, 0, 40);
+    w64(ai, 16, vk_pool);
+    w32(ai, 28, 1);
+    raw { vk_res = vkAllocateCommandBuffers(vk_dev, ai, vk_slot(0)); }
+    if !vk_check(vk_res, "vkAllocateCommandBuffers") { return 0; }
+    vk_cmd = vk_got(0);
+    var fi: i64 = vs(24);
+    w32(fi, 0, 8);
+    raw { vk_res = vkCreateFence(vk_dev, fi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateFence") { return 0; }
+    vk_fence = vk_got(0);
+    // what the frame is drawn into, and where it is read back
+    if vk_image(w, h, 44, 16 | 1) == 0 { return 0; }
+    vk_color = vk_out[7];
+    vk_color_mem = vk_out[8];
+    vk_color_view = vk_out[9];
+    if vk_image(w, h, 126, 32) == 0 { return 0; }
+    vk_depth = vk_out[7];
+    vk_depth_mem = vk_out[8];
+    vk_depth_view = vk_out[9];
+    if vk_buffer(w * h * 4, 2, 6) == 0 { return 0; }
+    vk_read_buf = vk_out[2];
+    vk_read_mem = vk_out[3];
+    vk_read_map = vk_map(vk_read_mem);
+    if vk_read_map == 0 { return 0; }
+    if vk_buffer(GPU_MAX_DRAWS * GPU_UNIFORM_STEP, 16, 6) == 0 { return 0; }
+    vk_ubo = vk_out[2];
+    vk_ubo_mem = vk_out[3];
+    vk_ubo_map = vk_map(vk_ubo_mem);
+    if vk_ubo_map == 0 { return 0; }
+    // the render pass: clear, draw, keep for the copy
+    var att: i64 = vs(72);
+    w32(att, 4, 44);
+    w32(att, 8, 1);
+    w32(att, 12, 1);
+    w32(att, 16, 0);
+    w32(att, 20, 2);
+    w32(att, 24, 1);
+    w32(att, 28, 0);
+    w32(att, 32, 6);
+    w32(att, 36 + 4, 126);
+    w32(att, 36 + 8, 1);
+    w32(att, 36 + 12, 1);
+    w32(att, 36 + 16, 1);
+    w32(att, 36 + 20, 2);
+    w32(att, 36 + 24, 1);
+    w32(att, 36 + 28, 0);
+    w32(att, 36 + 32, 3);
+    var cref: i64 = vs(8);
+    w32(cref, 0, 0);
+    w32(cref, 4, 2);
+    var dref: i64 = vs(8);
+    w32(dref, 0, 1);
+    w32(dref, 4, 3);
+    var sub: i64 = vs(72);
+    w32(sub, 24, 1);
+    w64(sub, 32, cref);
+    w64(sub, 48, dref);
+    var dep: i64 = vs(28);
+    w32(dep, 0, 0);
+    w32(dep, 4, 0 - 1);
+    w32(dep, 8, 1024 | 256);
+    w32(dep, 12, 4096);
+    w32(dep, 16, 256 | 1024);
+    w32(dep, 20, 2048);
+    var rp: i64 = vs(64);
+    w32(rp, 0, 38);
+    w32(rp, 20, 2);
+    w64(rp, 24, att);
+    w32(rp, 32, 1);
+    w64(rp, 40, sub);
+    w32(rp, 48, 1);
+    w64(rp, 56, dep);
+    raw { vk_res = vkCreateRenderPass(vk_dev, rp, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateRenderPass") { return 0; }
+    vk_pass = vk_got(0);
+    var views: i64 = vs(16);
+    w64(views, 0, vk_color_view);
+    w64(views, 8, vk_depth_view);
+    var fbi: i64 = vs(64);
+    w32(fbi, 0, 37);
+    w64(fbi, 24, vk_pass);
+    w32(fbi, 32, 2);
+    w64(fbi, 40, views);
+    w32(fbi, 48, w);
+    w32(fbi, 52, h);
+    w32(fbi, 56, 1);
+    raw { vk_res = vkCreateFramebuffer(vk_dev, fbi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateFramebuffer") { return 0; }
+    vk_fb = vk_got(0);
+    // descriptor layouts: set 0 the uniforms, set 1 four textures
+    var b0: i64 = vs(24);
+    w32(b0, 0, 0);
+    w32(b0, 4, 8);
+    w32(b0, 8, 1);
+    w32(b0, 12, 31);
+    var l0: i64 = vs(32);
+    w32(l0, 0, 32);
+    w32(l0, 20, 1);
+    w64(l0, 24, b0);
+    raw { vk_res = vkCreateDescriptorSetLayout(vk_dev, l0, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorSetLayout") { return 0; }
+    vk_set0_layout = vk_got(0);
+    var b1: i64 = vs(24 * 4);
+    i = 0;
+    while i < 4 {
+        w32(b1, i * 24, i);
+        w32(b1, i * 24 + 4, 1);
+        w32(b1, i * 24 + 8, 1);
+        w32(b1, i * 24 + 12, 16);
+        i = i + 1;
+    }
+    var l1: i64 = vs(32);
+    w32(l1, 0, 32);
+    w32(l1, 20, 4);
+    w64(l1, 24, b1);
+    raw { vk_res = vkCreateDescriptorSetLayout(vk_dev, l1, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorSetLayout") { return 0; }
+    vk_set1_layout = vk_got(0);
+    var sl: i64 = vs(16);
+    w64(sl, 0, vk_set0_layout);
+    w64(sl, 8, vk_set1_layout);
+    var pli: i64 = vs(48);
+    w32(pli, 0, 30);
+    w32(pli, 20, 2);
+    w64(pli, 24, sl);
+    raw { vk_res = vkCreatePipelineLayout(vk_dev, pli, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreatePipelineLayout") { return 0; }
+    vk_layout = vk_got(0);
+    // pools: one long-lived for the programs, one per frame for textures
+    var ps0: i64 = vs(8);
+    w32(ps0, 0, 8);
+    w32(ps0, 4, 1024);
+    var dp0: i64 = vs(40);
+    w32(dp0, 0, 33);
+    w32(dp0, 20, 1024);
+    w32(dp0, 24, 1);
+    w64(dp0, 32, ps0);
+    raw { vk_res = vkCreateDescriptorPool(vk_dev, dp0, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorPool") { return 0; }
+    vk_dpool = vk_got(0);
+    var ps1: i64 = vs(8);
+    w32(ps1, 0, 1);
+    w32(ps1, 4, GPU_MAX_DRAWS * 4);
+    var dp1: i64 = vs(40);
+    w32(dp1, 0, 33);
+    w32(dp1, 20, GPU_MAX_DRAWS);
+    w32(dp1, 24, 1);
+    w64(dp1, 32, ps1);
+    raw { vk_res = vkCreateDescriptorPool(vk_dev, dp1, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorPool") { return 0; }
+    vk_fpool = vk_got(0);
+    var smi: i64 = vs(80);
+    w32(smi, 0, 31);
+    w32(smi, 20, 1);
+    w32(smi, 24, 1);
+    w32(smi, 28, 1);
+    wf32(smi, 52, 1.0);
+    wf32(smi, 68, 1000.0);
+    raw { vk_res = vkCreateSampler(vk_dev, smi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateSampler") { return 0; }
+    vk_sampler = vk_got(0);
+    return 1;
+}
+
+fn vk_module(words: i64) -> i64 {
+    var n: i64 = list_len(words);
+    var buf: [u8; 65536];
+    if n * 4 > 65536 {
+        fail "a shader too long" hint "split the work between shaders";
+    }
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke32(&buf[0] + i * 4, list_get(words, i));
+            i = i + 1;
+        }
+    }
+    var mi: i64 = vs(40);
+    w32(mi, 0, 16);
+    w64(mi, 24, n * 4);
+    raw { w64(mi, 32, &buf[0]); }
+    raw { vk_res = vkCreateShaderModule(vk_dev, mi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateShaderModule") { return 0; }
+    return vk_got(0);
+}
+
+fn vk_format_of(t: i64) -> i64 {
+    if t == SH_FLOAT { return 100; }
+    if t == SH_VEC2 { return 103; }
+    if t == SH_VEC3 { return 106; }
+    return 109;
+}
+
+fn vk_program(sh: i64, usize: i64) -> i64 {
+    var vsm: i64 = vk_module(shader_spirv(sh, 0));
+    if vsm == 0 { return 0; }
+    var fsm: i64 = vk_module(shader_spirv(sh, 1));
+    if fsm == 0 { return 0; }
+    vk_sn = 0;
+    var st: i64 = vs(96);
+    w32(st, 0, 18);
+    w32(st, 20, 1);
+    w64(st, 24, vsm);
+    raw { w64(st, 32, "main"); }
+    w32(st, 48, 18);
+    w32(st, 48 + 20, 16);
+    w64(st, 48 + 24, fsm);
+    raw { w64(st, 48 + 32, "main"); }
+    // vertex input: one buffer, the inputs packed in order
+    var nin: i64 = shader_inputs(sh);
+    var attrs: i64 = vs(16 * 16);
+    var off: i64 = 0;
+    var i: i64 = 0;
+    while i < nin {
+        var t: i64 = shader_input_type(sh, i);
+        w32(attrs, i * 16, i);
+        w32(attrs, i * 16 + 4, 0);
+        w32(attrs, i * 16 + 8, vk_format_of(t));
+        w32(attrs, i * 16 + 12, off);
+        off = off + sh_comps(t) * 4;
+        i = i + 1;
+    }
+    var bind: i64 = vs(12);
+    w32(bind, 4, off);
+    var vis: i64 = vs(48);
+    w32(vis, 0, 19);
+    if nin > 0 {
+        w32(vis, 20, 1);
+        w64(vis, 24, bind);
+        w32(vis, 32, nin);
+        w64(vis, 40, attrs);
+    }
+    var ias: i64 = vs(32);
+    w32(ias, 0, 20);
+    w32(ias, 20, 3);
+    var vps: i64 = vs(48);
+    w32(vps, 0, 22);
+    w32(vps, 20, 1);
+    w32(vps, 32, 1);
+    var ras: i64 = vs(64);
+    w32(ras, 0, 23);
+    if gpu_cull_on == 1 {
+        w32(ras, 32, 2);
+    }
+    w32(ras, 36, 0);
+    wf32(ras, 56, 1.0);
+    var mss: i64 = vs(48);
+    w32(mss, 0, 24);
+    w32(mss, 20, 1);
+    var dss: i64 = vs(104);
+    w32(dss, 0, 25);
+    if gpu_depth_on == 1 {
+        w32(dss, 20, 1);
+        w32(dss, 24, 1);
+        w32(dss, 28, 3);
+    }
+    wf32(dss, 100, 1.0);
+    var cba: i64 = vs(32);
+    if gpu_blend_on == 1 {
+        w32(cba, 0, 1);
+        w32(cba, 4, 6);
+        w32(cba, 8, 7);
+        w32(cba, 16, 1);
+        w32(cba, 20, 7);
+    }
+    w32(cba, 28, 15);
+    var cbs: i64 = vs(56);
+    w32(cbs, 0, 26);
+    w32(cbs, 28, 1);
+    w64(cbs, 32, cba);
+    var dyn: i64 = vs(8);
+    w32(dyn, 0, 0);
+    w32(dyn, 4, 1);
+    var dys: i64 = vs(32);
+    w32(dys, 0, 27);
+    w32(dys, 20, 2);
+    w64(dys, 24, dyn);
+    var gp: i64 = vs(144);
+    w32(gp, 0, 28);
+    w32(gp, 20, 2);
+    w64(gp, 24, st);
+    w64(gp, 32, vis);
+    w64(gp, 40, ias);
+    w64(gp, 56, vps);
+    w64(gp, 64, ras);
+    w64(gp, 72, mss);
+    w64(gp, 80, dss);
+    w64(gp, 88, cbs);
+    w64(gp, 96, dys);
+    w64(gp, 104, vk_layout);
+    w64(gp, 112, vk_pass);
+    w32(gp, 136, 0 - 1);
+    raw { vk_res = vkCreateGraphicsPipelines(vk_dev, 0, 1, gp, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateGraphicsPipelines") { return 0; }
+    var pipe: i64 = vk_got(0);
+    // its uniform set: the frame's buffer, at a place given per draw
+    var lay: i64 = vs(8);
+    w64(lay, 0, vk_set0_layout);
+    var dai: i64 = vs(40);
+    w32(dai, 0, 34);
+    w64(dai, 16, vk_dpool);
+    w32(dai, 24, 1);
+    w64(dai, 32, lay);
+    raw { vk_res = vkAllocateDescriptorSets(vk_dev, dai, vk_slot(0)); }
+    if !vk_check(vk_res, "vkAllocateDescriptorSets") { return 0; }
+    var set: i64 = vk_got(0);
+    var rng: i64 = usize;
+    if rng < 16 { rng = 16; }
+    var bi: i64 = vs(24);
+    w64(bi, 0, vk_ubo);
+    w64(bi, 16, rng);
+    var wr: i64 = vs(64);
+    w32(wr, 0, 35);
+    w64(wr, 16, set);
+    w32(wr, 32, 1);
+    w32(wr, 36, 8);
+    w64(wr, 48, bi);
+    raw { vkUpdateDescriptorSets(vk_dev, 1, wr, 0, 0); }
+    list_add(gp_pipe, pipe);
+    list_add(gp_set, set);
+    list_add(gp_stride, off);
+    return 1;
+}
+
+// n bytes at src into a new buffer on the card, by way of a staging one
+fn vk_upload(src: i64, n: i64, usage: i64) -> i64 {
+    if vk_buffer(n, 1, 6) == 0 { return 0; }
+    var sbuf: i64 = vk_out[2];
+    var smem: i64 = vk_out[3];
+    var p: i64 = vk_map(smem);
+    if p == 0 { return 0; }
+    hp_copy(p, src, n);
+    if vk_buffer(n, usage | 2, 1) == 0 { return 0; }
+    var dbuf: i64 = vk_out[2];
+    var dmem: i64 = vk_out[3];
+    vk_once_begin();
+    var rg: i64 = vs(24);
+    w64(rg, 16, n);
+    raw { vkCmdCopyBuffer(vk_cmd, sbuf, dbuf, 1, rg); }
+    vk_once_end();
+    vk_out[2] = dbuf;
+    vk_out[3] = dmem;
+    return dbuf;
+}
+
+fn vk_mesh(vsrc: i64, vbytes: i64, isrc: i64, ibytes: i64) -> i64 {
+    vk_sn = 0;
+    if vk_upload(vsrc, vbytes, 128) == 0 { return 0; }
+    list_add(gm_vbuf, vk_out[2]);
+    list_add(gm_vmem, vk_out[3]);
+    if vk_upload(isrc, ibytes, 64) == 0 { return 0; }
+    list_add(gm_ibuf, vk_out[2]);
+    list_add(gm_imem, vk_out[3]);
+    return 1;
+}
+
+// w x h pixels, B G R A, at src
+fn vk_texture(src: i64, w: i64, h: i64) -> i64 {
+    vk_sn = 0;
+    var n: i64 = w * h * 4;
+    if vk_buffer(n, 1, 6) == 0 { return 0; }
+    var sbuf: i64 = vk_out[2];
+    var p: i64 = vk_map(vk_out[3]);
+    if p == 0 { return 0; }
+    hp_copy(p, src, n);
+    if vk_image(w, h, 44, 2 | 4) == 0 { return 0; }
+    var img: i64 = vk_out[7];
+    list_add(gt_img, img);
+    list_add(gt_mem, vk_out[8]);
+    list_add(gt_view, vk_out[9]);
+    vk_once_begin();
+    vk_barrier(img, 0, 7, 0, 4096, 1, 4096);
+    var rg: i64 = vs(56);
+    w32(rg, 16, 1);
+    w32(rg, 28, 1);
+    w32(rg, 44, w);
+    w32(rg, 48, h);
+    w32(rg, 52, 1);
+    raw { vkCmdCopyBufferToImage(vk_cmd, sbuf, img, 7, 1, rg); }
+    vk_barrier(img, 7, 5, 4096, 32, 4096, 128);
+    vk_once_end();
+    return 1;
+}
+
+fn vk_begin(clear: Vec4) -> i64 {
+    vk_sn = 0;
+    raw { vk_res = vkResetDescriptorPool(vk_dev, vk_fpool, 0); }
+    vk_once_begin();
+    var cv: i64 = vs(32);
+    wf32(cv, 0, clear.x);
+    wf32(cv, 4, clear.y);
+    wf32(cv, 8, clear.z);
+    wf32(cv, 12, clear.w);
+    wf32(cv, 16, 1.0);
+    var rb: i64 = vs(64);
+    w32(rb, 0, 43);
+    w64(rb, 16, vk_pass);
+    w64(rb, 24, vk_fb);
+    w32(rb, 40, gpu_w);
+    w32(rb, 44, gpu_h);
+    w32(rb, 48, 2);
+    w64(rb, 56, cv);
+    raw { vkCmdBeginRenderPass(vk_cmd, rb, 0); }
+    // y up, as Metal and WebGPU: the viewport is turned over
+    var vp: i64 = vs(24);
+    wf32(vp, 0, 0.0);
+    wf32(vp, 4, gpu_h as f64);
+    wf32(vp, 8, gpu_w as f64);
+    wf32(vp, 12, 0.0 - (gpu_h as f64));
+    wf32(vp, 16, 0.0);
+    wf32(vp, 20, 1.0);
+    raw { vkCmdSetViewport(vk_cmd, 0, 1, vp); }
+    var sc: i64 = vs(16);
+    w32(sc, 8, gpu_w);
+    w32(sc, 12, gpu_h);
+    raw { vkCmdSetScissor(vk_cmd, 0, 1, sc); }
+    return 1;
+}
+
+fn vk_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
+    if vk_sn > 12000 { vk_sn = 0; }
+    // the uniforms, into this draw's place in the frame's buffer
+    var at: i64 = gpu_draws * GPU_UNIFORM_STEP;
+    var size: i64 = list_get(gp_usize, prog);
+    var steps: i64 = (size + GPU_UNIFORM_STEP - 1) / GPU_UNIFORM_STEP;
+    if steps < 1 { steps = 1; }
+    if gpu_draws + steps > GPU_MAX_DRAWS {
+        fail "too many draws in one frame" hint "8192 at most";
+    }
+    raw { hp_copy(vk_ubo_map + at, &gp_ublock[0] + prog * GPU_MAX_UNIFORM, size); }
+    gpu_draws = gpu_draws + steps;
+    // the textures
+    var lay: i64 = vs(8);
+    w64(lay, 0, vk_set1_layout);
+    var dai: i64 = vs(40);
+    w32(dai, 0, 34);
+    w64(dai, 16, vk_fpool);
+    w32(dai, 24, 1);
+    w64(dai, 32, lay);
+    raw { vk_res = vkAllocateDescriptorSets(vk_dev, dai, vk_slot(10)); }
+    if !vk_check(vk_res, "vkAllocateDescriptorSets") { return 0; }
+    var set1: i64 = vk_got(10);
+    var infos: i64 = vs(24 * 4);
+    var writes: i64 = vs(64 * 4);
+    var k: i64 = 0;
+    while k < 4 {
+        var t: i64 = t0;
+        if k == 1 { t = t1; }
+        if k == 2 { t = t2; }
+        if k == 3 { t = t3; }
+        if t <= 0 || t > list_len(gt_view) { t = gpu_white; }
+        w64(infos, k * 24, vk_sampler);
+        w64(infos, k * 24 + 8, list_get(gt_view, t - 1));
+        w32(infos, k * 24 + 16, 5);
+        w32(writes, k * 64, 35);
+        w64(writes, k * 64 + 16, set1);
+        w32(writes, k * 64 + 24, k);
+        w32(writes, k * 64 + 32, 1);
+        w32(writes, k * 64 + 36, 1);
+        w64(writes, k * 64 + 40, infos + k * 24);
+        k = k + 1;
+    }
+    raw { vkUpdateDescriptorSets(vk_dev, 4, writes, 0, 0); }
+    var sets: i64 = vs(16);
+    w64(sets, 0, list_get(gp_set, prog));
+    w64(sets, 8, set1);
+    var dofs: i64 = vs(8);
+    w32(dofs, 0, at);
+    var bufs: i64 = vs(8);
+    w64(bufs, 0, list_get(gm_vbuf, mesh));
+    var offs: i64 = vs(8);
+    raw {
+        vkCmdBindPipeline(vk_cmd, 0, list_get(gp_pipe, prog));
+        vkCmdBindDescriptorSets(vk_cmd, 0, vk_layout, 0, 2, sets, 1, dofs);
+        vkCmdBindVertexBuffers(vk_cmd, 0, 1, bufs, offs);
+        vkCmdBindIndexBuffer(vk_cmd, list_get(gm_ibuf, mesh), 0, 1);
+        vkCmdDrawIndexed(vk_cmd, list_get(gm_count, mesh), 1, 0, 0, 0);
+    }
+    return 1;
+}
+
+fn vk_end() -> i64 {
+    raw { vkCmdEndRenderPass(vk_cmd); }
+    var rg: i64 = vs(56);
+    w32(rg, 16, 1);
+    w32(rg, 28, 1);
+    w32(rg, 44, gpu_w);
+    w32(rg, 48, gpu_h);
+    w32(rg, 52, 1);
+    raw { vkCmdCopyImageToBuffer(vk_cmd, vk_color, 6, vk_read_buf, 1, rg); }
+    var mb: i64 = vs(24);
+    w32(mb, 0, 46);
+    w32(mb, 16, 4096);
+    w32(mb, 20, 8192);
+    raw { vkCmdPipelineBarrier(vk_cmd, 4096, 16384, 0, 1, mb, 0, 0, 0, 0); }
+    if vk_once_end() == 0 { return 0; }
+    raw { hp_copy(&gpu_read[0], vk_read_map, gpu_w * gpu_h * 4); }
+    return 1;
+}
+
+fn vk_close() -> i64 {
+    raw { vk_res = vkDeviceWaitIdle(vk_dev); }
+    return 1;
+}
+
+// ======================================================== the front ===
+fn gpu_backend() -> i64 {
+    if win_is_web() { return 3; }
+    if win_is_mac() { return 2; }
+    return 1;
+}
+
+fn gpu_open(width: i64, height: i64) -> i64 {
+    if gpu_on == 1 {
+        fail "the GPU is open already" hint "gpu_close first";
+    }
+    if width <= 0 || height <= 0 || width * height > 2097152 {
+        fail "a frame of this size cannot be drawn" hint "from 1 x 1 to 1920 x 1080";
+    }
+    gpu_lists();
+    gpu_w = width;
+    gpu_h = height;
+    gpu_depth_on = 1;
+    gpu_blend_on = 1;
+    gpu_names = text_new();
+    gpu_kind = gpu_backend();
+    var ok: i64 = 0;
+    if gpu_kind == 1 {
+        ok = vk_open(width, height);
+    } else if gpu_kind == 3 {
+        ok = wg_open(width, height);
+    } else {
+        ok = mt_open(width, height);
+    }
+    if ok == 0 { return 0; }
+    gpu_on = 1;
+    // a white picture, for draws that give none
+    var white: [u8; 16];
+    raw { poke32(&white[0], 0 - 1); }
+    var t: i64 = 0;
+    raw { t = gpu_texture_bgra(&white[0], 1, 1); }
+    gpu_white = t;
+    return 1;
+}
+
+fn gpu_name() -> text {
+    return gpu_names;
+}
+
+fn gpu_cull(on: i64) -> i64 { gpu_cull_on = on; return on; }
+fn gpu_depth(on: i64) -> i64 { gpu_depth_on = on; return on; }
+fn gpu_blend(on: i64) -> i64 { gpu_blend_on = on; return on; }
+
+fn gpu_shader(source: i64) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if list_len(gp_shader) >= 256 {
+        fail "too many shaders" hint "256 at most";
+    }
+    var sh: i64 = shader_compile(source);
+    if sh == 0 {
+        say(shader_error());
+        fail "the shader has an error" hint "the line above says where";
+    }
+    var usize: i64 = shader_uniform_size(sh);
+    if usize > GPU_MAX_UNIFORM {
+        fail "the shader's uniforms take more than 2048 bytes" hint "use fewer, or a texture for big tables";
+    }
+    list_add(gp_shader, sh);
+    list_add(gp_usize, usize);
+    list_add(gp_ntex, shader_textures(sh));
+    var ok: i64 = 0;
+    if gpu_kind == 1 {
+        ok = vk_program(sh, usize);
+    } else if gpu_kind == 3 {
+        ok = wg_program(sh, usize);
+    } else {
+        ok = mt_program(sh, usize);
+    }
+    if ok == 0 { return 0; }
+    return list_len(gp_shader);
+}
+
+fn gpu_prog(p: i64) -> i64 {
+    if gpu_on == 0 || p < 1 || p > list_len(gp_shader) {
+        fail "no such shader" hint "use what gpu_shader gave";
+    }
+    return p;
+}
+
+// the place of a uniform in the program's block, after checking its type
+fn gpu_uniform_at(p: i64, name: i64, t: i64) -> i64 {
+    var pi: i64 = gpu_prog(p);
+    if pi == 0 { return -1; }
+    var sh: i64 = list_get(gp_shader, pi - 1);
+    var off: i64 = shader_uniform_offset(sh, name);
+    if off < 0 {
+        fail "the shader has no uniform of this name" hint "see its uniform { } block";
+    }
+    if shader_uniform_type(sh, name) != t {
+        fail "the uniform is of another type" hint "gpu_set_mat4, _vec4, _vec3, _vec2 or _float as it is declared";
+    }
+    return (pi - 1) * GPU_MAX_UNIFORM + off;
+}
+
+fn gpu_set_mat4(p: i64, name: i64, m: Mat4) -> i64 {
+    var at: i64 = gpu_uniform_at(p, name, SH_MAT4);
+    if at < 0 { return 0; }
+    raw { hp_copy(&gp_ublock[0] + at, &m, 64); }
+    return 1;
+}
+
+fn gpu_set_vec4(p: i64, name: i64, v: Vec4) -> i64 {
+    var at: i64 = gpu_uniform_at(p, name, SH_VEC4);
+    if at < 0 { return 0; }
+    raw { hp_copy(&gp_ublock[0] + at, &v, 16); }
+    return 1;
+}
+
+fn gpu_set_vec3(p: i64, name: i64, v: Vec3) -> i64 {
+    var at: i64 = gpu_uniform_at(p, name, SH_VEC3);
+    if at < 0 { return 0; }
+    raw { hp_copy(&gp_ublock[0] + at, &v, 12); }
+    return 1;
+}
+
+fn gpu_set_vec2(p: i64, name: i64, v: Vec2) -> i64 {
+    var at: i64 = gpu_uniform_at(p, name, SH_VEC2);
+    if at < 0 { return 0; }
+    raw { hp_copy(&gp_ublock[0] + at, &v, 8); }
+    return 1;
+}
+
+fn gpu_set_float(p: i64, name: i64, x: f64) -> i64 {
+    var at: i64 = gpu_uniform_at(p, name, SH_FLOAT);
+    if at < 0 { return 0; }
+    var a: [f32; 1];
+    a[0] = x;
+    raw { poke32(&gp_ublock[0] + at, peek32(&a)); }
+    return 1;
+}
+
+// a mesh: nverts corners of fpv floats at vertices, nindices u32 indices
+fn gpu_mesh(vertices: i64, nverts: i64, fpv: i64, indices: i64, nindices: i64) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if nverts <= 0 || fpv <= 0 || nindices <= 0 || nindices % 3 != 0 {
+        fail "a mesh needs corners and triangles" hint "three indices a triangle";
+    }
+    var ok: i64 = 0;
+    if gpu_kind == 1 {
+        ok = vk_mesh(vertices, nverts * fpv * 4, indices, nindices * 4);
+    } else if gpu_kind == 3 {
+        ok = wg_mesh(vertices, nverts * fpv * 4, indices, nindices * 4);
+    } else {
+        ok = mt_mesh(vertices, nverts * fpv * 4, indices, nindices * 4);
+    }
+    if ok == 0 { return 0; }
+    list_add(gm_count, nindices);
+    list_add(gm_stride, fpv * 4);
+    return list_len(gm_count);
+}
+
+// a mesh from lists: the floats (list<f64>) and the indices (list<i64>)
+fn gpu_mesh_lists(vertices: i64, fpv: i64, indices: i64) -> i64 {
+    var nv: i64 = list_len(vertices);
+    var ni: i64 = list_len(indices);
+    var vb: i64 = hp_alloc(nv * 4 + 8);
+    var ib: i64 = hp_alloc(ni * 4 + 8);
+    if vb == 0 || ib == 0 {
+        fail "no memory for the mesh" hint "a smaller mesh";
+    }
+    var a: [f32; 1];
+    var i: i64 = 0;
+    while i < nv {
+        a[0] = list_get_real(vertices, i);
+        raw { poke32(vb + i * 4, peek32(&a)); }
+        i = i + 1;
+    }
+    i = 0;
+    while i < ni {
+        raw { poke32(ib + i * 4, list_get(indices, i)); }
+        i = i + 1;
+    }
+    var m: i64 = gpu_mesh(vb, nv / fpv, fpv, ib, ni);
+    hp_release(vb);
+    hp_release(ib);
+    return m;
+}
+
+fn gpu_texture_bgra(pixels: i64, w: i64, h: i64) -> i64 {
+    if gpu_on == 0 && gpu_kind == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    var ok: i64 = 0;
+    if gpu_kind == 1 {
+        ok = vk_texture(pixels, w, h);
+    } else if gpu_kind == 3 {
+        ok = wg_texture(pixels, w, h);
+    } else {
+        ok = mt_texture(pixels, w, h);
+    }
+    if ok == 0 { return 0; }
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    return list_len(gt_w);
+}
+
+// a picture of std_image, on the card
+fn gpu_texture(img: i64) -> i64 {
+    var w: i64 = image_width(img);
+    var h: i64 = image_height(img);
+    if w <= 0 || h <= 0 {
+        fail "this is no picture" hint "image_load or image_new gives one";
+    }
+    lock_take(HP_LOCK);
+    var q: i64 = im_pixels(img);
+    lock_give(HP_LOCK);
+    return gpu_texture_bgra(q + 16, w, h);
+}
+
+fn gpu_begin(clear: Vec4) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_in_frame == 1 {
+        fail "a frame is already begun" hint "gpu_end it first";
+    }
+    gpu_in_frame = 1;
+    gpu_draws = 0;
+    if gpu_kind == 1 { return vk_begin(clear); }
+    if gpu_kind == 3 { return wg_begin(clear); }
+    return mt_begin(clear);
+}
+
+fn gpu_draw_textures(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
+    if gpu_in_frame == 0 {
+        fail "no frame is begun" hint "gpu_begin first";
+    }
+    var p: i64 = gpu_prog(prog);
+    if p == 0 { return 0; }
+    if mesh < 1 || mesh > list_len(gm_count) {
+        fail "no such mesh" hint "use what gpu_mesh gave";
+    }
+    if list_get(gm_stride, mesh - 1) != list_get(gp_stride, p - 1) {
+        fail "the mesh's corners are not what the shader takes" hint "as many floats a corner as its in declarations";
+    }
+    if gpu_kind == 1 { return vk_draw(p - 1, mesh - 1, t0, t1, t2, t3); }
+    if gpu_kind == 3 { return wg_draw(p - 1, mesh - 1, t0, t1, t2, t3); }
+    return mt_draw(p - 1, mesh - 1, t0, t1, t2, t3);
+}
+
+fn gpu_draw(prog: i64, mesh: i64, tex: i64) -> i64 {
+    return gpu_draw_textures(prog, mesh, tex, 0, 0, 0);
+}
+
+// the frame is done: drawn, read back and put in the window when one is open
+fn gpu_end() -> i64 {
+    if gpu_in_frame == 0 {
+        fail "no frame is begun" hint "gpu_begin first";
+    }
+    gpu_in_frame = 0;
+    var ok: i64 = 0;
+    if gpu_kind == 1 {
+        ok = vk_end();
+    } else if gpu_kind == 3 {
+        return wg_end();
+    } else {
+        ok = mt_end();
+    }
+    if ok == 0 { return 0; }
+    if win_open_now == 1 {
+        var w: i64 = gpu_w;
+        if w > win_w { w = win_w; }
+        var h: i64 = gpu_h;
+        if h > win_h { h = win_h; }
+        var y: i64 = 0;
+        while y < h {
+            raw { hp_copy(&win_fb + y * win_w * 4, &gpu_read[0] + y * gpu_w * 4, w * 4); }
+            y = y + 1;
+        }
+    }
+    return 1;
+}
+
+// a pixel of the last frame: 0xRRGGBB
+fn gpu_pixel(x: i64, y: i64) -> i64 {
+    if x < 0 || y < 0 || x >= gpu_w || y >= gpu_h {
+        fail "outside the frame" hint "from 0 to the width and the height minus one";
+    }
+    var c: i64 = 0;
+    raw { c = peek32(&gpu_read[0] + (y * gpu_w + x) * 4); }
+    return c & 16777215;
+}
+
+fn gpu_save_bmp(path: i64) -> i64 {
+    var img: i64 = image_new(gpu_w, gpu_h);
+    if img == 0 { return 0; }
+    lock_take(HP_LOCK);
+    var q: i64 = im_pixels(img);
+    lock_give(HP_LOCK);
+    raw { hp_copy(q + 16, &gpu_read[0], gpu_w * gpu_h * 4); }
+    var r: i64 = image_save_bmp(img, path);
+    image_free(img);
+    return r;
+}
+
+fn gpu_close() -> i64 {
+    if gpu_on == 0 { return 0; }
+    if gpu_kind == 1 { vk_close(); }
+    if gpu_kind == 3 { wg_close(); }
+    if gpu_kind == 2 { mt_close(); }
+    gpu_on = 0;
+    return 1;
+}
+
+// ------------------------------------------------------- ready meshes ---
+// each corner: position (3), normal (3), uv (2)
+fn gm_put(v: i64, px: f64, py: f64, pz: f64, nx: f64, ny: f64, nz: f64, u: f64, w: f64) -> i64 {
+    list_add_real(v, px);
+    list_add_real(v, py);
+    list_add_real(v, pz);
+    list_add_real(v, nx);
+    list_add_real(v, ny);
+    list_add_real(v, nz);
+    list_add_real(v, u);
+    list_add_real(v, w);
+    return 0;
+}
+
+// a cube from -1 to 1, each face with its own normal and the whole picture
+fn gpu_cube() -> i64 {
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    var f: i64 = 0;
+    while f < 6 {
+        // the face's normal n, and two directions a, b across it (a x b = n)
+        var nx: f64 = 0.0; var ny: f64 = 0.0; var nz: f64 = 0.0;
+        var ax: f64 = 0.0; var ay: f64 = 0.0; var az: f64 = 0.0;
+        var bx: f64 = 0.0; var by: f64 = 0.0; var bz: f64 = 0.0;
+        if f == 0 { nz = 1.0; ax = 1.0; by = 1.0; }
+        if f == 1 { nz = 0.0 - 1.0; ax = 0.0 - 1.0; by = 1.0; }
+        if f == 2 { nx = 1.0; az = 0.0 - 1.0; by = 1.0; }
+        if f == 3 { nx = 0.0 - 1.0; az = 1.0; by = 1.0; }
+        if f == 4 { ny = 1.0; ax = 1.0; bz = 0.0 - 1.0; }
+        if f == 5 { ny = 0.0 - 1.0; ax = 1.0; bz = 1.0; }
+        var base: i64 = f * 4;
+        gm_put(v, nx - ax - bx, ny - ay - by, nz - az - bz, nx, ny, nz, 0.0, 1.0);
+        gm_put(v, nx + ax - bx, ny + ay - by, nz + az - bz, nx, ny, nz, 1.0, 1.0);
+        gm_put(v, nx + ax + bx, ny + ay + by, nz + az + bz, nx, ny, nz, 1.0, 0.0);
+        gm_put(v, nx - ax + bx, ny - ay + by, nz - az + bz, nx, ny, nz, 0.0, 0.0);
+        list_add(ix, base);
+        list_add(ix, base + 1);
+        list_add(ix, base + 2);
+        list_add(ix, base);
+        list_add(ix, base + 2);
+        list_add(ix, base + 3);
+        f = f + 1;
+    }
+    return gpu_mesh_lists(v, 8, ix);
+}
+
+// a square of side size on the ground (y = 0), facing up
+fn gpu_plane(size: f64) -> i64 {
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    var s: f64 = size * 0.5;
+    gm_put(v, 0.0 - s, 0.0, s, 0.0, 1.0, 0.0, 0.0, 1.0);
+    gm_put(v, s, 0.0, s, 0.0, 1.0, 0.0, 1.0, 1.0);
+    gm_put(v, s, 0.0, 0.0 - s, 0.0, 1.0, 0.0, 1.0, 0.0);
+    gm_put(v, 0.0 - s, 0.0, 0.0 - s, 0.0, 1.0, 0.0, 0.0, 0.0);
+    list_add(ix, 0); list_add(ix, 1); list_add(ix, 2);
+    list_add(ix, 0); list_add(ix, 2); list_add(ix, 3);
+    return gpu_mesh_lists(v, 8, ix);
+}
+
+// a sphere of radius 1
+fn gpu_sphere(rings: i64, segments: i64) -> i64 {
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    var r: i64 = 0;
+    while r <= rings {
+        var th: f64 = (r as f64) * 3.14159265358979 / (rings as f64);
+        var s: i64 = 0;
+        while s <= segments {
+            var ph: f64 = (s as f64) * 6.28318530717959 / (segments as f64);
+            var x: f64 = fsin(th) * fcos(ph);
+            var y: f64 = fcos(th);
+            var z: f64 = 0.0 - fsin(th) * fsin(ph);
+            gm_put(v, x, y, z, x, y, z, (s as f64) / (segments as f64), (r as f64) / (rings as f64));
+            s = s + 1;
+        }
+        r = r + 1;
+    }
+    r = 0;
+    while r < rings {
+        var s2: i64 = 0;
+        while s2 < segments {
+            var a: i64 = r * (segments + 1) + s2;
+            var b: i64 = a + segments + 1;
+            list_add(ix, a); list_add(ix, b); list_add(ix, a + 1);
+            list_add(ix, a + 1); list_add(ix, b); list_add(ix, b + 1);
+            s2 = s2 + 1;
+        }
+        r = r + 1;
+    }
+    return gpu_mesh_lists(v, 8, ix);
+}
+
+// ===================================================== WebGPU (web) ===
+// The page draws with WebGPU itself (kron_web.js, the calls from 1200):
+// the frame goes to the canvas, nothing is read back.
+fn wg_open(w: i64, h: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = syscall(1200, w, h); }
+    if r <= 0 {
+        fail "this browser has no WebGPU" hint "Chrome or Edge 113 and later, Safari 18, Firefox 141 have it";
+    }
+    gpu_names = "WebGPU";
+    return 1;
+}
+
+fn wg_program(sh: i64, usize: i64) -> i64 {
+    var src: text = shader_wgsl(sh);
+    var nin: i64 = shader_inputs(sh);
+    var fmts: [i64; 16];
+    var i: i64 = 0;
+    var off: i64 = 0;
+    while i < nin && i < 16 {
+        var t: i64 = shader_input_type(sh, i);
+        fmts[i] = sh_comps(t);
+        off = off + sh_comps(t) * 4;
+        i = i + 1;
+    }
+    var flags: i64 = gpu_cull_on | (gpu_depth_on << 1) | (gpu_blend_on << 2);
+    var r: i64 = 0;
+    raw { r = syscall(1201, text_cstr(src), text_len(src), &fmts, nin, usize, flags); }
+    if r <= 0 {
+        fail "the browser refused the shader" hint "its console says why";
+    }
+    list_add(gp_pipe, r);
+    list_add(gp_set, 0);
+    list_add(gp_stride, off);
+    return 1;
+}
+
+fn wg_mesh(vsrc: i64, vbytes: i64, isrc: i64, ibytes: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = syscall(1202, vsrc, vbytes, isrc, ibytes); }
+    if r <= 0 {
+        fail "the browser refused the mesh" hint "its console says why";
+    }
+    list_add(gm_vbuf, r);
+    list_add(gm_ibuf, 0);
+    list_add(gm_vmem, 0);
+    list_add(gm_imem, 0);
+    return 1;
+}
+
+fn wg_texture(src: i64, w: i64, h: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = syscall(1203, src, w, h); }
+    if r <= 0 {
+        fail "the browser refused the picture" hint "its console says why";
+    }
+    list_add(gt_img, r);
+    list_add(gt_mem, 0);
+    list_add(gt_view, r);
+    return 1;
+}
+
+fn wg_begin(clear: Vec4) -> i64 {
+    var c: [f32; 4];
+    c[0] = clear.x;
+    c[1] = clear.y;
+    c[2] = clear.z;
+    c[3] = clear.w;
+    raw { vk_res = syscall(1204, &c); }
+    return 1;
+}
+
+fn wg_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
+    var tex: [i64; 4];
+    tex[0] = t0; tex[1] = t1; tex[2] = t2; tex[3] = t3;
+    var k: i64 = 0;
+    while k < 4 {
+        if tex[k] <= 0 || tex[k] > list_len(gt_view) { tex[k] = gpu_white; }
+        tex[k] = list_get(gt_view, tex[k] - 1);
+        k = k + 1;
+    }
+    var size: i64 = list_get(gp_usize, prog);
+    raw {
+        vk_res = syscall(1205, list_get(gp_pipe, prog), list_get(gm_vbuf, mesh), list_get(gm_count, mesh),
+                         &gp_ublock[0] + prog * GPU_MAX_UNIFORM, size, &tex);
+    }
+    return 1;
+}
+
+fn wg_end() -> i64 {
+    raw { vk_res = syscall(1206); }
+    return 1;
+}
+
+fn wg_close() -> i64 {
+    raw { vk_res = syscall(1207); }
+    return 1;
+}
+
+// ===================================================== Metal (Apple) ===
+// macOS and iOS: Metal, through the Objective-C runtime -- objc_msgSend
+// called with c_call, the shader in MSL from std_shader.kr. The frame is
+// drawn into a shared texture and read back like Vulkan's. macOS has no
+// window of std_window yet: there it draws for gpu_pixel and gpu_save_bmp;
+// an iOS app shows it through std_app.kr's host.
+extern "/usr/lib/libobjc.A.dylib" {
+    fn objc_getClass(name: i64) -> i64;
+    fn sel_registerName(name: i64) -> i64;
+}
+extern "/usr/lib/libSystem.B.dylib" {
+    fn dlsym(handle: i64, name: i64) -> i64;
+}
+extern "/System/Library/Frameworks/Metal.framework/Metal" {
+    fn MTLCreateSystemDefaultDevice() -> i64;
+}
+
+var mt_send: i64;          // objc_msgSend
+var mt_dev: i64;
+var mt_queue: i64;
+var mt_target: i64;
+var mt_depthtex: i64;
+var mt_sampler: i64;
+var mt_dstate: i64;        // depth test on
+var mt_dstate_off: i64;
+var mt_cb: i64;            // this frame's command buffer and encoder
+var mt_enc: i64;
+var mt_clear: [f64; 4];
+var mt_region: [i64; 6];
+var mt_pipe: i64;          // by program: the pipeline state, culling, depth
+var mt_flags: i64;
+var mt_vbuf: i64;
+var mt_ibuf: i64;
+var mt_tex: i64;
+
+fn mt_sel(name: i64) -> i64 {
+    var s: i64 = 0;
+    raw { s = sel_registerName(name); }
+    return s;
+}
+fn mt_cls(name: i64) -> i64 {
+    var c: i64 = 0;
+    raw { c = objc_getClass(name); }
+    return c;
+}
+fn oc0(o: i64, name: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name)); }
+    return r;
+}
+fn oc1(o: i64, name: i64, a: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a); }
+    return r;
+}
+fn oc2(o: i64, name: i64, a: i64, b: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a, b); }
+    return r;
+}
+fn oc3(o: i64, name: i64, a: i64, b: i64, c: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a, b, c); }
+    return r;
+}
+fn oc4(o: i64, name: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a, b, c, d); }
+    return r;
+}
+fn oc5(o: i64, name: i64, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a, b, c, d, e); }
+    return r;
+}
+// an NSString from a text
+fn mt_str(t: i64) -> i64 {
+    var c: i64 = 0;
+    raw { c = text_cstr(t); }
+    return oc1(mt_cls("NSString"), "stringWithUTF8String:", c);
+}
+// element k of an array property: [[o name] objectAtIndexedSubscript:k]
+fn mt_at(o: i64, name: i64, k: i64) -> i64 {
+    return oc1(oc0(o, name), "objectAtIndexedSubscript:", k);
+}
+
+fn mt_texture_new(w: i64, h: i64, format: i64, usage: i64, storage: i64) -> i64 {
+    var d: i64 = oc4(mt_cls("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", format, w, h, 0);
+    oc1(d, "setUsage:", usage);
+    oc1(d, "setStorageMode:", storage);
+    return oc1(mt_dev, "newTextureWithDescriptor:", d);
+}
+
+fn mt_open(w: i64, h: i64) -> i64 {
+    raw {
+        mt_send = dlsym(0 - 2, "objc_msgSend");
+        mt_dev = MTLCreateSystemDefaultDevice();
+    }
+    if failed() || mt_dev == 0 || mt_send == 0 {
+        fail "no Metal on this machine" hint "Metal needs macOS 10.14 or iOS 12 and a Mac or device with a GPU";
+    }
+    mt_pipe = list_new();
+    mt_flags = list_new();
+    mt_vbuf = list_new();
+    mt_ibuf = list_new();
+    mt_tex = list_new();
+    mt_queue = oc0(mt_dev, "newCommandQueue");
+    var nm: i64 = oc0(mt_dev, "name");
+    var cs: i64 = oc0(nm, "UTF8String");
+    raw { gpu_names = text_from_bytes(cs, str_len0(cs)); }
+    // what the frame is drawn into: shared, so it can be read back
+    mt_target = mt_texture_new(w, h, 80, 1 | 4, 0);
+    mt_depthtex = mt_texture_new(w, h, 252, 4, 2);
+    var sd: i64 = oc0(oc0(mt_cls("MTLSamplerDescriptor"), "alloc"), "init");
+    oc1(sd, "setMinFilter:", 1);
+    oc1(sd, "setMagFilter:", 1);
+    oc1(sd, "setSAddressMode:", 2);
+    oc1(sd, "setTAddressMode:", 2);
+    mt_sampler = oc1(mt_dev, "newSamplerStateWithDescriptor:", sd);
+    var dd: i64 = oc0(oc0(mt_cls("MTLDepthStencilDescriptor"), "alloc"), "init");
+    oc1(dd, "setDepthCompareFunction:", 1);
+    oc1(dd, "setDepthWriteEnabled:", 1);
+    mt_dstate = oc1(mt_dev, "newDepthStencilStateWithDescriptor:", dd);
+    var dd2: i64 = oc0(oc0(mt_cls("MTLDepthStencilDescriptor"), "alloc"), "init");
+    oc1(dd2, "setDepthCompareFunction:", 7);
+    oc1(dd2, "setDepthWriteEnabled:", 0);
+    mt_dstate_off = oc1(mt_dev, "newDepthStencilStateWithDescriptor:", dd2);
+    if mt_queue == 0 || mt_target == 0 || mt_depthtex == 0 {
+        fail "Metal refused to set up the frame" hint "update the system";
+    }
+    return 1;
+}
+
+// the length of a NUL-ended string
+fn str_len0(p: i64) -> i64 {
+    var n: i64 = 0;
+    raw {
+        while peek8(p + n) != 0 {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn mt_program(sh: i64, usize: i64) -> i64 {
+    var err: [i64; 1];
+    var lib: i64 = 0;
+    raw { lib = oc3(mt_dev, "newLibraryWithSource:options:error:", mt_str(shader_msl(sh)), 0, &err); }
+    if lib == 0 {
+        if err[0] != 0 {
+            var d: i64 = oc0(err[0], "localizedDescription");
+            var cs: i64 = oc0(d, "UTF8String");
+            raw { say(text_from_bytes(cs, str_len0(cs))); }
+        }
+        fail "Metal refused the shader" hint "the line above says why";
+    }
+    var vf: i64 = oc1(lib, "newFunctionWithName:", mt_str("vs_main"));
+    var ff: i64 = oc1(lib, "newFunctionWithName:", mt_str("fs_main"));
+    var pd: i64 = oc0(oc0(mt_cls("MTLRenderPipelineDescriptor"), "alloc"), "init");
+    oc1(pd, "setVertexFunction:", vf);
+    oc1(pd, "setFragmentFunction:", ff);
+    var ca: i64 = mt_at(pd, "colorAttachments", 0);
+    oc1(ca, "setPixelFormat:", 80);
+    if gpu_blend_on == 1 {
+        oc1(ca, "setBlendingEnabled:", 1);
+        oc1(ca, "setSourceRGBBlendFactor:", 4);
+        oc1(ca, "setDestinationRGBBlendFactor:", 5);
+        oc1(ca, "setSourceAlphaBlendFactor:", 1);
+        oc1(ca, "setDestinationAlphaBlendFactor:", 5);
+    }
+    oc1(pd, "setDepthAttachmentPixelFormat:", 252);
+    var vd: i64 = oc0(mt_cls("MTLVertexDescriptor"), "vertexDescriptor");
+    var nin: i64 = shader_inputs(sh);
+    var off: i64 = 0;
+    var i: i64 = 0;
+    while i < nin {
+        var t: i64 = shader_input_type(sh, i);
+        var at: i64 = mt_at(vd, "attributes", i);
+        oc1(at, "setFormat:", 27 + sh_comps(t));
+        oc1(at, "setOffset:", off);
+        oc1(at, "setBufferIndex:", 0);
+        off = off + sh_comps(t) * 4;
+        i = i + 1;
+    }
+    if nin > 0 {
+        oc1(mt_at(vd, "layouts", 0), "setStride:", off);
+        oc1(pd, "setVertexDescriptor:", vd);
+    }
+    var err2: [i64; 1];
+    var ps: i64 = 0;
+    raw { ps = oc2(mt_dev, "newRenderPipelineStateWithDescriptor:error:", pd, &err2); }
+    if ps == 0 {
+        fail "Metal refused the pipeline" hint "the shader's inputs and the mesh must match";
+    }
+    list_add(mt_pipe, ps);
+    list_add(mt_flags, gpu_cull_on | (gpu_depth_on << 1));
+    list_add(gp_pipe, ps);
+    list_add(gp_set, 0);
+    list_add(gp_stride, off);
+    return 1;
+}
+
+fn mt_mesh(vsrc: i64, vbytes: i64, isrc: i64, ibytes: i64) -> i64 {
+    var vb: i64 = oc3(mt_dev, "newBufferWithBytes:length:options:", vsrc, vbytes, 0);
+    var ib: i64 = oc3(mt_dev, "newBufferWithBytes:length:options:", isrc, ibytes, 0);
+    if vb == 0 || ib == 0 {
+        fail "Metal refused the mesh" hint "a smaller mesh";
+    }
+    list_add(gm_vbuf, vb);
+    list_add(gm_ibuf, ib);
+    list_add(gm_vmem, 0);
+    list_add(gm_imem, 0);
+    return 1;
+}
+
+fn mt_texture(src: i64, w: i64, h: i64) -> i64 {
+    var t: i64 = mt_texture_new(w, h, 80, 1, 0);
+    if t == 0 {
+        fail "Metal refused the picture" hint "at most 16384 pixels a side";
+    }
+    mt_region[0] = 0; mt_region[1] = 0; mt_region[2] = 0;
+    mt_region[3] = w; mt_region[4] = h; mt_region[5] = 1;
+    raw { oc4(t, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", &mt_region, 0, src, w * 4); }
+    list_add(gt_img, t);
+    list_add(gt_mem, 0);
+    list_add(gt_view, t);
+    return 1;
+}
+
+fn mt_begin(clear: Vec4) -> i64 {
+    mt_cb = oc0(mt_queue, "commandBuffer");
+    var rp: i64 = oc0(mt_cls("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    var ca: i64 = mt_at(rp, "colorAttachments", 0);
+    oc1(ca, "setTexture:", mt_target);
+    oc1(ca, "setLoadAction:", 2);
+    oc1(ca, "setStoreAction:", 1);
+    var r: f64 = clear.x;
+    var g: f64 = clear.y;
+    var b: f64 = clear.z;
+    var a: f64 = clear.w;
+    raw { c_call(mt_send, ca, mt_sel("setClearColor:"), r, g, b, a); }
+    var da: i64 = oc0(rp, "depthAttachment");
+    oc1(da, "setTexture:", mt_depthtex);
+    oc1(da, "setLoadAction:", 2);
+    oc1(da, "setStoreAction:", 0);
+    var one: f64 = 1.0;
+    raw { c_call(mt_send, da, mt_sel("setClearDepth:"), one); }
+    mt_enc = oc1(mt_cb, "renderCommandEncoderWithDescriptor:", rp);
+    oc1(mt_enc, "setFrontFacingWinding:", 1);
+    return 1;
+}
+
+fn mt_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
+    var flags: i64 = list_get(mt_flags, prog);
+    oc1(mt_enc, "setRenderPipelineState:", list_get(mt_pipe, prog));
+    if (flags & 2) == 2 {
+        oc1(mt_enc, "setDepthStencilState:", mt_dstate);
+    } else {
+        oc1(mt_enc, "setDepthStencilState:", mt_dstate_off);
+    }
+    var cull: i64 = 0;
+    if (flags & 1) == 1 { cull = 2; }
+    oc1(mt_enc, "setCullMode:", cull);
+    oc3(mt_enc, "setVertexBuffer:offset:atIndex:", list_get(gm_vbuf, mesh), 0, 0);
+    var size: i64 = list_get(gp_usize, prog);
+    if size > 0 {
+        var u: i64 = 0;
+        raw { u = &gp_ublock[0] + prog * GPU_MAX_UNIFORM; }
+        oc3(mt_enc, "setVertexBytes:length:atIndex:", u, size, 1);
+        oc3(mt_enc, "setFragmentBytes:length:atIndex:", u, size, 1);
+    }
+    var k: i64 = 0;
+    while k < 4 {
+        var t: i64 = t0;
+        if k == 1 { t = t1; }
+        if k == 2 { t = t2; }
+        if k == 3 { t = t3; }
+        if t <= 0 || t > list_len(gt_view) { t = gpu_white; }
+        oc2(mt_enc, "setFragmentTexture:atIndex:", list_get(gt_view, t - 1), k);
+        oc2(mt_enc, "setFragmentSamplerState:atIndex:", mt_sampler, k);
+        k = k + 1;
+    }
+    oc5(mt_enc, "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:",
+        3, list_get(gm_count, mesh), 1, list_get(gm_ibuf, mesh), 0);
+    return 1;
+}
+
+fn mt_end() -> i64 {
+    oc0(mt_enc, "endEncoding");
+    oc0(mt_cb, "commit");
+    oc0(mt_cb, "waitUntilCompleted");
+    mt_region[0] = 0; mt_region[1] = 0; mt_region[2] = 0;
+    mt_region[3] = gpu_w; mt_region[4] = gpu_h; mt_region[5] = 1;
+    raw { oc4(mt_target, "getBytes:bytesPerRow:fromRegion:mipmapLevel:", &gpu_read[0], gpu_w * 4, &mt_region, 0); }
+    return 1;
+}
+
+fn mt_close() -> i64 {
+    return 1;
+}

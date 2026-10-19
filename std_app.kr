@@ -1,0 +1,195 @@
+kron_program
+kron_domain std_app;
+kron_imports
+acquire_domain "std_window.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- a phone app.
+//
+// The program is a library the phone's system loads (build it with --lib):
+// std_app.kr gives it what the system calls, starts the program's main in
+// a thread of its own, and std_window draws on the screen. main is written
+// as on a computer: window_open, then a loop on window_show.
+//
+//   Android:  kronc app.kr --target=android --lib -o libkronapp.so
+//             The system calls ANativeActivity_onCreate (NativeActivity, no
+//             Java): see templates/android.
+//   iOS:      kronc app.kr --target=ios --lib -o KronApp.dylib
+//             A small Swift app (templates/ios) calls:
+//               kron_app_start(width, height)  the screen's pixels; main starts
+//               kron_app_frame(dst, bytes)     the last picture, copied to dst:
+//                                              its width | height << 32, 0 when
+//                                              none is new; 32 bits a pixel,
+//                                              blue first in memory
+//               kron_app_touch(phase, x, y)    1 down, 2 move, 3 up; pixels
+//                                              of the picture
+//               kron_app_key(key, ch)          a key (window_key's codes), the
+//                                              character typed (0 none)
+//               kron_app_wants_keyboard()      1 while a box to type in
+//                                              has the focus
+//               kron_app_running()             0 once main returned
+//               kron_app_stop()                the system is ending the app
+//   Any other app that embeds Kron the same way (React Native, a desktop
+//   host) uses the same calls.
+//
+// What these functions touch is shared: the system calls them from its own
+// threads. main is not one of them: it runs as the program's main thread.
+// =========================================================================
+
+shared var app_started: i64;
+shared var app_done: i64;
+
+extern "libandroid.so" {
+    fn ANativeActivity_finish(activity: i64);
+}
+
+fn app_run(arg: i64) -> i64 {
+    main();
+    app_done = 1;
+    app_alive = 0;
+    if app_mode == 1 {
+        if app_activity != 0 {
+            raw { ANativeActivity_finish(app_activity); }
+        }
+    }
+    return 0;
+}
+
+fn app_begin() -> i64 {
+    app_alive = 1;
+    if app_started == 0 {
+        app_started = 1;
+        lock_init(30);
+        var h: i64 = thread_start(&app_run, 0);
+    }
+    return 1;
+}
+
+// ---- Android: NativeActivity ----------------------------------------------
+
+fn export app_on_destroy(activity: i64) {
+    app_alive = 0;
+    app_activity = 0;
+}
+
+fn export app_on_window_created(activity: i64, window: i64) {
+    lock_take(30);
+    var w: i64 = 0;
+    var h: i64 = 0;
+    raw {
+        w = ANativeWindow_getWidth(window);
+        h = ANativeWindow_getHeight(window);
+    }
+    app_screen_w = w;
+    app_screen_h = h;
+    and_window = window;
+    lock_give(30);
+}
+
+fn export app_on_window_destroyed(activity: i64, window: i64) {
+    lock_take(30);
+    and_window = 0;
+    lock_give(30);
+}
+
+fn export app_on_queue_created(activity: i64, queue: i64) {
+    lock_take(30);
+    and_queue = queue;
+    lock_give(30);
+}
+
+fn export app_on_queue_destroyed(activity: i64, queue: i64) {
+    lock_take(30);
+    and_queue = 0;
+    lock_give(30);
+}
+
+// ANativeActivity: its callbacks first. ANativeActivityCallbacks: onStart,
+// onResume, onSaveInstanceState, onPause, onStop, onDestroy (40),
+// onWindowFocusChanged, onNativeWindowCreated (56), onNativeWindowResized,
+// onNativeWindowRedrawNeeded, onNativeWindowDestroyed (80),
+// onInputQueueCreated (88), onInputQueueDestroyed (96), ...
+fn export ANativeActivity_onCreate(activity: i64, saved: i64, saved_size: u64) {
+    raw {
+        var cb: i64 = peek(activity);
+        poke(cb + 40, c_fn(app_on_destroy));
+        poke(cb + 56, c_fn(app_on_window_created));
+        poke(cb + 80, c_fn(app_on_window_destroyed));
+        poke(cb + 88, c_fn(app_on_queue_created));
+        poke(cb + 96, c_fn(app_on_queue_destroyed));
+    }
+    app_activity = activity;
+    app_mode = 1;
+    app_begin();
+}
+
+// ---- a host app (iOS, an embedder) -----------------------------------------
+
+fn export kron_app_start(width: i32, height: i32) -> i32 {
+    app_screen_w = width;
+    app_screen_h = height;
+    app_mode = 2;
+    app_begin();
+    return 1;
+}
+
+fn export kron_app_frame(dst: i64, bytes: i64) -> i64 {
+    lock_take(30);
+    var r: i64 = 0;
+    if app_seq != 0 {
+        var n: i64 = app_fw * app_fh * 4;
+        if n <= bytes {
+            raw {
+                var s: i64 = &app_frame;
+                var d: i64 = dst;
+                var e: i64 = s + n;
+                while s < e {
+                    poke(d, peek(s));
+                    s = s + 8;
+                    d = d + 8;
+                }
+            }
+            r = app_fw | (app_fh << 32);
+        }
+    }
+    lock_give(30);
+    return r;
+}
+
+fn app_event(kind: i64, x: i64, y: i64) -> i64 {
+    lock_take(30);
+    var next: i64 = (app_ev_tail + 1) & 63;
+    if next != app_ev_head {
+        var i: i64 = app_ev_tail * 4;
+        app_ev[i] = kind;
+        app_ev[i + 1] = x;
+        app_ev[i + 2] = y;
+        app_ev_tail = next;
+    }
+    lock_give(30);
+    return 1;
+}
+
+fn export kron_app_touch(phase: i32, x: f64, y: f64) {
+    app_event(phase as i64, x as i64, y as i64);
+}
+
+fn export kron_app_key(key: i32, ch: i32) {
+    if key != 0 { app_event(4, key as i64, 0); }
+    if ch != 0 { app_event(5, ch as i64, 0); }
+}
+
+fn export kron_app_wants_keyboard() -> i32 {
+    if app_kb != 0 { return 1; }
+    return 0;
+}
+
+fn export kron_app_running() -> i32 {
+    if app_done != 0 { return 0; }
+    return 1;
+}
+
+fn export kron_app_stop() {
+    app_alive = 0;
+}

@@ -38,10 +38,13 @@ global macho_write
 extern karm_build_image, karm_get_code, karm_get_code_len, karm_get_data_len
 extern karm_get_bss_size, karm_label, karm_reloc_count, karm_reloc_at
 extern karm_reloc_text
+extern codegen_export_count, codegen_export_name
+global mo_dylib, mo_platform, mo_idname
 
 MO_BASE   equ 0x100000000
 MO_PAGE   equ 0x4000
 MO_CODE   equ 0x4000             ; where the code starts, in the file and in memory
+MO_NSYM   equ 5                  ; functions of the system library dyld binds
 
 section .bss
     mo_out       resq 1          ; the file being written
@@ -65,8 +68,11 @@ section .bss
     mo_sig_off   resq 1
     mo_sig_size  resq 1
     mo_entry     resq 1
-    mo_got1      resq 1          ; offsets in __DATA of the two pointers
-    mo_got2      resq 1
+    mo_got       resq MO_NSYM    ; offsets in __DATA of the pointers dyld fills
+    mo_base      resq 1          ; where the image goes: 4 GB up, 0 for a dylib
+    mo_ndef      resq 1          ; symbols defined here: 1, or the exports
+    mo_exp_addr  resq 4096       ; a dylib: the offset of each export's entry
+    mo_lbl       resb 320        ; "__ce_" and an export's name
     mo_identlen  resq 1
     mo_ncode     resq 1          ; 4 KB pages the signature covers
     ; SHA-256
@@ -87,11 +93,28 @@ section .data
     mo_s_dyld     db "/usr/lib/dyld", 0
     mo_s_libsys   db "/usr/lib/libSystem.B.dylib", 0
     mo_s_mh       db "__mh_execute_header", 0
+    mo_l_main     db "__mac_main", 0
+    mo_dylib      db 0               ; 1: a dylib (--lib), set by main
+    mo_platform   dd 1               ; 1 macOS, 2 iOS
+    mo_s_rpath    db "@rpath/", 0
+    mo_idname     dq 0               ; what follows @rpath/ in a dylib's name
+    ; each function of the system library the program takes, and the word
+    ; of its .data that dyld fills with it: threads for the shim, and what
+    ; extern functions need -- dlopen, dlsym, and exit to end the program
+    ; with whatever the C library still buffers written out
+    mo_syms       dq mo_s_create, mo_l_got1, mo_s_detach, mo_l_got2
+                  dq mo_s_dlopen, mo_l_dlopen, mo_s_dlsym, mo_l_dlsym
+                  dq mo_s_exit, mo_l_exit
     mo_s_create   db "_pthread_create", 0
     mo_s_detach   db "_pthread_detach", 0
-    mo_l_main     db "__mac_main", 0
+    mo_s_dlopen   db "_dlopen", 0
+    mo_s_dlsym    db "_dlsym", 0
+    mo_s_exit     db "_exit", 0
     mo_l_got1     db "__mac_got_create", 0
     mo_l_got2     db "__mac_got_detach", 0
+    mo_l_dlopen   db "__got_dlopen", 0
+    mo_l_dlsym    db "__got_dlsym", 0
+    mo_l_exit     db "__got_exit", 0
     ; SHA-256: the first 32 bits of the fractional parts of the cube roots of
     ; the first 64 primes, and of the square roots of the first 8
     mo_k:
@@ -123,6 +146,12 @@ macho_write:
     sub  rsp, 40
     mov  [rel mo_out], rcx
     mov  [rel mo_name], rdx
+    mov  rax, MO_BASE
+    cmp  byte [rel mo_dylib], 0
+    je   .base_set
+    xor  eax, eax                    ; a dylib: from 0, dyld slides it
+.base_set:
+    mov  [rel mo_base], rax
     ; an address in a dq of the code cannot move with the image
     call karm_reloc_text
     test rax, rax
@@ -147,26 +176,69 @@ macho_write:
     call mo_page
     add  rax, rbx
     mov  [rel mo_data_vsz], rax
-    ; the labels the file needs: the entry and the two pointers to bind
+    ; the labels the file needs: the entry and the pointers to bind -- a
+    ; dylib has no entry, and its exports instead
+    cmp  byte [rel mo_dylib], 0
+    jne  .lbl_dylib
     lea  rcx, [rel mo_l_main]
     call karm_label
     cmp  rax, -1
     je   .fail
-    mov  rcx, MO_BASE
-    sub  rax, rcx
+    sub  rax, [rel mo_base]
     mov  [rel mo_entry], rax
-    lea  rcx, [rel mo_l_got1]
+    mov  qword [rel mo_ndef], 1
+    jmp  .lbl_got
+.lbl_dylib:
+    call codegen_export_count
+    mov  [rel mo_ndef], rax
+    xor  ebx, ebx
+.lbl_exp:
+    cmp  rbx, [rel mo_ndef]
+    jae  .lbl_got
+    mov  ecx, ebx
+    call codegen_export_name
+    mov  rsi, rax
+    lea  rdi, [rel mo_lbl]
+    mov  byte [rdi], '_'
+    mov  byte [rdi + 1], '_'
+    mov  byte [rdi + 2], 'c'
+    mov  byte [rdi + 3], 'e'
+    mov  byte [rdi + 4], '_'
+    xor  ecx, ecx
+.lbl_cp:
+    cmp  rcx, rdx
+    jae  .lbl_cpd
+    mov  al, [rsi + rcx]
+    mov  [rdi + rcx + 5], al
+    inc  rcx
+    jmp  .lbl_cp
+.lbl_cpd:
+    mov  byte [rdi + rcx + 5], 0
+    lea  rcx, [rel mo_lbl]
+    call karm_label
+    cmp  rax, -1
+    je   .fail
+    sub  rax, [rel mo_base]
+    lea  rcx, [rel mo_exp_addr]
+    mov  [rcx + rbx*8], rax
+    inc  ebx
+    jmp  .lbl_exp
+.lbl_got:
+    xor  ebx, ebx
+.got:
+    lea  rax, [rel mo_syms]
+    mov  rcx, rbx
+    shl  rcx, 4
+    mov  rcx, [rax + rcx + 8]
     call karm_label
     cmp  rax, -1
     je   .fail
     call mo_data_off
-    mov  [rel mo_got1], rax
-    lea  rcx, [rel mo_l_got2]
-    call karm_label
-    cmp  rax, -1
-    je   .fail
-    call mo_data_off
-    mov  [rel mo_got2], rax
+    lea  rcx, [rel mo_got]
+    mov  [rcx + rbx*8], rax
+    inc  ebx
+    cmp  ebx, MO_NSYM
+    jb   .got
 
     ; the header page, empty for now; the code and the data after it
     mov  rdi, [rel mo_out]
@@ -227,6 +299,7 @@ macho_write:
     call karm_reloc_at
     mov  r13, rax
     mov  al, 0x22                    ; SET_SEGMENT_AND_OFFSET_ULEB, segment 2
+    sub  al, [rel mo_dylib]          ; __DATA: segment 1 of a dylib, no __PAGEZERO
     call mo_b
     mov  rax, r13
     call mo_uleb
@@ -249,35 +322,41 @@ macho_write:
     call mo_b
     mov  al, 0x51                    ; SET_TYPE_IMM POINTER
     call mo_b
+    xor  ebx, ebx
+.bind:
     mov  al, 0x40                    ; SET_SYMBOL_TRAILING_FLAGS_IMM 0
     call mo_b
-    lea  rsi, [rel mo_s_create]
+    lea  rax, [rel mo_syms]
+    mov  rcx, rbx
+    shl  rcx, 4
+    mov  rsi, [rax + rcx]
     call mo_str
     mov  al, 0x72                    ; SET_SEGMENT_AND_OFFSET_ULEB, segment 2
+    sub  al, [rel mo_dylib]
     call mo_b
-    mov  rax, [rel mo_got1]
+    lea  rax, [rel mo_got]
+    mov  rax, [rax + rbx*8]
     call mo_uleb
     mov  al, 0x90                    ; DO_BIND
     call mo_b
-    mov  al, 0x40
-    call mo_b
-    lea  rsi, [rel mo_s_detach]
-    call mo_str
-    mov  al, 0x72
-    call mo_b
-    mov  rax, [rel mo_got2]
-    call mo_uleb
-    mov  al, 0x90
-    call mo_b
+    inc  ebx
+    cmp  ebx, MO_NSYM
+    jb   .bind
     xor  eax, eax                    ; DONE
     call mo_b
     call mo_align8
     mov  rax, [rel mo_n]
     sub  rax, [rel mo_bind]
     mov  [rel mo_bind + 8], rax
-    ; exports: a trie with one name, __mh_execute_header at offset 0
+    ; exports: a trie with one name, __mh_execute_header at offset 0 -- or,
+    ; for a dylib, every export
     mov  rax, [rel mo_n]
     mov  [rel mo_export], rax
+    cmp  byte [rel mo_dylib], 0
+    je   .trie_exe
+    call mo_trie
+    jmp  .trie_done
+.trie_exe:
     xor  eax, eax                    ; root: not a symbol
     call mo_b
     mov  al, 1                       ; one edge
@@ -292,6 +371,7 @@ macho_write:
     call mo_b
     call mo_b
     call mo_b                        ; no edges
+.trie_done:
     call mo_align8
     mov  rax, [rel mo_n]
     sub  rax, [rel mo_export]
@@ -300,6 +380,33 @@ macho_write:
     ; system library. Their names: " ", 0, then each one
     mov  rax, [rel mo_n]
     mov  [rel mo_symoff], rax
+    cmp  byte [rel mo_dylib], 0
+    je   .sym_exe
+    ; a dylib: each export, "_" and its name, from 2
+    mov  r12d, 2
+    xor  ebx, ebx
+.sym_exp:
+    cmp  rbx, [rel mo_ndef]
+    jae  .sym_undef
+    mov  eax, r12d
+    call mo_d
+    mov  al, 0x0F                    ; N_SECT | N_EXT
+    call mo_b
+    mov  al, 1
+    call mo_b
+    xor  eax, eax
+    call mo_w16
+    lea  rax, [rel mo_exp_addr]
+    mov  rax, [rax + rbx*8]
+    add  rax, [rel mo_base]
+    call mo_q
+    mov  ecx, ebx
+    call codegen_export_name
+    add  r12d, edx
+    add  r12d, 2                     ; "_" and the 0
+    inc  ebx
+    jmp  .sym_exp
+.sym_exe:
     mov  eax, 2                      ; name at 2
     call mo_d
     mov  al, 0x0F                    ; N_SECT | N_EXT
@@ -308,9 +415,14 @@ macho_write:
     call mo_b
     mov  eax, 0x10                   ; REFERENCED_DYNAMICALLY
     call mo_w16
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     call mo_q
-    mov  eax, 22                     ; 2 + 20
+    ; the undefined ones, their names one after the other from 22 (2 + 20)
+    mov  r12d, 22
+.sym_undef:
+    xor  ebx, ebx
+.usym:
+    mov  eax, r12d
     call mo_d
     mov  al, 1                       ; N_UNDF | N_EXT
     call mo_b
@@ -320,28 +432,65 @@ macho_write:
     call mo_w16
     xor  eax, eax
     call mo_q
-    mov  eax, 38                     ; 22 + 16
-    call mo_d
-    mov  al, 1
-    call mo_b
-    xor  eax, eax
-    call mo_b
-    mov  eax, 0x100
-    call mo_w16
-    xor  eax, eax
-    call mo_q
+    lea  rax, [rel mo_syms]
+    mov  rcx, rbx
+    shl  rcx, 4
+    mov  rsi, [rax + rcx]
+.usym_len:
+    inc  r12d
+    mov  al, [rsi]
+    inc  rsi
+    test al, al
+    jnz  .usym_len
+    inc  ebx
+    cmp  ebx, MO_NSYM
+    jb   .usym
     mov  rax, [rel mo_n]
     mov  [rel mo_stroff], rax
     mov  al, ' '
     call mo_b
     xor  eax, eax
     call mo_b
+    cmp  byte [rel mo_dylib], 0
+    jne  .sstr_exp
     lea  rsi, [rel mo_s_mh]
     call mo_str
-    lea  rsi, [rel mo_s_create]
+    jmp  .sstr_imp
+.sstr_exp:
+    xor  ebx, ebx
+.sstr_e:
+    cmp  rbx, [rel mo_ndef]
+    jae  .sstr_imp
+    mov  al, '_'
+    call mo_b
+    mov  ecx, ebx
+    call codegen_export_name
+    mov  rsi, rax
+    mov  r12, rdx
+.sstr_c:
+    test r12, r12
+    jz   .sstr_z
+    mov  al, [rsi]
+    call mo_b
+    inc  rsi
+    dec  r12
+    jmp  .sstr_c
+.sstr_z:
+    xor  eax, eax
+    call mo_b
+    inc  ebx
+    jmp  .sstr_e
+.sstr_imp:
+    xor  ebx, ebx
+.sstr:
+    lea  rax, [rel mo_syms]
+    mov  rcx, rbx
+    shl  rcx, 4
+    mov  rsi, [rax + rcx]
     call mo_str
-    lea  rsi, [rel mo_s_detach]
-    call mo_str
+    inc  ebx
+    cmp  ebx, MO_NSYM
+    jb   .sstr
     call mo_align8
     mov  rax, [rel mo_n]
     sub  rax, [rel mo_stroff]
@@ -406,8 +555,7 @@ macho_write:
 
 ; mo_data_off(rax = address of a .data label) -> rax = its offset in __DATA
 mo_data_off:
-    mov  rcx, MO_BASE
-    sub  rax, rcx
+    sub  rax, [rel mo_base]
     sub  rax, [rel mo_text_sz]
     ret
 
@@ -427,6 +575,8 @@ mo_commands:
     add  rax, 32
     mov  [rel mo_lc], rax
     mov  qword [rel mo_ncmds], 0
+    cmp  byte [rel mo_dylib], 0
+    jne  .no_pagezero
     ; __PAGEZERO: the first 4 GB, no access
     mov  eax, 0x19                   ; LC_SEGMENT_64
     mov  ecx, 72
@@ -435,7 +585,7 @@ mo_commands:
     call mo_lc_name
     xor  eax, eax
     call mo_lc_q                     ; vmaddr
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     call mo_lc_q                     ; vmsize
     xor  eax, eax
     call mo_lc_q                     ; fileoff
@@ -444,13 +594,14 @@ mo_commands:
     call mo_lc_d                     ; initprot
     call mo_lc_d                     ; nsects
     call mo_lc_d                     ; flags
+.no_pagezero:
     ; __TEXT: the header page and the code, read and execute
     mov  eax, 0x19
     mov  ecx, 152
     call mo_cmd
     lea  rsi, [rel mo_s_text]
     call mo_lc_name
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     call mo_lc_q
     mov  rax, [rel mo_text_sz]
     call mo_lc_q
@@ -469,7 +620,8 @@ mo_commands:
     call mo_lc_name
     lea  rsi, [rel mo_s_text]
     call mo_lc_name
-    mov  rax, 0x100004000
+    mov  rax, [rel mo_base]
+    add  rax, MO_CODE
     call mo_lc_q                     ; addr
     mov  rax, [rel mo_code_len]
     call mo_lc_q                     ; size
@@ -492,7 +644,7 @@ mo_commands:
     call mo_cmd
     lea  rsi, [rel mo_s_data]
     call mo_lc_name
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     add  rax, [rel mo_text_sz]
     call mo_lc_q
     mov  rax, [rel mo_data_vsz]
@@ -512,7 +664,7 @@ mo_commands:
     call mo_lc_name
     lea  rsi, [rel mo_s_data]
     call mo_lc_name
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     add  rax, [rel mo_text_sz]
     call mo_lc_q
     mov  rax, [rel mo_data_len]
@@ -532,7 +684,7 @@ mo_commands:
     call mo_lc_name
     lea  rsi, [rel mo_s_data]
     call mo_lc_name
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     add  rax, [rel mo_text_sz]
     add  rax, [rel mo_data_fsz]
     call mo_lc_q
@@ -557,7 +709,7 @@ mo_commands:
     call mo_cmd
     lea  rsi, [rel mo_s_linkedit]
     call mo_lc_name
-    mov  rax, MO_BASE
+    mov  rax, [rel mo_base]
     add  rax, [rel mo_text_sz]
     add  rax, [rel mo_data_vsz]
     call mo_lc_q
@@ -604,13 +756,14 @@ mo_commands:
     call mo_cmd
     mov  rax, [rel mo_symoff]
     call mo_lc_d
-    mov  eax, 3
+    mov  rax, [rel mo_ndef]
+    add  eax, MO_NSYM
     call mo_lc_d
     mov  rax, [rel mo_stroff]
     call mo_lc_d
     mov  rax, [rel mo_strsize]
     call mo_lc_d
-    ; LC_DYSYMTAB: no locals, one defined, two undefined
+    ; LC_DYSYMTAB: no locals, one defined, the rest undefined
     mov  eax, 0x0B
     mov  ecx, 80
     call mo_cmd
@@ -618,10 +771,10 @@ mo_commands:
     call mo_lc_d                     ; ilocalsym
     call mo_lc_d                     ; nlocalsym
     call mo_lc_d                     ; iextdefsym
-    mov  eax, 1
+    mov  rax, [rel mo_ndef]
     call mo_lc_d                     ; nextdefsym
     call mo_lc_d                     ; iundefsym
-    mov  eax, 2
+    mov  eax, MO_NSYM
     call mo_lc_d                     ; nundefsym
     xor  eax, eax
     mov  ebx, 12
@@ -629,6 +782,8 @@ mo_commands:
     call mo_lc_d
     dec  ebx
     jnz  .dys
+    cmp  byte [rel mo_dylib], 0
+    jne  .id_dylib
     ; LC_LOAD_DYLINKER
     mov  eax, 0x0E
     mov  ecx, 32
@@ -638,6 +793,12 @@ mo_commands:
     lea  rsi, [rel mo_s_dyld]
     mov  ecx, 20
     call mo_lc_str
+    jmp  .after_id
+.id_dylib:
+    ; LC_ID_DYLIB: @rpath/ and the file's name, the name a program that
+    ; links with it records
+    call mo_id_dylib
+.after_id:
     ; LC_UUID: from the code's first bytes and the size, the same for the
     ; same program
     mov  eax, 0x1B
@@ -657,13 +818,19 @@ mo_commands:
     mov  eax, 0x32
     mov  ecx, 24
     call mo_cmd
-    mov  eax, 1                      ; PLATFORM_MACOS
+    mov  eax, [rel mo_platform]      ; 1 PLATFORM_MACOS, 2 PLATFORM_IOS
     call mo_lc_d
-    mov  eax, 0x000B0000             ; minos 11.0
+    mov  eax, 0x000B0000             ; minos 11.0 -- iOS 14.0
+    cmp  dword [rel mo_platform], 2
+    jne  .minos
+    mov  eax, 0x000E0000
+.minos:
     call mo_lc_d
-    call mo_lc_d                     ; sdk 11.0
+    call mo_lc_d                     ; sdk the same
     xor  eax, eax
     call mo_lc_d                     ; no tools
+    cmp  byte [rel mo_dylib], 0
+    jne  .no_main
     ; LC_MAIN
     mov  eax, 0x80000028
     mov  ecx, 24
@@ -672,6 +839,7 @@ mo_commands:
     call mo_lc_q
     xor  eax, eax
     call mo_lc_q
+.no_main:
     ; LC_LOAD_DYLIB libSystem
     mov  eax, 0x0C
     mov  ecx, 56
@@ -708,8 +876,188 @@ mo_commands:
     sub  rax, 32
     mov  [rdi + 20], eax
     mov  dword [rdi + 24], 0x00200085 ; NOUNDEFS DYLDLINK TWOLEVEL PIE
+    cmp  byte [rel mo_dylib], 0
+    je   .hdr_done
+    mov  dword [rdi + 12], 6         ; MH_DYLIB
+    mov  dword [rdi + 24], 0x00100085 ; NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED
+.hdr_done:
     mov  dword [rdi + 28], 0
     pop  r12
+    pop  rbx
+    ret
+
+; mo_id_dylib(): LC_ID_DYLIB, the name "@rpath/<file>"
+mo_id_dylib:
+    push rbx
+    push rsi
+    mov  rsi, [rel mo_idname]
+    xor  ebx, ebx
+.idl_len:
+    cmp  byte [rsi + rbx], 0
+    je   .idl_have
+    inc  ebx
+    jmp  .idl_len
+.idl_have:
+    add  ebx, 8                      ; "@rpath/" and the 0
+    add  ebx, 24
+    add  ebx, 7
+    and  ebx, -8
+    mov  eax, 0x0D
+    mov  ecx, ebx
+    call mo_cmd
+    mov  eax, 24
+    call mo_lc_d                     ; the name's offset
+    mov  eax, 2
+    call mo_lc_d                     ; timestamp
+    mov  eax, 0x00010000
+    call mo_lc_d                     ; current version 1.0
+    call mo_lc_d                     ; compatibility 1.0
+    ; the name, padded with zeros to the command's end
+    push rdi
+    mov  rdi, [rel mo_lc]
+    sub  ebx, 24
+    xor  ecx, ecx
+.idl_z:
+    cmp  ecx, ebx
+    jae  .idl_zd
+    mov  byte [rdi + rcx], 0
+    inc  ecx
+    jmp  .idl_z
+.idl_zd:
+    lea  rsi, [rel mo_s_rpath]
+    xor  ecx, ecx
+.idl_r:
+    mov  al, [rsi + rcx]
+    test al, al
+    jz   .idl_rd
+    mov  [rdi + rcx], al
+    inc  ecx
+    jmp  .idl_r
+.idl_rd:
+    mov  rsi, [rel mo_idname]
+.idl_n:
+    mov  al, [rsi]
+    test al, al
+    jz   .idl_nd
+    mov  [rdi + rcx], al
+    inc  rsi
+    inc  ecx
+    jmp  .idl_n
+.idl_nd:
+    add  rdi, rbx
+    mov  [rel mo_lc], rdi
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; mo_trie(): a dylib's exports. The root has an edge for every one, the
+; whole name "_<name>"; each child is a symbol: flags 0, its offset, no
+; edges. The root's offsets to its children take three bytes each, padded,
+; so that they are known before the children are written.
+mo_trie:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    xor  eax, eax                    ; root: not a symbol
+    call mo_b
+    mov  rax, [rel mo_ndef]
+    call mo_b                        ; its edges: a byte, so 255 at most
+    ; the root's size: 1 + uleb(count) + each edge's name and 3 bytes
+    ; -- worked out as the edges are written; the children's offsets then
+    ; patched: r13 = where each 3-byte offset goes, kept in mo_exp_addr's
+    ; upper half (offsets below 2^21 fit)
+    xor  ebx, ebx
+.tr_edge:
+    cmp  rbx, [rel mo_ndef]
+    jae  .tr_kids
+    mov  al, '_'
+    call mo_b
+    mov  ecx, ebx
+    call codegen_export_name
+    mov  rsi, rax
+    mov  r12, rdx
+.tr_name:
+    test r12, r12
+    jz   .tr_named
+    mov  al, [rsi]
+    call mo_b
+    inc  rsi
+    dec  r12
+    jmp  .tr_name
+.tr_named:
+    xor  eax, eax
+    call mo_b
+    ; three bytes for the child's offset, filled below
+    mov  rax, [rel mo_n]
+    shl  rax, 32
+    lea  rcx, [rel mo_exp_addr]
+    mov  rdx, [rcx + rbx*8]
+    or   rdx, rax
+    mov  [rcx + rbx*8], rdx
+    mov  al, 0x80
+    call mo_b
+    call mo_b
+    xor  eax, eax
+    call mo_b
+    inc  ebx
+    jmp  .tr_edge
+.tr_kids:
+    xor  ebx, ebx
+.tr_kid:
+    cmp  rbx, [rel mo_ndef]
+    jae  .tr_out
+    ; the child's offset from the trie's start, into its three bytes
+    mov  rax, [rel mo_n]
+    sub  rax, [rel mo_export]
+    lea  rcx, [rel mo_exp_addr]
+    mov  r14, [rcx + rbx*8]
+    mov  r13, r14
+    shr  r13, 32                     ; where the three bytes are
+    mov  ecx, r14d                   ; the export's offset
+    mov  r14, rcx
+    lea  rcx, [rel mo_exp_addr]
+    mov  [rcx + rbx*8], r14          ; only the offset again, for the symbols
+    mov  rdi, [rel mo_out]
+    add  rdi, r13
+    mov  rdx, rax
+    and  edx, 127
+    or   edx, 128
+    mov  [rdi], dl
+    mov  rdx, rax
+    shr  rdx, 7
+    and  edx, 127
+    or   edx, 128
+    mov  [rdi + 1], dl
+    mov  rdx, rax
+    shr  rdx, 14
+    and  edx, 127
+    mov  [rdi + 2], dl
+    ; the child: its info's size, flags 0, the offset, no edges
+    mov  rax, r14
+    xor  ecx, ecx
+.tr_len:
+    inc  ecx
+    shr  rax, 7
+    jnz  .tr_len
+    mov  eax, ecx
+    inc  eax
+    call mo_b                        ; terminal size: flags + offset
+    xor  eax, eax
+    call mo_b                        ; flags
+    mov  rax, r14
+    call mo_uleb
+    xor  eax, eax
+    call mo_b                        ; no edges
+    inc  ebx
+    jmp  .tr_kid
+.tr_out:
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rsi
     pop  rbx
     ret
 

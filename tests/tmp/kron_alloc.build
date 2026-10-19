@@ -8,6 +8,6 @@
 [4/6] Semantic... OK
 [5/6] Codegen... OK
 [6/6] Linking... OK
-Written: tests\tmp\kron_alloc.asm
+Written: tests\tmp\kron_alloc_c.exe
 
 Compilation successful!

@@ -8,12 +8,15 @@ REM   but kasm and pe_writer.  No NASM.  No GoLink.
 REM
 REM   Three generations, because the seed may be an older
 REM   compiler: stage1 is assembled by the seed's kasm, stage2
-REM   by the kasm just built.  Those two may legitimately
+REM   by the kasm just built.  The parts of the compiler written
+REM   in Kron (KRONPARTS.bat) go in as they are for stage1, and
+REM   are made again by stage1 for stage2 and by stage2 for
+REM   stage3.  Those two may legitimately
 REM   differ.  stage2 and stage3 may not -- that is the fixpoint,
 REM   and stage3 is what gets installed.
 REM
-REM   If you have no seed yet, run SEED.bat once while NASM is
-REM   still around.
+REM   If you have no seed yet, SEED.bat kronc promotes the kronc.exe
+REM   you have.
 REM ============================================================
 
 if not exist seed\kronc.exe (
@@ -40,13 +43,17 @@ if not exist kron_all.exe goto :nostage1
 copy /y kron_all.exe stage1.exe >nul
 del /q kron_all.exe
 
-echo [stage 2] stage1.exe --^> stage2.exe
+echo [stage 2] stage1.exe makes the parts in Kron again, then --^> stage2.exe
+call KRONPARTS.bat stage1.exe
+if errorlevel 1 goto :noparts
 stage1.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nostage2
 copy /y kron_all.exe stage2.exe >nul
 del /q kron_all.exe
 
-echo [stage 3] stage2.exe --^> stage3.exe
+echo [stage 3] stage2.exe makes the parts in Kron again, then --^> stage3.exe
+call KRONPARTS.bat stage2.exe
+if errorlevel 1 goto :noparts
 stage2.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nostage3
 copy /y kron_all.exe stage3.exe >nul
@@ -88,12 +95,16 @@ echo ============================================================
 echo   kronc.exe installed, built by Kron's own tools
 echo   Built by:  seed\kronc.exe  (no NASM, no GoLink)
 echo.
-echo   Next:  RUNTESTS.bat /slow     then    PETESTS.bat
+echo   Next:  RUNTESTS.bat /slow
 echo   Re-seed with SEED.bat only when both are green.
 echo ============================================================
 echo.
 exit /b 0
 
+:noparts
+echo   [FAIL] a part of the compiler written in Kron does not compile
+echo          -- kronc.exe was NOT replaced
+exit /b 1
 :nostage1
 echo   [FAIL] stage 1 produced no executable -- the seed cannot
 echo          assemble the current kron_all.asm

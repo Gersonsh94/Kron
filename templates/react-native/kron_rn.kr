@@ -1,0 +1,89 @@
+kron_program
+kron_domain kron_rn;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron functions for a React Native app.
+//
+//   Android:  kronc kron_rn.kr --target=android --lib -o libkron.so
+//   iOS:      kronc kron_rn.kr --target=ios --lib -o KronRN.framework/KronRN
+//
+// Each function is exported twice: once under a plain C name, which the iOS
+// module (ios/KronModule.m) calls, and once under the name Java gives a
+// native method of dev.kron.rn.KronNative, which the Android module calls.
+// A Java method gets the JNIEnv and its class first; a Java string comes in
+// and goes out through the JNIEnv's functions, called by their place in its
+// table (GetStringUTFChars 169, ReleaseStringUTFChars 170, NewStringUTF 167),
+// with c_call: C code at an address, in the C convention of the system.
+// =========================================================================
+
+fn export kron_add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn export kron_fib(n: i32) -> i64 {
+    var a: i64 = 0;
+    var b: i64 = 1;
+    var i: i64 = 0;
+    while i < (n as i64) {
+        var t: i64 = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    return a;
+}
+
+// "Hello, <name>, from Kron" into out (cap bytes, the last one a 0); its length
+fn export kron_greet(name: i64, out: i64, cap: i64) -> i64 {
+    var n: i64 = 0;
+    raw {
+        n = put_text(out, n, cap, "Hello, ");
+        n = put_text(out, n, cap, name);
+        n = put_text(out, n, cap, ", from Kron");
+        poke8(out + n, 0);
+    }
+    return n;
+}
+
+fn put_text(out: i64, at: i64, cap: i64, text: i64) -> i64 {
+    var n: i64 = at;
+    var i: i64 = 0;
+    raw {
+        while peek8(text + i) != 0 {
+            if n < cap - 1 {
+                poke8(out + n, peek8(text + i));
+                n = n + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
+// ---- Android: the native methods of dev.kron.rn.KronNative ----------------
+
+fn export Java_dev_kron_rn_KronNative_add(env: i64, cls: i64, a: i32, b: i32) -> i32 {
+    return kron_add(a, b);
+}
+
+fn export Java_dev_kron_rn_KronNative_fib(env: i64, cls: i64, n: i32) -> i64 {
+    return kron_fib(n);
+}
+
+fn export Java_dev_kron_rn_KronNative_greet(env: i64, cls: i64, name: i64) -> i64 {
+    var out: [u8; 256];
+    var r: i64 = 0;
+    raw {
+        var table: i64 = peek(env);
+        var get_chars: i64 = peek(table + 169 * 8);
+        var release_chars: i64 = peek(table + 170 * 8);
+        var new_string: i64 = peek(table + 167 * 8);
+        var chars: i64 = c_call(get_chars, env, name, 0);
+        kron_greet(chars, &out, 256);
+        var ignored: i64 = c_call(release_chars, env, name, chars);
+        r = c_call(new_string, env, &out);
+    }
+    return r;
+}

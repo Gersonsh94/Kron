@@ -211,8 +211,33 @@ between regions. The order of work does not change unless Gerson says so.
 
 ## Order of work
 
-- Next (Gerson, 12-10-2026): block C, phones (Android and iPhone: asked,
-  not answered yet); then Ganimedes. The language comes before Ganimedes.
+- **The next delivery, all in one (Gerson, 12-10-2026):**
+  1. **Interoperability**: Kron calls functions of the system's libraries
+     on every system (`extern fn ... from "lib"`), and builds libraries
+     (`.dll`, `.so`, `.dylib`) whose exported functions follow the system's
+     C calling convention. The base of everything below.
+  2. **Performance**: the web's registers in wasm locals; reals, arrays and
+     calls through the register allocator; fewer ARM64 instructions per
+     x86-64 one.
+  3. **Language**: `list<T>` and `map<T>` of any type, structs included;
+     generic functions; modules with a namespace (`math.sqrt(x)`).
+  4. **Tools**: the VS Code extension up to date; a minimal debugger.
+  5. **Block C, phones**: Kron as a library for Android and iOS (usable from
+     React Native, Kotlin, Swift), and whole apps in Kron with `std_ui` on
+     the touch screen.
+  6. **3D games** (Gerson, same day): `std_gpu` over Vulkan (Windows,
+     Linux, Android), Metal (macOS, iOS) and WebGPU (the web); shaders
+     written in Kron and compiled by kronc to SPIR-V, MSL and WGSL; `mat4`,
+     `quat`, SIMD vectors; glTF/OBJ models and JPEG textures; `std_audio`;
+     gamepads, captured mouse, touch; a game loop and basic collisions
+     (the last two, and the model loaders, taken out on 18-10-2026: see
+     "Kron is a language, not an engine").
+     Verified on Claude's side with software renderers; `GPUTESTS.bat` on
+     Gerson's RTX 3060 is the real test, as `MACTESTS.sh` is for macOS.
+  - Testing tools on Claude's side only (gcc, the ARM64 cross gcc, QEMU,
+    Mesa's software Vulkan, SPIR-V validators, the macOS emulator):
+    allowed by Gerson, 12-10-2026. Nothing of them goes into Kron.
+- Then Ganimedes. The language comes before Ganimedes.
 
 
 1. ~~Memory safety (point 1)~~ — **done**.
@@ -785,10 +810,173 @@ between each.
   `[rel x + 32]` lost its 32 and `[rel x + 2*8]` meant x + 2.
   `test_kasmfix.asm` (in RUNTESTS' assembler list) checks all three.
 
+## The big delivery (13 to 18-10-2026, Gerson: everything in one zip)
+
+What Kron lacked to be used for real programs, in one delivery: calling C
+and being called by it, speed, the language features a large program asks
+for, tools, phones and the graphics card.
+
+- **extern blocks**: `extern "lib.so.6", "lib.dylib", "lib.dll" { fn ... }`,
+  the first library that loads; calls only inside `raw { }`. The executable
+  stays free of a C library unless a program uses `extern`: then a Linux
+  program is linked dynamically, a Windows one flushes the C library's
+  buffers at exit.
+- **--lib** builds .dll, .so and .dylib; `fn export` is what C calls; the
+  globals get their values on the first call. `c_fn` and `c_call` for
+  callbacks. `--target=android` and `--target=ios` build libraries only; an
+  app is a thin shell around one (templates/).
+- **Speed on the web**: the x86-64 registers are wasm locals inside a
+  function, synchronised at calls and returns -- 2 to 4 times faster.
+  Codegen: left-leaf binary operations without push/pop, shifts by a
+  constant.
+- **Struct values** (copies on assignment, parameters, results through a
+  hidden destination in r11), `list<S>`, zero-initialised locals,
+  **generics** by copying (`f<T>`, `S<A, B>`), **module names**
+  (`module.name`, `acquire_domain "x.kr" as m;`). Generics and module names
+  are a pass over the tokens before the parser: the parser and everything
+  after it never see a template.
+- **3D**: one API, `std_gpu`, over Vulkan, Metal and WebGPU; shaders in KSL,
+  a language in Kron's style that `std_shader` translates to SPIR-V, MSL and
+  WGSL -- no shader compiler to install. The frame is read back and shown in
+  the window `std_window` already has, so every system shows it the same
+  way. Blending is on by default. Everything 3D is written in Kron
+  (`extern` for Vulkan and Metal, the web host for WebGPU).
+- **External tools only to test**: Mesa's lavapipe, the Vulkan validation
+  layers, spirv-val, naga, Dawn, gcc, QEMU and PIL checked the work on
+  Claude's side; nothing of them is in Kron or in the delivery.
+- **The debugger** is in the language, not in a debugging API: `--debug`
+  puts a call before each statement of the program's own files and keeps
+  locals in memory; `std_debug.kr` speaks a line protocol on the standard
+  input and output; the VS Code extension turns it into the Debug Adapter
+  Protocol with no package. Windows and Linux x86-64 for now.
+
+## Kron is a language, not an engine (18-10-2026, Gerson)
+
+"Do only what belongs to the language." The compiler and its standard
+library give a program the machine: memory, threads, files, the network,
+windows, the graphics card (`std_gpu`, `std_shader`, `std_math3d`), sound
+(`std_audio`), controllers (`std_gamepad`), data formats (`std_image`,
+`std_json`). What a game or an engine builds on top -- a game loop,
+collisions, model loaders, scenes, presenting frames as fast as the
+monitor allows -- is not part of Kron and does not go in this repository.
+`std_game`, `std_collide`, `std_model`, `templates/game3d.kr` and their
+tests were taken out on this date; they were written to show the language
+can carry a 3D game, and they work, but they belong to a library of their
+own. Future work here is the language: the compiler, the standard library
+at the level above, the tools (editor, debugger) and the targets.
+
+## Without NASM and GoLink (18-10-2026, Gerson)
+
+"We have to separate from NASM and GoLink now." Nothing in the repository
+uses them any more:
+
+- The compiler already built itself with kasm and pe_writer (BUILD.bat,
+  BOOTSTRAP.bat). RUNTESTS.bat built every test twice, once through NASM
+  and GoLink as an audit; it now builds each one the way `kronc prog.kr`
+  does, and only that. The encoding tests compare kasm's bytes with
+  references in tests\enc (made by kasm, each checked opcode by opcode
+  against another assembler once, on Claude's side, as all external tools
+  are used); the programs that only have to compile are built with kronc.
+- The bare-metal paths: kasm learnt `org`, `align`, `times` with an
+  expression, data values that are expressions of labels, and `mov crN,
+  r64` / `mov r64, crN`. The 16-bit MBR and the 32-bit Multiboot entry are
+  written as the bytes of each instruction, the instruction beside them,
+  with labels for every address and distance. The MBR had never booted (its
+  page tables sat at 0x70000, past what a 16-bit address reaches, and the
+  disk image was shorter than what it read); it now builds its tables at
+  0x1000 and BUILDOS.bat pads the image. Both paths boot in QEMU.
+- Removed: BUILD_NASM.bat, SPLICE.bat, SELFHOST.bat, DIFFGEN.bat and
+  PETESTS.bat (they existed to compare kasm with NASM), the /nasm option of
+  kc.bat, and nasm.exe, GoLink.exe and kronc_nasm.exe from the folder.
+  `kronc -S` still writes the assembly text, in the syntax kasm reads.
+
+## The compiler moves to Kron, part by part (19-10-2026, Gerson)
+
+"Let's go part by part, I want nothing half done." The compiler is
+rewritten in Kron one part at a time. The hand-written assembly is the
+seed it grows from: a part rewritten in Kron replaces its assembly, it is
+not kept beside it. A part is delivered whole or not at all: written in
+Kron, running inside the compiler, giving exactly what the assembly gave
+(checked token by token or byte for byte), with the fixpoint and every
+suite green.
+
+How a part is built:
+
+- `kronc part.kr --module` writes the part's functions as x86-64 text,
+  `part_kr.asm`, with nothing of a program: no runtime, no entry, no
+  failure traces, no debugger hooks. kron_all.asm includes it, so kasm
+  still builds the whole compiler alone, from text. The part's globals
+  and constants carry its name (`__g_lexer_klx_pos`): parts compiled apart
+  may import the same constants. Its functions keep their names, which the
+  hand-written code calls. A module refuses what it cannot have: `main`, a
+  global whose first value has to be computed, `export`.
+- Each part is a compilation of its own, so no one compilation has to
+  hold the whole compiler: the token, AST and code buffers stay as they
+  are.
+- The generated `_kr.asm` files are committed, so a seed that knows no
+  `--module` still builds. `KRONPARTS.bat` makes them again; BUILD.bat
+  and BOOTSTRAP.bat call it with stage1 (boot1) and stage2 (boot2), so
+  the fixpoint covers the parts in Kron too.
+- Inside the compiler there is no runtime: a part reaches memory with
+  peek and poke, and its arrays through their address, so nothing calls
+  a bounds check or `fail`. A small hand-written file is the door to each
+  part: the old entry names, every register but rax kept.
+- kasm reports a label defined twice (the `equ` lines every module's
+  headers repeat aside): two parts can no longer clash in silence.
+
+Part 1, the lexer (done 19-10-2026): `lexer/lexer.kr`, with
+`lexer/tokens.kr` (the token numbers, the same as include/kron_types.inc),
+and `lexer/lexer.asm` as its door. It gives the same tokens as the
+assembly lexer on every `.kr` file of the repository and on 2,500
+generated files, and `kronc -S` of every test is the same text. One
+behaviour changed on purpose: a character Kron does not use (`@`, `#`, an
+`é` outside a text) used to end the file there without a word -- what
+came after it was not compiled at all. It is now an error with its line
+and column, and so is a text with no closing quote.
+
+## Fixed 19-10-2026
+
+- A global array given values (`var t: [i64; 4] = [1, 2, 3, 4];`) started
+  at zero: the values were dropped without a word. They are data now, at
+  the width of the elements, the rest zero; a value that has to be
+  computed is an error.
+- kasm: `resb`/`resq` outside `.bss` reserved the space in `.bss` while
+  the label stayed where it was; they are zeros in place now, as in NASM.
+  A real with an exponent and no point (`1e5`) was read as 1.
+- An internal error of the code generator (its output buffer full) was
+  taken for success, and the truncated program went on to be assembled.
+
+## Fixed 13 to 18-10-2026
+
+- Windows: `__main_exit` called `ExitProcess` with the stack misaligned:
+  the process could fault while it ended (exit code 5 under Wine).
+- A program with several `acquire_domain` lines reported every line below
+  the second one early (traces, errors, the debugger): each later directive
+  now starts a new run of the line map. A file named twice in the map keeps
+  one name, so it has one number.
+- The lexer's errors were not seen: a program too big for the token table
+  came out as "unexpected end of file". The table is now 8 MB (349 000
+  tokens) and the error says what happened.
+- xwasm: a program with an `export` did not build for the web.
+- std_gpu chose the graphics card's memory with `f & want == want`, which
+  Kron reads as C does, `f & (want == want)`: on lavapipe every memory can
+  be mapped and it went unseen; on an RTX 3060 the game asked to map memory
+  only the card can see (vkMapMemory -5). Parenthesised, and a failed map
+  now fails the call instead of copying to address 0.
+- Windows commits a stack a page at a time behind a guard page; a function
+  with a frame bigger than a page (std_gpu's vk_module: 512 KB) stored far
+  below it and the process died without a word -- on the RTX 3060 the
+  first shader. Frames over 4 KB now touch their pages from the top down
+  (a store of rbp per page, before anything in the frame has a value), and
+  executables reserve 8 MB of stack instead of 1. GPUTESTS.bat took the
+  crash for a pass ("if errorlevel 1" does not see negative codes): it
+  checks the exit code exactly now.
+- kasm accepts two global labels of the same name without a word; a
+  debugger label met one of karm's. Names are now checked across modules
+  before a delivery.
+
 ## Known limits, still to fix
 
-- A Kron function named like a NASM directive or macro (`at`, `struc`,
-  `times`...) breaks the NASM audit build; the kasm build is unaffected.
 - Text arguments are checked as handles, or as addresses between 64 KB and
   2^47: any other integer passed where a text is expected could still be
   read as one.
@@ -799,11 +987,14 @@ between each.
   released by the first wait); on Windows it is harmless.
 
 - `failed();` alone is not a statement: `if failed() { }`.
-- The web target runs about three to six times slower than native code:
-  the x86-64 registers are wasm globals. Keeping them in locals inside a
-  function would close most of it.
-- macOS: tested in emulation only until MACTESTS.sh runs on a Mac.
+- The web target runs about one and a half to three times slower than
+  native code.
+- macOS: tested in emulation only until MACTESTS.sh runs on a Mac; the
+  Metal backend of std_gpu and the AudioQueue sound have not run on one yet.
+- Not run on real hardware here: XInput and waveOut on Windows, AAudio on
+  Android, the Vulkan backend on Windows (GPUTESTS.bat is for that).
+- The debugger follows the main thread only, cannot pause a running
+  program from outside, and builds for Windows and Linux x86-64.
 
 - The `--dump` option writes nothing.
-- kasm does not check undefined symbols.
 - `jup_` prefixes on internal symbols.

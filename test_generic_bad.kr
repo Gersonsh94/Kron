@@ -1,0 +1,8 @@
+kron_program
+kron_domain t;
+kron_imports
+kron_definitions
+fn biggest<T>(a: T, b: T) -> T { if a > b { return a; } return b; }
+fn main() {
+    print(biggest(3, 9));
+}

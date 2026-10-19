@@ -1,0 +1,10 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer...
+test_char_bad.kr:18:1: a character Kron does not use '@'
+@
+^
+  hint: outside a "..." text and a // comment, Kron is written with letters, digits, _ and its operators

@@ -103,7 +103,18 @@ const LIMIT: i64 = 64;
 function... A `var` outside any function is a global: it lives for the whole
 program and starts at zero (a global can start from any expression; those
 that are not constants are computed when `main` begins). Large arrays belong there; a local array of tens of thousands
-of elements does not fit on the stack.
+of elements does not fit on the stack. A global array can start from
+numbers written out, which are data in the program; the elements not given
+are zero:
+
+```
+var primes: [i64; 100] = [2, 3, 5, 7, 11];
+var mask: [u8; 4] = [0xFF, 0x0F, 0, -1];
+```
+
+Outside a `"..."` text and a `//` comment, a program is letters, digits,
+`_`, blanks and Kron's operators; any other character (`@`, `#`, an `é`) is
+an error at its line and column.
 
 Every element of an array takes the width of its type: a `[u8; 4096]` is
 4096 bytes, a `[i32; 100]` 400, a `[f32; 3]` 12. `&buf[0]` of a `[u8; N]`
@@ -662,9 +673,13 @@ brings in what it imports itself, each one once.
 | `std_ml.kr` | logistic regression with its metrics |
 | `std_text.kr` `std_list.kr` `std_map.kr` | texts, lists and maps (section 10) |
 | `std_file.kr` `std_time.kr` `std_os.kr` | files and folders, dates and time, the system (section 11) |
-| `std_image.kr` | PNG and BMP pictures |
+| `std_image.kr` | PNG, BMP and JPEG pictures |
 | `std_window.kr` | a window to draw in, with keyboard, mouse, wheel and clipboard (on a web page, its canvas) |
 | `std_ui.kr` | controls: buttons, text boxes, lists, menus, dropdowns, tabs, pictures |
+| `std_app.kr` | a whole app on a phone (Android, iOS), section 18 |
+| `std_gpu.kr` `std_shader.kr` `std_math3d.kr` `std_audio.kr` `std_gamepad.kr` | the graphics card, sound and controllers (section 19) |
+| `std_json.kr` | reading JSON |
+| `std_debug.kr` | the debugger's side, added by `--debug` (section 20) |
 
 ---
 
@@ -707,8 +722,11 @@ What a program has on the web:
 - **Time**: the clock, `time_sleep` and `window_sleep`.
 
 Not there: running other programs (`os_run`), the network (`std_net`) and
-command-line arguments (`arg_count()` is 1). A program runs about three to
-six times slower than as native code.
+command-line arguments (`arg_count()` is 1). A program runs about one and a
+half to three times slower than as native code. 3D (`std_gpu`) draws with
+WebGPU (Chrome, Edge; Firefox and Safari as they enable it), sound plays
+after the first click or key (browsers ask for that), gamepads and the
+captured mouse work as on a computer.
 
 Programs that only print run in Node.js too, with files on the real disk:
 
@@ -746,12 +764,255 @@ program` removes it.
 The program is the Linux ARM64 one with a different layer underneath: files,
 folders, time, memory, threads, the network and running other programs all
 work. Windows (`std_window`, `std_ui`) do not yet: `window_open` fails and
-says so. The same program built with `--target=web` opens its window in a
+says so. `std_gpu` draws with Metal without a window (pictures, tests). The same program built with `--target=web` opens its window in a
 browser on the Mac.
 
 ---
 
-## 17. Limits
+## 17. Values, generics and module names
+
+### Struct values
+
+A struct is a value: assigning it, passing it and returning it copies it
+whole, nested structs included. A struct declared without a value starts
+with every field at 0, and so does every local declared without one.
+
+```
+struct Vec3 { x: f32; y: f32; z: f32; }
+
+fn mid(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5, z: (a.z + b.z) * 0.5 };
+}
+
+var p: Vec3 = mid(a, b);        // a copy: changing p leaves a and b alone
+var q: ptr<Vec3> = &p;
+q.x = 2.0;                       // through a pointer: p.x is 2
+```
+
+`list<S>` holds structs by value: `l[i]` is a copy, `l[i] = s` stores one,
+`for s in l` gives each, and `list_add`, `list_insert`, `list_remove`,
+`list_pop`, `list_last`, `list_reverse` work on them as on numbers.
+
+### Generics
+
+A function or a struct can take types as parameters. The types are written
+where it is used, and the compiler makes a copy for each set of them:
+
+```
+struct Pair<A, B> { first: A; second: B; }
+
+fn biggest<T>(a: T, b: T) -> T {
+    if a > b { return a; }
+    return b;
+}
+
+print(biggest<i64>(3, 9));                    // 9
+print(biggest<f64>(2.5, 1.5));                // 2.500000
+var p: Pair<i64, f64> = Pair<i64, f64> { first: 7, second: 0.5 };
+```
+
+### Module names
+
+Two modules may define functions of the same name. Inside each module its
+own one is meant; elsewhere the name is written with its module,
+`module.name` (the file's name without `.kr`), or with a shorter name given
+on import:
+
+```
+acquire_domain "mod_sq.kr" as sq;
+acquire_domain "mod_tri.kr";
+
+print(sq.area(4));
+print(mod_tri.area(4));
+```
+
+A name defined in only one module needs nothing. Using a name two modules
+define, without saying which, is a compile error that lists them.
+
+---
+
+## 18. Calling C, and being called from it
+
+### extern: the system's libraries
+
+```
+extern "libm.so.6", "libm.dylib", "msvcrt.dll" {
+    fn cos(x: f64) -> f64;
+    fn printf(format: str, ...) -> i32;
+}
+
+raw {
+    print(cos(0.0));
+    printf("%d %s\n", 7, "seven");
+}
+```
+
+The strings name the library on each system; the first that loads is used,
+and each function is looked up the first time it is called. The calls go
+inside `raw { }`: what they run is C, outside what Kron checks. Reals go as
+reals, integers as integers, texts and pointers as addresses, and `...`
+takes any number more. A function no library has makes the call fail with
+a hint, instead of stopping the program.
+
+### Libraries: `--lib`
+
+```
+kronc.exe engine.kr --lib                         engine.dll
+kronc.exe engine.kr --lib --target=linux          libengine.so
+kronc.exe engine.kr --lib --target=macos          libengine.dylib
+```
+
+Functions marked `export` are what C (or C#, Python, Swift, Kotlin...) can
+call; they take and return numbers, reals and addresses in the system's C
+convention:
+
+```
+fn export engine_step(dt: f64) -> i64 { ... }
+```
+
+The library's globals get their first values the first time any export is
+called, and an optional `fn lib_init()` runs then.
+
+### Callbacks
+
+`c_fn(f)` is the address C calls to reach the export `f` (a comparison for
+`qsort`, a window procedure); `c_call(address, args...)` calls a C function
+by its address. Both only inside `raw { }`.
+
+### Phones
+
+`--target=android` (a `.so` for an app) and `--target=ios` (a `.dylib` for
+an app) build libraries; `templates/` has the Android and iOS projects
+around them, a whole app in Kron (`templates/app.kr`, with `std_app.kr`),
+and a React Native module. `templates/README.md` says how to build each.
+
+---
+
+## 19. The graphics card, sound and controllers
+
+```
+window_open(1280, 720, "demo");
+gpu_open(1280, 720);
+var prog: i64 = gpu_shader(source);         // KSL, below
+var cube: i64 = gpu_cube();
+var tex: i64 = gpu_texture(image_load("crate.png"));
+while window_show() {
+    gpu_begin(color4(20, 24, 32, 255));
+    gpu_set_mat4(prog, "mvp", mvp);
+    gpu_draw(prog, cube, tex);
+    gpu_end();                               // the frame is in the window
+}
+```
+
+The same program draws with Vulkan on Windows, Linux and Android, Metal on
+macOS and iOS, and WebGPU in a browser. Without a window it draws all the
+same, for `gpu_pixel(x, y)` and `gpu_save_bmp(path)`. Blending (alpha) is
+on unless `gpu_blend(0)` turns it off for the shaders made after;
+`gpu_depth` and `gpu_cull` work the same way.
+
+| Module | What it has |
+|---|---|
+| `std_gpu.kr` | `gpu_open` `gpu_shader` `gpu_mesh` `gpu_mesh_lists` `gpu_cube` `gpu_plane` `gpu_sphere` `gpu_texture` `gpu_begin` `gpu_set_mat4/vec4/vec3/vec2/float` `gpu_draw` `gpu_draw_textures` `gpu_end` `gpu_pixel` `gpu_save_bmp` `gpu_close` |
+| `std_shader.kr` | KSL, the shader language, translated to SPIR-V, MSL and WGSL |
+| `std_math3d.kr` | `Vec2` `Vec3` `Vec4` `Quat` `Mat4` and their functions: `m4_perspective` `m4_look_at` `m4_trs` `q_slerp` ... |
+| `std_image.kr` | PNG, BMP and baseline JPEG; `image_from_bytes` |
+| `std_audio.kr` | `audio_open` `audio_load_wav` `audio_tone` `audio_play` `audio_stop` `audio_set_volume` `audio_set_pan` `audio_update` |
+| `std_gamepad.kr` | `gamepad_poll` `gamepad_connected` `gamepad_button` `gamepad_pressed` `gamepad_axis`, Xbox layout |
+| `std_json.kr` | `json_parse` and the functions that read what it gives |
+| `std_window.kr` | also: `window_key_down(k)` (a key held now), `window_mouse_capture(1)` with `window_mouse_dx/dy` |
+
+### KSL: shaders in Kron's style
+
+```
+uniform { mvp: mat4; model: mat4; light: vec3; }
+texture albedo;
+in pos: vec3;
+in normal: vec3;
+in uv: vec2;
+var vn: vec3;
+var vuv: vec2;
+vertex {
+    vn = (model * vec4(normal, 0.0)).xyz;
+    vuv = uv;
+    position = mvp * vec4(pos, 1.0);
+}
+fragment {
+    let d = max(dot(normalize(vn), light), 0.0);
+    color = vec4(sample(albedo, vuv).rgb * (0.25 + 0.75 * d), 1.0);
+}
+```
+
+Types `float vec2 vec3 vec4 mat4 bool`; `let`, `var`, `if`, `for i in 0..4`,
+`discard`; the usual functions (`normalize dot cross mix clamp pow sin`...).
+A mesh's corners are floats in the order of the `in` lines: position, normal
+and uv make eight a corner, which is what `gpu_cube` and `gpu_sphere` give;
+`gpu_mesh_lists(vertices, 8, indices)` makes one from a `list<f64>` and a
+`list<i64>`. `shader_error()` says what is wrong in a shader and on
+which line.
+
+### What is not here
+
+Kron gives the program the graphics card, the sound and the controllers.
+What a game builds on them -- a game loop, collisions, scene graphs, model
+formats -- belongs to libraries written in Kron, outside the language and
+its standard library.
+
+---
+
+## 20. The debugger
+
+```
+kronc.exe program.kr --debug -o program_debug.exe
+```
+
+A debug build stops where it is told and shows every variable. The Kron
+extension for VS Code does all of it from the editor: F5 builds the open
+file this way and runs it under the debugger; breakpoints are set by
+clicking left of the line numbers; F10, F11 and Shift+F11 step over, into
+and out of calls; the Variables panel shows the locals of each function on
+the stack and the globals of the program's files -- texts, lists, maps,
+arrays and structs, field by field.
+
+What a debug build changes: before each statement of the program's own
+files there is a call to the debugger (`std_debug.kr`, added by the
+compiler; the std_*.kr modules run at full speed, without stops), and
+every local stays in memory, where it can be read. It talks to the editor
+through its standard input and output; the protocol is described at the top
+of `std_debug.kr`. Debug builds are for Windows and Linux x86-64. The main
+thread is the one followed; the others run without stops.
+
+---
+
+## 21. Getting started on a new machine
+
+See `GETTING_STARTED.md` next to the compiler: what to install (nothing for
+programs nor for the compiler), the first program, the
+editor, the tests, building for other systems.
+
+---
+
+## 22. Building the compiler
+
+The compiler is written in x86-64 assembly and, part by part, in Kron
+itself; its lexer is `lexer/lexer.kr`. `BUILD.bat` builds `kronc.exe` from
+the seed with nothing but Kron's own tools, and `BOOTSTRAP.bat` checks that
+it reproduces itself byte for byte.
+
+A part in Kron is compiled as a module:
+
+```
+kronc.exe lexer\lexer.kr --module        lexer\lexer_kr.asm
+```
+
+which is its functions as assembly text, with no runtime and no entry, for
+`kron_all.asm` to include. A module has no `main` and exports nothing; its
+globals start from numbers written out. `KRONPARTS.bat` makes every part
+again, and BUILD.bat and BOOTSTRAP.bat call it with each compiler they
+build.
+
+---
+
+## 23. Limits
 
 | Limit | Value |
 |---|---|
@@ -769,7 +1030,7 @@ browser on the Mac.
 
 ---
 
-## 18. Testing
+## 24. Testing
 
 ```
 RUNTESTS.bat            the suite on Windows: compile, run, compare
@@ -779,12 +1040,16 @@ ARMTESTS.bat            the same programs on ARM64, through WSL and QEMU
 WEBTESTS.bat            the same programs as WebAssembly, through Node.js
 MACTESTS.bat            builds them for macOS into tests\mac; then, on a Mac
                         with Apple silicon, in the same folder:  bash MACTESTS.sh
+GPUTESTS.bat            the graphics card, a window, the sound, the controllers
 BOOTSTRAP.bat           the compiler compiles itself; three generations must match
 ```
 
+`RUNTESTS.bat` also builds `test_debug.kr` with `--debug` and drives it with
+`tests\debug\test_debug.in`, as the editor would.
+
 ---
 
-## 19. A complete example
+## 25. A complete example
 
 ```
 kron_program

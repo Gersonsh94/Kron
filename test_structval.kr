@@ -1,0 +1,61 @@
+kron_program
+kron_domain t;
+kron_imports
+kron_definitions
+struct Vec3 { x: f64; y: f64; z: f64; }
+struct Small { a: u8; b: i16; c: f32; }
+struct Body { id: i32; pos: Vec3; s: Small; m: f32; }
+var gv: Vec3;
+var gb: Body;
+fn len2(v: Vec3) -> f64 { return v.x * v.x + v.y * v.y + v.z * v.z; }
+fn mk(a: f64) -> Vec3 { var r: Vec3; r.x = a; r.y = a + 1.0; r.z = a + 2.0; return r; }
+fn add(a: Vec3, b: Vec3) -> Vec3 { return Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
+fn scale(v: Vec3, k: f64) -> Vec3 { var r: Vec3 = v; r.x = r.x * k; r.y = r.y * k; r.z = r.z * k; return r; }
+fn twice(v: Vec3) -> Vec3 { return add(v, v); }
+fn fact(n: i64) -> Vec3 { if n <= 1 { return mk(1.0); } var r: Vec3 = fact(n - 1); r.x = r.x * n; return r; }
+fn vsc(p: ptr<Vec3>, k: f64) { raw { p.x = p.x * k; p.z = k; } }
+fn main() {
+    var a: Vec3;
+    a.x = 1.0; a.y = 2.0; a.z = 3.0;
+    var b: Vec3 = a;
+    b.x = 10.0;
+    print(a.x); print(b.x); print(b.y);
+    var c: Vec3;
+    c = b;
+    print(c.x); print(c.z);
+    var q: Vec3 = mk(4.0);
+    print(q.z);
+    q = add(q, a);
+    print(q.x); print(q.y); print(q.z);
+    print(len2(mk(1.0)));
+    print(len2(add(mk(1.0), Vec3 { x: 1.0, y: 1.0, z: 1.0 })));
+    var t: Vec3 = twice(scale(a, 2.0));
+    print(t.x); print(t.y); print(t.z);
+    var f: Vec3 = fact(5);
+    print(f.x);
+    gv = a;
+    print(gv.y);
+    gb.pos = add(a, a);
+    print(gb.pos.z);
+    var bd: Body = Body { id: 5, pos: a, m: 2.5 };
+    print(bd.id); print(bd.pos.y); print(bd.m);
+    bd.s.a = 200; bd.s.b = -3; bd.s.c = 1.5;
+    var bd2: Body = bd;
+    print(bd2.s.a); print(bd2.s.b); print(bd2.s.c); print(bd2.m); print(bd2.pos.z);
+    var v2: Vec3 = bd.pos;
+    print(v2.x);
+    gb = bd;
+    print(gb.s.b);
+    print(len2(gb.pos));
+    var p: ptr<Vec3> = &a;
+    raw {
+        print(p.x);
+        p.y = 5.0;
+    }
+    print(a.y);
+    vsc(&a, 3.0);
+    print(a.x); print(a.z);
+    var w: Vec3;
+    raw { w = *p; }
+    print(w.y);
+}

@@ -1,0 +1,648 @@
+kron_program
+kron_domain std_audio;
+kron_imports
+acquire_domain "std_file.kr";
+acquire_domain "std_os.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_window.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- sound.
+//
+//     audio_open(48000);
+//     var shot: i64 = audio_load_wav("shot.wav");
+//     var music: i64 = audio_load_wav("theme.wav");
+//     audio_play(music, 0.5, 1);                 // half volume, looping
+//     while window_show() {
+//         if window_key() == 32 { audio_play(shot, 1.0, 0); }
+//         audio_update();                        // every frame
+//     }
+//
+// Kron mixes every sound playing into one stereo stream and hands it to
+// the system: waveOut on Windows, ALSA on Linux, AAudio on Android,
+// AudioQueue on macOS and iOS, WebAudio on the web. audio_update keeps a
+// tenth of a second queued; call it every frame.
+//
+//     audio_open(rate)                  48000 or 44100; 1, or a fail
+//     audio_load_wav(path)              a sound from a .wav (PCM, 8 or 16
+//                                       bits, mono or stereo, any rate)
+//     audio_tone(hz, ms, volume)        a sound made here: a sine
+//     audio_play(sound, volume, loop)   a voice: the sound playing
+//     audio_stop(voice)  audio_set_volume(voice, v)  audio_set_pan(voice, p)
+//     audio_playing(voice)              1 while it has not ended
+//     audio_update()  audio_close()
+//
+// On Linux the device is "default", or what KRON_AUDIO_DEVICE says.
+// =========================================================================
+
+const AU_VOICES: i64 = 64;
+const AU_CHUNK: i64 = 1024;              // frames mixed at a time
+const AU_NBUF: i64 = 6;                  // waveOut / AudioQueue buffers
+
+var au_on: i64;
+var au_kind: i64;                        // 1 Windows, 2 ALSA, 3 web, 4 AAudio, 5 AudioQueue
+var au_rate: i64;
+var au_snd_addr: i64;                    // sounds: stereo i16 frames
+var au_snd_frames: i64;
+var au_v_sound: [i64; 64];               // voices: 0 when free
+var au_v_pos: [i64; 64];
+var au_v_vol: [i64; 64];                 // 0 .. 256 each side
+var au_v_left: [i64; 64];
+var au_v_right: [i64; 64];
+var au_v_loop: [i64; 64];
+var au_v_gen: [i64; 64];                 // a voice's number changes when reused
+var au_mixbuf: [i32; 2048];              // one chunk, both sides
+var au_out: [i16; 2048];
+var au_dev: i64;                         // the system's handle
+var au_hdr: [u8; 512];                   // waveOut headers, 48 bytes each
+var au_bufs: [i16; 12288];               // their samples: AU_NBUF chunks
+var au_used: [i64; 8];                   // a buffer handed to the system
+var au_scratch: [i64; 16];
+var au_ignore: i64;
+shared var aq_free: [i64; 8];            // AudioQueue: buffers given back
+shared var aq_ptr: [i64; 8];
+
+// ---------------------------------------------------------- the systems ---
+extern "winmm.dll" {
+    fn waveOutOpen(out: i64, device: u32, format: i64, cb: i64, inst: i64, flags: u32) -> u32;
+    fn waveOutPrepareHeader(h: i64, hdr: i64, size: u32) -> u32;
+    fn waveOutWrite(h: i64, hdr: i64, size: u32) -> u32;
+    fn waveOutReset(h: i64) -> u32;
+    fn waveOutClose(h: i64) -> u32;
+}
+extern "libasound.so.2" {
+    fn snd_pcm_open(out: i64, name: i64, dir: i32, mode: i32) -> i32;
+    fn snd_pcm_set_params(pcm: i64, format: i32, access: i32, channels: u32, rate: u32, resample: i32, latency: u32) -> i32;
+    fn snd_pcm_avail_update(pcm: i64) -> i64;
+    fn snd_pcm_writei(pcm: i64, buf: i64, frames: u64) -> i64;
+    fn snd_pcm_prepare(pcm: i64) -> i32;
+    fn snd_pcm_drain(pcm: i64) -> i32;
+    fn snd_pcm_close(pcm: i64) -> i32;
+}
+extern "libaaudio.so" {
+    fn AAudio_createStreamBuilder(out: i64) -> i32;
+    fn AAudioStreamBuilder_setSampleRate(b: i64, rate: i32);
+    fn AAudioStreamBuilder_setChannelCount(b: i64, n: i32);
+    fn AAudioStreamBuilder_setFormat(b: i64, f: i32);
+    fn AAudioStreamBuilder_openStream(b: i64, out: i64) -> i32;
+    fn AAudioStreamBuilder_delete(b: i64) -> i32;
+    fn AAudioStream_requestStart(s: i64) -> i32;
+    fn AAudioStream_write(s: i64, buf: i64, frames: i32, timeout: i64) -> i32;
+    fn AAudioStream_close(s: i64) -> i32;
+}
+extern "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox" {
+    fn AudioQueueNewOutput(format: i64, cb: i64, user: i64, rl: i64, mode: i64, flags: u32, out: i64) -> i32;
+    fn AudioQueueAllocateBuffer(q: i64, size: u32, out: i64) -> i32;
+    fn AudioQueueEnqueueBuffer(q: i64, buf: i64, n: u32, descs: i64) -> i32;
+    fn AudioQueueStart(q: i64, time: i64) -> i32;
+    fn AudioQueueStop(q: i64, now: u32) -> i32;
+    fn AudioQueueDispose(q: i64, now: u32) -> i32;
+}
+
+// AudioQueue gives a buffer back on a thread of its own
+fn export kron_aq_done(user: i64, q: i64, buf: i64) {
+    var i: i64 = 0;
+    while i < 8 {
+        if aq_ptr[i] == buf {
+            aq_free[i] = 1;
+        }
+        i = i + 1;
+    }
+}
+
+fn au_is_android() -> i64 {
+    if app_mode == 1 { return 1; }
+    return 0;
+}
+
+fn audio_open(rate: i64) -> i64 {
+    if au_on == 1 {
+        fail "the sound is open already" hint "audio_close first";
+    }
+    if rate < 8000 || rate > 192000 {
+        fail "no such sample rate" hint "48000 or 44100";
+    }
+    au_rate = rate;
+    au_snd_addr = list_new();
+    au_snd_frames = list_new();
+    var ok: i64 = 0;
+    if win_is_web() {
+        au_kind = 3;
+        raw { ok = syscall(1210, rate); }
+        if ok <= 0 {
+            fail "this page has no sound" hint "a browser with WebAudio, and a page with a window";
+        }
+    } else if win_is_mac() {
+        au_kind = 5;
+        ok = aq_open(rate);
+    } else if au_is_android() {
+        au_kind = 4;
+        ok = aa_open(rate);
+    } else if target_os() == 1 {
+        au_kind = 1;
+        ok = wo_open(rate);
+    } else {
+        au_kind = 2;
+        ok = al_open(rate);
+    }
+    if ok <= 0 { return 0; }
+    var i: i64 = 0;
+    while i < AU_VOICES {
+        au_v_sound[i] = 0;
+        i = i + 1;
+    }
+    au_on = 1;
+    return 1;
+}
+
+fn wo_open(rate: i64) -> i64 {
+    var fmt: [u8; 24];
+    var r: i64 = 0;
+    raw {
+        var f: i64 = &fmt[0];
+        poke16(f, 1);
+        poke16(f + 2, 2);
+        poke32(f + 4, rate);
+        poke32(f + 8, rate * 4);
+        poke16(f + 12, 4);
+        poke16(f + 14, 16);
+        poke16(f + 16, 0);
+        r = waveOutOpen(&au_scratch[0], 0 - 1, f, 0, 0, 0);
+    }
+    if failed() || r != 0 {
+        fail "the sound device would not open" hint "is a speaker or a headset connected?";
+    }
+    au_dev = au_scratch[0];
+    var i: i64 = 0;
+    while i < AU_NBUF {
+        au_used[i] = 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn al_open(rate: i64) -> i64 {
+    var name: text = env_get("KRON_AUDIO_DEVICE");
+    if text_len(name) == 0 {
+        name = "default";
+    }
+    var r: i64 = 0;
+    raw { r = snd_pcm_open(&au_scratch[0], text_cstr(name), 0, 1); }
+    if failed() {
+        fail "there is no ALSA on this computer" hint "install libasound2";
+    }
+    if r < 0 {
+        fail "the sound device would not open" hint "set KRON_AUDIO_DEVICE to an ALSA device, or check the sound settings";
+    }
+    au_dev = au_scratch[0];
+    raw { r = snd_pcm_set_params(au_dev, 2, 3, 2, rate, 1, 100000); }
+    if r < 0 {
+        fail "the sound device does not take 16-bit stereo at this rate" hint "try 48000 or 44100";
+    }
+    return 1;
+}
+
+fn aa_open(rate: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = AAudio_createStreamBuilder(&au_scratch[0]); }
+    if failed() || r != 0 {
+        fail "no AAudio on this phone" hint "Android 8.1 and later have it";
+    }
+    var b: i64 = au_scratch[0];
+    raw {
+        AAudioStreamBuilder_setSampleRate(b, rate);
+        AAudioStreamBuilder_setChannelCount(b, 2);
+        AAudioStreamBuilder_setFormat(b, 1);
+        r = AAudioStreamBuilder_openStream(b, &au_scratch[1]);
+        au_ignore = AAudioStreamBuilder_delete(b);
+    }
+    if r != 0 {
+        fail "the sound would not open" hint "check the phone's sound settings";
+    }
+    au_dev = au_scratch[1];
+    raw { r = AAudioStream_requestStart(au_dev); }
+    return 1;
+}
+
+fn aq_open(rate: i64) -> i64 {
+    var asbd: [u8; 40];
+    var r: i64 = 0;
+    raw {
+        var f: i64 = &asbd[0];
+        var d: [f64; 1];
+        d[0] = rate as f64;
+        poke(f, peek(&d));
+        poke32(f + 8, 1819304813);       // 'lpcm'
+        poke32(f + 12, 12);              // signed integers, packed
+        poke32(f + 16, 4);
+        poke32(f + 20, 1);
+        poke32(f + 24, 4);
+        poke32(f + 28, 2);
+        poke32(f + 32, 16);
+        poke32(f + 36, 0);
+        r = AudioQueueNewOutput(f, c_fn(kron_aq_done), 0, 0, 0, 0, &au_scratch[0]);
+    }
+    if failed() || r != 0 {
+        fail "the sound would not open" hint "check the system's sound settings";
+    }
+    au_dev = au_scratch[0];
+    var i: i64 = 0;
+    while i < AU_NBUF {
+        raw { r = AudioQueueAllocateBuffer(au_dev, AU_CHUNK * 4, &au_scratch[1]); }
+        aq_ptr[i] = au_scratch[1];
+        aq_free[i] = 1;
+        i = i + 1;
+    }
+    raw { r = AudioQueueStart(au_dev, 0); }
+    return 1;
+}
+
+// ----------------------------------------------------------------- sounds ---
+// n frames of stereo i16, a block of the heap; the sound's number
+fn au_add_sound(addr: i64, frames: i64) -> i64 {
+    list_add(au_snd_addr, addr);
+    list_add(au_snd_frames, frames);
+    return list_len(au_snd_addr);
+}
+
+fn audio_tone(hz: f64, ms: i64, volume: f64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    var n: i64 = au_rate * ms / 1000;
+    var p: i64 = hp_alloc(n * 4 + 8);
+    if p == 0 {
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    var i: i64 = 0;
+    var step: f64 = 6.283185307179586 * hz / (au_rate as f64);
+    while i < n {
+        var v: i64 = (fsin(step * (i as f64)) * volume * 32000.0) as i64;
+        raw {
+            poke16(p + i * 4, v);
+            poke16(p + i * 4 + 2, v);
+        }
+        i = i + 1;
+    }
+    return au_add_sound(p, n);
+}
+
+fn au_le16(p: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek16(p); }
+    if v >= 32768 { v = v - 65536; }
+    return v;
+}
+
+fn au_le32(p: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek32(p); }
+    return v;
+}
+
+// a .wav: PCM, 8 or 16 bits, one or two channels, any rate (made the
+// device's rate here, by straight lines between samples)
+fn audio_load_wav(path: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    var f: i64 = file_open(path, "r");
+    if f == 0 {
+        fail "cannot read the sound file" hint "check the name";
+    }
+    var size: i64 = file_size(f);
+    var buf: i64 = hp_alloc(size + 16);
+    if buf == 0 {
+        file_close(f);
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    file_read_at(f, 0, buf, size);
+    file_close(f);
+    if size < 44 || au_le32(buf) != 1179011410 || au_le32(buf + 8) != 1163280727 {
+        hp_release(buf);
+        fail "this is no .wav file" hint "a RIFF WAVE file";
+    }
+    var at: i64 = 12;
+    var chans: i64 = 0;
+    var rate: i64 = 0;
+    var bits: i64 = 0;
+    var data: i64 = 0;
+    var dlen: i64 = 0;
+    while at + 8 <= size {
+        var id: i64 = au_le32(buf + at);
+        var len: i64 = au_le32(buf + at + 4);
+        if id == 544501094 {              // "fmt "
+            if au_le16(buf + at + 8) != 1 {
+                hp_release(buf);
+                fail "the .wav is compressed" hint "save it as PCM (8 or 16 bits)";
+            }
+            chans = au_le16(buf + at + 10);
+            rate = au_le32(buf + at + 12);
+            bits = au_le16(buf + at + 22);
+        }
+        if id == 1635017060 {             // "data"
+            data = buf + at + 8;
+            dlen = len;
+            if at + 8 + dlen > size { dlen = size - at - 8; }
+        }
+        at = at + 8 + len + (len & 1);
+    }
+    if data == 0 || rate == 0 || (bits != 8 && bits != 16) || (chans != 1 && chans != 2) {
+        hp_release(buf);
+        fail "this .wav is not one Kron reads" hint "PCM, 8 or 16 bits, mono or stereo";
+    }
+    var bpf: i64 = chans * bits / 8;
+    var nin: i64 = dlen / bpf;
+    var nout: i64 = nin * au_rate / rate;
+    var p: i64 = hp_alloc(nout * 4 + 8);
+    if p == 0 {
+        hp_release(buf);
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    var i: i64 = 0;
+    while i < nout {
+        // where it falls in the file, in 1/65536 frames
+        var pos: i64 = i * rate * 65536 / au_rate;
+        var k: i64 = pos >> 16;
+        var fr: i64 = pos & 65535;
+        var k2: i64 = k + 1;
+        if k2 >= nin { k2 = nin - 1; }
+        var c: i64 = 0;
+        while c < 2 {
+            var ch: i64 = c;
+            if chans == 1 { ch = 0; }
+            var a: i64 = 0;
+            var b: i64 = 0;
+            if bits == 16 {
+                a = au_le16(data + k * bpf + ch * 2);
+                b = au_le16(data + k2 * bpf + ch * 2);
+            } else {
+                raw {
+                    a = (peek8(data + k * bpf + ch) - 128) * 256;
+                    b = (peek8(data + k2 * bpf + ch) - 128) * 256;
+                }
+            }
+            var v: i64 = a + (b - a) * fr / 65536;
+            raw { poke16(p + i * 4 + c * 2, v); }
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    hp_release(buf);
+    return au_add_sound(p, nout);
+}
+
+// ----------------------------------------------------------------- voices ---
+fn audio_play(sound: i64, volume: f64, looping: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if sound < 1 || sound > list_len(au_snd_addr) {
+        fail "no such sound" hint "use what audio_load_wav or audio_tone gave";
+    }
+    var i: i64 = 0;
+    while i < AU_VOICES {
+        if au_v_sound[i] == 0 {
+            au_v_sound[i] = sound;
+            au_v_pos[i] = 0;
+            au_v_vol[i] = (volume * 256.0) as i64;
+            au_v_left[i] = 256;
+            au_v_right[i] = 256;
+            au_v_loop[i] = looping;
+            au_v_gen[i] = au_v_gen[i] + 1;
+            return i + 1 + au_v_gen[i] * 256;
+        }
+        i = i + 1;
+    }
+    fail "too many sounds playing at once" hint "64 at most: stop some";
+}
+
+fn au_voice(v: i64) -> i64 {
+    var i: i64 = (v & 255) - 1;
+    if i < 0 || i >= AU_VOICES || au_v_gen[i] != v >> 8 || au_v_sound[i] == 0 {
+        return -1;
+    }
+    return i;
+}
+
+fn audio_stop(v: i64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i >= 0 { au_v_sound[i] = 0; }
+    return 0;
+}
+
+fn audio_playing(v: i64) -> i64 {
+    if au_voice(v) >= 0 { return 1; }
+    return 0;
+}
+
+fn audio_set_volume(v: i64, volume: f64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i >= 0 { au_v_vol[i] = (volume * 256.0) as i64; }
+    return 0;
+}
+
+// -1 all left, 0 the middle, 1 all right
+fn audio_set_pan(v: i64, pan: f64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i >= 0 {
+        var p: f64 = fclamp(pan, 0.0 - 1.0, 1.0);
+        au_v_left[i] = ((1.0 - p) * 256.0) as i64;
+        au_v_right[i] = ((1.0 + p) * 256.0) as i64;
+        if au_v_left[i] > 256 { au_v_left[i] = 256; }
+        if au_v_right[i] > 256 { au_v_right[i] = 256; }
+    }
+    return 0;
+}
+
+// n frames of every voice, mixed into au_out
+fn au_mix(n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n * 2 {
+        au_mixbuf[i] = 0;
+        i = i + 1;
+    }
+    var v: i64 = 0;
+    while v < AU_VOICES {
+        var s: i64 = au_v_sound[v];
+        if s != 0 {
+            var addr: i64 = list_get(au_snd_addr, s - 1);
+            var frames: i64 = list_get(au_snd_frames, s - 1);
+            var pos: i64 = au_v_pos[v];
+            var vl: i64 = au_v_vol[v] * au_v_left[v] / 256;
+            var vr: i64 = au_v_vol[v] * au_v_right[v] / 256;
+            var k: i64 = 0;
+            while k < n {
+                if pos >= frames {
+                    if au_v_loop[v] == 1 && frames > 0 {
+                        pos = 0;
+                    } else {
+                        au_v_sound[v] = 0;
+                        k = n;
+                    }
+                }
+                if k < n {
+                    var l: i64 = 0;
+                    var r: i64 = 0;
+                    raw {
+                        l = peek16(addr + pos * 4);
+                        r = peek16(addr + pos * 4 + 2);
+                    }
+                    if l >= 32768 { l = l - 65536; }
+                    if r >= 32768 { r = r - 65536; }
+                    au_mixbuf[k * 2] = au_mixbuf[k * 2] + l * vl / 256;
+                    au_mixbuf[k * 2 + 1] = au_mixbuf[k * 2 + 1] + r * vr / 256;
+                    pos = pos + 1;
+                    k = k + 1;
+                }
+            }
+            au_v_pos[v] = pos;
+        }
+        v = v + 1;
+    }
+    i = 0;
+    while i < n * 2 {
+        var x: i64 = au_mixbuf[i];
+        if x > 32767 { x = 32767; }
+        if x < 0 - 32768 { x = 0 - 32768; }
+        au_out[i] = x;
+        i = i + 1;
+    }
+    return n;
+}
+
+// keeps the system's queue full: call it every frame
+fn audio_update() -> i64 {
+    if au_on == 0 { return 0; }
+    if au_kind == 1 { return wo_update(); }
+    if au_kind == 2 { return al_update(); }
+    if au_kind == 3 { return web_update(); }
+    if au_kind == 4 { return aa_update(); }
+    return aq_update();
+}
+
+fn wo_update() -> i64 {
+    var b: i64 = 0;
+    while b < AU_NBUF {
+        var hdr: i64 = 0;
+        var free: i64 = 1;
+        raw {
+            hdr = &au_hdr[0] + b * 48;
+            if au_used[b] == 1 && (peek32(hdr + 24) & 1) == 0 {
+                free = 0;
+            }
+        }
+        if free == 1 {
+            au_mix(AU_CHUNK);
+            raw {
+                var data: i64 = &au_bufs[0] + b * AU_CHUNK * 4;
+                hp_copy(data, &au_out[0], AU_CHUNK * 4);
+                poke(hdr, data);
+                poke32(hdr + 8, AU_CHUNK * 4);
+                poke32(hdr + 12, 0);
+                poke(hdr + 16, 0);
+                poke32(hdr + 24, 0);
+                poke32(hdr + 28, 0);
+                poke(hdr + 32, 0);
+                poke(hdr + 40, 0);
+                au_ignore = waveOutPrepareHeader(au_dev, hdr, 48);
+                au_ignore = waveOutWrite(au_dev, hdr, 48);
+            }
+            au_used[b] = 1;
+        }
+        b = b + 1;
+    }
+    return 1;
+}
+
+fn al_update() -> i64 {
+    var avail: i64 = 0;
+    raw { avail = snd_pcm_avail_update(au_dev); }
+    if avail < 0 {
+        raw { au_ignore = snd_pcm_prepare(au_dev); }
+        raw { avail = snd_pcm_avail_update(au_dev); }
+        if avail < 0 { return 0; }
+    }
+    // at most a tenth of a second ahead
+    var budget: i64 = au_rate / 10;
+    if avail > budget { avail = budget; }
+    while avail > 0 {
+        var n: i64 = AU_CHUNK;
+        if n > avail { n = avail; }
+        au_mix(n);
+        var w: i64 = 0;
+        raw { w = snd_pcm_writei(au_dev, &au_out[0], n); }
+        if w < 0 {
+            raw { au_ignore = snd_pcm_prepare(au_dev); }
+            return 0;
+        }
+        avail = avail - n;
+    }
+    return 1;
+}
+
+fn web_update() -> i64 {
+    var queued: i64 = 0;
+    raw { queued = syscall(1212); }
+    while queued < au_rate / 10 {
+        au_mix(AU_CHUNK);
+        raw { au_ignore = syscall(1211, &au_out[0], AU_CHUNK); }
+        queued = queued + AU_CHUNK;
+    }
+    return 1;
+}
+
+fn aa_update() -> i64 {
+    var k: i64 = 0;
+    while k < 8 {
+        au_mix(AU_CHUNK);
+        var w: i64 = 0;
+        raw { w = AAudioStream_write(au_dev, &au_out[0], AU_CHUNK, 0); }
+        if w < AU_CHUNK {
+            return 1;                    // full: the rest of this chunk is lost
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn aq_update() -> i64 {
+    var b: i64 = 0;
+    while b < AU_NBUF {
+        if aq_free[b] == 1 {
+            aq_free[b] = 0;
+            au_mix(AU_CHUNK);
+            var buf: i64 = aq_ptr[b];
+            raw {
+                hp_copy(peek(buf + 8), &au_out[0], AU_CHUNK * 4);
+                poke32(buf + 16, AU_CHUNK * 4);
+                au_ignore = AudioQueueEnqueueBuffer(au_dev, buf, 0, 0);
+            }
+        }
+        b = b + 1;
+    }
+    return 1;
+}
+
+fn audio_close() -> i64 {
+    if au_on == 0 { return 0; }
+    raw {
+        if au_kind == 1 {
+            au_ignore = waveOutReset(au_dev);
+            au_ignore = waveOutClose(au_dev);
+        } else if au_kind == 2 {
+            au_ignore = snd_pcm_drain(au_dev);
+            au_ignore = snd_pcm_close(au_dev);
+        } else if au_kind == 3 {
+            au_ignore = syscall(1213);
+        } else if au_kind == 4 {
+            au_ignore = AAudioStream_close(au_dev);
+        } else {
+            au_ignore = AudioQueueStop(au_dev, 1);
+            au_ignore = AudioQueueDispose(au_dev, 1);
+        }
+    }
+    au_on = 0;
+    return 1;
+}

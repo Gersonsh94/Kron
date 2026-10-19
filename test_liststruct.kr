@@ -1,0 +1,52 @@
+kron_program
+kron_domain t;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+struct Vec3 { x: f64; y: f64; z: f64; }
+struct P { id: i32; w: u8; pos: Vec3; }
+enum Color { Red, Green, Blue }
+var gl: list<P>;
+fn mkp(i: i64) -> P { var p: P; p.id = i; p.w = i * 2; p.pos.x = i * 1.5; return p; }
+fn sum(l: list<Vec3>) -> f64 {
+    var s: f64 = 0.0;
+    for v in l { s = s + v.x + v.y + v.z; }
+    return s;
+}
+fn main() {
+    var l: list<Vec3>;
+    var a: Vec3 = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    list_add(l, a);
+    list_add(l, Vec3 { x: 4.0, y: 5.0, z: 6.0 });
+    a.x = 7.0;
+    list_add(l, a);
+    print(list_len(l));
+    var b: Vec3 = l[1];
+    print(b.y);
+    l[0] = b;
+    var c: Vec3 = l[0];
+    print(c.z);
+    for v in l { print(v.x); }
+    print(sum(l));
+    list_insert(l, 1, Vec3 { x: 9.0, y: 9.0, z: 9.0 });
+    var r: Vec3 = list_remove(l, 0);
+    print(r.x);
+    var q: Vec3 = list_pop(l);
+    print(q.x);
+    list_reverse(l);
+    var f: Vec3 = l[0];
+    print(f.x);
+    print(list_len(l));
+    var cs: list<Color>;
+    list_add(cs, Color.Blue);
+    list_add(cs, Color.Red);
+    print(cs[0]);
+    print(list_len(cs));
+    var i: i64 = 0;
+    while i < 5 { list_add(gl, mkp(i)); i = i + 1; }
+    var p3: P = gl[3];
+    print(p3.id); print(p3.w); print(p3.pos.x);
+    print(list_len(gl));
+    var lp: P = list_last(gl);
+    print(lp.id);
+}

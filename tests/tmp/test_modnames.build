@@ -1,0 +1,17 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic... OK
+[5/6] Codegen... OK
+[6/6] Linking... OK
+Written: tests\tmp\test_modnames.asm
+
+Compilation successful!
+﻿
+GoLink.Exe Version 1.0.4.6  Copyright Jeremy Gordon 2002-2025   info@goprog.com
+Output file: test_modnames_t.exe
+Format: X64   Size: 8,192 bytes

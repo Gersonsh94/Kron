@@ -1,0 +1,62 @@
+kron_program
+kron_domain test_lib;
+kron_imports
+kron_definitions
+
+// A library: kronc test_lib.kr --lib makes test_lib.dll, test_lib.so or
+// test_lib.dylib, as the target says. Each fn marked export is a function C
+// can call, under its name, in the system's C convention; test_libhost.kr
+// calls these through an extern block, as a C program would.
+//
+// The first call into the library gives its globals their first values and
+// runs its lib_init(), whichever thread makes it. C may call from any of its
+// threads, so what an export touches has to be shared, as in a thread.
+
+shared var calls: i64;
+const SCALE: f64 = 2.5;
+
+fn lib_init() {
+    lock_init(1);
+    calls = 0;
+}
+
+fn count() {
+    lock_take(1);
+    calls = calls + 1;
+    lock_give(1);
+}
+
+fn export kron_add(a: i32, b: i32) -> i32 {
+    count();
+    return a + b;
+}
+
+fn export kron_scale(x: f64) -> f64 {
+    count();
+    return x * SCALE;
+}
+
+// nine arguments: past the registers on every system, of every width
+fn export kron_mix(a: i64, x: f32, b: u8, y: f64, c: i16, d: i64, e: i64, f: i64, g: i64) -> f32 {
+    count();
+    var s: f64 = (a as f64) + x + (b as f64) + y + (c as f64) + ((d + e + f + g) as f64);
+    return s as f32;
+}
+
+fn export kron_len(s: str) -> i64 {
+    count();
+    var n: i64 = 0;
+    raw {
+        while peek8(s + n) != 0 {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn export kron_calls() -> i64 {
+    lock_take(1);
+    var n: i64 = calls;
+    lock_give(1);
+    return n;
+}

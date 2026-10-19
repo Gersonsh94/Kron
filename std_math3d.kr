@@ -1,0 +1,408 @@
+kron_program
+kron_domain std_math3d;
+kron_imports
+acquire_domain "std_math.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- vectors, matrices and quaternions for 3D.
+//
+//     var eye: Vec3 = v3(0.0, 2.0, 5.0);
+//     var view: Mat4 = m4_look_at(eye, v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
+//     var proj: Mat4 = m4_perspective(radians(60.0), 16.0 / 9.0, 0.1, 100.0);
+//     var spin: Quat = q_axis_angle(v3(0.0, 1.0, 0.0), t);
+//     var mvp: Mat4 = m4_mul(proj, m4_mul(view, q_to_m4(spin)));
+//
+// Every type is a struct of f32, laid out as the GPU reads it, so a Mat4
+// goes to a shader as it is (std_gpu.kr). The arithmetic is done in double
+// precision and stored in single.
+//
+// Mat4 is column-major: m0..m3 is the first column, m12 m13 m14 the
+// translation. m4_mul(a, b) applies b first, then a -- as a * b does on
+// the GPU. Angles are in radians; radians(deg) converts.
+//
+// Clip space is the one Vulkan, Metal and WebGPU share: depth from 0 at
+// the near plane to 1 at the far one, y up (std_gpu flips Vulkan's).
+// =========================================================================
+
+struct Vec2 { x: f32; y: f32; }
+struct Vec3 { x: f32; y: f32; z: f32; }
+struct Vec4 { x: f32; y: f32; z: f32; w: f32; }
+struct Quat { x: f32; y: f32; z: f32; w: f32; }
+struct Mat4 {
+    m0: f32; m1: f32; m2: f32; m3: f32;
+    m4: f32; m5: f32; m6: f32; m7: f32;
+    m8: f32; m9: f32; m10: f32; m11: f32;
+    m12: f32; m13: f32; m14: f32; m15: f32;
+}
+
+fn radians(deg: f64) -> f64 { return deg * 0.017453292519943295; }
+fn degrees(rad: f64) -> f64 { return rad * 57.29577951308232; }
+
+// ------------------------------------------------------------------ Vec2 ---
+fn v2(x: f64, y: f64) -> Vec2 { var r: Vec2; r.x = x; r.y = y; return r; }
+fn v2_add(a: Vec2, b: Vec2) -> Vec2 { return v2(a.x + b.x, a.y + b.y); }
+fn v2_sub(a: Vec2, b: Vec2) -> Vec2 { return v2(a.x - b.x, a.y - b.y); }
+fn v2_scale(a: Vec2, k: f64) -> Vec2 { return v2(a.x * k, a.y * k); }
+fn v2_dot(a: Vec2, b: Vec2) -> f64 { return a.x * b.x + a.y * b.y; }
+fn v2_len(a: Vec2) -> f64 { return fsqrt(a.x * a.x + a.y * a.y); }
+fn v2_norm(a: Vec2) -> Vec2 {
+    var l: f64 = v2_len(a);
+    if l == 0.0 { return v2(0.0, 0.0); }
+    return v2(a.x / l, a.y / l);
+}
+fn v2_lerp(a: Vec2, b: Vec2, t: f64) -> Vec2 { return v2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t); }
+
+// ------------------------------------------------------------------ Vec3 ---
+fn v3(x: f64, y: f64, z: f64) -> Vec3 { var r: Vec3; r.x = x; r.y = y; r.z = z; return r; }
+fn v3_add(a: Vec3, b: Vec3) -> Vec3 { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
+fn v3_sub(a: Vec3, b: Vec3) -> Vec3 { return v3(a.x - b.x, a.y - b.y, a.z - b.z); }
+fn v3_mul(a: Vec3, b: Vec3) -> Vec3 { return v3(a.x * b.x, a.y * b.y, a.z * b.z); }
+fn v3_scale(a: Vec3, k: f64) -> Vec3 { return v3(a.x * k, a.y * k, a.z * k); }
+fn v3_neg(a: Vec3) -> Vec3 { return v3(0.0 - a.x, 0.0 - a.y, 0.0 - a.z); }
+fn v3_dot(a: Vec3, b: Vec3) -> f64 { return a.x * b.x + a.y * b.y + a.z * b.z; }
+fn v3_cross(a: Vec3, b: Vec3) -> Vec3 {
+    return v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+fn v3_len2(a: Vec3) -> f64 { return a.x * a.x + a.y * a.y + a.z * a.z; }
+fn v3_len(a: Vec3) -> f64 { return fsqrt(a.x * a.x + a.y * a.y + a.z * a.z); }
+fn v3_dist(a: Vec3, b: Vec3) -> f64 { return v3_len(v3_sub(a, b)); }
+fn v3_norm(a: Vec3) -> Vec3 {
+    var l: f64 = v3_len(a);
+    if l == 0.0 { return v3(0.0, 0.0, 0.0); }
+    return v3(a.x / l, a.y / l, a.z / l);
+}
+fn v3_lerp(a: Vec3, b: Vec3, t: f64) -> Vec3 {
+    return v3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+}
+fn v3_min(a: Vec3, b: Vec3) -> Vec3 { return v3(fmin(a.x, b.x), fmin(a.y, b.y), fmin(a.z, b.z)); }
+fn v3_max(a: Vec3, b: Vec3) -> Vec3 { return v3(fmax(a.x, b.x), fmax(a.y, b.y), fmax(a.z, b.z)); }
+// the direction d bounced off a surface whose normal is n (n of length 1)
+fn v3_reflect(d: Vec3, n: Vec3) -> Vec3 { return v3_sub(d, v3_scale(n, 2.0 * v3_dot(d, n))); }
+
+// ------------------------------------------------------------------ Vec4 ---
+fn v4(x: f64, y: f64, z: f64, w: f64) -> Vec4 { var r: Vec4; r.x = x; r.y = y; r.z = z; r.w = w; return r; }
+fn v4_from3(a: Vec3, w: f64) -> Vec4 { return v4(a.x, a.y, a.z, w); }
+fn v4_xyz(a: Vec4) -> Vec3 { return v3(a.x, a.y, a.z); }
+fn v4_add(a: Vec4, b: Vec4) -> Vec4 { return v4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+fn v4_sub(a: Vec4, b: Vec4) -> Vec4 { return v4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
+fn v4_scale(a: Vec4, k: f64) -> Vec4 { return v4(a.x * k, a.y * k, a.z * k, a.w * k); }
+fn v4_dot(a: Vec4, b: Vec4) -> f64 { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+fn v4_lerp(a: Vec4, b: Vec4, t: f64) -> Vec4 {
+    return v4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+}
+// a color from 0-255 parts, as the shaders take it: 0.0 to 1.0
+fn color4(r: i64, g: i64, b: i64, a: i64) -> Vec4 {
+    return v4((r as f64) / 255.0, (g as f64) / 255.0, (b as f64) / 255.0, (a as f64) / 255.0);
+}
+
+// ------------------------------------------------------------------ Mat4 ---
+// element of row r, column c
+fn m4_get(m: Mat4, r: i64, c: i64) -> f64 {
+    var k: i64 = c * 4 + r;
+    if k < 0 || k > 15 {
+        fail "no such element of a 4x4 matrix" hint "row and column go from 0 to 3";
+    }
+    var v: f64 = 0.0;
+    raw {
+        var p: ptr<f32> = &m;
+        var a: [f32; 1];
+        poke32(&a, peek32(p + k));
+        v = a[0];
+    }
+    return v;
+}
+
+fn m4_set(m: Mat4, r: i64, c: i64, v: f64) -> Mat4 {
+    var k: i64 = c * 4 + r;
+    if k < 0 || k > 15 {
+        fail "no such element of a 4x4 matrix" hint "row and column go from 0 to 3";
+    }
+    var o: Mat4 = m;
+    raw {
+        var p: ptr<f32> = &o;
+        var a: [f32; 1];
+        a[0] = v;
+        poke32(p + k, peek32(&a));
+    }
+    return o;
+}
+
+fn m4_identity() -> Mat4 {
+    var m: Mat4;
+    m.m0 = 1.0; m.m5 = 1.0; m.m10 = 1.0; m.m15 = 1.0;
+    return m;
+}
+
+fn m4_mul(a: Mat4, b: Mat4) -> Mat4 {
+    var r: Mat4;
+    r.m0 = a.m0 * b.m0 + a.m4 * b.m1 + a.m8 * b.m2 + a.m12 * b.m3;
+    r.m1 = a.m1 * b.m0 + a.m5 * b.m1 + a.m9 * b.m2 + a.m13 * b.m3;
+    r.m2 = a.m2 * b.m0 + a.m6 * b.m1 + a.m10 * b.m2 + a.m14 * b.m3;
+    r.m3 = a.m3 * b.m0 + a.m7 * b.m1 + a.m11 * b.m2 + a.m15 * b.m3;
+    r.m4 = a.m0 * b.m4 + a.m4 * b.m5 + a.m8 * b.m6 + a.m12 * b.m7;
+    r.m5 = a.m1 * b.m4 + a.m5 * b.m5 + a.m9 * b.m6 + a.m13 * b.m7;
+    r.m6 = a.m2 * b.m4 + a.m6 * b.m5 + a.m10 * b.m6 + a.m14 * b.m7;
+    r.m7 = a.m3 * b.m4 + a.m7 * b.m5 + a.m11 * b.m6 + a.m15 * b.m7;
+    r.m8 = a.m0 * b.m8 + a.m4 * b.m9 + a.m8 * b.m10 + a.m12 * b.m11;
+    r.m9 = a.m1 * b.m8 + a.m5 * b.m9 + a.m9 * b.m10 + a.m13 * b.m11;
+    r.m10 = a.m2 * b.m8 + a.m6 * b.m9 + a.m10 * b.m10 + a.m14 * b.m11;
+    r.m11 = a.m3 * b.m8 + a.m7 * b.m9 + a.m11 * b.m10 + a.m15 * b.m11;
+    r.m12 = a.m0 * b.m12 + a.m4 * b.m13 + a.m8 * b.m14 + a.m12 * b.m15;
+    r.m13 = a.m1 * b.m12 + a.m5 * b.m13 + a.m9 * b.m14 + a.m13 * b.m15;
+    r.m14 = a.m2 * b.m12 + a.m6 * b.m13 + a.m10 * b.m14 + a.m14 * b.m15;
+    r.m15 = a.m3 * b.m12 + a.m7 * b.m13 + a.m11 * b.m14 + a.m15 * b.m15;
+    return r;
+}
+
+fn m4_mul_v4(m: Mat4, v: Vec4) -> Vec4 {
+    return v4(m.m0 * v.x + m.m4 * v.y + m.m8 * v.z + m.m12 * v.w, m.m1 * v.x + m.m5 * v.y + m.m9 * v.z + m.m13 * v.w, m.m2 * v.x + m.m6 * v.y + m.m10 * v.z + m.m14 * v.w, m.m3 * v.x + m.m7 * v.y + m.m11 * v.z + m.m15 * v.w);
+}
+
+// a point: w = 1, divided by the w that comes out
+fn m4_mul_point(m: Mat4, p: Vec3) -> Vec3 {
+    var r: Vec4 = m4_mul_v4(m, v4_from3(p, 1.0));
+    if r.w != 0.0 && r.w != 1.0 { return v3(r.x / r.w, r.y / r.w, r.z / r.w); }
+    return v3(r.x, r.y, r.z);
+}
+// a direction: w = 0, the translation does not move it
+fn m4_mul_dir(m: Mat4, d: Vec3) -> Vec3 {
+    var r: Vec4 = m4_mul_v4(m, v4_from3(d, 0.0));
+    return v3(r.x, r.y, r.z);
+}
+fn m4_translate(x: f64, y: f64, z: f64) -> Mat4 {
+    var m: Mat4 = m4_identity();
+    m.m12 = x; m.m13 = y; m.m14 = z;
+    return m;
+}
+fn m4_translation(t: Vec3) -> Mat4 { return m4_translate(t.x, t.y, t.z); }
+fn m4_scale(x: f64, y: f64, z: f64) -> Mat4 {
+    var m: Mat4;
+    m.m0 = x; m.m5 = y; m.m10 = z; m.m15 = 1.0;
+    return m;
+}
+fn m4_rotate_x(a: f64) -> Mat4 {
+    var c: f64 = fcos(a);
+    var s: f64 = fsin(a);
+    var m: Mat4 = m4_identity();
+    m.m5 = c; m.m6 = s; m.m9 = 0.0 - s; m.m10 = c;
+    return m;
+}
+fn m4_rotate_y(a: f64) -> Mat4 {
+    var c: f64 = fcos(a);
+    var s: f64 = fsin(a);
+    var m: Mat4 = m4_identity();
+    m.m0 = c; m.m2 = 0.0 - s; m.m8 = s; m.m10 = c;
+    return m;
+}
+fn m4_rotate_z(a: f64) -> Mat4 {
+    var c: f64 = fcos(a);
+    var s: f64 = fsin(a);
+    var m: Mat4 = m4_identity();
+    m.m0 = c; m.m1 = s; m.m4 = 0.0 - s; m.m5 = c;
+    return m;
+}
+// a turn of angle a about axis (any length but zero)
+fn m4_rotate(axis: Vec3, a: f64) -> Mat4 { return q_to_m4(q_axis_angle(axis, a)); }
+
+// perspective: fovy the vertical angle, aspect width / height; depth 0 at
+// near, 1 at far
+fn m4_perspective(fovy: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
+    var f: f64 = 1.0 / ftan(fovy * 0.5);
+    var m: Mat4;
+    m.m0 = f / aspect;
+    m.m5 = f;
+    m.m10 = far / (near - far);
+    m.m11 = 0.0 - 1.0;
+    m.m14 = near * far / (near - far);
+    return m;
+}
+fn m4_ortho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Mat4 {
+    var m: Mat4;
+    m.m0 = 2.0 / (right - left);
+    m.m5 = 2.0 / (top - bottom);
+    m.m10 = 1.0 / (near - far);
+    m.m12 = (right + left) / (left - right);
+    m.m13 = (top + bottom) / (bottom - top);
+    m.m14 = near / (near - far);
+    m.m15 = 1.0;
+    return m;
+}
+// a camera at eye looking at target; up says which way is up
+fn m4_look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
+    var f: Vec3 = v3_norm(v3_sub(target, eye));
+    var s: Vec3 = v3_norm(v3_cross(f, up));
+    var u: Vec3 = v3_cross(s, f);
+    var m: Mat4 = m4_identity();
+    m.m0 = s.x; m.m4 = s.y; m.m8 = s.z;
+    m.m1 = u.x; m.m5 = u.y; m.m9 = u.z;
+    m.m2 = 0.0 - f.x; m.m6 = 0.0 - f.y; m.m10 = 0.0 - f.z;
+    m.m12 = 0.0 - v3_dot(s, eye);
+    m.m13 = 0.0 - v3_dot(u, eye);
+    m.m14 = v3_dot(f, eye);
+    return m;
+}
+
+fn m4_transpose(a: Mat4) -> Mat4 {
+    var r: Mat4;
+    r.m0 = a.m0;
+    r.m1 = a.m4;
+    r.m2 = a.m8;
+    r.m3 = a.m12;
+    r.m4 = a.m1;
+    r.m5 = a.m5;
+    r.m6 = a.m9;
+    r.m7 = a.m13;
+    r.m8 = a.m2;
+    r.m9 = a.m6;
+    r.m10 = a.m10;
+    r.m11 = a.m14;
+    r.m12 = a.m3;
+    r.m13 = a.m7;
+    r.m14 = a.m11;
+    r.m15 = a.m15;
+    return r;
+}
+
+// the inverse; a matrix that has none fails and gives the identity
+fn m4_inverse(a: Mat4) -> Mat4 {
+    var m0: f64 = a.m0;
+    var m1: f64 = a.m1;
+    var m2: f64 = a.m2;
+    var m3: f64 = a.m3;
+    var m4: f64 = a.m4;
+    var m5: f64 = a.m5;
+    var m6: f64 = a.m6;
+    var m7: f64 = a.m7;
+    var m8: f64 = a.m8;
+    var m9: f64 = a.m9;
+    var m10: f64 = a.m10;
+    var m11: f64 = a.m11;
+    var m12: f64 = a.m12;
+    var m13: f64 = a.m13;
+    var m14: f64 = a.m14;
+    var m15: f64 = a.m15;
+    var c0: f64 = m5 * m10 * m15 - m5 * m11 * m14 - m9 * m6 * m15 + m9 * m7 * m14 + m13 * m6 * m11 - m13 * m7 * m10;
+    var c4: f64 = 0.0 -m4 * m10 * m15 + m4 * m11 * m14 + m8 * m6 * m15 - m8 * m7 * m14 - m12 * m6 * m11 + m12 * m7 * m10;
+    var c8: f64 = m4 * m9 * m15 - m4 * m11 * m13 - m8 * m5 * m15 + m8 * m7 * m13 + m12 * m5 * m11 - m12 * m7 * m9;
+    var c12: f64 = 0.0 -m4 * m9 * m14 + m4 * m10 * m13 + m8 * m5 * m14 - m8 * m6 * m13 - m12 * m5 * m10 + m12 * m6 * m9;
+    var c1: f64 = 0.0 -m1 * m10 * m15 + m1 * m11 * m14 + m9 * m2 * m15 - m9 * m3 * m14 - m13 * m2 * m11 + m13 * m3 * m10;
+    var c5: f64 = m0 * m10 * m15 - m0 * m11 * m14 - m8 * m2 * m15 + m8 * m3 * m14 + m12 * m2 * m11 - m12 * m3 * m10;
+    var c9: f64 = 0.0 -m0 * m9 * m15 + m0 * m11 * m13 + m8 * m1 * m15 - m8 * m3 * m13 - m12 * m1 * m11 + m12 * m3 * m9;
+    var c13: f64 = m0 * m9 * m14 - m0 * m10 * m13 - m8 * m1 * m14 + m8 * m2 * m13 + m12 * m1 * m10 - m12 * m2 * m9;
+    var c2: f64 = m1 * m6 * m15 - m1 * m7 * m14 - m5 * m2 * m15 + m5 * m3 * m14 + m13 * m2 * m7 - m13 * m3 * m6;
+    var c6: f64 = 0.0 -m0 * m6 * m15 + m0 * m7 * m14 + m4 * m2 * m15 - m4 * m3 * m14 - m12 * m2 * m7 + m12 * m3 * m6;
+    var c10: f64 = m0 * m5 * m15 - m0 * m7 * m13 - m4 * m1 * m15 + m4 * m3 * m13 + m12 * m1 * m7 - m12 * m3 * m5;
+    var c14: f64 = 0.0 -m0 * m5 * m14 + m0 * m6 * m13 + m4 * m1 * m14 - m4 * m2 * m13 - m12 * m1 * m6 + m12 * m2 * m5;
+    var c3: f64 = 0.0 -m1 * m6 * m11 + m1 * m7 * m10 + m5 * m2 * m11 - m5 * m3 * m10 - m9 * m2 * m7 + m9 * m3 * m6;
+    var c7: f64 = m0 * m6 * m11 - m0 * m7 * m10 - m4 * m2 * m11 + m4 * m3 * m10 + m8 * m2 * m7 - m8 * m3 * m6;
+    var c11: f64 = 0.0 -m0 * m5 * m11 + m0 * m7 * m9 + m4 * m1 * m11 - m4 * m3 * m9 - m8 * m1 * m7 + m8 * m3 * m5;
+    var c15: f64 = m0 * m5 * m10 - m0 * m6 * m9 - m4 * m1 * m10 + m4 * m2 * m9 + m8 * m1 * m6 - m8 * m2 * m5;
+    var det: f64 = m0 * c0 + m1 * c4 + m2 * c8 + m3 * c12;
+    if det == 0.0 {
+        fail "this matrix has no inverse" hint "a scale of zero flattens it";
+    }
+    var d: f64 = 1.0 / det;
+    var r: Mat4;
+    r.m0 = c0 * d;
+    r.m1 = c1 * d;
+    r.m2 = c2 * d;
+    r.m3 = c3 * d;
+    r.m4 = c4 * d;
+    r.m5 = c5 * d;
+    r.m6 = c6 * d;
+    r.m7 = c7 * d;
+    r.m8 = c8 * d;
+    r.m9 = c9 * d;
+    r.m10 = c10 * d;
+    r.m11 = c11 * d;
+    r.m12 = c12 * d;
+    r.m13 = c13 * d;
+    r.m14 = c14 * d;
+    r.m15 = c15 * d;
+    return r;
+}
+
+// translation t, then rotation q, then scale s applied first: the usual
+// placement of an object
+fn m4_trs(t: Vec3, q: Quat, s: Vec3) -> Mat4 {
+    var r: Mat4 = q_to_m4(q);
+    r.m0 = r.m0 * s.x; r.m1 = r.m1 * s.x; r.m2 = r.m2 * s.x;
+    r.m4 = r.m4 * s.y; r.m5 = r.m5 * s.y; r.m6 = r.m6 * s.y;
+    r.m8 = r.m8 * s.z; r.m9 = r.m9 * s.z; r.m10 = r.m10 * s.z;
+    r.m12 = t.x; r.m13 = t.y; r.m14 = t.z;
+    return r;
+}
+
+// ------------------------------------------------------------------ Quat ---
+fn q_identity() -> Quat { var q: Quat; q.w = 1.0; return q; }
+fn quat(x: f64, y: f64, z: f64, w: f64) -> Quat { var q: Quat; q.x = x; q.y = y; q.z = z; q.w = w; return q; }
+fn q_axis_angle(axis: Vec3, a: f64) -> Quat {
+    var n: Vec3 = v3_norm(axis);
+    var s: f64 = fsin(a * 0.5);
+    return quat(n.x * s, n.y * s, n.z * s, fcos(a * 0.5));
+}
+// pitch about x, then yaw about y, then roll about z, in that order of use:
+// q_euler(p, y, r) = yaw * pitch * roll, the order of a camera or a plane
+fn q_euler(pitch: f64, yaw: f64, roll: f64) -> Quat {
+    var qp: Quat = q_axis_angle(v3(1.0, 0.0, 0.0), pitch);
+    var qy: Quat = q_axis_angle(v3(0.0, 1.0, 0.0), yaw);
+    var qr: Quat = q_axis_angle(v3(0.0, 0.0, 1.0), roll);
+    return q_mul(qy, q_mul(qp, qr));
+}
+// b first, then a
+fn q_mul(a: Quat, b: Quat) -> Quat {
+    return quat(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+fn q_dot(a: Quat, b: Quat) -> f64 { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+fn q_conj(q: Quat) -> Quat { return quat(0.0 - q.x, 0.0 - q.y, 0.0 - q.z, q.w); }
+fn q_norm(q: Quat) -> Quat {
+    var l: f64 = fsqrt(q_dot(q, q));
+    if l == 0.0 { return q_identity(); }
+    return quat(q.x / l, q.y / l, q.z / l, q.w / l);
+}
+// v turned by q (q of length 1)
+fn q_rotate(q: Quat, v: Vec3) -> Vec3 {
+    var u: Vec3 = v3(q.x, q.y, q.z);
+    var t: Vec3 = v3_scale(v3_cross(u, v), 2.0);
+    return v3_add(v3_add(v, v3_scale(t, q.w)), v3_cross(u, t));
+}
+fn q_to_m4(q: Quat) -> Mat4 {
+    var x: f64 = q.x;
+    var y: f64 = q.y;
+    var z: f64 = q.z;
+    var w: f64 = q.w;
+    var m: Mat4;
+    m.m0 = 1.0 - 2.0 * (y * y + z * z);
+    m.m1 = 2.0 * (x * y + z * w);
+    m.m2 = 2.0 * (x * z - y * w);
+    m.m4 = 2.0 * (x * y - z * w);
+    m.m5 = 1.0 - 2.0 * (x * x + z * z);
+    m.m6 = 2.0 * (y * z + x * w);
+    m.m8 = 2.0 * (x * z + y * w);
+    m.m9 = 2.0 * (y * z - x * w);
+    m.m10 = 1.0 - 2.0 * (x * x + y * y);
+    m.m15 = 1.0;
+    return m;
+}
+// from a to b, t from 0 to 1, along the shorter way, at an even speed
+fn q_slerp(a: Quat, b: Quat, t: f64) -> Quat {
+    var bb: Quat = b;
+    var d: f64 = q_dot(a, b);
+    if d < 0.0 {
+        bb = quat(0.0 - b.x, 0.0 - b.y, 0.0 - b.z, 0.0 - b.w);
+        d = 0.0 - d;
+    }
+    if d > 0.9995 {
+        return q_norm(quat(a.x + (bb.x - a.x) * t, a.y + (bb.y - a.y) * t,
+                           a.z + (bb.z - a.z) * t, a.w + (bb.w - a.w) * t));
+    }
+    var th: f64 = facos(d);
+    var s: f64 = fsin(th);
+    var ka: f64 = fsin((1.0 - t) * th) / s;
+    var kb: f64 = fsin(t * th) / s;
+    return quat(a.x * ka + bb.x * kb, a.y * ka + bb.y * kb, a.z * ka + bb.z * kb, a.w * ka + bb.w * kb);
+}
