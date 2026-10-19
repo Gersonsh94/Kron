@@ -11,14 +11,44 @@ let output;
 
 // ------------------------------------------------------------------ compiler
 
-// The compiler: a kronc.exe in an open folder wins, then the setting.
+// The compiler: a kronc.exe in an open folder or repo root wins, then the setting.
 function findCompiler() {
+    const exeName = process.platform === 'win32' ? 'kronc.exe' : 'kronc';
+
+    // 1. Open workspace folder root
     for (const f of vscode.workspace.workspaceFolders || []) {
-        const p = path.join(f.uri.fsPath, 'kronc.exe');
+        const p = path.join(f.uri.fsPath, exeName);
         if (fs.existsSync(p)) return p;
     }
+
+    // 2. Walk up from the active .kr file (finds the repo root if a subfolder is open)
+    const ed = vscode.window.activeTextEditor;
+    if (ed && ed.document.fileName) {
+        let dir = path.dirname(ed.document.fileName);
+        for (let i = 0; i < 5; i++) {
+            const candidate = path.join(dir, exeName);
+            if (fs.existsSync(candidate)) return candidate;
+            const parent = path.dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+    }
+
+    // 3. Repository root relative to kron-vscode/kron-lang/
+    const repoExe = path.resolve(__dirname, '..', '..', exeName);
+    if (fs.existsSync(repoExe)) return repoExe;
+
+    // 4. Configured setting (relative to workspace, absolute path, or command in PATH)
     const p = vscode.workspace.getConfiguration('kron').get('compilerPath');
-    if (p && fs.existsSync(p)) return p;
+    if (p) {
+        for (const f of vscode.workspace.workspaceFolders || []) {
+            const rel = path.resolve(f.uri.fsPath, p);
+            if (fs.existsSync(rel)) return rel;
+        }
+        if (fs.existsSync(p)) return p;
+        if (p === 'kronc' || p === 'kronc.exe') return p;
+    }
+
     return null;
 }
 
@@ -27,7 +57,7 @@ function runCompiler(args, cwd) {
         const kronc = findCompiler();
         if (!kronc) {
             resolve({ ok: false, text: 'kronc.exe not found. Set "kron.compilerPath" in the settings, ' +
-                                      'or open the compiler folder.', missing: true });
+                                       'or open the compiler folder.', missing: true });
             return;
         }
         cp.execFile(kronc, args, { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
@@ -110,8 +140,8 @@ async function currentKronFile() {
     return ed.document.fileName;
 }
 
-// kronc goes from the .kr straight to the .exe next to it, as a C compiler
-// does: nothing else is written. Returns the .exe path, or null.
+// kronc goes from the .kr straight to the .exe next to it:
+// nothing else is written. Returns the .exe path, or null.
 async function build(file, quiet) {
     const cwd = path.dirname(file);
     const exe = file.replace(/\.kr$/i, '.exe');
@@ -540,9 +570,9 @@ const HELP = {
     dll_proc: 'dll_proc(lib, "name") -> the function\'s address, 0 if not found. Call it with call ptr(args). Only inside raw { }.',
     call: 'call ptr(args) -- calls a function through its address, with the Windows convention.',
     extern: 'extern "libm.so.6", "libm.dylib", "msvcrt.dll" {\n    fn cos(x: f64) -> f64;\n}\n\nFunctions of a system library (.dll .so .dylib): the first library that loads is used. Call them inside raw { }.',
-    export: 'fn export name(...) -> T { }\n\nA function C can call: of a library built with --lib, or a callback (c_fn).',
-    c_fn: 'c_fn(f) -> the address C calls to reach the exported function f (callbacks: qsort, a window procedure...). Only inside raw { }.',
-    c_call: 'c_call(address, args...) -- calls a C function through its address, in the system\'s C convention. Only inside raw { }.',
+    export: 'fn export name(...) -> T { }\n\nAn exported function: of a library built with --lib, or a callback (c_fn).',
+    c_fn: 'c_fn(f) -> the native address to reach the exported function f (callbacks: qsort, a window procedure...). Only inside raw { }.',
+    c_call: 'c_call(address, args...) -- calls a native function through its address, in the system\'s calling convention. Only inside raw { }.',
     target_os: 'target_os() -> 1 Windows, 2 Linux, 3 krn, 4 bare: known when compiling.',
     say: 'say(x): prints a text, a number or a "..." and a new line.'
 };
