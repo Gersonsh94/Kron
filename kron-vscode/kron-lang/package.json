@@ -1,8 +1,8 @@
 {
-  "name": "kron-lang",
+  "name": "kron",
   "displayName": "Kron",
   "description": "Kron language support: highlighting, build and run, a debugger (breakpoints, stepping, variables), builds for every target, errors in the editor, completion, go to definition, hover help and outline.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "gerson",
   "engines": {
     "vscode": "^1.70.0"
