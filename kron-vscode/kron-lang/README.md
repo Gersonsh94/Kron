@@ -49,7 +49,7 @@ the open one, add `.vscode/launch.json`:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.6.0",
   "configurations": [
     {
       "type": "kron",
@@ -64,14 +64,3 @@ the open one, add `.vscode/launch.json`:
 ```
 
 The debug build is written as `NAME_debug.exe`, next to the program.
-
-## Where the compiler is
-
-A `kronc.exe` in the open folder is used first. Otherwise, the setting
-`kron.compilerPath`, which defaults to `C:\Users\Gerson\Kron-compiler\kronc.exe`.
-
-## Install
-
-Ctrl+Shift+P, "Developer: Install Extension from Location...", choose this
-`kron-lang` folder, then "Developer: Reload Window". An older version
-installed the same way is replaced.
