@@ -2,7 +2,7 @@
   "name": "kron",
   "displayName": "Kron",
   "description": "Kron language support: highlighting, build and run, errors in the editor, completion, go to definition, hover help and outline.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "Codexmy",
   "engines": {
     "vscode": "^1.70.0"
