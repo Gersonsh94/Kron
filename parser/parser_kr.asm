@@ -541,6 +541,9 @@ section .data
 __g_parser_AST_VAR_DECL: dq 1003
 section .text
 section .data
+__g_parser_AST_CONST_DECL: dq 1004
+section .text
+section .data
 __g_parser_AST_ASSIGN: dq 1005
 section .text
 section .data
@@ -560,6 +563,9 @@ __g_parser_AST_IF: dq 1010
 section .text
 section .data
 __g_parser_AST_WHILE: dq 1011
+section .text
+section .data
+__g_parser_AST_LOOP_IN: dq 1012
 section .text
 section .data
 __g_parser_AST_BREAK: dq 1013
@@ -587,6 +593,12 @@ __g_parser_AST_STRUCT_DEF: dq 1020
 section .text
 section .data
 __g_parser_AST_ENUM_DEF: dq 1021
+section .text
+section .data
+__g_parser_AST_IMPORT: dq 1022
+section .text
+section .data
+__g_parser_AST_MODULE: dq 1023
 section .text
 section .data
 __g_parser_AST_HARDWARE_BLOCK: dq 1024

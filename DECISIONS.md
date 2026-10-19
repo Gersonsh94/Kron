@@ -965,6 +965,18 @@ is the same text.
   it as an argument (the semantic pass reads the file in order): that is
   why `parser_state.kr` holds them all and is imported first.
 
+Part 3, the semantic pass (done 19-10-2026): `semantic/semantic.kr`, with
+`semantic/semantic.asm` as its door; the symbol table, the checks of raw,
+of arrays passed to functions and of arenas, and the closest-name hint
+are all in Kron now. It stops the same programs with the same error, at
+the same line and column, with the same hint, as the assembly did -- on
+every `.kr` file of the repository, on the 3,500 programs of part 2 and on
+2,500 more made by misspelling names, dropping `raw`, changing sizes and
+bases and making targets something that cannot be assigned to -- and
+`kronc -S` of every test is the same text. A statement chain and the
+program's chain of declarations are walked in a loop, not one call deeper
+per statement.
+
 ## Fixed 19-10-2026
 
 - A function's parameter after a `ptr<T>` one -- and the parameters of
@@ -975,6 +987,10 @@ is the same text.
   calls one letter long. Test: `test_ptrparam`.
 - `var x = e;` with no type kept a stray register in the tree node where
   the type goes; nothing read it, but it was not the same twice. It is 0.
+- A function of more than about 250 statements, with anything declared
+  after it, crashed the compiler in the semantic pass: each statement
+  opens a block there, past 255 open at once the table of blocks emptied,
+  and the next name declared read far outside it. Test: `test_longfn`.
 
 - A global array given values (`var t: [i64; 4] = [1, 2, 3, 4];`) started
   at zero: the values were dropped without a word. They are data now, at
@@ -1021,6 +1037,9 @@ is the same text.
   2^47: any other integer passed where a text is expected could still be
   read as one.
 - The extern table still drops names past 512 without an error.
+- kasm: a `%define` that stands for a memory operand (`%define SLOT
+  [rbp - 24]`, then `mov SLOT, rax`) is not accepted; written out, the
+  same line is.
 - Linux threads: a 1 MB stack each, with the fail block at its bottom --
   deep recursion inside a thread would overwrite it before the system
   notices. Waiting for the same thread twice crashes on Linux (its stack is

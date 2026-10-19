@@ -114,6 +114,7 @@ echo     kc.bat                          builds a program in one go
 echo     kron_all.asm seed\ tests\expected\ and the .bat and .ps1
 echo     lexer\lexer_kr.asm              made from lexer.kr, part of the build
 echo     parser\parser_kr.asm            made from parser.kr, part of the build
+echo     semantic\semantic_kr.asm        made from semantic.kr, part of the build
 echo.
 if not defined DOFUSED echo   .fused.kr files are kept unless /fused is given.
 echo.

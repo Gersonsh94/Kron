@@ -93,11 +93,11 @@ the page and open `http://localhost:8000/prog.html`.
 ## 6. When the compiler changes
 
 After an update of the compiler's sources (the `*.asm` files, and the
-parts written in Kron, `lexer\lexer.kr` and `parser\parser.kr` with the
-files they import), `BOOTSTRAP.bat` builds it
+parts written in Kron, `lexer\lexer.kr`, `parser\parser.kr` with the
+files it imports, and `semantic\semantic.kr`), `BOOTSTRAP.bat` builds it
 three times with itself and checks that the last two are identical;
 `SEED.bat` then keeps the result as the seed, and `BUILD.bat` installs it
 as `kronc.exe`. The parts in Kron become assembly text (`lexer_kr.asm`,
-`parser_kr.asm`)
+`parser_kr.asm`, `semantic_kr.asm`)
 with `kronc --module`; `KRONPARTS.bat` does that for all of them, and the
 two scripts call it on their own.

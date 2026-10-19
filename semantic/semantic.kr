@@ -1,0 +1,971 @@
+kron_program
+kron_domain semantic;
+kron_imports
+acquire_domain "include/tokens.kr";
+acquire_domain "include/ast.kr";
+kron_definitions
+
+// =========================================================================
+// THE SEMANTIC PASS
+//
+// The third part of the compiler written in Kron. It walks the tree the
+// parser built, keeps every name declared so far in a symbol table and
+// stops a program that uses a name nobody declared, reaches memory by
+// address outside raw { }, gives a function a smaller array than it
+// declares, or lays out two arenas on the same memory. kronc --module
+// turns it into semantic_kr.asm; semantic.asm beside it is the small
+// hand-written door the rest of the compiler calls through.
+//
+//     sem_init(buf, size)     start, with the memory for the symbols
+//     sem_run(root)           0 when the program is right, -1 if not
+//     sem_set_error(tok, k)   an error found later, reported the same way
+//     sem_error_kind() / _line() / _col() / _len() / _name() / _name_len()
+//     sem_suggest_name() / sem_suggest_len()   the closest declared name
+//
+// The kinds of error (main prints a message for each):
+//     0 a name not declared             6 an array smaller than the
+//     1 two arenas with one name          parameter it is passed to
+//     2 an arena of size zero           7 peek, poke, *p, dll_load,
+//     3 two arenas that overlap           dll_proc or a system call
+//     4 an array not declared             outside raw { }
+//     5 something that cannot be        9 an array of another element
+//       assigned to                       width than the parameter's
+// (8, 10 and 11 come from codegen and the lexer through sem_set_error.)
+//
+// The symbol table is a hash of 4096 chains; a name is found from the
+// last one declared with it, whatever block it was declared in. Like
+// every part, it runs with no runtime underneath: memory through ptr<Ast>,
+// ptr<Tok> and ptr<Sym> fields and peek / poke, its tables through their
+// address.
+// =========================================================================
+
+// a symbol: 64 bytes in the memory sem_init is given
+struct Sym {
+    s_name: i64;            // +0  where the name is, in the source
+    s_len: u32;             // +8
+    s_type: u32;            // +12 SEM_T_*
+    s_scope: u32;           // +16 the block it was declared in
+    s_flags: u32;           // +20 SEM_F_*
+    s_value: i64;           // +24 a function's node; an array's length,
+                            //     with its element width in the top byte
+    s_next: i64;            // +32 the next symbol of the same chain
+}
+
+const SEM_SYM_SIZE: i64 = 64;
+const SEM_BUCKETS: i64 = 4096;
+const SEM_MAX_DEPTH: i64 = 256;
+
+// what a block is
+const SEM_SCOPE_GLOBAL: i64 = 0;
+const SEM_SCOPE_FUNCTION: i64 = 1;
+const SEM_SCOPE_BLOCK: i64 = 2;
+const SEM_SCOPE_HARDWARE: i64 = 3;
+
+// what a symbol is
+const SEM_F_CONST: i64 = 1;
+const SEM_F_FUNCTION: i64 = 2;
+const SEM_F_DEFINED: i64 = 16;
+
+// its type, as include/kron_types.inc numbers them (JTYPE_*)
+const SEM_T_I64: i64 = 9;
+const SEM_T_F64: i64 = 11;
+const SEM_T_STRUCT: i64 = 13;
+const SEM_T_FN: i64 = 15;
+const SEM_T_PTR: i64 = 16;
+
+// --- the symbol table ---
+var sem_table: [i64; 4096];         // the head of each chain, 0 for none
+var sem_arena: i64;                 // the memory for the symbols
+var sem_arena_ptr: i64;             // the next free symbol
+var sem_arena_end: i64;
+
+// --- the blocks open: four slots each (id, kind, symbols, parent) ---
+var sem_scopes: [i64; 1024];
+var sem_depth: i64;
+var sem_scope_ids: i64;
+
+// --- what went wrong ---
+var sem_had_error: i64;
+var sem_error_line: i64;
+var sem_error_tok: i64;             // the token it is reported at
+var sem_error_kind: i64;
+var sem_raw_depth: i64;             // how many raw { } enclose this point
+
+// --- the closest declared name, for the hint ---
+var sem_sug_len: i64;
+
+// =========================================================================
+// memory by address
+// =========================================================================
+
+fn sem_tget(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn sem_tset(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+fn sem_bget(p: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(p);
+    }
+    return r;
+}
+
+// the n bytes at a and at b are the same
+fn sem_memeq(a: i64, b: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if sem_bget(a + i) != sem_bget(b + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// a < b, both read as unsigned
+fn sem_ult(a: i64, b: i64) -> i64 {
+    var top: i64 = 1;
+    top = top << 63;
+    if (a ^ top) < (b ^ top) {
+        return 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// the symbol table
+// =========================================================================
+
+// The chain of a name: FNV-1a over its bytes, of which only the low 12
+// bits pick the chain -- and those depend only on the low 12 bits of the
+// hash and of its constants (offset 0xcbf29ce484222325, prime
+// 0x100000001b3), so they are all it keeps.
+fn sem_bucket(name: i64, len: i64) -> i64 {
+    var h: i64 = 0x325;
+    var i: i64 = 0;
+    while i < len {
+        h = ((h ^ sem_bget(name + i)) * 0x1B3) & 0xFFF;
+        i += 1;
+    }
+    return h;
+}
+
+// a block opens: 0, or -1 when 255 are open already (nothing is opened)
+fn sem_push_scope(kind: i64) -> i64 {
+    var at: i64 = 0;
+    if sem_depth >= SEM_MAX_DEPTH - 1 {
+        return -1;
+    }
+    sem_scope_ids += 1;
+    at = &sem_scopes + sem_depth * 32;
+    sem_tset(at, 0, sem_scope_ids);
+    sem_tset(at, 1, kind);
+    sem_tset(at, 2, 0);
+    sem_tset(at, 3, sem_depth - 1);
+    sem_depth += 1;
+    return 0;
+}
+
+// a block closes: 0, or -1 when none is open
+fn sem_pop_scope() -> i64 {
+    if sem_depth == 0 {
+        return -1;
+    }
+    sem_depth -= 1;
+    return 0;
+}
+
+// A name is declared: the symbol, or 0 when the memory for symbols is
+// full (the name is then not in the table).
+fn sem_insert(name: i64, len: i64, kind: i64, flags: i64, value: i64) -> i64 {
+    var e: ptr<Sym> = 0;
+    var at: i64 = 0;
+    var b: i64 = 0;
+    var i: i64 = 0;
+    if sem_arena_ptr + SEM_SYM_SIZE > sem_arena_end {
+        return 0;
+    }
+    e = sem_arena_ptr;
+    i = 0;
+    while i < 8 {
+        sem_tset(sem_arena_ptr, i, 0);
+        i += 1;
+    }
+    sem_arena_ptr += SEM_SYM_SIZE;
+    e.s_name = name;
+    e.s_len = len;
+    e.s_type = kind;
+    e.s_flags = flags | SEM_F_DEFINED;
+    e.s_value = value;
+    // the block it belongs to. With every block closed (more were closed
+    // than could be opened: past 255 at once) it belongs to none.
+    if sem_depth > 0 {
+        at = &sem_scopes + (sem_depth - 1) * 32;
+        e.s_scope = sem_tget(at, 0);
+        sem_tset(at, 2, sem_tget(at, 2) + 1);
+    }
+    b = sem_bucket(name, len);
+    e.s_next = sem_tget(&sem_table, b);
+    sem_tset(&sem_table, b, e);
+    return e;
+}
+
+// the last symbol declared with this name, 0 for none
+fn sem_lookup(name: i64, len: i64) -> ptr<Sym> {
+    var e: ptr<Sym> = sem_tget(&sem_table, sem_bucket(name, len));
+    while e != 0 {
+        if e.s_len == len {
+            if sem_memeq(e.s_name, name, len) == 1 {
+                return e;
+            }
+        }
+        e = e.s_next;
+    }
+    return 0;
+}
+
+// the symbol of a token's name
+fn sem_lookup_tok(t: ptr<Tok>) -> ptr<Sym> {
+    return sem_lookup(t.value, t.length);
+}
+
+// a token's name is declared
+fn sem_insert_tok(t: ptr<Tok>, kind: i64, flags: i64, value: i64) -> i64 {
+    return sem_insert(t.value, t.length, kind, flags, value);
+}
+
+// =========================================================================
+// what a declaration holds
+// =========================================================================
+
+// its type, from what the parser left in the node: a real, a pointer
+// (its element width), a struct (the type's name), else an integer
+fn sem_node_type(d: ptr<Ast>) -> i64 {
+    if d == 0 {
+        return SEM_T_I64;
+    }
+    if (d.col & 1) != 0 {
+        return SEM_T_F64;
+    }
+    if d.child_count != 0 {
+        return SEM_T_PTR;
+    }
+    if d.left != 0 {
+        return SEM_T_STRUCT;
+    }
+    return SEM_T_I64;
+}
+
+// an array's length, with its element width (bits 4-7 of col) in the
+// top byte; 0 when it is no array
+fn sem_arr_value(d: ptr<Ast>) -> i64 {
+    var n: i64 = d.type_info;
+    if n == 0 {
+        return 0;
+    }
+    return n | (((d.col >> 4) & 15) << 56);
+}
+
+// the number a literal token reads: 0x and hex digits, or decimal digits.
+// It stops at the first character that is neither; no token reads 0.
+fn sem_token_number(t: ptr<Tok>) -> i64 {
+    var r: i64 = 0;
+    var p: i64 = 0;
+    var n: i64 = 0;
+    var c: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    p = t.value;
+    n = t.length;
+    if n == 0 {
+        return 0;
+    }
+    if n > 2 && sem_bget(p) == 48 && (sem_bget(p + 1) | 32) == 120 {
+        p += 2;
+        n -= 2;
+        while n > 0 {
+            c = sem_bget(p);
+            if c < 48 {
+                return r;
+            }
+            if c <= 57 {
+                c -= 48;
+            } else {
+                c = c | 32;
+                if c < 97 || c > 102 {
+                    return r;
+                }
+                c -= 87;
+            }
+            r = (r << 4) + c;
+            p += 1;
+            n -= 1;
+        }
+        return r;
+    }
+    while n > 0 {
+        c = sem_bget(p);
+        if c < 48 || c > 57 {
+            return r;
+        }
+        r = r * 10 + (c - 48);
+        p += 1;
+        n -= 1;
+    }
+    return r;
+}
+
+// =========================================================================
+// the hint: a declared name one edit away
+// =========================================================================
+
+// a and b are one edit apart: a letter changed, added or missing, or two
+// side by side swapped. The same name is not.
+fn sem_one_edit(a: i64, alen: i64, b: i64, blen: i64) -> i64 {
+    var d: i64 = alen - blen;
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var miss: i64 = 0;
+    var first: i64 = -1;
+    var second: i64 = 0;
+    var t: i64 = 0;
+    if d < 0 {
+        d = 0 - d;
+    }
+    if d > 1 {
+        return 0;
+    }
+    if d == 0 {
+        // the same length: count where they differ, up to three
+        while i < alen {
+            if sem_bget(a + i) != sem_bget(b + i) {
+                miss += 1;
+                if first == -1 {
+                    first = i;
+                } else {
+                    second = i;
+                }
+            }
+            i += 1;
+            if miss >= 3 {
+                break;
+            }
+        }
+        if miss == 1 {
+            return 1;
+        }
+        if miss != 2 {
+            return 0;
+        }
+        // two: a swap of neighbours still counts
+        if second - first != 1 {
+            return 0;
+        }
+        if sem_bget(a + first) != sem_bget(b + second) {
+            return 0;
+        }
+        if sem_bget(a + second) != sem_bget(b + first) {
+            return 0;
+        }
+        return 1;
+    }
+    // one longer than the other: a is made the longer
+    if alen < blen {
+        t = a;
+        a = b;
+        b = t;
+        t = alen;
+        alen = blen;
+        blen = t;
+    }
+    // i walks the longer, j the shorter; one skip is allowed
+    while j < blen {
+        if sem_bget(a + i) == sem_bget(b + j) {
+            i += 1;
+            j += 1;
+        } else {
+            miss += 1;
+            if miss > 1 {
+                return 0;
+            }
+            i += 1;
+        }
+    }
+    return 1;
+}
+
+// the first symbol, chain by chain, one edit from the name: its text, and
+// its length in sem_sug_len; 0 when none is
+fn sem_suggest(name: i64, len: i64) -> i64 {
+    var b: i64 = 0;
+    var e: ptr<Sym> = 0;
+    sem_sug_len = 0;
+    while b < SEM_BUCKETS {
+        e = sem_tget(&sem_table, b);
+        while e != 0 {
+            if sem_one_edit(name, len, e.s_name, e.s_len) == 1 {
+                sem_sug_len = e.s_len;
+                return e.s_name;
+            }
+            e = e.s_next;
+        }
+        b += 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// errors
+// =========================================================================
+
+// an error at a token: where, and what kind
+fn sem_error_at(t: ptr<Tok>, kind: i64) -> i64 {
+    sem_error_tok = t;
+    sem_error_line = t.line;
+    sem_error_kind = kind;
+    sem_had_error = 1;
+    return 0;
+}
+
+// peek, poke, *p, dll_load, dll_proc outside every raw { }: an error at
+// the keyword (kind 7). Only the first error is kept.
+fn sem_raw_check(n: ptr<Ast>) -> i64 {
+    if sem_raw_depth != 0 || sem_had_error != 0 {
+        return 0;
+    }
+    if n.data == 0 {
+        return 0;
+    }
+    sem_error_at(n.data, 7);
+    return 0;
+}
+
+// the left side of an assignment can be assigned to
+fn sem_check_lvalue(n: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var t: ptr<Tok> = 0;
+    if n == 0 {
+        return 0;
+    }
+    k = n.node_type;
+    if k == AST_IDENTIFIER || k == AST_INDEX || k == AST_MEMBER || k == AST_UNOP {
+        return 0;
+    }
+    sem_error_kind = 5;
+    if n.data != 0 {
+        t = n.data;
+        sem_error_tok = t;
+        sem_error_line = t.line;
+    }
+    sem_had_error = 1;
+    return 0;
+}
+
+// =========================================================================
+// the walk
+// =========================================================================
+
+// each value of a chain of AST_ARG nodes
+fn sem_args(a: ptr<Ast>) -> i64 {
+    while a != 0 {
+        if a.left != 0 {
+            sem_node(a.left);
+        }
+        a = a.right;
+    }
+    return 0;
+}
+
+// The arenas of an mmu block (heap_arena_definition): none of size zero,
+// no two with one name, no two over the same memory -- [base, base+size)
+// of one meeting the other's. Each of these errors is kept, the last one
+// found standing.
+fn sem_mmu(n: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = n.left;
+    var b: ptr<Ast> = 0;
+    var sz: ptr<Tok> = 0;
+    var ta: ptr<Tok> = 0;
+    var tb: ptr<Tok> = 0;
+    var p: i64 = 0;
+    var c: i64 = 0;
+    var zero: i64 = 0;
+    var abase: i64 = 0;
+    var aend: i64 = 0;
+    var bbase: i64 = 0;
+    var bend: i64 = 0;
+    var overlap: i64 = 0;
+    while a != 0 {
+        // a size of nothing but zeros
+        sz = a.type_info;
+        if sz != 0 {
+            if sz.length != 0 {
+                p = sz.value;
+                c = sz.length;
+                zero = 1;
+                while c > 0 {
+                    if sem_bget(p) != 48 {
+                        zero = 0;
+                        break;
+                    }
+                    p += 1;
+                    c -= 1;
+                }
+                if zero == 1 {
+                    ta = a.data;
+                    sem_error_line = ta.line;
+                    sem_error_kind = 2;
+                    sem_had_error = 1;
+                }
+            }
+        }
+        // against every arena after it
+        b = a.right;
+        while b != 0 {
+            overlap = 0;
+            abase = sem_token_number(a.left);
+            aend = abase + sem_token_number(a.type_info);
+            if sem_ult(aend, abase) == 0 {
+                bbase = sem_token_number(b.left);
+                bend = bbase + sem_token_number(b.type_info);
+                if sem_ult(bend, bbase) == 0 {
+                    if sem_ult(abase, bend) == 1 && sem_ult(bbase, aend) == 1 {
+                        overlap = 1;
+                    }
+                }
+            }
+            if overlap == 1 {
+                tb = b.data;
+                sem_error_line = tb.line;
+                sem_error_kind = 3;
+                sem_had_error = 1;
+            } else {
+                ta = a.data;
+                tb = b.data;
+                if ta.length == tb.length {
+                    if sem_memeq(ta.value, tb.value, ta.length) == 1 {
+                        sem_error_line = tb.line;
+                        sem_error_kind = 1;
+                        sem_had_error = 1;
+                    }
+                }
+            }
+            b = b.right;
+        }
+        a = a.right;
+    }
+    return 0;
+}
+
+// A call: the function it names, and every array it is given against the
+// parameter it goes to. Inside the function each index is checked against
+// the length the parameter declares, which is only safe when the array is
+// that long and of that element width: a shorter one is kind 6, another
+// width kind 9 (an array of u8 read through an i64 parameter would be read
+// eight bytes at a time). Then every argument.
+fn sem_call(n: ptr<Ast>) -> i64 {
+    var f: ptr<Sym> = 0;
+    var fnode: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    var a: ptr<Ast> = 0;
+    var v: ptr<Ast> = 0;
+    var s: ptr<Sym> = 0;
+    var want: i64 = 0;
+    var have: i64 = 0;
+    var aw: i64 = 0;
+    var pw: i64 = 0;
+    if n.data == 0 {
+        return 0;
+    }
+    f = sem_lookup_tok(n.data);
+    // a function not found may be a builtin: it is not an error here
+    if f != 0 {
+        if (f.s_flags & SEM_F_FUNCTION) != 0 && f.s_value != 0 {
+            fnode = f.s_value;
+            p = fnode.left;
+            a = n.right;
+            while p != 0 && a != 0 {
+                want = p.type_info;
+                v = a.left;
+                if want != 0 && v != 0 {
+                    if v.node_type == AST_IDENTIFIER {
+                        s = sem_lookup_tok(v.data);
+                        if s != 0 {
+                            have = s.s_value;
+                            if have != 0 {
+                                aw = (have >> 56) & 255;
+                                have = have & 0x00FFFFFFFFFFFFFF;
+                                pw = (p.col >> 4) & 15;
+                                if aw == 0 {
+                                    aw = 8;
+                                }
+                                if pw == 0 {
+                                    pw = 8;
+                                }
+                                if aw != pw {
+                                    if sem_had_error == 0 {
+                                        sem_error_at(v.data, 9);
+                                    }
+                                    break;
+                                }
+                                if have < want {
+                                    if sem_had_error == 0 {
+                                        sem_error_at(v.data, 6);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                p = p.right;
+                a = a.right;
+            }
+        }
+    }
+    sem_args(n.right);
+    return 0;
+}
+
+// A chain of statements: each link a block that holds one in left and the
+// rest in right -- and each link opens a block of its own, closed when the
+// chain ends, as the walk always did. Walked in a loop, not one call deeper
+// per statement.
+fn sem_block(n: ptr<Ast>) -> i64 {
+    var links: i64 = 0;
+    var raws: i64 = 0;
+    var cur: ptr<Ast> = n;
+    var nx: ptr<Ast> = 0;
+    while 1 == 1 {
+        if cur.type_info == BLOCK_RAW {
+            sem_raw_depth += 1;
+            raws += 1;
+        }
+        sem_push_scope(SEM_SCOPE_BLOCK);
+        links += 1;
+        sem_node(cur.left);
+        nx = cur.right;
+        if nx == 0 {
+            break;
+        }
+        if nx.node_type != AST_BLOCK {
+            sem_node(nx);
+            break;
+        }
+        cur = nx;
+    }
+    while links > 0 {
+        sem_pop_scope();
+        links -= 1;
+    }
+    sem_raw_depth -= raws;
+    return 0;
+}
+
+// one node and all it holds
+fn sem_node(n: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var t: ptr<Tok> = 0;
+    var c: ptr<Ast> = 0;
+    var d: ptr<Ast> = 0;
+    if n == 0 {
+        return 0;
+    }
+    k = n.node_type;
+
+    // the program: a chain of declarations, walked in a loop
+    if k == AST_PROGRAM {
+        c = n;
+        while 1 == 1 {
+            sem_node(c.left);
+            d = c.right;
+            if d == 0 {
+                return 0;
+            }
+            if d.node_type != AST_PROGRAM {
+                sem_node(d);
+                return 0;
+            }
+            c = d;
+        }
+    }
+    if k == AST_FUNCTION {
+        if n.data == 0 {
+            return 0;
+        }
+        // its node is its value, so that a call reaches the parameters
+        sem_insert_tok(n.data, SEM_T_FN, SEM_F_FUNCTION, n);
+        sem_push_scope(SEM_SCOPE_FUNCTION);
+        sem_node(n.left);
+        sem_node(n.right);
+        sem_pop_scope();
+        return 0;
+    }
+    if k == AST_PARAM {
+        // each parameter, in the function's block
+        c = n;
+        while c != 0 {
+            if c.node_type != AST_PARAM {
+                return sem_node(c);
+            }
+            if c.data != 0 {
+                sem_insert_tok(c.data, sem_node_type(c), 0, sem_arr_value(c));
+            }
+            c = c.right;
+        }
+        return 0;
+    }
+    if k == AST_VAR_DECL {
+        if n.data == 0 {
+            return 0;
+        }
+        sem_insert_tok(n.data, sem_node_type(n), 0, sem_arr_value(n));
+        return sem_node(n.right);
+    }
+    if k == AST_CONST_DECL {
+        if n.data == 0 {
+            return 0;
+        }
+        sem_insert_tok(n.data, SEM_T_I64, SEM_F_CONST, 0);
+        return sem_node(n.right);
+    }
+    if k == AST_BLOCK {
+        return sem_block(n);
+    }
+    if k == AST_ASSIGN {
+        sem_node(n.left);
+        sem_check_lvalue(n.left);
+        return sem_node(n.right);
+    }
+    if k == AST_BINOP || k == AST_UNOP {
+        sem_node(n.left);
+        return sem_node(n.right);
+    }
+    if k == AST_CALL {
+        return sem_call(n);
+    }
+    if k == AST_RETURN {
+        // return a, b: the values after the first are in left
+        sem_node(n.right);
+        return sem_args(n.left);
+    }
+    if k == AST_MULTI {
+        // a, b = f(): the call, then the targets
+        sem_node(n.right);
+        return sem_args(n.left);
+    }
+    if k == AST_LAMBDA {
+        // a function as a value: a block of its own, the names around it
+        // still in sight
+        sem_push_scope(SEM_SCOPE_BLOCK);
+        sem_node(n.left);
+        sem_node(n.right);
+        sem_pop_scope();
+        return 0;
+    }
+    // what holds one expression in right
+    if k == AST_PRINT || k == AST_PRINTC || k == AST_CAST || k == AST_TRUNC || k == AST_INB || k == AST_ARG_GET {
+        return sem_node(n.right);
+    }
+    // two, in left and right
+    if k == AST_OUTB || k == AST_BEEP {
+        sem_node(n.left);
+        return sem_node(n.right);
+    }
+    // memory by address, and system libraries: inside raw { } only
+    if k == AST_POKE || k == AST_POKE8 || k == AST_POKE16 || k == AST_POKE32 {
+        sem_raw_check(n);
+        sem_node(n.left);
+        return sem_node(n.right);
+    }
+    if k == AST_PEEK || k == AST_PEEK8 || k == AST_PEEK16 || k == AST_PEEK32 {
+        return sem_raw_check(n);
+    }
+    if k == AST_DEREF || k == AST_DLL_LOAD {
+        sem_raw_check(n);
+        return sem_node(n.right);
+    }
+    if k == AST_DLL_PROC {
+        sem_raw_check(n);
+        sem_node(n.left);
+        return sem_node(n.right);
+    }
+    if k == AST_SYSCALL {
+        // the keyword is in type_info; every argument is an expression
+        if sem_raw_depth == 0 && sem_had_error == 0 && n.type_info != 0 {
+            sem_error_at(n.type_info, 7);
+        }
+        return sem_args(n.right);
+    }
+    if k == AST_CALL_INDIRECT {
+        // call <pointer>(args)
+        sem_node(n.left);
+        return sem_args(n.right);
+    }
+    if k == AST_SAVEFILE {
+        // savefile(buffer, len, name)
+        sem_node(n.left);
+        sem_node(n.right);
+        return sem_node(n.data);
+    }
+    if k == AST_IF {
+        sem_node(n.data);
+        sem_node(n.left);
+        return sem_node(n.right);
+    }
+    if k == AST_WHILE {
+        // a for's step is in left, apart from the body
+        sem_node(n.data);
+        sem_node(n.right);
+        return sem_node(n.left);
+    }
+    if k == AST_LOOP_IN {
+        sem_push_scope(SEM_SCOPE_BLOCK);
+        if n.data != 0 {
+            sem_insert_tok(n.data, SEM_T_I64, 0, 0);
+        }
+        sem_node(n.left);
+        sem_node(n.right);
+        sem_pop_scope();
+        return 0;
+    }
+    if k == AST_INDEX {
+        // a[i]: an array that was never declared is a mistake of its own
+        if n.data != 0 {
+            if sem_lookup_tok(n.data) == 0 {
+                t = n.data;
+                sem_error_tok = t;
+                sem_error_line = t.line;
+                sem_error_kind = 4;
+                sem_had_error = 1;
+            }
+        }
+        return sem_node(n.right);
+    }
+    if k == AST_IDENTIFIER {
+        // a name never declared. The kind stays what it was: 0, unless an
+        // error before this one set another.
+        if n.data != 0 {
+            if sem_lookup_tok(n.data) == 0 {
+                t = n.data;
+                sem_error_tok = t;
+                sem_error_line = t.line;
+                sem_had_error = 1;
+            }
+        }
+        return 0;
+    }
+    if k == AST_HARDWARE_BLOCK {
+        if n.data == 0 {
+            return 0;
+        }
+        sem_push_scope(SEM_SCOPE_HARDWARE);
+        sem_node(n.right);
+        sem_pop_scope();
+        return 0;
+    }
+    if k == AST_MMU_DEF {
+        return sem_mmu(n);
+    }
+    // a.b, imports, literals and the rest: nothing to check
+    return 0;
+}
+
+// =========================================================================
+// the door: what semantic.asm calls
+// =========================================================================
+
+fn sem_init(buf: i64, size: i64) -> i64 {
+    var i: i64 = 0;
+    sem_arena = buf;
+    sem_arena_ptr = buf;
+    sem_arena_end = buf + size;
+    while i < SEM_BUCKETS {
+        sem_tset(&sem_table, i, 0);
+        i += 1;
+    }
+    sem_depth = 0;
+    sem_scope_ids = 0;
+    sem_had_error = 0;
+    sem_error_line = 0;
+    sem_error_kind = 0;
+    sem_raw_depth = 0;
+    sem_push_scope(SEM_SCOPE_GLOBAL);
+    return 0;
+}
+
+fn sem_run(root: ptr<Ast>) -> i64 {
+    if root == 0 {
+        return -1;
+    }
+    sem_node(root);
+    if sem_had_error != 0 {
+        return -1;
+    }
+    return 0;
+}
+
+// an error found after this pass (codegen's thread check, the lexer's
+// characters) is reported through the same state
+fn sem_set_error(t: ptr<Tok>, kind: i64) -> i64 {
+    return sem_error_at(t, kind);
+}
+
+fn sem_kind() -> i64 {
+    return sem_error_kind;
+}
+
+fn sem_line() -> i64 {
+    return sem_error_line;
+}
+
+fn sem_col() -> i64 {
+    var t: ptr<Tok> = sem_error_tok;
+    if t == 0 {
+        return 0;
+    }
+    return t.col;
+}
+
+fn sem_len() -> i64 {
+    var t: ptr<Tok> = sem_error_tok;
+    if t == 0 {
+        return 0;
+    }
+    return t.length;
+}
+
+// the name the error is about, straight out of the source (no 0 at its end)
+fn sem_name() -> i64 {
+    var t: ptr<Tok> = sem_error_tok;
+    if t == 0 {
+        return 0;
+    }
+    return t.value;
+}
+
+// the closest declared name to the one the error is about: its text, its
+// length in sem_suggest_len()
+fn sem_suggest_name() -> i64 {
+    var t: ptr<Tok> = sem_error_tok;
+    if t == 0 {
+        sem_sug_len = 0;
+        return 0;
+    }
+    return sem_suggest(t.value, t.length);
+}
+
+fn sem_suggest_len() -> i64 {
+    return sem_sug_len;
+}
