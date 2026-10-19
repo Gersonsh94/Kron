@@ -230,13 +230,6 @@ async function cmdDebug() {
 
 // ------------------------------------------------------------------ the debugger
 
-// A build made with --debug stops where it is told: before each statement
-// of the program's own files it asks std_debug.kr, which talks to this code
-// through the program's standard input and output (lines starting with
-// "@@kdbg "; the protocol is described at the top of std_debug.kr). This
-// class turns that into the Debug Adapter Protocol VS Code speaks, without
-// any package: requests come in through handleMessage, answers and events
-// go out through onDidSendMessage.
 class KronDebugSession {
     constructor() {
         this.emitter = new vscode.EventEmitter();
@@ -267,7 +260,6 @@ class KronDebugSession {
 
     key(p) { const r = path.resolve(p); return process.platform === 'win32' ? r.toLowerCase() : r; }
 
-    // every breakpoint, again: the program takes them at its next stop
     sendBreakpoints() {
         this.write('c');
         for (const [file, lines] of this.bps) {
@@ -283,7 +275,6 @@ class KronDebugSession {
         this.write(this.stopOnEntry ? 'step' : 'run');
     }
 
-    // a line the program wrote
     line(text) {
         if (!text.startsWith('@@kdbg ')) { this.out(text + '\n'); return; }
         const rest = text.slice(7);
@@ -303,7 +294,6 @@ class KronDebugSession {
                                        line: parseInt(p[2], 10), name: p.slice(3).join(' ') });
         }
         else if (word === 'var' && this.pending) {
-            // var FRAME PATH TYPE VALUE...
             const a = args.indexOf(' '), b = args.indexOf(' ', a + 1), c = args.indexOf(' ', b + 1);
             const frame = args.slice(0, a), vpath = args.slice(a + 1, b);
             const type = c < 0 ? args.slice(b + 1) : args.slice(b + 1, c);
@@ -373,7 +363,6 @@ class KronDebugSession {
         this.event('initialized');
     }
 
-    // the variables under a path (top level: path '')
     children(frame, parent) {
         const list = this.vars.get(frame) || [];
         const out = [];
@@ -478,8 +467,6 @@ class KronDebugSession {
 
 // ------------------------------------------------------------------ the index
 
-// Declarations of a file and of every module it imports, found by reading
-// the text: enough for completion, definitions and the outline.
 const DECL = [
     { re: /^\s*fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(->\s*[^{]+)?/, kind: 'fn' },
     { re: /^\s*struct\s+([A-Za-z_]\w*)/, kind: 'struct' },
@@ -499,7 +486,6 @@ function declsOf(text, file) {
                 let detail = '';
                 if (d.kind === 'fn') detail = `fn ${m[1]}(${m[2].trim()})${m[3] ? ' ' + m[3].trim() : ''}`;
                 else if (d.kind === 'global' || d.kind === 'const') {
-                    // the type runs to the final ';' -- an array type has one inside: [i64; 4]
                     name = m[2];
                     const type = m[3].replace(/\/\/.*$/, '').replace(/=.*$/, '').replace(/;\s*$/, '').trim();
                     detail = `${d.kind === 'const' ? 'const' : (m[1] ? 'shared var' : 'var')} ${name}: ${type}`;
@@ -521,7 +507,6 @@ function importsOf(text, dir) {
     return out;
 }
 
-// The document and its imports, following imports of imports, once each.
 function indexFor(doc) {
     const seen = new Set();
     const all = [];
