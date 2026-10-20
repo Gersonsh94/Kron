@@ -67,6 +67,7 @@ const CT_STREAM: i64 = 35;
 const CT_SPTR: i64 = 36;
 const CT_SLEN: i64 = 37;
 const CT_TEXT_FREE: i64 = 38;
+const CT_TEXT_DROP: i64 = 39;
 
 // --- the output ---
 var cg_out: i64;
@@ -338,3 +339,22 @@ var ld_lvtext: [i64; 512];               // and whether each says 'text'
 var ld_lvc: [i64; 512];                  // and what each carries
 var ld_plan_lit: i64;                    // ld_plan's answer
 var ld_plan_fresh: i64;
+var ld_mmask: [i64; 4096];               // per function of the table: the parameters it changes, not keeps
+var ld_fresh: [i64; 4096];               // 1: a function of the table that returns a new text
+
+// --- texts a local owns (cg_lend.kr, lo_*) ---
+var ld_lmode: i64;                       // the walk follows the text locals too
+var ld_mut: i64;                         // locals changed in place (text_add)
+var lo_nb: i64;                          // bits given to locals so far
+var lo_allbits: i64;                     // and all of them
+var lo_bitof: [i64; 512];                // per local the walk met: its own bit, 0 none
+var lo_nw: [i64; 512];                   // how many writes of it this round
+var lo_wlit: [i64; 512];                 // 1 when its last write was a "..."
+var lo_tbeg: i64;                        // the body's first token
+var lo_ntok: i64;                        // and how many it has
+var lo_mark: [i64; 1024];                // a bit per token of the body: the walk read it
+var lo_n: i64;                           // the locals of the function being written:
+var lo_name: [i64; 64];                  // their names,
+var lo_own: [i64; 64];                   // the slot holding the text each owns (0: none),
+var lo_lit: [i64; 64];                   // 1: a "..." kept as it is
+var lo_nown: i64;                        // how many own one

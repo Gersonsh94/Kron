@@ -52,6 +52,8 @@ kron_definitions
 //                                  never failing: "" for 0 or a freed text
 // Freeing
 //   text_free(t)                   the text is gone; using it again fails
+//   text_drop(t)                   the same, and 0 is nothing: what the
+//                                  compiler calls for a text a local owned
 //
 // A text is a handle (std_heap.kr). A position out of range, a freed text,
 // or a number where a text belongs fails with a cause and a hint, and the
@@ -664,6 +666,13 @@ fn text_free(t: i64) -> i64 {
         hp_release(q);
     }
     return text_end(0);
+}
+
+fn text_drop(t: i64) -> i64 {
+    if t == 0 {
+        return 0;
+    }
+    return text_free(t);
 }
 
 fn text_from_int(n: i64) -> text {

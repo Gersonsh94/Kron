@@ -447,6 +447,14 @@ fn main() {
   is given -- in a global, a field, a list, or by returning it -- gets a
   text of its own, as a variable does. The compiler works out which
   functions only read; reading the bytes through `text_cstr` counts.
+- A text local that the function only reads, changes with `text_add` and
+  its kin, or passes to functions that only read, owns the texts it is
+  given (a `"..."`, a joined text, a new text of std_text): each one is
+  freed when the local is written again -- a `var` in a loop each round --
+  and the last when the function returns. Written once with a `"..."` and
+  never changed, it is the `"..."` itself and no text is made. A local
+  whose text goes into a global, a field, a list, another name or the
+  result keeps it, and the program frees it with `text_free`.
 - `list<T>` and `map<T>` hold `i64`, `f64` or `text`. Declared without a
   value they start empty; `[a, b, c]` makes a list. `l[i]` and `m[key]` read
   and write; `for x in l { }` walks a list (`break` and `continue` work);
@@ -462,7 +470,7 @@ Every call takes the library's lock, so threads can share them.
 
 | Texts (`std_text.kr`) | |
 |---|---|
-| `text(x)` `text_new()` `text_free(t)` | make and free |
+| `text(x)` `text_new()` `text_free(t)` `text_drop(t)` | make and free (`text_drop`: 0 is nothing) |
 | `text_add(t, x)` `text_add_int(t, n)` `text_add_real(t, x, decimals)` `text_add_char(t, code)` | add to a text |
 | `text_len(x)` `text_at(x, i)` `text_same(a, b)` `text_compare(a, b)` | read |
 | `text_find(x, part)` `text_find_after(x, part, i)` `text_count(x, part)` `text_contains` `text_starts` `text_ends` | search |

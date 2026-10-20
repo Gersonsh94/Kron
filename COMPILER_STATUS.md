@@ -42,8 +42,8 @@ same errors, positions and hints, the Kron code generator the same text
 byte for byte, for every target, and the Kron assembler the same bytes
 (the whole compiler included) and the same errors, on every `.kr` file of
 the repository and on thousands of generated files; `-S` of every test is
-the same text. Tests: Windows 109 plus the debug test, Linux 108, ARM64 108,
-web 104, macOS (emulated) 107, 40 refused programs.
+the same text. Tests: Windows 110 plus the debug test, Linux 109, ARM64 109,
+web 105, macOS (emulated) 108, 40 refused programs.
 
 ## 0b. STATE AT 18-10-2026
 

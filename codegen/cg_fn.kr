@@ -178,8 +178,10 @@ fn cg_function(n: ptr<Ast>) -> i64 {
     if cg_is_entry(n.data) != 0 {
         cg_emit_global_inits();
     }
+    lo_begin();                          // the texts its locals own (cg_lend.kr)
     cg_emit(n.right);
     ir_ctl(IR_RETLBL, ret);
+    lo_end();
     emit_cstr("    mov rsp, rbp\n");
     emit_cstr("    pop rbp\n");
     // main ends the process; the others return

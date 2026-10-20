@@ -520,7 +520,9 @@ fn vk_open(w: i64, h: i64) -> i64 {
     vk_depth = vk_out[7];
     vk_depth_mem = vk_out[8];
     vk_depth_view = vk_out[9];
-    if vk_buffer(w * h * 4, 2, 6) == 0 { return 0; }
+    // host-cached: the frame is read back by the CPU every gpu_end, and
+    // uncached (write-combined) memory reads tens of times slower
+    if vk_buffer(w * h * 4, 2, 14) == 0 { return 0; }
     vk_read_buf = vk_out[2];
     vk_read_mem = vk_out[3];
     vk_read_map = vk_map(vk_read_mem);

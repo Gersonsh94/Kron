@@ -1079,6 +1079,46 @@ two). An engine drawing `"$" + n` every frame took one text per frame.
 - **Measured**: 20000 rounds of eleven such calls needed 260008 texts and
   now need 5 (`test_textlend`). The compiler's own parts do not change.
 
+## Texts a local owns (20-10-2026, Gerson: found in the engine)
+
+`var t: text = "literal"` inside a loop made a new text every round and
+none was ever freed: 200,000 rounds, about 14 MB. The same with
+`var t: text = "a" + n`, `text_from_int(n)`, `s = s + piece` -- every
+text a local was given stayed until the program ended, unless the program
+called `text_free` itself.
+
+- **What changes.** A text local given a text the compiler makes -- a
+  `"..."`, a `+` that joins texts, a new text of std_text (`text`,
+  `text_new`, `text_from_int`, `text_from_real`, `text_char`,
+  `text_from_bytes`, `text_part`, `text_upper`, `text_lower`, `text_trim`,
+  `text_replace`, `text_repeat`, `text_join`) -- *owns* it when the
+  function only reads the local, changes it in place (`text_add`,
+  `text_add_int`, `text_add_real`, `text_add_char`, `text_clear`,
+  `text_set_at`) or passes it to functions that only read. Such a local:
+  - written once, with a `"..."`, and never changed: the `"..."` is used
+    as it is and no text is made (every reader of std_text takes one);
+  - otherwise: a slot of the frame holds the text it owns, 0 at the start.
+    Each write -- a declaration in a loop is a write each round -- frees
+    the text it owned before, after the new value is made (so `s = s + x`
+    reads the old one first), and the function's return frees the last.
+    Results in rax, rdx, r8, r9 and xmm0 are kept around those frees.
+- **Who only reads.** The walk of `codegen/cg_lend.kr` that decides which
+  parameters a function reads, with a bit for each text local too. A
+  local whose value reaches a place that keeps it -- a global, a field,
+  a list, memory, an argument the callee keeps, the result, another name
+  (`var u = t`, or a pointer from `text_cstr` kept in a local) -- keeps
+  its texts, as before; so does one written as itself (`t = t`,
+  `t = text_add(t, x)`), one whose address is taken, one named anywhere the
+  walk did not read, and every local of a function with `asm` or a fn
+  value. A program that frees its own texts (`text_free(t)`) is
+  untouched: `text_free` keeps what it is given, so `t` is not owned.
+- **text_drop(t)** (std_text, new): `text_free` that takes 0 for nothing,
+  for the frees the compiler writes.
+- **Measured**: the loop above takes no text for a `"literal"` and two
+  for `"a" + n` or `text_from_int(n)`, where it took 200,000. A text is
+  still alive while its function runs: a recursion 30 deep holds 31.
+  Test: `test_textown`.
+
 ## Fixed 20-10-2026
 
 - A comparison of reals used as a value -- `return a < b`, `f(x == 1.0)`,
@@ -1200,6 +1240,11 @@ two). An engine drawing `"$" + n` every frame took one text per frame.
   the system (a path joined for std_file, std_os, std_image) is still given
   and stays, as is the text a function returns (`say(text_upper(x))`),
   which is the caller's to free.
+- A text local owns its text only when every use is one the compiler can
+  follow (see "Texts a local owns"); a text given to a struct, a list, a
+  global or another local is the program's to free, as before. The text a
+  local owns lives until the local is written again or the function
+  returns, not until the end of its block.
 - kasm: a `%define` that stands for a memory operand (`%define SLOT
   [rbp - 24]`, then `mov SLOT, rax`) is not accepted; written out, the
   same line is.

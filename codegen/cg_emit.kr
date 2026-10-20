@@ -208,6 +208,7 @@ fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
     var r: ptr<Ast> = n.right;
     var t: ptr<Tok> = n.left;
     var s: i64 = 0;
+    var k: i64 = 0;
     cg_decl_infer_real(n);                   // var x = 2.5: a real
     col = n.col;
     pending_vtag = cg_decl_vtag(n);
@@ -233,6 +234,20 @@ fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
         if r.node_type == AST_STRUCT_LIT {
             return cg_emit_struct_lit(r, off);
         }
+    }
+    // a text local that owns its texts (cg_lend.kr): a "..." kept as it
+    // is, or the text it owned before freed
+    k = lo_find(n.data);
+    if k != -1 && n.type_info == 0 && (col & 1) == 0 && ((col >> 8) & 15) == 1 {
+        if r == 0 {
+            emit_cstr("    mov rax, 0\n");
+        } else if cg_q(&lo_lit, k) != 0 {
+            cg_emit(r);
+        } else {
+            cg_emit_for(r, cg_decl_vtag(n));
+        }
+        lo_store(k, r);
+        return ir_stloc(off);
     }
     if r == 0 {
         return cg_e_decl_noinit(n, off);
@@ -356,6 +371,10 @@ fn cg_e_assign(n: ptr<Ast>) -> i64 {
         return 0;
     }
     if cg_find_var_idx(l.data) != -1 {
+        i = lo_find(l.data);
+        if i != -1 {
+            lo_store(i, r);                  // the text it owned before, freed
+        }
         return ir_stloc(cg_find_var(l.data));
     }
     cg_emit_gpre("    mov [rel __g_");

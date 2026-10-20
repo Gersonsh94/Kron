@@ -188,6 +188,7 @@ fn cg_tok_init() -> i64 {
     cg_tok_set(CT_SPTR, 0, "bytes", 5);
     cg_tok_set(CT_SLEN, 0, "len", 3);
     cg_tok_set(CT_TEXT_FREE, TOK_IDENT, "text_free", 9);
+    cg_tok_set(CT_TEXT_DROP, TOK_IDENT, "text_drop", 9);
     return 0;
 }
 

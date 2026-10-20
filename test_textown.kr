@@ -1,0 +1,150 @@
+kron_program
+kron_domain test_textown;
+kron_imports
+acquire_domain "std_list.kr";
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// Texts a local owns. A text local given a "...", a joined text or a new
+// text of std_text, which the function only reads or changes in place, is
+// freed when the local is written again -- a declaration in a loop is a
+// write each round -- and when the function returns; a "..." written once
+// and never changed is not made a text at all. A local that keeps its text
+// somewhere -- a list, a global, a field, another name, the result --
+// keeps it as before. Before, each round of these loops left a text.
+// =========================================================================
+
+var kept: text;
+var names: list<text>;
+var total: i64;
+
+struct Person {
+    name: text;
+    age: i64;
+}
+
+fn width(s: text) -> i64 {
+    return text_len(s);
+}
+
+// owned locals and several results: rax and rdx survive the frees
+fn two(n: i64) -> (i64, i64) {
+    var a: text = "x" + n;
+    var b: text = text_from_int(n * 10);
+    return text_len(a), text_len(b);
+}
+
+// a real result: xmm0 survives
+fn ratio(n: i64) -> f64 {
+    var s: text = "abc" + n;
+    return text_len(s) * 0.5;
+}
+
+// a failure is still there for the caller
+fn checked(n: i64) -> i64 {
+    var s: text = "v" + n;
+    if n > 5 {
+        fail "too big" hint "keep it at 5 or less";
+    }
+    return text_len(s);
+}
+
+fn depth(n: i64) -> i64 {
+    var s: text = "d" + n;
+    if n == 0 {
+        return text_len(s);
+    }
+    return depth(n - 1) + text_len(s);
+}
+
+// kept: these hold on to their texts
+fn keep_global(n: i64) -> i64 {
+    var s: text = "g" + n;
+    kept = s;
+    return 0;
+}
+
+fn keep_list(n: i64) -> i64 {
+    var s: text = "l" + n;
+    list_add(names, s);
+    return 0;
+}
+
+fn keep_field(p: ptr<Person>, n: i64) -> i64 {
+    var s: text = "p" + n;
+    p.name = s;
+    return 0;
+}
+
+fn give_back(n: i64) -> text {
+    var s: text = "r" + n;
+    return s;
+}
+
+fn main() -> i64 {
+    var i: i64 = 0;
+    var base: i64 = ob_count;
+    var line: text = "";
+    var p: Person;
+    while i < 20000 {
+        var a: text = "literal";
+        total = total + text_len(a) + width(a);
+        if a == "literal" {
+            total = total + 1;
+        }
+        var b: text = "n" + i;
+        total = total + width(b);
+        var c: text = text_from_int(i);
+        text_add(c, "!");
+        text_add_int(c, 7);
+        total = total + text_len(c);
+        var d: text = a + "/" + c;
+        total = total + text_len(d);
+        if i % 1000 == 0 {
+            line = line + "#";
+        }
+        var x, y = two(i);
+        total = total + x + y;
+        var r: f64 = ratio(i);
+        if r < 1.0 {
+            print(r);
+        }
+        var u: text = text_upper("ab" + i);
+        if text_len(u) == 0 {
+            break;
+        }
+        if i % 7 == 0 {
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    print(total);                        // 1044449
+    print(line);                         // ####################
+    print(ob_count - base < 16);         // 1: nothing piled up
+    print(checked(3));                   // 2
+    print(checked(9));                   // 0
+    if failed() {
+        print(-1);                       // -1: the failure reached main
+    }
+    print(depth(30));                    // 83: 31 frames, a text each, at once
+    keep_global(5);
+    keep_list(1);
+    keep_list(2);
+    keep_field(&p, 3);
+    var g: text = give_back(4);
+    print(kept);                         // g5
+    print(names);                        // ["l1", "l2"]
+    print(p.name);                       // p3
+    print(g);                            // r4
+    var s: text = "start";
+    var k: i64 = 0;
+    while k < 5 {
+        s = s + k;
+        k += 1;
+    }
+    print(s);                            // start01234
+    print(ob_count - base < 48);         // 1
+    return 0;
+}

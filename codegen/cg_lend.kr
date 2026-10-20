@@ -135,6 +135,36 @@ fn ld_text_mask(t: ptr<Tok>) -> i64 {
     return 0;
 }
 
+// the parameters a function of std_text changes in place without keeping
+// them (bit 0 the first): the text is the same text after the call
+fn ld_text_mmask(t: ptr<Tok>) -> i64 {
+    if ld_is(t, "text_add") != 0 { return 1; }
+    if ld_is(t, "text_add_int") != 0 { return 1; }
+    if ld_is(t, "text_add_real") != 0 { return 1; }
+    if ld_is(t, "text_add_char") != 0 { return 1; }
+    if ld_is(t, "text_clear") != 0 { return 1; }
+    if ld_is(t, "text_set_at") != 0 { return 1; }
+    return 0;
+}
+
+// 1 for a function of std_text whose result is a new text, nobody else's
+fn ld_text_fresh(t: ptr<Tok>) -> i64 {
+    if ld_is(t, "text") != 0 { return 1; }
+    if ld_is(t, "text_new") != 0 { return 1; }
+    if ld_is(t, "text_from_int") != 0 { return 1; }
+    if ld_is(t, "text_from_real") != 0 { return 1; }
+    if ld_is(t, "text_char") != 0 { return 1; }
+    if ld_is(t, "text_from_bytes") != 0 { return 1; }
+    if ld_is(t, "text_part") != 0 { return 1; }
+    if ld_is(t, "text_upper") != 0 { return 1; }
+    if ld_is(t, "text_lower") != 0 { return 1; }
+    if ld_is(t, "text_trim") != 0 { return 1; }
+    if ld_is(t, "text_replace") != 0 { return 1; }
+    if ld_is(t, "text_repeat") != 0 { return 1; }
+    if ld_is(t, "text_join") != 0 { return 1; }
+    return 0;
+}
+
 // the key of a map is copied in: only read
 fn ld_map_mask(t: ptr<Tok>) -> i64 {
     if ld_is(t, "map_set") != 0 { return 2; }
@@ -160,8 +190,12 @@ fn ld_table(f: i64) -> i64 {
         return 0;
     }
     cg_qs(&ld_vmask, f, 0);
+    cg_qs(&ld_mmask, f, 0);
+    cg_qs(&ld_fresh, f, 0);
     if ld_file_is(file, "std_text.kr") != 0 {
         cg_qs(&ld_mask, f, ld_text_mask(t));
+        cg_qs(&ld_mmask, f, ld_text_mmask(t));
+        cg_qs(&ld_fresh, f, ld_text_fresh(t));
         // the bytes of a text: valid while the text is
         if ld_is(t, "text_cstr") != 0 || ld_is(t, "text_view") != 0 {
             cg_qs(&ld_vmask, f, 1);
@@ -444,6 +478,7 @@ fn ld_local(t: i64) -> i64 {
 // (-1: an assignment, which says nothing of the type)
 fn ld_give(t: i64, m: i64, tx: i64) -> i64 {
     var j: i64 = ld_local(t);
+    var own: i64 = 0;
     if j == -1 {
         if ld_nlv >= 512 {
             ld_abort = 1;
@@ -457,10 +492,32 @@ fn ld_give(t: i64, m: i64, tx: i64) -> i64 {
         if tx != 1 {
             cg_qs(&ld_lvtext, j, 0);
         }
+        cg_qs(&lo_bitof, j, 0);
+        cg_qs(&lo_nw, j, 0);
+        cg_qs(&lo_wlit, j, 0);
+        // following the text locals: a text local gets a bit of its own,
+        // after the parameters'
+        if ld_lmode != 0 && tx == 1 && ld_np + lo_nb < 62 {
+            own = ld_bit(ld_np + lo_nb);
+            lo_nb += 1;
+            lo_allbits = lo_allbits | own;
+            cg_qs(&lo_bitof, j, own);
+            cg_qs(&ld_lvc, j, own);
+        }
         ld_changed = 1;
     } else if tx == 0 && cg_q(&ld_lvtext, j) != 0 {
         cg_qs(&ld_lvtext, j, 0);
         ld_changed = 1;
+    }
+    if ld_lmode != 0 {
+        // a text local given to another name is held twice: kept; given
+        // itself back (t = t), kept too
+        own = cg_q(&lo_bitof, j);
+        ld_keep = ld_keep | (m & lo_allbits & ~own);
+        if (m & own) != 0 {
+            ld_keep = ld_keep | own;
+        }
+        cg_qs(&lo_nw, j, cg_q(&lo_nw, j) + 1);
     }
     if (cg_q(&ld_lvc, j) | m) != cg_q(&ld_lvc, j) {
         cg_qs(&ld_lvc, j, cg_q(&ld_lvc, j) | m);
@@ -582,6 +639,9 @@ fn ld_ident(e: ptr<Ast>) -> i64 {
     var i: i64 = 0;
     var m: i64 = ld_carry(e.data);
     if j == -1 {
+        if ld_lmode != 0 {
+            lo_markt(e.data);
+        }
         return m;
     }
     m = m | ld_bit(j);
@@ -621,6 +681,7 @@ fn ld_call(c: ptr<Ast>) -> i64 {
     var j: i64 = 0;
     var m: i64 = 0;
     var res: i64 = 0;
+    var mm: i64 = 0;
     if c.owner_type != FNVAL_MARK && c.data != 0 {
         if ld_is_local(c.data) == 0 && ld_param(c.data) == -1 && cg_is_intrinsic(c.data) == 0 {
             g = cg_find_func(c.data);
@@ -629,12 +690,21 @@ fn ld_call(c: ptr<Ast>) -> i64 {
     if g != -1 {
         r = cg_q(&ld_mask, g);
         v = cg_q(&ld_vmask, g);
+        if ld_lmode != 0 {
+            mm = cg_q(&ld_mmask, g);
+        }
     }
     while a != 0 {
         m = ld_val(a.left);
         if (r & ld_bit(j)) == 0 {
             if (v & ld_bit(j)) != 0 {
                 res = res | m;
+            } else if (mm & ld_bit(j)) != 0 {
+                // a text local changed in place (text_add) stays its own;
+                // the result is that same text
+                ld_sink(m & ~lo_allbits);
+                ld_mut = ld_mut | (m & lo_allbits);
+                res = res | (m & lo_allbits);
             } else {
                 ld_sink(m);
             }
@@ -692,13 +762,39 @@ fn ld_binop(e: ptr<Ast>) -> i64 {
 fn ld_decl(d: ptr<Ast>) -> i64 {
     var m: i64 = ld_val(d.right);
     var tx: i64 = 0;
+    var r: ptr<Ast> = d.right;
     if d.data == 0 {
         return ld_sink(m);
     }
     if (d.col >> 8) == 1 {
         tx = 1;
     }
-    return ld_give(d.data, m, tx);
+    if ld_lmode == 0 {
+        return ld_give(d.data, m, tx);
+    }
+    // an array of texts is no text
+    if d.type_info != 0 || (d.col & 1) != 0 {
+        tx = 0;
+    }
+    lo_markt(d.data);
+    ld_give(d.data, m, tx);
+    lo_note(d.data, r);
+    return 0;
+}
+
+// the last write of a local: a "..." or not
+fn lo_note(t: i64, r: ptr<Ast>) -> i64 {
+    var j: i64 = ld_local(t);
+    if j == -1 {
+        return 0;
+    }
+    cg_qs(&lo_wlit, j, 0);
+    if r != 0 {
+        if r.node_type == AST_STRING_LIT {
+            cg_qs(&lo_wlit, j, 1);
+        }
+    }
+    return 0;
 }
 
 // an assignment: into a local it is carried, anywhere else kept
@@ -709,7 +805,11 @@ fn ld_assign(e: ptr<Ast>) -> i64 {
         if l.node_type == AST_IDENTIFIER {
             if ld_param(l.data) == -1 && (ld_local(l.data) != -1 || ld_is_local(l.data) != 0) {
                 ld_ident(l);
-                return ld_give(l.data, m, -1);
+                ld_give(l.data, m, -1);
+                if ld_lmode != 0 {
+                    lo_note(l.data, e.right);
+                }
+                return 0;
             }
             ld_ident(l);
             return ld_sink(m);
@@ -1021,4 +1121,306 @@ fn ld_free_top() -> i64 {
     emit_cstr("    pop rcx\n    push rax\n");
     cg_lib_call(cg_tok(CT_TEXT_FREE));
     return emit_cstr("    pop rax\n");
+}
+
+// =========================================================================
+// TEXTS A LOCAL OWNS
+//
+// A text local given a text the compiler makes -- a "...", a '+' that
+// joins texts, a new text of std_text (text_from_int, text_upper, ...) --
+// owns it: nobody else holds it. The same walk as above, with a bit for
+// each text local, tells which locals the function only reads, changes in
+// place (text_add), or passes to functions that only read: never stored,
+// returned, given to another name, handed to code that may keep it. For
+// those:
+//   - one written once, with a "...", never changed: the "..." is kept as
+//     it is -- no text is made (every reader of std_text takes a "...")
+//   - any other: a slot of the frame holds the text it owns, 0 at the
+//     start; each write frees the one it owned before, and the return
+//     frees the last. A declaration in a loop is a write each round.
+// What the walk cannot see -- asm, a fn value, a name it did not read --
+// leaves the local as it was: its texts stay.
+// =========================================================================
+
+// the token of the body t is, read by the walk
+fn lo_markt(t: i64) -> i64 {
+    var i: i64 = 0;
+    if t < lo_tbeg {
+        return 0;
+    }
+    i = (t - lo_tbeg) / 24;
+    if i >= lo_ntok || (t - lo_tbeg) != i * 24 {
+        return 0;
+    }
+    cg_qs(&lo_mark, i >> 6, cg_q(&lo_mark, i >> 6) | (1 << (i & 63)));
+    return 0;
+}
+
+// The tokens of the body, between its braces: 0 when there are more than
+// the marks can hold.
+fn lo_range(d: ptr<Ast>) -> i64 {
+    var at: i64 = d.data;
+    var t: ptr<Tok> = at;
+    var depth: i64 = 1;
+    var n: i64 = 0;
+    var i: i64 = 0;
+    while t.kind != TOK_LBRACE {
+        if t.kind == TOK_EOF {
+            return 0;
+        }
+        at += 24;
+        t = at;
+    }
+    at += 24;
+    t = at;
+    lo_tbeg = at;
+    while depth > 0 {
+        if t.kind == TOK_EOF {
+            return 0;
+        }
+        if t.kind == TOK_LBRACE {
+            depth += 1;
+        } else if t.kind == TOK_RBRACE {
+            depth -= 1;
+        }
+        at += 24;
+        t = at;
+        n += 1;
+        if n > 65536 {
+            return 0;
+        }
+    }
+    lo_ntok = n;
+    while i < 1024 && i * 64 < n {
+        cg_qs(&lo_mark, i, 0);
+        i += 1;
+    }
+    return 1;
+}
+
+// 1 when the walk read every token of the body that names t
+fn lo_all_read(t: i64) -> i64 {
+    var i: i64 = 0;
+    var at: i64 = lo_tbeg;
+    var k: ptr<Tok> = 0;
+    while i < lo_ntok {
+        k = at;
+        if k.kind == TOK_IDENTIFIER {
+            if tok_equal(k, t) == 1 {
+                if (cg_q(&lo_mark, i >> 6) & (1 << (i & 63))) == 0 {
+                    return 0;
+                }
+            }
+        }
+        at += 24;
+        i += 1;
+    }
+    return 1;
+}
+
+// The text locals of function f that own their texts, into lo_name and
+// lo_lit (lo_n of them).
+fn lo_analyze(f: i64) -> i64 {
+    var d: ptr<Ast> = cg_q(&fn_nodes, f);
+    var p: ptr<Ast> = d.left;
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var b: i64 = 0;
+    var t: i64 = 0;
+    var rounds: i64 = 0;
+    lo_n = 0;
+    if cg_q(&ld_fixed, f) != 0 {
+        return 0;
+    }
+    ld_np = 0;
+    ld_ptext = 0;
+    while p != 0 && ld_np < 62 {
+        cg_qs(&ld_ptok, ld_np, p.data);
+        cg_qs(&ld_ntok, ld_np, 0);
+        if (p.col >> 8) == 1 {
+            ld_ptext = ld_ptext | ld_bit(ld_np);
+        }
+        ld_np += 1;
+        p = p.right;
+    }
+    if p != 0 {
+        return 0;
+    }
+    ld_abort = 0;
+    ld_nloc = 0;
+    ld_nlv = 0;
+    ld_raw = 0;
+    if ld_scan(d) == 0 {
+        return 0;
+    }
+    if lo_range(d) == 0 {
+        return 0;
+    }
+    ld_lmode = 1;
+    lo_nb = 0;
+    lo_allbits = 0;
+    ld_changed = 1;
+    while ld_changed != 0 {
+        ld_changed = 0;
+        ld_keep = 0;
+        ld_ret = 0;
+        ld_raw = 0;
+        ld_mut = 0;
+        i = 0;
+        while i < ld_np {
+            cg_qs(&ld_nseen, i, 0);
+            i += 1;
+        }
+        i = 0;
+        while i < ld_nlv {
+            cg_qs(&lo_nw, i, 0);
+            i += 1;
+        }
+        ld_val(d.right);
+        rounds += 1;
+        if ld_abort != 0 || rounds > 24 {
+            ld_lmode = 0;
+            return 0;
+        }
+    }
+    ld_lmode = 0;
+    j = 0;
+    while j < ld_nlv {
+        b = cg_q(&lo_bitof, j);
+        t = cg_q(&ld_lv, j);
+        if b != 0 && cg_q(&ld_lvtext, j) != 0 && ((ld_keep | ld_ret) & b) == 0 && lo_n < 62 {
+            if ld_param(t) == -1 && cg_find_global(t) == -1 && lo_all_read(t) != 0 {
+                cg_qs(&lo_name, lo_n, t);
+                cg_qs(&lo_lit, lo_n, 0);
+                if cg_q(&lo_nw, j) == 1 && cg_q(&lo_wlit, j) != 0 && (ld_mut & b) == 0 {
+                    cg_qs(&lo_lit, lo_n, 1);
+                }
+                lo_n += 1;
+            }
+        }
+        j += 1;
+    }
+    return 0;
+}
+
+// At the start of a function's body: its owning locals worked out, each
+// one's slot made and set to 0.
+fn lo_begin() -> i64 {
+    var k: i64 = 0;
+    var off: i64 = 0;
+    lo_n = 0;
+    lo_nown = 0;
+    if cg_lam_cur != -1 || cg_cur_fn == -1 || cg_bare != 0 {
+        return 0;
+    }
+    if cg_find_func(cg_tok(CT_TEXT_DROP)) == -1 {
+        return 0;
+    }
+    ld_ensure();
+    lo_analyze(cg_cur_fn);
+    while k < lo_n {
+        cg_qs(&lo_own, k, 0);
+        if cg_q(&lo_lit, k) == 0 {
+            pending_struct = -1;
+            cg_add_fresh = 1;
+            off = cg_add_var(cg_tok(CT_TMP), 1);
+            cg_add_fresh = 0;
+            cg_qs(&lo_own, k, off);
+            emit_cstr("    mov qword [rbp-");
+            emit_u32(off);
+            emit_cstr("], 0\n");
+            lo_nown += 1;
+        }
+        k += 1;
+    }
+    return 0;
+}
+
+// At the return label: the last text each local owned, freed. The results
+// (rax; rdx, r8, r9; xmm0) are kept meanwhile.
+fn lo_end() -> i64 {
+    var k: i64 = 0;
+    if lo_nown == 0 {
+        lo_n = 0;
+        return 0;
+    }
+    emit_cstr("    push rax\n    push rdx\n    push r8\n    push r9\n    sub rsp, 8\n    movsd [rsp], xmm0\n");
+    while k < lo_n {
+        if cg_q(&lo_own, k) != 0 {
+            emit_cstr("    mov rcx, [rbp-");
+            emit_u32(cg_q(&lo_own, k));
+            emit_cstr("]\n");
+            cg_lib_call(cg_tok(CT_TEXT_DROP));
+        }
+        k += 1;
+    }
+    emit_cstr("    movsd xmm0, [rsp]\n    add rsp, 8\n    pop r9\n    pop r8\n    pop rdx\n    pop rax\n");
+    lo_n = 0;
+    lo_nown = 0;
+    return 0;
+}
+
+// the owning local a name is, or -1
+fn lo_find(t: i64) -> i64 {
+    var k: i64 = 0;
+    if t == 0 {
+        return -1;
+    }
+    while k < lo_n {
+        if tok_equal(t, cg_q(&lo_name, k)) == 1 {
+            return k;
+        }
+        k += 1;
+    }
+    return -1;
+}
+
+// 1 when the value written is a text nobody else holds: a "..." made a
+// text, a joined text, a new text of std_text
+fn lo_fresh(r: ptr<Ast>) -> i64 {
+    var g: i64 = 0;
+    if r == 0 {
+        return 0;
+    }
+    if r.node_type == AST_STRING_LIT {
+        return 1;
+    }
+    if cg_e_fresh(r) != 0 {
+        return 1;
+    }
+    if r.node_type == AST_CALL && r.owner_type != FNVAL_MARK && r.data != 0 {
+        if cg_find_var_idx(r.data) != -1 || cg_is_intrinsic(r.data) != 0 {
+            return 0;
+        }
+        g = cg_find_func(r.data);
+        if g != -1 {
+            if cg_q(&ld_fixed, g) != 0 && cg_q(&ld_fresh, g) != 0 {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// With the value about to be written to owning local k in rax: the text it
+// owned freed, and what it owns now noted.
+fn lo_store(k: i64, r: ptr<Ast>) -> i64 {
+    var off: i64 = cg_q(&lo_own, k);
+    if off == 0 {
+        return 0;
+    }
+    emit_cstr("    push rax\n    mov rcx, [rbp-");
+    emit_u32(off);
+    emit_cstr("]\n");
+    cg_lib_call(cg_tok(CT_TEXT_DROP));
+    emit_cstr("    pop rax\n");
+    emit_cstr("    mov ");
+    if lo_fresh(r) != 0 {
+        emit_cstr("[rbp-");
+        emit_u32(off);
+        return emit_cstr("], rax\n");
+    }
+    emit_cstr("qword [rbp-");
+    emit_u32(off);
+    return emit_cstr("], 0\n");
 }
