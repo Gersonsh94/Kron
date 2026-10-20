@@ -1,0 +1,89 @@
+kron_program
+kron_domain test_realint;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// A real where an integer goes, and an integer where a real goes. An i64
+// given x * 2 kept the bits of the real; f(7) to an f64 parameter left the
+// parameter whatever was in its register; var q = 2.5 was not a real; a
+// real global given 3 was 5e-324; x % y of reals gave x. Now, as 'return'
+// and 'as i64' always did: a real into an integer is truncated toward zero,
+// an integer into a real is converted, an untyped var takes the real.
+// =========================================================================
+
+struct S {
+    n: i64;
+    r: f64;
+}
+
+var gn: i64;
+var ga: [i64; 4];
+var gr: f64 = 3;
+var gi: i64 = 7.9;
+var gu = 1.5 * 2.0;
+
+fn take(n: i64) -> i64 {
+    return n;
+}
+
+fn take7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return g;
+}
+
+fn takef(r: f64) -> f64 {
+    return r;
+}
+
+fn takef7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: f64) -> f64 {
+    return g;
+}
+
+fn half(n: i64) -> f64 {
+    return n / 2.0;
+}
+
+fn main() -> i64 {
+    var x: f64 = 2.5;
+    var n: i64 = x * 2;
+    print(n);                                 // 5
+    n = x * 4;
+    print(n);                                 // 10
+    n = 0.0 - x;
+    print(n);                                 // -2
+    gn = x * 6;
+    print(gn);                                // 15
+    ga[1] = x * 8;
+    print(ga[1]);                             // 20
+    var s: S;
+    s.n = x * 10;
+    print(s.n);                               // 25
+    s.r = 3;
+    print(s.r);                               // 3.000000
+    var t: S = S { n: x * 12, r: 1 };
+    print(t.n);                               // 30
+    print(t.r);                               // 1.000000
+    print(take(x * 14));                      // 35
+    print(take7(0, 0, 0, 0, 0, 0, x * 16));   // 40
+    print(takef(7));                          // 7.000000
+    print(takef7(0, 0, 0, 0, 0, 0, 9));       // 9.000000
+    print(half(5));                           // 2.500000
+    var a: [i64; 2] = [x, 7.75];
+    print(a[0] + a[1]);                       // 9
+    var u: u8 = x * 40;
+    print(u);                                 // 100
+    var z = x * 2.0;
+    print(z);                                 // 5.000000
+    var q = 2.5;
+    print(q + 1);                             // 3.500000
+    print(gr);                                // 3.000000
+    print(gi);                                // 7
+    print(gu);                                // 3.000000
+    print(7.5 % 2.0);                         // 1.500000
+    print(-7.5 % 2.0);                        // -1.500000
+    print(7.5 % -2.0);                        // 1.500000
+    var w: f64 = 10.0;
+    w = w % 3;
+    print(w);                                 // 1.000000
+    return 0;
+}

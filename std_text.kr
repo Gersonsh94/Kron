@@ -48,6 +48,8 @@ kron_definitions
 //   text_cstr(x)                   the address of x's bytes, ending in 0,
 //                                  for raw code and system calls; it stays
 //                                  valid until the text changes
+//   text_view(x)                   the same for raw code that only reads,
+//                                  never failing: "" for 0 or a freed text
 // Freeing
 //   text_free(t)                   the text is gone; using it again fails
 //
@@ -1185,4 +1187,27 @@ fn text_cstr(x: i64) -> i64 {
         p = tv_p;
     }
     return text_end(p);
+}
+
+// the bytes of x for raw code that only reads them, never failing: a text's
+// own, a literal's own, "" for 0 or for a text that is not there (a number
+// that is no text comes back as it is). Valid while the text is unchanged.
+fn text_view(x: i64) -> i64 {
+    if ob_is(x) == 0 {
+        if x == 0 {
+            return "";
+        }
+        return x;
+    }
+    lock_take(HP_LOCK);
+    var p: i64 = 0;
+    if tv_view(x) {
+        p = tv_p;
+    }
+    hp_take_err();
+    lock_give(HP_LOCK);
+    if p == 0 {
+        return "";
+    }
+    return p;
 }

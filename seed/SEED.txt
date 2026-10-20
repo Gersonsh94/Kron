@@ -1,5 +1,5 @@
 Kron bootstrap seed
   promoted from : boot3.exe
-  date          : Mon 10/19/2026 21:10:06.58
-  size          : 693760 bytes
-  sha256        : 0779857110ea4de6b3c9a4325714c18d0f64c2c109aa981a3528eff704c538fc
+  date          : Tue 10/20/2026  8:06:14.75
+  size          : 722432 bytes
+  sha256        : ffb7d3c639d0ee5598f5c7bd3d1f666640463a0f2be211f5d671e5e43eaca3d7

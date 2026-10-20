@@ -1,0 +1,28 @@
+kron_program
+kron_domain test_random_alone;
+kron_imports
+acquire_domain "std_random.kr";
+kron_definitions
+
+// =========================================================================
+// std_random.kr imported alone. It uses std_stats (st_x, st_y, st_push),
+// std_math (fsqrt, fsin, fcos) and std_exp (fln) and did not import them:
+// a program had to bring them itself or the module did not compile. Each
+// std_*.kr now brings what it uses, so this one line of imports is enough.
+// The numbers are test_random's, from the same seeds.
+// =========================================================================
+
+fn main() -> i64 {
+    rnd_seed(42);
+    print(rnd_next());        // 1083814273
+    print(rnd_int(100));      // 88
+    rnd_seed(42);
+    print(rnd_range(10.0, 20.0));   // 12.523452
+    rnd_seed(7);
+    print(rnd_gauss() < 10.0);      // 1
+    rnd_fill_linear(50, 2.0, 1.0, 0.1);
+    print(st_n);              // 50
+    rnd_shuffle();
+    print(st_n);              // 50
+    return 0;
+}

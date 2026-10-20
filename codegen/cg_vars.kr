@@ -306,7 +306,7 @@ fn cg_emit_struct_lit(n: ptr<Ast>, base: i64) -> i64 {
                 // base is ever [rbp-N]. As plain stores the allocator put the
                 // other slots in registers, and the memory the reads go to was
                 // never written.
-                cg_emit(e.left);
+                cg_emit_int(e.left);
                 emit_cstr("    mov [rbp-");
                 emit_u32(off);
                 emit_cstr(cg_st_suffix(w));
@@ -357,7 +357,7 @@ fn cg_emit_array_lit(n: ptr<Ast>, base: i64, reals: i64) -> i64 {
             emit_u32(off);
             emit_cstr("], xmm0\n");
         } else {
-            cg_emit(e.left);
+            cg_emit_int(e.left);
             w = cur_lit_aw;
             if w == 1 || w == 2 || w == 4 {
                 // element i of a packed array sits i * width above the base

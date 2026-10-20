@@ -1,0 +1,1024 @@
+kron_program
+kron_domain cg_lend;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEXTS LENT TO A CALL
+//
+// Two kinds of text are made by the compiler itself, not by the program:
+// the new text of a '+' that joins texts, and the text a "..." becomes when
+// it is passed to a parameter declared 'text'. Nobody else holds them, so
+// when the function they are passed to only READS that parameter they are
+// lent for the call: the literal goes as it is (every reading function of
+// std_text takes a "..." too), and a joined text is freed as soon as the
+// call returns. Passed to a parameter the function may keep -- store it,
+// return it, change it, hand it to code that may -- they are given, as
+// they always were, and belong to whoever keeps them.
+//
+// What a function does with each parameter, worked out for every function
+// of the program -- one of three answers:
+//   READ   it only reads it while it runs
+//   VIEW   it reads it, and its result may be the parameter or point into
+//          it (text_cstr: the bytes of a text)
+//   KEEP   anything else: stored in a global, a field, an element or memory,
+//          changed, handed to what keeps it, to the system, to a thread
+// The walk follows the values: each expression carries the parameters its
+// value may be or point into -- a name, arithmetic on it, a local given it
+// (a local carries all it is ever given), a VIEW call -- and what reaches a
+// place that keeps it is kept: an assignment to anything but a local, a
+// poke, an argument the callee keeps, the address of a local taken, a
+// number printed or added to a text (a text read there is only read), a
+// 'text' parameter compared as a number. A return makes it VIEW. A read of
+// memory (peek, an element, a field), a comparison, a length carry
+// nothing.
+// Two checks keep it honest: every token of the body that writes a
+// parameter's name must be a name the walk read (p.x, &p, p[i], a call
+// through p are not: the parameter is KEPT), and a body holding asm, a fn
+// value or anything the walk does not know keeps every parameter.
+// Calls go round in circles, so the answers are reached by repetition:
+// every parameter starts as READ, and each pass lowers what a body shows,
+// until a pass changes nothing.
+//
+// std_text.kr, std_map.kr and std_heap.kr are described by a table instead
+// (ld_table): they reach texts through the handle table, which the walk
+// cannot follow. A change there that keeps one of those parameters must be
+// written in the table too.
+// =========================================================================
+
+// the bit of parameter i, for i below 62
+fn ld_bit(i: i64) -> i64 {
+    if i < 0 || i >= 62 {
+        return 0;
+    }
+    return 1 << i;
+}
+
+// 1 when the token reads exactly s
+fn ld_is(t: ptr<Tok>, s: i64) -> i64 {
+    var n: i64 = 0;
+    var i: i64 = 0;
+    while cg_b(s + n) != 0 {
+        n += 1;
+    }
+    if t.length != n {
+        return 0;
+    }
+    while i < n {
+        if cg_b(t.value + i) != cg_b(s + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// 1 when the last part of a path is exactly s
+fn ld_file_is(file: i64, s: i64) -> i64 {
+    var p: i64 = file;
+    var last: i64 = file;
+    var c: i64 = cg_b(p);
+    var i: i64 = 0;
+    while c != 0 {
+        p += 1;
+        if c == 47 || c == 92 {
+            last = p;
+        }
+        c = cg_b(p);
+    }
+    while cg_b(s + i) != 0 {
+        if cg_b(last + i) != cg_b(s + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    if cg_b(last + i) != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// -------------------------------------------------------------------------
+// the table: std_text.kr, std_map.kr, std_heap.kr
+// -------------------------------------------------------------------------
+
+// the parameters a function of std_text only reads (bit 0 the first)
+fn ld_text_mask(t: ptr<Tok>) -> i64 {
+    if ld_is(t, "text") != 0 { return 1; }
+    if ld_is(t, "text_add") != 0 { return 2; }
+    if ld_is(t, "text_len") != 0 { return 1; }
+    if ld_is(t, "text_at") != 0 { return 1; }
+    if ld_is(t, "text_same") != 0 { return 3; }
+    if ld_is(t, "text_compare") != 0 { return 3; }
+    if ld_is(t, "text_find") != 0 { return 3; }
+    if ld_is(t, "text_find_after") != 0 { return 3; }
+    if ld_is(t, "text_contains") != 0 { return 3; }
+    if ld_is(t, "text_count") != 0 { return 3; }
+    if ld_is(t, "text_starts") != 0 { return 3; }
+    if ld_is(t, "text_ends") != 0 { return 3; }
+    if ld_is(t, "text_to_int") != 0 { return 1; }
+    if ld_is(t, "text_to_real") != 0 { return 1; }
+    if ld_is(t, "text_is_int") != 0 { return 1; }
+    if ld_is(t, "text_is_real") != 0 { return 1; }
+    if ld_is(t, "text_hash") != 0 { return 1; }
+    if ld_is(t, "text_part") != 0 { return 1; }
+    if ld_is(t, "text_upper") != 0 { return 1; }
+    if ld_is(t, "text_lower") != 0 { return 1; }
+    if ld_is(t, "text_trim") != 0 { return 1; }
+    if ld_is(t, "text_replace") != 0 { return 7; }
+    if ld_is(t, "text_repeat") != 0 { return 1; }
+    if ld_is(t, "text_split") != 0 { return 3; }
+    if ld_is(t, "text_lines") != 0 { return 1; }
+    if ld_is(t, "text_join") != 0 { return 2; }
+    if ld_is(t, "say") != 0 { return 1; }
+    if ld_is(t, "text_print") != 0 { return 1; }
+    return 0;
+}
+
+// the key of a map is copied in: only read
+fn ld_map_mask(t: ptr<Tok>) -> i64 {
+    if ld_is(t, "map_set") != 0 { return 2; }
+    if ld_is(t, "map_get") != 0 { return 2; }
+    if ld_is(t, "map_get_or") != 0 { return 2; }
+    if ld_is(t, "map_has") != 0 { return 2; }
+    if ld_is(t, "map_remove") != 0 { return 2; }
+    if ld_is(t, "map_set_real") != 0 { return 2; }
+    if ld_is(t, "map_get_real") != 0 { return 2; }
+    return 0;
+}
+
+// 1 when function f belongs to the table, its answers then set
+fn ld_table(f: i64) -> i64 {
+    var d: ptr<Ast> = cg_q(&fn_nodes, f);
+    var t: ptr<Tok> = d.data;
+    var file: i64 = 0;
+    if cg_u32(t.line) == 0 {
+        return 0;
+    }
+    file = cg_lmap(t.line);
+    if file == 0 {
+        return 0;
+    }
+    cg_qs(&ld_vmask, f, 0);
+    if ld_file_is(file, "std_text.kr") != 0 {
+        cg_qs(&ld_mask, f, ld_text_mask(t));
+        // the bytes of a text: valid while the text is
+        if ld_is(t, "text_cstr") != 0 || ld_is(t, "text_view") != 0 {
+            cg_qs(&ld_vmask, f, 1);
+        }
+        return 1;
+    }
+    if ld_file_is(file, "std_map.kr") != 0 {
+        cg_qs(&ld_mask, f, ld_map_mask(t));
+        return 1;
+    }
+    if ld_file_is(file, "std_heap.kr") != 0 {
+        cg_qs(&ld_mask, f, 0);
+        return 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the answers, worked out once per program
+// -------------------------------------------------------------------------
+
+// the parameters that can be lent at all: one slot of eight bytes holding
+// an integer, a pointer or a handle -- not a real, an array or a struct
+fn ld_candidates(d: ptr<Ast>) -> i64 {
+    var p: ptr<Ast> = d.left;
+    var i: i64 = 0;
+    var m: i64 = 0;
+    var tag: i64 = 0;
+    while p != 0 && i < 62 {
+        tag = p.col >> 8;
+        if p.type_info == 0 && (p.col & 1) == 0 && (tag == 0 || tag == 1) {
+            if cg_param_struct_id(p) == -1 {
+                m = m | ld_bit(i);
+            }
+        }
+        i += 1;
+        p = p.right;
+    }
+    return m;
+}
+
+// ld_mask holds the READ parameters of each function, ld_vmask the VIEW
+// ones. Each pass takes, for every parameter, the lower of what it had and
+// what the body shows now.
+fn ld_ensure() -> i64 {
+    var f: i64 = 0;
+    var r: i64 = 0;
+    var v: i64 = 0;
+    var nr: i64 = 0;
+    var nv: i64 = 0;
+    var again: i64 = 1;
+    if ld_done != 0 {
+        return 0;
+    }
+    ld_done = 1;
+    while f < fn_count {
+        cg_qs(&ld_fixed, f, ld_table(f));
+        if cg_q(&ld_fixed, f) == 0 {
+            cg_qs(&ld_mask, f, ld_candidates(cg_q(&fn_nodes, f)));
+            cg_qs(&ld_vmask, f, 0);
+        }
+        f += 1;
+    }
+    while again != 0 {
+        again = 0;
+        f = 0;
+        while f < fn_count {
+            r = cg_q(&ld_mask, f);
+            v = cg_q(&ld_vmask, f);
+            if cg_q(&ld_fixed, f) == 0 && (r | v) != 0 {
+                ld_analyze(f);
+                nr = r & ld_ar;
+                nv = (r | v) & (ld_ar | ld_av) & ~nr;
+                if nr != r || nv != v {
+                    cg_qs(&ld_mask, f, nr);
+                    cg_qs(&ld_vmask, f, nv);
+                    again = 1;
+                }
+            }
+            f += 1;
+        }
+    }
+    return 0;
+}
+
+// what function f does with its parameters, given what is known of the
+// others: ld_ar the READ ones, ld_av the VIEW ones
+fn ld_analyze(f: i64) -> i64 {
+    var d: ptr<Ast> = cg_q(&fn_nodes, f);
+    var p: ptr<Ast> = d.left;
+    var i: i64 = 0;
+    var rounds: i64 = 0;
+    ld_ar = 0;
+    ld_av = 0;
+    ld_np = 0;
+    ld_ptext = 0;
+    while p != 0 && ld_np < 62 {
+        cg_qs(&ld_ptok, ld_np, p.data);
+        cg_qs(&ld_ntok, ld_np, 0);
+        if (p.col >> 8) == 1 {
+            ld_ptext = ld_ptext | ld_bit(ld_np);
+        }
+        ld_np += 1;
+        p = p.right;
+    }
+    ld_abort = 0;
+    ld_nloc = 0;
+    ld_nlv = 0;
+    ld_raw = 0;
+    if ld_scan(d) == 0 {
+        return 0;
+    }
+    // walked until what the locals carry stops growing
+    ld_changed = 1;
+    while ld_changed != 0 {
+        ld_changed = 0;
+        ld_keep = 0;
+        ld_ret = 0;
+        ld_raw = 0;
+        i = 0;
+        while i < ld_np {
+            cg_qs(&ld_nseen, i, 0);
+            i += 1;
+        }
+        ld_val(d.right);
+        if ld_abort != 0 {
+            return 0;
+        }
+        rounds += 1;
+        if rounds > 24 {
+            return 0;
+        }
+    }
+    i = 0;
+    while i < ld_np {
+        if (ld_keep & ld_bit(i)) == 0 && cg_q(&ld_nseen, i) == cg_q(&ld_ntok, i) {
+            if (ld_ret & ld_bit(i)) != 0 {
+                ld_av = ld_av | ld_bit(i);
+            } else {
+                ld_ar = ld_ar | ld_bit(i);
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// The tokens of the body: how many times each parameter's name is written,
+// and the names the body declares (var, const, for). 0 when the body holds
+// asm or a fn value, or its tokens are not where they were expected.
+fn ld_scan(d: ptr<Ast>) -> i64 {
+    var at: i64 = d.data;
+    var t: ptr<Tok> = at;
+    var n: i64 = 0;
+    var depth: i64 = 0;
+    var k: i64 = 0;
+    var j: i64 = 0;
+    var decl: i64 = 0;
+    if at == 0 {
+        return 0;
+    }
+    if t.kind != TOK_IDENTIFIER {
+        return 0;
+    }
+    at += 24;
+    t = at;
+    if t.kind != TOK_LPAREN {
+        return 0;
+    }
+    // the body's '{'
+    while t.kind != TOK_LBRACE {
+        if t.kind == TOK_EOF || t.kind == TOK_SEMICOLON {
+            return 0;
+        }
+        at += 24;
+        t = at;
+        n += 1;
+        if n > 4096 {
+            return 0;
+        }
+    }
+    depth = 1;
+    at += 24;
+    t = at;
+    n = 0;
+    while depth > 0 {
+        k = t.kind;
+        if k == TOK_EOF {
+            return 0;
+        }
+        if k == KW_ASM || k == KW_FN {
+            return 0;
+        }
+        if k == TOK_LBRACE {
+            depth += 1;
+        } else if k == TOK_RBRACE {
+            depth -= 1;
+        } else if k == TOK_IDENTIFIER {
+            j = 0;
+            while j < ld_np {
+                if tok_equal(t, cg_q(&ld_ptok, j)) == 1 {
+                    cg_qs(&ld_ntok, j, cg_q(&ld_ntok, j) + 1);
+                }
+                j += 1;
+            }
+            if decl != 0 {
+                if ld_nloc >= 512 {
+                    return 0;
+                }
+                cg_qs(&ld_loc, ld_nloc, t);
+                ld_nloc += 1;
+            }
+        }
+        // a name declared: right after var, const or for, and after each
+        // comma of var a, b = ...
+        decl = 0;
+        if k == KW_VAR || k == KW_CONST || k == KW_FOR {
+            decl = 1;
+            ld_invar = 1;
+        } else if k == TOK_COMMA && ld_invar != 0 {
+            decl = 1;
+        } else if k == TOK_ASSIGN || k == TOK_SEMICOLON || k == TOK_COLON {
+            ld_invar = 0;
+        }
+        at += 24;
+        t = at;
+        n += 1;
+        if n > 4000000 {
+            return 0;
+        }
+    }
+    ld_invar = 0;
+    return 1;
+}
+
+
+// the parameter a name is, or -1
+fn ld_param(t: i64) -> i64 {
+    var j: i64 = 0;
+    if t == 0 {
+        return -1;
+    }
+    while j < ld_np {
+        if tok_equal(t, cg_q(&ld_ptok, j)) == 1 {
+            return j;
+        }
+        j += 1;
+    }
+    return -1;
+}
+
+// 1 when the body declares a name like this one
+fn ld_is_local(t: i64) -> i64 {
+    var j: i64 = 0;
+    if t == 0 {
+        return 0;
+    }
+    while j < ld_nloc {
+        if tok_equal(t, cg_q(&ld_loc, j)) == 1 {
+            return 1;
+        }
+        j += 1;
+    }
+    return 0;
+}
+
+// the entry of a local the walk has met, or -1
+fn ld_local(t: i64) -> i64 {
+    var j: i64 = 0;
+    while j < ld_nlv {
+        if tok_equal(t, cg_q(&ld_lv, j)) == 1 {
+            return j;
+        }
+        j += 1;
+    }
+    return -1;
+}
+
+// a local given a value carrying m; tx 1 when its declaration says 'text'
+// (-1: an assignment, which says nothing of the type)
+fn ld_give(t: i64, m: i64, tx: i64) -> i64 {
+    var j: i64 = ld_local(t);
+    if j == -1 {
+        if ld_nlv >= 512 {
+            ld_abort = 1;
+            return 0;
+        }
+        j = ld_nlv;
+        ld_nlv += 1;
+        cg_qs(&ld_lv, j, t);
+        cg_qs(&ld_lvc, j, 0);
+        cg_qs(&ld_lvtext, j, 1);
+        if tx != 1 {
+            cg_qs(&ld_lvtext, j, 0);
+        }
+        ld_changed = 1;
+    } else if tx == 0 && cg_q(&ld_lvtext, j) != 0 {
+        cg_qs(&ld_lvtext, j, 0);
+        ld_changed = 1;
+    }
+    if (cg_q(&ld_lvc, j) | m) != cg_q(&ld_lvc, j) {
+        cg_qs(&ld_lvc, j, cg_q(&ld_lvc, j) | m);
+        ld_changed = 1;
+    }
+    return 0;
+}
+
+// what a local carries, 0 for a name that is none
+fn ld_carry(t: i64) -> i64 {
+    var j: i64 = ld_local(t);
+    if j == -1 {
+        return 0;
+    }
+    return cg_q(&ld_lvc, j);
+}
+
+// A name that is surely a text where the code generator reads it: a local
+// every declaration of which says 'text', else a 'text' parameter, else a
+// global declared so.
+fn ld_name_text(t: i64) -> i64 {
+    var j: i64 = ld_local(t);
+    var g: i64 = 0;
+    if j != -1 {
+        if cg_q(&ld_lvtext, j) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if ld_is_local(t) != 0 {
+        return 0;                            // declared some way the walk did not see
+    }
+    j = ld_param(t);
+    if j != -1 {
+        if (ld_ptext & ld_bit(j)) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    g = cg_find_global(t);
+    if g != -1 {
+        if cg_q(&g_vtag, g) == 1 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// 1 when e is surely a text (cg_expr_vtag would say 1)
+fn ld_text_value(e: ptr<Ast>) -> i64 {
+    var g: i64 = 0;
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_IDENTIFIER {
+        return ld_name_text(e.data);
+    }
+    if e.node_type == AST_BINOP {
+        return ld_concat(e);
+    }
+    if e.node_type == AST_CALL {
+        if e.owner_type == FNVAL_MARK {
+            return 0;
+        }
+        if (e.col >> 8) != 0 {
+            if (e.col >> 8) == 1 {
+                return 1;
+            }
+            return 0;
+        }
+        if ld_is_local(e.data) != 0 || ld_param(e.data) != -1 {
+            return 0;
+        }
+        g = cg_find_func(e.data);
+        if g == -1 {
+            return 0;
+        }
+        if cg_q(&fn_ret_vtag, g) == 1 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// 1 when e is surely a '+' that joins texts (cg_is_concat would say 1)
+fn ld_concat(e: ptr<Ast>) -> i64 {
+    var l: ptr<Ast> = e.left;
+    if e.data != TOK_PLUS || ld_raw != 0 || l == 0 {
+        return 0;
+    }
+    if l.node_type == AST_STRING_LIT {
+        return 1;
+    }
+    return ld_text_value(l);
+}
+
+// a text or a "..." (cg_is_textish)
+fn ld_textish(e: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type == AST_STRING_LIT {
+        return 1;
+    }
+    return ld_text_value(e);
+}
+
+// what reaches a place that keeps it
+fn ld_sink(m: i64) -> i64 {
+    ld_keep = ld_keep | m;
+    return 0;
+}
+
+// a name read: a parameter's token is counted; the value is the parameter,
+// or what the local carries
+fn ld_ident(e: ptr<Ast>) -> i64 {
+    var j: i64 = ld_param(e.data);
+    var n: i64 = 0;
+    var i: i64 = 0;
+    var m: i64 = ld_carry(e.data);
+    if j == -1 {
+        return m;
+    }
+    m = m | ld_bit(j);
+    n = cg_q(&ld_nseen, j);
+    while i < n {
+        if cg_q(&ld_seen, j * 64 + i) == e.data {
+            return m;
+        }
+        i += 1;
+    }
+    if n >= 64 {
+        ld_keep = ld_keep | ld_bit(j);
+        return m;
+    }
+    cg_qs(&ld_seen, j * 64 + n, e.data);
+    cg_qs(&ld_nseen, j, n + 1);
+    return m;
+}
+
+// each value of a chain, kept
+fn ld_chain(a: ptr<Ast>) -> i64 {
+    while a != 0 {
+        ld_sink(ld_val(a.left));
+        a = a.right;
+    }
+    return 0;
+}
+
+// A call: each argument goes where the callee's answer says -- READ
+// nowhere, VIEW into the result, KEEP kept. A call through a value, an
+// intrinsic, or what is not a function of the program keeps them all.
+fn ld_call(c: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var g: i64 = -1;
+    var r: i64 = 0;
+    var v: i64 = 0;
+    var j: i64 = 0;
+    var m: i64 = 0;
+    var res: i64 = 0;
+    if c.owner_type != FNVAL_MARK && c.data != 0 {
+        if ld_is_local(c.data) == 0 && ld_param(c.data) == -1 && cg_is_intrinsic(c.data) == 0 {
+            g = cg_find_func(c.data);
+        }
+    }
+    if g != -1 {
+        r = cg_q(&ld_mask, g);
+        v = cg_q(&ld_vmask, g);
+    }
+    while a != 0 {
+        m = ld_val(a.left);
+        if (r & ld_bit(j)) == 0 {
+            if (v & ld_bit(j)) != 0 {
+                res = res | m;
+            } else {
+                ld_sink(m);
+            }
+        }
+        j += 1;
+        a = a.right;
+    }
+    return res;
+}
+
+// a side of a comparison: a text compared as a number keeps what it carries
+fn ld_cmp_side(side: ptr<Ast>, m: i64, ok: i64) -> i64 {
+    if ok == 0 && ld_text_value(side) != 0 {
+        ld_sink(m);
+    }
+    return 0;
+}
+
+// a binary operator: what its value carries
+fn ld_binop(e: ptr<Ast>) -> i64 {
+    var op: i64 = e.data;
+    var l: ptr<Ast> = e.left;
+    var r: ptr<Ast> = e.right;
+    var ml: i64 = 0;
+    var mr: i64 = 0;
+    if op == TOK_PLUS && ld_concat(e) != 0 {
+        // text(left) copies the left; on the right a text is read, a number
+        // or a real is written out
+        ld_val(l);
+        mr = ld_val(r);
+        if ld_textish(r) == 0 {
+            ld_sink(mr);
+        }
+        return 0;                            // a new text
+    }
+    ml = ld_val(l);
+    mr = ld_val(r);
+    if op == TOK_EQ || op == TOK_NEQ {
+        ld_cmp_side(l, ml, ld_textish(r));
+        ld_cmp_side(r, mr, ld_textish(l));
+        return 0;
+    }
+    if op == TOK_LT || op == TOK_GT || op == TOK_LTE || op == TOK_GTE {
+        ld_cmp_side(l, ml, 0);
+        ld_cmp_side(r, mr, 0);
+        return 0;
+    }
+    if op == TOK_AND || op == TOK_OR {
+        return 0;
+    }
+    return ml | mr;                          // arithmetic: derived from both
+}
+
+// a declaration of a local
+fn ld_decl(d: ptr<Ast>) -> i64 {
+    var m: i64 = ld_val(d.right);
+    var tx: i64 = 0;
+    if d.data == 0 {
+        return ld_sink(m);
+    }
+    if (d.col >> 8) == 1 {
+        tx = 1;
+    }
+    return ld_give(d.data, m, tx);
+}
+
+// an assignment: into a local it is carried, anywhere else kept
+fn ld_assign(e: ptr<Ast>) -> i64 {
+    var m: i64 = ld_val(e.right);
+    var l: ptr<Ast> = e.left;
+    if l != 0 {
+        if l.node_type == AST_IDENTIFIER {
+            if ld_param(l.data) == -1 && (ld_local(l.data) != -1 || ld_is_local(l.data) != 0) {
+                ld_ident(l);
+                return ld_give(l.data, m, -1);
+            }
+            ld_ident(l);
+            return ld_sink(m);
+        }
+    }
+    ld_val(l);
+    return ld_sink(m);
+}
+
+// a chain of statements, raw { } as the code generator sees it: for the
+// statement of its own link
+fn ld_block(n: ptr<Ast>) -> i64 {
+    while n != 0 {
+        if n.node_type != AST_BLOCK {
+            ld_val(n);
+            return 0;
+        }
+        if n.type_info == BLOCK_RAW {
+            ld_raw += 1;
+            ld_val(n.left);
+            ld_raw -= 1;
+        } else {
+            ld_val(n.left);
+        }
+        n = n.right;
+    }
+    return 0;
+}
+
+// one node: the parameters its value may be or point into
+fn ld_val(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    var m: i64 = 0;
+    if e == 0 || ld_abort != 0 {
+        return 0;
+    }
+    k = e.node_type;
+    if k == AST_IDENTIFIER {
+        return ld_ident(e);
+    }
+    if k == AST_INTEGER_LIT || k == AST_FLOAT_LIT || k == AST_STRING_LIT || k == AST_BOOL_LIT {
+        return 0;
+    }
+    if k == AST_BREAK || k == AST_CONTINUE || k == AST_FAILED || k == AST_PRINTFAIL {
+        return 0;
+    }
+    if k == AST_READKEY || k == AST_READMOUSE || k == AST_MOUSEX || k == AST_MOUSEY {
+        return 0;
+    }
+    if k == AST_CPU_COUNT || k == AST_THREAD_YIELD || k == AST_ARG_COUNT || k == AST_TARGET_OS {
+        return 0;
+    }
+    if k == AST_TICKS || k == AST_TICKS_PER_SEC || k == AST_SIZEOF || k == AST_FRAMEADDR || k == AST_IMM {
+        return 0;
+    }
+    if k == AST_BLOCK {
+        return ld_block(e);
+    }
+    if k == AST_VAR_DECL || k == AST_CONST_DECL {
+        return ld_decl(e);
+    }
+    if k == AST_ASSIGN {
+        return ld_assign(e);
+    }
+    if k == AST_RETURN {
+        ld_ret = ld_ret | ld_val(e.right);
+        return ld_chain(e.left);
+    }
+    if k == AST_MULTI {
+        ld_sink(ld_val(e.right));
+        return ld_chain(e.left);
+    }
+    if k == AST_IF {
+        ld_val(e.data);
+        ld_val(e.left);
+        ld_val(e.right);
+        return 0;
+    }
+    if k == AST_WHILE {
+        ld_val(e.data);
+        ld_val(e.right);
+        ld_val(e.left);
+        return 0;
+    }
+    if k == AST_BINOP {
+        return ld_binop(e);
+    }
+    if k == AST_CALL {
+        return ld_call(e);
+    }
+    if k == AST_PRINT {
+        // a text is shown as its words; anything else as a number
+        m = ld_val(e.right);
+        if ld_text_value(e.right) == 0 {
+            ld_sink(m);
+        }
+        return 0;
+    }
+    if k == AST_UNOP {
+        m = ld_val(e.right);
+        if e.data == TOK_NOT {
+            return 0;
+        }
+        return m;
+    }
+    if k == AST_CAST || k == AST_TRUNC {
+        return ld_val(e.right);
+    }
+    // reads of memory: what is read carries nothing
+    if k == AST_DEREF || k == AST_PEEK || k == AST_PEEK8 || k == AST_PEEK16 || k == AST_PEEK32 {
+        ld_val(e.right);
+        return 0;
+    }
+    if k == AST_INDEX {
+        ld_val(e.left);
+        ld_val(e.right);
+        return 0;
+    }
+    if k == AST_MEMBER {
+        // left is the field's token; right the node it is read from
+        if e.right != 0 {
+            ld_val(e.right);
+        }
+        return 0;
+    }
+    if k == AST_INB || k == AST_ARG_GET {
+        ld_val(e.right);
+        return 0;
+    }
+    // &name: what the local holds can be reached through it
+    if k == AST_ADDR_OF {
+        ld_sink(ld_carry(e.data));
+        ld_val(e.right);
+        return 0;
+    }
+    if k == AST_PRINTC || k == AST_DLL_LOAD || k == AST_THREAD_WAIT || k == AST_VEC2_LOAD {
+        return ld_sink(ld_val(e.right));
+    }
+    if k == AST_LOCK_INIT || k == AST_LOCK_TAKE || k == AST_LOCK_GIVE {
+        return ld_sink(ld_val(e.right));
+    }
+    // a poke: the address is used, the value kept
+    if k == AST_POKE || k == AST_POKE8 || k == AST_POKE16 || k == AST_POKE32 {
+        ld_val(e.left);
+        return ld_sink(ld_val(e.right));
+    }
+    if k == AST_OUTB || k == AST_BEEP || k == AST_DLL_PROC || k == AST_VEC2_ADD || k == AST_VEC2_SUB || k == AST_VEC2_MUL {
+        ld_sink(ld_val(e.left));
+        return ld_sink(ld_val(e.right));
+    }
+    if k == AST_CALL_INDIRECT {
+        ld_sink(ld_val(e.left));
+        return ld_chain(e.right);
+    }
+    if k == AST_SYSCALL || k == AST_ARRAY_LIT || k == AST_STRUCT_LIT {
+        return ld_chain(e.right);
+    }
+    if k == AST_FAIL {
+        ld_sink(ld_val(e.data));
+        return ld_sink(ld_val(e.left));
+    }
+    if k == AST_SAVEFILE || k == AST_LOADFILE {
+        ld_sink(ld_val(e.left));
+        ld_sink(ld_val(e.right));
+        return ld_sink(ld_val(e.data));
+    }
+    // a lambda, asm, a thread, and whatever else: nothing is lent here
+    ld_abort = 1;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// at a call
+// -------------------------------------------------------------------------
+
+// 1 when e is a text the compiler makes and nobody else holds: a '+' that
+// joins texts
+fn cg_e_fresh(e: ptr<Ast>) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    if e.node_type != AST_BINOP || e.data != TOK_PLUS {
+        return 0;
+    }
+    return cg_is_concat(e);
+}
+
+// 1 when the program has text_free, which the lending needs
+fn ld_can_free() -> i64 {
+    if cg_find_func(cg_tok(CT_TEXT_FREE)) == -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// The plan for a call of function f: ld_plan_lit the "..." passed as they
+// are, ld_plan_fresh the joined texts freed when it returns. Worked out
+// only for a call that has such an argument.
+fn ld_plan(c: ptr<Ast>, f: i64) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var x: ptr<Ast> = 0;
+    var j: i64 = 0;
+    var any: i64 = 0;
+    var m: i64 = 0;
+    ld_plan_lit = 0;
+    ld_plan_fresh = 0;
+    while a != 0 && j < 62 {
+        x = a.left;
+        if cg_e_fresh(x) != 0 {
+            any = 1;
+        } else if x != 0 {
+            if x.node_type == AST_STRING_LIT && (cg_param_vtag(c, j) & 15) == 1 {
+                any = 1;
+            }
+        }
+        j += 1;
+        a = a.right;
+    }
+    if any == 0 {
+        return 0;
+    }
+    ld_ensure();
+    m = cg_q(&ld_mask, f);
+    a = c.right;
+    j = 0;
+    while a != 0 && j < 62 {
+        x = a.left;
+        if (m & ld_bit(j)) != 0 {
+            if cg_e_fresh(x) != 0 {
+                if ld_can_free() != 0 {
+                    ld_plan_fresh = ld_plan_fresh | ld_bit(j);
+                }
+            } else if x != 0 {
+                if x.node_type == AST_STRING_LIT && (cg_param_vtag(c, j) & 15) == 1 {
+                    ld_plan_lit = ld_plan_lit | ld_bit(j);
+                }
+            }
+        }
+        j += 1;
+        a = a.right;
+    }
+    return 0;
+}
+
+// where the joined text of argument i is kept until the call returns:
+// "    mov [rsp+N], rax", N past what this call has pushed so far
+fn ld_stash(fr: i64, i: i64, pushed: i64) -> i64 {
+    var slot: i64 = ra_popcnt(fr & (ld_bit(i) - 1));
+    emit_cstr("    mov [rsp+");
+    emit_u32((pushed + slot) * 8);
+    return emit_cstr("], rax\n");
+}
+
+// After the call of f: the joined texts lent to it freed, its results kept
+// meanwhile (rax; rdx, r8, r9 for several; xmm0 for a real), then the
+// slots they were kept in dropped.
+fn ld_free_after(f: i64, nf: i64) -> i64 {
+    var cnt: i64 = cg_q(&fn_multi, f) & 7;
+    var fl: i64 = cg_q(&fn_ret_float, f);
+    var saved: i64 = 1;
+    var s: i64 = 0;
+    if cnt >= 1 && cg_multi_float(cg_q(&fn_multi, f), 0) != 0 {
+        fl = 1;
+    }
+    emit_cstr("    push rax\n");
+    if cnt >= 2 {
+        emit_cstr("    push rdx\n");
+        saved += 1;
+    }
+    if cnt >= 3 {
+        emit_cstr("    push r8\n");
+        saved += 1;
+    }
+    if cnt >= 4 {
+        emit_cstr("    push r9\n");
+        saved += 1;
+    }
+    if fl != 0 {
+        emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+        saved += 1;
+    }
+    while s < nf {
+        emit_cstr("    mov rcx, [rsp+");
+        emit_u32((saved + s) * 8);
+        emit_cstr("]\n");
+        cg_lib_call(cg_tok(CT_TEXT_FREE));
+        s += 1;
+    }
+    if fl != 0 {
+        emit_cstr("    movsd xmm0, [rsp]\n    add rsp, 8\n");
+    }
+    if cnt >= 4 {
+        emit_cstr("    pop r9\n");
+    }
+    if cnt >= 3 {
+        emit_cstr("    pop r8\n");
+    }
+    if cnt >= 2 {
+        emit_cstr("    pop rdx\n");
+    }
+    emit_cstr("    pop rax\n");
+    emit_cstr("    add rsp, ");
+    emit_u32(nf * 8);
+    return emit_cstr("\n");
+}
+
+// a joined text on the stack, freed: what rax holds is kept
+fn ld_free_top() -> i64 {
+    emit_cstr("    pop rcx\n    push rax\n");
+    cg_lib_call(cg_tok(CT_TEXT_FREE));
+    return emit_cstr("    pop rax\n");
+}

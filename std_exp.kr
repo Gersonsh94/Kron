@@ -1,6 +1,7 @@
 kron_program
 kron_domain std_exp;
 kron_imports
+acquire_domain "std_math.kr";
 kron_definitions
 
 // std_exp.kr -- exponential, logarithm and the functions built on them.

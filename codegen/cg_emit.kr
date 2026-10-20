@@ -202,12 +202,14 @@ fn cg_e_decl_slots(n: ptr<Ast>) -> i64 {
 }
 
 fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
-    var col: i64 = n.col;
+    var col: i64 = 0;
     var slots: i64 = 0;
     var off: i64 = 0;
     var r: ptr<Ast> = n.right;
     var t: ptr<Tok> = n.left;
     var s: i64 = 0;
+    cg_decl_infer_real(n);                   // var x = 2.5: a real
+    col = n.col;
     pending_vtag = cg_decl_vtag(n);
     pending_struct = -1;
     pending_elem = n.child_count;            // pointer element width, 0 if none
@@ -383,7 +385,7 @@ fn cg_e_assign_member(n: ptr<Ast>) -> i64 {
     if cg_member_is_float(m) != 0 {
         return cg_e_assign_mfloat(n);
     }
-    cg_emit(n.right);
+    cg_emit_int(n.right);
     if cg_member_global(m) != 0 {
         w = mem_width;
         s = "    mov [rdx], rax\n";
@@ -435,7 +437,7 @@ fn cg_e_assign_idx(n: ptr<Ast>) -> i64 {
     if reals != 0 {
         cg_emit_float(n.right);
     } else {
-        cg_emit(n.right);
+        cg_emit_int(n.right);
     }
     emit_cstr("    pop rcx\n");
     cg_emit_idx_base(x.data);
@@ -857,6 +859,9 @@ fn cg_e_cast(n: ptr<Ast>) -> i64 {
 
 fn cg_e_unop(n: ptr<Ast>) -> i64 {
     var op: i64 = n.data;
+    if op == TOK_TILDE && cg_expr_is_float(n.right) != 0 {
+        return cg_real_bits_error(n.right);
+    }
     cg_emit(n.right);
     if op == TOK_TILDE { return emit_cstr("    not rax\n"); }
     if op == TOK_NOT { return emit_cstr("    test rax, rax\n    sete al\n    movzx rax, al\n"); }
@@ -1104,6 +1109,11 @@ fn cg_e_poparg(i: i64) -> i64 {
 fn cg_e_call(n: ptr<Ast>) -> i64 {
     var kind: i64 = 0;
     var sv: i64 = -1;
+    var f: i64 = -1;
+    var lit: i64 = 0;
+    var fr: i64 = 0;
+    var nf: i64 = 0;
+    var rm: i64 = 0;
     if cg_c_fn(n) != 0 { return 0; }         // c_fn(f): the C entry of an export
     if cg_c_call(n) != 0 { return 0; }       // c_call(p, ...): C at an address
     if cg_list_call(n) != 0 { return 0; }    // on a list<S>: the _n versions
@@ -1125,7 +1135,22 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
     if n.owner_type != FNVAL_MARK {
         sv = cg_sret_setup(n.data);
     }
-    cg_e_call_args(n);
+    // texts lent to it (cg_lend.kr): a "..." passed as it is, a joined
+    // text kept in a slot below the arguments until the call returns
+    if kind == 0 && n.owner_type != FNVAL_MARK {
+        f = cg_find_func(n.data);
+        if f != -1 {
+            ld_plan(n, f);
+            lit = ld_plan_lit;
+            fr = ld_plan_fresh;
+            nf = ra_popcnt(fr);
+        }
+    }
+    if nf != 0 {
+        cg_e_wrap("    sub rsp, ", nf * 8, "\n");
+    }
+    rm = cg_arg_reals(n, f);
+    cg_e_call_args(n, lit, fr, rm);
     cg_sret_pend = sv;
     emit_cstr("    sub rsp, 32\n");
     kt_flush();
@@ -1146,6 +1171,9 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
         emit_u32(extra_args << 3);
         emit_cstr("\n");
     }
+    if nf != 0 {
+        ld_free_after(f, nf);
+    }
     return 0;
 }
 
@@ -1154,7 +1182,7 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
 // is nearest the return address. The rest are pushed in order and popped
 // in reverse into their registers; a constant or a local is not pushed at
 // all but loaded at the very end, after every pop.
-fn cg_e_call_args(n: ptr<Ast>) -> i64 {
+fn cg_e_call_args(n: ptr<Ast>, lit: i64, fr: i64, rm: i64) -> i64 {
     var cnt: i64 = cg_count_list(n.right);
     var i: i64 = 0;
     var a: ptr<Ast> = 0;
@@ -1166,11 +1194,20 @@ fn cg_e_call_args(n: ptr<Ast>) -> i64 {
         while i >= 6 {
             a = cg_e_nth(n.right, i);
             x = a.left;
-            if cg_expr_is_float(x) != 0 {
+            if cg_arg_is_real(rm, i, x) != 0 {
                 cg_emit_float(x);
                 emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
             } else {
-                cg_emit(x);
+                // a "..." for a 'text' it keeps is a text of its own here
+                // too, as in a register
+                if (lit & ld_bit(i)) != 0 {
+                    cg_emit(x);
+                } else {
+                    cg_emit_for(x, cg_param_vtag(n, i));
+                }
+                if (fr & ld_bit(i)) != 0 {
+                    ld_stash(fr, i, cnt - 1 - i);
+                }
                 emit_cstr("    push rax\n");
             }
             i -= 1;
@@ -1179,7 +1216,7 @@ fn cg_e_call_args(n: ptr<Ast>) -> i64 {
     a = n.right;
     i = 0;
     while a != 0 && i < 6 {
-        cg_e_push_arg(n, a, i);
+        cg_e_push_arg(n, a, i, lit, fr, rm);
         i += 1;
         a = a.right;
     }
@@ -1187,18 +1224,18 @@ fn cg_e_call_args(n: ptr<Ast>) -> i64 {
         i -= 1;
         a = cg_e_nth(n.right, i);
         x = a.left;
-        if cg_arg_struct_id(x) == -1 && cg_expr_is_float(x) != 0 {
+        if cg_arg_struct_id(x) == -1 && cg_arg_is_real(rm, i, x) != 0 {
             emit_cstr("    movsd xmm");
             emit_u32(i);
             emit_cstr(", [rsp]\n    add rsp, 8\n");
-        } else if cg_arg_leaf_here(a, i) == 0 {
+        } else if cg_arg_leaf_here(a, i, rm) == 0 {
             cg_e_poparg(i);
         }
     }
     a = n.right;
     i = 0;
     while a != 0 && i < 6 {
-        if cg_arg_leaf_here(a, i) != 0 {
+        if cg_arg_leaf_here(a, i, rm) != 0 {
             cg_emit_leaf_arg(a.left, i);
         }
         i += 1;
@@ -1210,7 +1247,7 @@ fn cg_e_call_args(n: ptr<Ast>) -> i64 {
 // one register argument, onto the stack (a leaf: nothing yet). A struct
 // is passed by address, which the callee's prologue copies in; a slot that
 // already holds an address (an array parameter handed on) is forwarded.
-fn cg_e_push_arg(n: ptr<Ast>, a: ptr<Ast>, i: i64) -> i64 {
+fn cg_e_push_arg(n: ptr<Ast>, a: ptr<Ast>, i: i64, lit: i64, fr: i64, rm: i64) -> i64 {
     var x: ptr<Ast> = a.left;
     var j: i64 = 0;
     if cg_arg_struct_id(x) != -1 {
@@ -1230,14 +1267,27 @@ fn cg_e_push_arg(n: ptr<Ast>, a: ptr<Ast>, i: i64) -> i64 {
         cg_emit_struct_addr(x);
         return emit_cstr("    push rax\n");
     }
-    if cg_expr_is_float(x) != 0 {
+    if cg_arg_is_real(rm, i, x) != 0 {
         cg_emit_float(x);
         return emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
     }
-    if cg_arg_leaf_here(a, i) != 0 {
+    if cg_arg_leaf_here(a, i, rm) != 0 {
         return 0;
     }
-    cg_emit_for(x, cg_param_vtag(n, i));     // [a, b] for a list<T> is a list
+    if (lit & ld_bit(i)) != 0 {
+        cg_emit(x);                          // lent: the "..." as it is
+    } else {
+        cg_emit_for(x, cg_param_vtag(n, i)); // [a, b] for a list<T> is a list
+    }
+    // lent: kept below what this call has pushed -- the arguments past the
+    // sixth, and every one before this
+    if (fr & ld_bit(i)) != 0 {
+        j = cg_count_list(n.right) - 6;
+        if j < 0 {
+            j = 0;
+        }
+        ld_stash(fr, i, j + i);
+    }
     return emit_cstr("    push rax\n");
 }
 

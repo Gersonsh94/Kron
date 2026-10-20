@@ -1,6 +1,7 @@
 kron_program
 kron_domain std_stats;
 kron_imports
+acquire_domain "std_math.kr";
 kron_definitions
 
 // std_stats.kr -- descriptive statistics and least-squares fitting.

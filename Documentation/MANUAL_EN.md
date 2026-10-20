@@ -156,6 +156,11 @@ i = d as i64;          // real to integer, towards zero
 b = big as u8;         // narrowing keeps the low bits
 ```
 
+Without `as` the same happens wherever a value goes: a real given to an
+integer -- a variable, a field, an element, a parameter -- is truncated
+towards zero, an integer given to a real is converted, and `var x = 2.5;`
+is a real. A comparison is a bool whatever it compares.
+
 `sizeof(T)` gives the size of a type at compile time: `sizeof(Vec3)` is 24.
 
 ---
@@ -193,10 +198,10 @@ are constants, enum members included.
 
 | Group | Operators |
 |---|---|
-| Arithmetic | `+` `-` `*` `/` `%`, unary `-` |
+| Arithmetic | `+` `-` `*` `/` `%`, unary `-` (`%` of reals: the remainder, with the sign of the left side) |
 | Comparison | `<` `>` `<=` `>=` `==` `!=` |
 | Logical | `&&` `\|\|` (short-circuit), `!` |
-| Bits | `&` `\|` `^` `~` `<<` `>>` (`>>` is logical on unsigned types) |
+| Bits | `&` `\|` `^` `~` `<<` `>>` (`>>` is logical on unsigned types), on integers only |
 | Compound | `+=` `-=` `*=` `/=` `^=` |
 | Address | `&x`, `&f` (a function) |
 
@@ -435,6 +440,13 @@ fn main() {
 - A `text` prints as its words; `==` and `!=` compare the bytes; `+` joins
   texts, string literals, integers and reals into a new text. Declared from
   a literal, a `text` is a text of its own that `text_add` can grow.
+- A text the compiler makes for a call -- `"$" + n`, or a `"..."` given to
+  a `text` parameter -- is lent when the function only reads it: the
+  literal goes as it is, the joined text is freed when the call returns.
+  `draw("$" + n)` in a loop takes no memory. A function that keeps what it
+  is given -- in a global, a field, a list, or by returning it -- gets a
+  text of its own, as a variable does. The compiler works out which
+  functions only read; reading the bytes through `text_cstr` counts.
 - `list<T>` and `map<T>` hold `i64`, `f64` or `text`. Declared without a
   value they start empty; `[a, b, c]` makes a list. `l[i]` and `m[key]` read
   and write; `for x in l { }` walks a list (`break` and `continue` work);
@@ -458,7 +470,7 @@ Every call takes the library's lock, so threads can share them.
 | `text_split(x, sep)` `text_lines(x)` `text_join(list, sep)` `text_sort(list)` | with lists |
 | `text_to_int(x)` `text_to_real(x)` `text_is_int` `text_is_real` `text_from_int(n)` `text_from_real(x, d)` | numbers |
 | `say(x)` `text_print(x)` | output, with and without a line end |
-| `text_cstr(x)` `text_from_bytes(address, n)` | to and from byte buffers |
+| `text_cstr(x)` `text_view(x)` `text_from_bytes(address, n)` | to and from byte buffers (`text_view` never fails: "" for a freed text) |
 
 | Lists (`std_list.kr`) | Maps (`std_map.kr`) |
 |---|---|
@@ -996,7 +1008,7 @@ editor, the tests, building for other systems.
 The compiler is written in x86-64 assembly and, part by part, in Kron
 itself: its lexer is `lexer/lexer.kr`, its parser `parser/parser.kr` and
 the files it imports, its semantic pass `semantic/semantic.kr`, its code
-generator `codegen/codegen.kr` and its assembler `kasm/kasm.kr`, with the
+generator `codegen/codegen.kr` and its assembler `kasm.kr`, with the
 files they import. `BUILD.bat`
 builds `kronc.exe` from the seed with nothing but Kron's own tools, and
 `BOOTSTRAP.bat` checks that it reproduces itself byte for byte.
@@ -1008,7 +1020,7 @@ kronc.exe lexer\lexer.kr --module        lexer\lexer_kr.asm
 kronc.exe parser\parser.kr --module      parser\parser_kr.asm
 kronc.exe semantic\semantic.kr --module  semantic\semantic_kr.asm
 kronc.exe codegen\codegen.kr --module    codegen\codegen_kr.asm
-kronc.exe kasm\kasm.kr --module          kasm\kasm_kr.asm
+kronc.exe kasm.kr --module               kasm_kr.asm
 ```
 
 which is its functions as assembly text, with no runtime and no entry, for

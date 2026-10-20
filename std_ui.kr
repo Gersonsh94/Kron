@@ -749,25 +749,11 @@ fn ui_utf8(p: i64) -> i64 {
 }
 
 // the bytes of a text handle (std_text), or the address itself; a text is
-// read at once and drawn before anything can change it
+// read at once and drawn before anything can change it. Through
+// text_view, which the compiler knows only reads: a text made for one call
+// (ui_label(x, y, "Score " + n)) is freed when the call returns.
 fn ui_str(x: i64) -> i64 {
-    if ob_is(x) == 0 {
-        if x == 0 {
-            return "";
-        }
-        return x;
-    }
-    lock_take(HP_LOCK);
-    var p: i64 = 0;
-    if tv_view(x) {
-        p = tv_p;
-    }
-    hp_take_err();
-    lock_give(HP_LOCK);
-    if p == 0 {
-        return "";
-    }
-    return p;
+    return text_view(x);
 }
 
 // the width of n bytes of text at p, or up to its end when n < 0

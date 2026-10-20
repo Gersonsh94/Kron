@@ -1040,6 +1040,76 @@ numbers.
   read, and its length -- and so does the Kron one: the reports are the
   same, number for number.
 
+## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
+
+A text the compiler makes for the program leaked at every call: a `"..."`
+given to a parameter declared `text` became a new text each time, and each
+`+` that joins texts left one nobody held, nor could free (`a + b + c` left
+two). An engine drawing `"$" + n` every frame took one text per frame.
+
+- **What changes.** A text the compiler makes -- the result of a `+` that
+  joins texts, or a `"..."` going to a `text` parameter -- is *lent* to a
+  function that only reads that parameter: the literal goes as it is (every
+  reading function of std_text takes a `"..."` too), and the joined text is
+  freed as soon as the call returns. Given to a function that keeps it --
+  stores it, returns it, changes it, hands it to the system -- it is given,
+  as before, and belongs to whoever keeps it. A joined text that is printed
+  or compared is freed there; in `a + b + c` the text of `a + b` is the one
+  `c` is added to, so the chain makes one text.
+- **Who only reads.** The compiler works it out for every function of the
+  program (`codegen/cg_lend.kr`), following the values: each expression
+  carries the parameters its value may be or point into; what reaches a
+  place that keeps it -- a global, a field, an element, memory, an argument
+  the callee keeps, the system -- makes the parameter kept; a return makes
+  it a view (its result points into it, like `text_cstr`). Reading the
+  bytes through `text_cstr` in `raw`, comparing, measuring, printing,
+  passing on to a reader are reads. Every token of the body that writes a
+  parameter's name has to be one the walk understood, or the parameter is
+  kept; a body with `asm` or a fn value inside keeps them all. Calls go
+  round in circles: the answers start at "reads" and come down, pass after
+  pass, until nothing changes. std_text, std_map and std_heap, which reach
+  texts through the handle table, are described by a table in the same
+  file. std_ui reads through `text_view` (std_text, new), so a
+  `ui_label(x, y, "Score " + n)` is freed too.
+- **Why not freeing at the end of the statement**, or a counted text: a
+  function that keeps its argument (`list_add(names, "a" + i)`, a field
+  given a parameter) would be left with a freed text. Lending only where
+  the function provably reads costs nothing at run time and changes nothing
+  a program can see but its memory.
+- **Measured**: 20000 rounds of eleven such calls needed 260008 texts and
+  now need 5 (`test_textlend`). The compiler's own parts do not change.
+
+## Fixed 20-10-2026
+
+- A comparison of reals used as a value -- `return a < b`, `f(x == 1.0)`,
+  `var r: bool = x > y`, `a < b && c > d` -- gave the left operand
+  truncated, not a bool: `lt(3.0, 2.0)` returned 3. The code generator took
+  a comparison with a real on either side for a real, and never compared;
+  in an `if` it went another way and was right. Test: `test_fcmpval`.
+- The same mistake, everywhere a value goes: a real given to an integer
+  kept the bits of the real (`var n: i64 = x * 2`, an element, a field, a
+  struct literal), a real passed to an `i64` parameter went in a register
+  the function does not read, and an integer passed to an `f64` parameter
+  left it what was there before (`fsqrt(2)`); `var q = 2.5;` was not a
+  real; a real global given `3` held 5e-324, an integer global given 7.9
+  the bits of 7.9. A real into an integer is now truncated towards zero, as
+  `return` and `as i64` always did; an integer into a real is converted; an
+  argument goes as its parameter says; `var x = value` with no type takes
+  the real. std_stats' `st_percentile` gave `lo = ffloor(pos)` whatever
+  ffloor left in rax -- right only by chance. Test: `test_realint`.
+- `x % y` of reals gave x; it is the remainder now, with the sign of x
+  (x - trunc(x / y) * y). `&`, `|`, `^`, `~`, `<<`, `>>` given a real gave
+  it back unchanged; they are an error at the real now. Tests:
+  `test_realint`, `test_realbits_bad`.
+- std_exp, std_stats, std_vec3, std_random and std_ml did not compile
+  imported alone: they used std_math, std_exp or std_stats (st_x, st_y)
+  without importing them. Each imports what it uses now; every
+  `std_*.kr` builds alone. Test: `test_random_alone`.
+- A function named like a register of the processor (`r8`, `rax`) was
+  called as the register -- `call r8` jumped to whatever r8 held -- and
+  `eax`, `cl` or `xmm9` stopped the assembler with no reason given. It is
+  an error at the name now. Test: `test_regname_bad`.
+
 ## Fixed 19-10-2026
 
 - A global or a constant given a hexadecimal number with an E among its
@@ -1123,6 +1193,13 @@ numbers.
   2^47: any other integer passed where a text is expected could still be
   read as one.
 - The extern table still drops names past 512 without an error.
+- `%` of reals is x - trunc(x / y) * y: exact while the quotient is small,
+  not to the last bit as C's fmod for a quotient past 2^52.
+- A text the compiler makes is lent only to a function that reads it
+  where the compiler can see it: one given to a function that hands it to
+  the system (a path joined for std_file, std_os, std_image) is still given
+  and stays, as is the text a function returns (`say(text_upper(x))`),
+  which is the caller's to free.
 - kasm: a `%define` that stands for a memory operand (`%define SLOT
   [rbp - 24]`, then `mov SLOT, rax`) is not accepted; written out, the
   same line is.

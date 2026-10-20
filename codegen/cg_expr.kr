@@ -102,10 +102,13 @@ fn cg_arg_is_leaf(a: ptr<Ast>) -> i64 {
 // Loading a leaf late -- after the pops -- moves its read past what the
 // later arguments do: in f(x, g(&x)) x would carry g's change. With leaves
 // only after it, nothing runs in between.
-fn cg_arg_leaf_here(a: ptr<Ast>, i: i64) -> i64 {
+fn cg_arg_leaf_here(a: ptr<Ast>, i: i64, rm: i64) -> i64 {
     while a != 0 && i < 6 {
         if cg_arg_is_leaf(a.left) == 0 {
             return 0;
+        }
+        if ((rm >> i) & 1) != 0 {
+            return 0;                        // goes in an xmm register
         }
         i += 1;
         a = a.right;
@@ -340,6 +343,9 @@ fn cg_global_note(d: ptr<Ast>) -> i64 {
     if i >= CG_MAX_GLOBALS {
         return 0;
     }
+    if d.node_type == AST_VAR_DECL && cg_decl_infer_real(d) != 0 {
+        c = d.col;
+    }
     cg_qs(&g_toks, i, d.data);
     cg_qs(&g_unsigned, i, (c >> 1) & 1);
     cg_qs(&g_isfloat, i, c & 1);
@@ -421,7 +427,7 @@ fn cg_global_decl(d: ptr<Ast>) -> i64 {
     // false as 1 or 0; anything else starts at zero
     v = d.right;
     k = 0;
-    if v != 0 {
+    if v != 0 && cg_global_lit_fits(d) != 0 {
         k = v.node_type;
     }
     if k == AST_INTEGER_LIT {
@@ -833,13 +839,73 @@ fn cg_expr_is_float(e: ptr<Ast>) -> i64 {
         if e.data == TOK_PLUS && cg_is_concat(e) != 0 {
             return 0;                        // text + 2.5 is a text
         }
+        // a comparison, or && and ||, is a bool whatever it compares
+        if cg_e_is_cmp(e.data) != 0 || e.data == TOK_AND || e.data == TOK_OR {
+            return 0;
+        }
         if cg_expr_is_float(e.left) != 0 {
             return 1;
         }
         return cg_expr_is_float(e.right);
     }
     if k == AST_UNOP {
+        if e.data == TOK_NOT {
+            return 0;                        // !x is a bool
+        }
         return cg_expr_is_float(e.right);
+    }
+    return 0;
+}
+
+// cg_emit_int(expression): the value in rax where an integer goes; a real
+// is truncated toward zero, as 'return' and 'as i64' do
+fn cg_emit_int(e: ptr<Ast>) -> i64 {
+    if cg_expr_is_float(e) != 0 {
+        cg_emit_float(e);
+        return emit_cstr("    cvttsd2si rax, xmm0\n");
+    }
+    return cg_emit(e);
+}
+
+// 1 for 'var x = value' with no type written whose value is a real: x is
+// a real, as a text value makes a text. The mark goes in the declaration
+// (bit 0 of col), where every reader of the declaration finds it.
+fn cg_decl_infer_real(d: ptr<Ast>) -> i64 {
+    var v: ptr<Ast> = d.right;
+    if (d.col & 1) != 0 {
+        return 1;
+    }
+    if (d.col & 8) != 0 || d.left != 0 || d.type_info != 0 || (d.col >> 8) != 0 || v == 0 {
+        return 0;
+    }
+    if v.node_type == AST_ARRAY_LIT || v.node_type == AST_STRUCT_LIT {
+        return 0;
+    }
+    if cg_expr_is_float(v) == 0 {
+        return 0;
+    }
+    d.col = d.col | 1;
+    return 1;
+}
+
+// 1 when a global's literal is written into its cell as it is: a number of
+// its own kind (a real for a real, an integer or a bool for an integer);
+// any other value is computed when main begins
+fn cg_global_lit_fits(d: ptr<Ast>) -> i64 {
+    var v: ptr<Ast> = d.right;
+    var k: i64 = 0;
+    if v == 0 {
+        return 0;
+    }
+    k = v.node_type;
+    if (d.col & 1) != 0 {
+        if k == AST_FLOAT_LIT {
+            return 1;
+        }
+        return 0;
+    }
+    if k == AST_INTEGER_LIT || k == AST_BOOL_LIT {
+        return 1;
     }
     return 0;
 }
@@ -963,6 +1029,11 @@ fn cg_emit_float(e: ptr<Ast>) -> i64 {
 // has no side effect, so the order cannot be seen).
 fn cg_emit_float_binop(e: ptr<Ast>) -> i64 {
     var op: i64 = e.data;
+    // a comparison, && or ||: a bool, made as one and converted
+    if cg_e_is_cmp(op) != 0 || op == TOK_AND || op == TOK_OR {
+        cg_emit(e);
+        return emit_cstr("    cvtsi2sd xmm0, rax\n");
+    }
     if cg_fleaf_is(e.right) == 0 && cg_fleaf_is(e.left) != 0 {
         cg_emit_float(e.right);
         emit_cstr("    movaps xmm1, xmm0\n");
@@ -987,6 +1058,55 @@ fn cg_emit_float_binop(e: ptr<Ast>) -> i64 {
     if op == TOK_SLASH {
         return emit_cstr("    divsd xmm0, xmm1\n");
     }
+    if op == TOK_PERCENT {
+        return cg_emit_fmod();
+    }
+    // & | ^ << >> >>> have no meaning on a real: said, not computed
+    cg_real_bits_error(e);
+    return 0;
+}
+
+// x % y of reals, xmm0 and xmm1: x - trunc(x / y) * y, the sign of x as
+// C's fmod. A quotient past 2^52 is whole already; a NaN is left as it is.
+fn cg_emit_fmod() -> i64 {
+    var lbl: i64 = new_label();
+    emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n    divsd xmm0, xmm1\n");
+    emit_cstr("    ucomisd xmm0, xmm0\n");
+    cg_e_wrap("    jb .fmod", lbl, "\n");
+    emit_cstr("    mov rax, 0x4330000000000000\n    movq xmm2, rax\n    comisd xmm0, xmm2\n");
+    cg_e_wrap("    jae .fmod", lbl, "\n");
+    emit_cstr("    mov rax, 0xC330000000000000\n    movq xmm2, rax\n    comisd xmm2, xmm0\n");
+    cg_e_wrap("    jae .fmod", lbl, "\n");
+    emit_cstr("    cvttsd2si rax, xmm0\n    cvtsi2sd xmm0, rax\n");
+    cg_e_wrap(".fmod", lbl, ":\n");
+    return emit_cstr("    mulsd xmm0, xmm1\n    movaps xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n    subsd xmm0, xmm1\n");
+}
+
+// the first name or number of an expression, for an error to point at
+fn cg_first_tok(e: ptr<Ast>) -> i64 {
+    var k: i64 = 0;
+    while e != 0 {
+        k = e.node_type;
+        if k == AST_IDENTIFIER || k == AST_FLOAT_LIT || k == AST_INTEGER_LIT || k == AST_CALL {
+            return e.data;
+        }
+        if k == AST_BINOP {
+            e = e.left;
+        } else {
+            e = e.right;
+        }
+    }
+    return 0;
+}
+
+fn cg_real_bits_error(e: ptr<Ast>) -> i64 {
+    if cg_err_msg != 0 {
+        return 0;
+    }
+    cg_err_tok = cg_first_tok(e);
+    cg_err_msg = "a bit operator works on integers, and this one is given a real ";
+    cg_err_hint = "  hint: make it an integer first: (x as i64) & 3\r\n";
+    cg_had_error = 1;
     return 0;
 }
 
@@ -1029,4 +1149,43 @@ fn cg_field_index(sid: i64, t: i64) -> i64 {
         i += 1;
     }
     return -1;
+}
+
+// The arguments of a call that go in xmm registers, a bit each: for a
+// function of the program, those its parameters say are reals -- an
+// integer given there is converted, a real given to an integer truncated;
+// for a call through a value, the arguments that are reals.
+fn cg_arg_reals(c: ptr<Ast>, f: i64) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var fnode: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    var i: i64 = 0;
+    var m: i64 = 0;
+    if f != -1 {
+        fnode = cg_q(&fn_nodes, f);
+        p = fnode.left;
+    }
+    while a != 0 && i < 62 {
+        if p != 0 {
+            if (p.col & 1) != 0 && p.type_info == 0 && cg_param_struct_id(p) == -1 {
+                m = m | (1 << i);
+            }
+            p = p.right;
+        } else if f == -1 {
+            if cg_arg_struct_id(a.left) == -1 && cg_expr_is_float(a.left) != 0 {
+                m = m | (1 << i);
+            }
+        }
+        i += 1;
+        a = a.right;
+    }
+    return m;
+}
+
+// argument i goes in an xmm register
+fn cg_arg_is_real(rm: i64, i: i64, x: ptr<Ast>) -> i64 {
+    if i < 62 {
+        return (rm >> i) & 1;
+    }
+    return cg_expr_is_float(x);
 }

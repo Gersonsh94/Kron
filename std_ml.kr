@@ -1,6 +1,9 @@
 kron_program
 kron_domain std_ml;
 kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_exp.kr";
+acquire_domain "std_stats.kr";
 kron_definitions
 
 // std_ml.kr -- logistic regression by gradient descent, plus the usual

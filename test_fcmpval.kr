@@ -1,0 +1,95 @@
+kron_program
+kron_domain test_fcmpval;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// A comparison of reals used as a value: returned, passed, stored, printed,
+// joined with && and ||, negated. Its result is a bool -- the code
+// generator took it for a real and never compared, so lt(3.0, 2.0) came
+// back as 3. Inside an if it was always right.
+// =========================================================================
+
+struct P {
+    x: f64;
+    ok: bool;
+}
+
+var gx: f64 = 2.5;
+
+fn lt(a: f64, b: f64) -> bool {
+    return a < b;
+}
+
+fn ge(a: f64, b: f64) -> i64 {
+    return a >= b;
+}
+
+fn mix(a: f64, n: i64) -> bool {
+    return a == n;
+}
+
+fn both(a: f64, b: f64) -> bool {
+    return a > 0.0 && b > 0.0;
+}
+
+fn either(a: f64, b: f64) -> bool {
+    return a > 10.0 || b < 0.0;
+}
+
+fn neg(a: f64) -> bool {
+    return !(a < 1.0);
+}
+
+fn b2i(b: bool) -> i64 {
+    if b {
+        return 1;
+    }
+    return 0;
+}
+
+fn sum3(a: i64, b: i64, c: i64) -> i64 {
+    return a * 100 + b * 10 + c;
+}
+
+fn main() -> i64 {
+    var x: f64 = 1.0;
+    var y: f64 = 2.0;
+    print(b2i(lt(3.0, 2.0)));            // 0
+    print(b2i(lt(2.0, 3.0)));            // 1
+    print(ge(2.0, 2.0));                 // 1
+    print(ge(1.0, 2.0));                 // 0
+    print(b2i(mix(3.0, 3)));             // 1
+    print(b2i(mix(3.5, 3)));             // 0
+    print(b2i(x == 1.0));                // 1
+    print(b2i(x != 1.0));                // 0
+    print(b2i(both(1.0, 2.0)));          // 1
+    print(b2i(both(1.0, -2.0)));         // 0
+    print(b2i(either(11.0, 2.0)));       // 1
+    print(b2i(either(1.0, 2.0)));        // 0
+    print(b2i(neg(0.5)));                // 0
+    print(b2i(neg(1.5)));                // 1
+    var r: bool = x < y;
+    print(b2i(r));                       // 1
+    r = x > y;
+    print(b2i(r));                       // 0
+    var n: i64 = x <= y;
+    print(n);                            // 1
+    print(sum3(x < y, y < x, gx > 2.0)); // 101
+    var a: [i64; 3];
+    a[0] = x < y;
+    a[1] = y < x;
+    a[2] = gx == 2.5;
+    print(a[0] * 100 + a[1] * 10 + a[2]); // 101
+    var p: P;
+    p.x = 4.0;
+    p.ok = p.x > 3.0;
+    print(b2i(p.ok));                    // 1
+    print(x < y);                        // 1
+    var f: f64 = (x < y) as f64;
+    print(f);                            // 1.000000
+    if (x < y) == (gx > 2.0) {
+        print(7);                        // 7
+    }
+    return 0;
+}

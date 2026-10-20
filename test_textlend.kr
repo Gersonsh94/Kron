@@ -1,0 +1,140 @@
+kron_program
+kron_domain test_textlend;
+kron_imports
+acquire_domain "std_map.kr";
+kron_definitions
+
+// =========================================================================
+// Texts lent to a call. A text the compiler makes -- "$" + n, or a "..."
+// given to a 'text' parameter -- is freed when the call returns if the
+// function only reads it, and given to it if the function keeps it. Before,
+// every one of them stayed: a "..." became a new text at every call, and
+// each '+' left one nobody could free. ob_count (std_heap) is how many
+// handles were ever needed at once; 20000 rounds below need a handful.
+// =========================================================================
+
+var shown: i64;
+var kept: text;
+var names: list<text>;
+var sum: i64;
+var gp: i64;
+
+struct Person {
+    name: text;
+    age: i64;
+}
+
+// only reads its text: through std_text, a comparison, a map key
+fn draw(s: text) -> i64 {
+    if s == "skip" {
+        return 0;
+    }
+    shown = shown + text_len(s);
+    return 0;
+}
+
+// hands it on to a reader: reads it too
+fn label(x: i64, s: text) -> i64 {
+    return draw(s) + x;
+}
+
+// reads its bytes through text_cstr, in raw code
+fn bytes(s: text) -> i64 {
+    var p: i64 = text_cstr(s);
+    var n: i64 = text_len(s);
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            sum = sum + peek8(p + i);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// keep what they are given
+fn keep(s: text) -> i64 {
+    kept = s;
+    return 0;
+}
+
+fn to_list(s: text) -> i64 {
+    list_add(names, s);
+    return 0;
+}
+
+fn to_field(p: ptr<Person>, s: text) -> i64 {
+    p.name = s;
+    return 0;
+}
+
+fn back(s: text) -> text {
+    return s;
+}
+
+fn view_kept(s: text) -> i64 {
+    gp = text_cstr(s);
+    return 0;
+}
+
+// changes it: a "..." still becomes a text of its own
+fn grow(s: text) -> i64 {
+    text_add(s, "!");
+    return text_len(s);
+}
+
+fn twice(s: text) -> (i64, i64) {
+    return text_len(s), text_len(s) * 2;
+}
+
+fn half(s: text) -> f64 {
+    return text_len(s) * 0.5;
+}
+
+fn main() -> i64 {
+    var i: i64 = 0;
+    var m: map<i64>;
+    var name: text = "ana";
+    while i < 20000 {
+        draw("$" + i);
+        draw("score: " + i + " of " + 20000);
+        label(i, "lit");
+        draw(name + "/" + i);
+        bytes("b" + i);
+        if text_len("x" + i) == 0 {
+            print(0);
+        }
+        if "k" + (i % 3) == "k1" {
+            shown = shown + 1;
+        }
+        m["k" + (i % 5)] = i;
+        shown = shown + map_get(m, "k" + (i % 5)) * 0;
+        var a, b = twice("ab" + i);
+        shown = shown + b - a;
+        var r: f64 = half("abcd" + i);
+        if r < 1.0 {
+            print(r);
+        }
+        i += 1;
+    }
+    print(shown);                        // 882227
+    print(sum);
+    print(ob_count < 64);                // 1: nothing piled up
+    keep("k" + 7);
+    print(kept);                         // k7
+    to_list("a" + 1);
+    to_list("lit");
+    print(names);                        // ["a1", "lit"]
+    var p: Person;
+    to_field(&p, "b" + 2);
+    print(p.name);                       // b2
+    var t: text = back("c" + 3);
+    print(t);                            // c3
+    view_kept("view" + 4);
+    print(text_from_bytes(gp, 5));       // view4
+    print(grow("lit"));                  // 4
+    print("$" + 5 + "/" + 2.5);          // $5/2.5
+    print(map_get(m, "k3"));             // 19998
+    print(ob_count < 64);                // 1
+    return 0;
+}

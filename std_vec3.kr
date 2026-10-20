@@ -1,6 +1,7 @@
 kron_program
 kron_domain std_vec3;
 kron_imports
+acquire_domain "std_math.kr";
 kron_definitions
 
 // ============================================================================

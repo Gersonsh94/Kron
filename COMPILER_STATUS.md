@@ -13,7 +13,7 @@ on no C runtime, and kasm alone builds it.
 
 ---
 
-## 0. STATE AT 19-10-2026
+## 0. STATE AT 20-10-2026
 
 The compiler moves to Kron, one part per delivery (DECISIONS.md, "The
 compiler moves to Kron, part by part"); from now on all development and
@@ -24,12 +24,14 @@ optimization is in Kron. Parts 1 to 5:
 | The lexer | `lexer/lexer.kr` (632 lines) with `include/tokens.kr`; `lexer/lexer.asm` is now only the door to it (the old entry names, registers kept) |
 | The parser | `parser/parser.kr` and `parser_state.kr`, `parser_stmt.kr`, `parser_expr.kr`, `parser_titan.kr`, `parser_ng.kr` (6,343 lines) with `include/ast.kr`; `parser/parser.asm` (10,079 lines of assembly before) is now only its door, 179 lines |
 | The semantic pass | `semantic/semantic.kr` (971 lines); `semantic/semantic.asm` (1,676 lines of assembly before) is now only its door, 135 lines |
-| The code generator | `codegen/codegen.kr` and the 14 `cg_*.kr` files it imports (12,236 lines) with `include/defs.kr`; `codegen/codegen.asm` (20,559 lines of assembly before) is now only its door, 267 lines |
+| The code generator | `codegen/codegen.kr` and the 15 `cg_*.kr` files it imports (13,446 lines) with `include/defs.kr`; `codegen/codegen.asm` (20,559 lines of assembly before) is now only its door, 267 lines |
 | The assembler | `kasm.kr` and the 5 `ks_*.kr` files it imports (4,232 lines); `kasm.asm` (8,102 lines of assembly before) is now only its door, 228 lines |
 | `--module` | `kronc part.kr --module` writes `part_kr.asm`: the functions alone, no runtime, no entry; its globals carry its name; it refuses `main`, `export` and globals computed at start; `extern "kronc"` names a function of the compiler outside the part |
 | The build | `KRONPARTS.bat` makes the parts in Kron again (lexer, parser, semantic pass, code generator, assembler); BUILD.bat and BOOTSTRAP.bat call it with stage1 and stage2, so the fixpoint covers them |
 | kasm | a label defined twice is an error; `resb`/`resq` outside `.bss` are zeros; `1e5` in `dq` |
 | Language | a global array given values keeps them (`var t: [i64; 4] = [1, 2, 3, 4];`), as data; a character Kron does not use, and a text with no closing quote, are errors with their line and column; a parameter after a `ptr<T>` one no longer takes its element width; a function of more than 250 statements no longer crashes the compiler; a hexadecimal global with an E among its digits, and a `bool` global given `true` or `false`, are right |
+| Texts (20-10-2026) | a text the compiler makes -- `"$" + n`, a `"..."` given to a `text` parameter -- is lent to a function that only reads it: the literal goes as it is, the joined text is freed when the call returns (`codegen/cg_lend.kr` works out, for every function, which parameters it only reads); `a + b + c` makes one text, not three; a joined text printed or compared is freed |
+| Fixed (20-10-2026) | a comparison of reals used as a value (`return a < b`, `f(x == 1.0)`) gave the left operand, not a bool; a real given to an integer (variable, field, element, parameter) kept its bits and an integer given to a real parameter was lost: now truncated and converted, and `var x = 2.5` is a real; `%` of reals is the remainder, bit operators on a real are an error; every `std_*.kr` compiles imported alone (std_exp, std_stats, std_vec3, std_random and std_ml did not); a function named like a register (`r8`, `eax`, `xmm9`) is refused instead of being called as the register |
 
 Still in assembly, in the order they come: the writers (PE, ELF, Mach-O,
 wasm, KRN, ARM64), the translators (xarm, xwasm) and karm, main.
@@ -40,8 +42,8 @@ same errors, positions and hints, the Kron code generator the same text
 byte for byte, for every target, and the Kron assembler the same bytes
 (the whole compiler included) and the same errors, on every `.kr` file of
 the repository and on thousands of generated files; `-S` of every test is
-the same text. Tests: Windows 105 plus the debug test, Linux 104, ARM64 104,
-web 100, macOS (emulated) 103, 38 refused programs.
+the same text. Tests: Windows 109 plus the debug test, Linux 108, ARM64 108,
+web 104, macOS (emulated) 107, 40 refused programs.
 
 ## 0b. STATE AT 18-10-2026
 

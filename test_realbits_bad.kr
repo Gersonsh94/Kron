@@ -1,0 +1,14 @@
+kron_program
+kron_domain test_realbits_bad;
+kron_imports
+kron_definitions
+
+// A bit operator given a real: refused. It used to give the left side
+// back, as if nothing had been asked.
+
+fn main() -> i64 {
+    var x: f64 = 2.5;
+    var y: f64 = x & 3;
+    print(y);
+    return 0;
+}

@@ -237,9 +237,8 @@ fn cg_global_init_one(d: ptr<Ast>) -> i64 {
             return 0;
         }
     } else {
-        k = v.node_type;
-        if k == AST_INTEGER_LIT || k == AST_FLOAT_LIT || k == AST_BOOL_LIT {
-            return 0;
+        if cg_global_lit_fits(d) != 0 {
+            return 0;                        // in the data already
         }
         if (d.col & 1) != 0 {
             cg_emit_float(v);
@@ -299,32 +298,71 @@ fn cg_emit_for(v: ptr<Ast>, tag: i64) -> i64 {
             return emit_cstr("    pop rax\n");
         }
     }
-    return cg_emit(v);
+    return cg_emit_int(v);                   // a real where an integer goes: truncated
 }
 
-// '==' / '!=' of two texts: text_same, turned around for !=; rax
+// '==' / '!=' of two texts: text_same, turned around for !=; rax. A side
+// that is a joined text is freed once compared.
 fn cg_emit_textcmp(e: ptr<Ast>) -> i64 {
+    var fl: i64 = cg_e_fresh(e.left);
+    var fr: i64 = cg_e_fresh(e.right);
+    if ld_can_free() == 0 {
+        fl = 0;
+        fr = 0;
+    }
     cg_emit(e.left);
     emit_cstr("    push rax\n");
     cg_emit(e.right);
     emit_cstr("    mov rdx, rax\n");
     emit_cstr("    pop rcx\n");
+    if fl != 0 || fr != 0 {
+        emit_cstr("    push rcx\n    push rdx\n");
+    }
     cg_lib_call(cg_tok(CT_TEXT_SAME));
     if e.data == TOK_NEQ {
         emit_cstr("    xor rax, 1\n");
+    }
+    if fl != 0 || fr != 0 {
+        // [left, right] under the result
+        emit_cstr("    pop rdx\n    pop rcx\n    push rax\n    push rcx\n    push rdx\n");
+        if fr != 0 {
+            emit_cstr("    pop rcx\n");
+            cg_lib_call(cg_tok(CT_TEXT_FREE));
+        } else {
+            emit_cstr("    add rsp, 8\n");
+        }
+        if fl != 0 {
+            emit_cstr("    pop rcx\n");
+            cg_lib_call(cg_tok(CT_TEXT_FREE));
+        } else {
+            emit_cstr("    add rsp, 8\n");
+        }
+        emit_cstr("    pop rax\n");
     }
     return 0;
 }
 
 // a '+' that joins texts: a new text with the left side, then the right
 // side added -- text_add, text_add_int or text_add_real as it is a text, an
-// integer or a real; rax
+// integer or a real; rax. In a + b + c the text a + b makes is new already:
+// c is added to it, not to a copy of it. A joined text on the right is
+// freed once added.
 fn cg_emit_concat(e: ptr<Ast>) -> i64 {
+    var fresh: i64 = ld_can_free();
     cg_emit(e.left);
-    emit_cstr("    mov rcx, rax\n");
-    cg_lib_call(cg_tok(CT_TEXT));
+    if cg_e_fresh(e.left) == 0 {
+        emit_cstr("    mov rcx, rax\n");
+        cg_lib_call(cg_tok(CT_TEXT));
+    }
     emit_cstr("    push rax\n");
-    if cg_is_textish(e.right) != 0 {
+    if cg_is_textish(e.right) != 0 && fresh != 0 && cg_e_fresh(e.right) != 0 {
+        cg_emit(e.right);
+        emit_cstr("    mov rdx, rax\n");
+        emit_cstr("    pop rcx\n    push rcx\n    push rdx\n");
+        cg_lib_call(cg_tok(CT_TEXT_ADD));
+        emit_cstr("    pop rcx\n");
+        cg_lib_call(cg_tok(CT_TEXT_FREE));
+    } else if cg_is_textish(e.right) != 0 {
         cg_emit(e.right);
         emit_cstr("    mov rdx, rax\n");
         emit_cstr("    pop rcx\n    push rcx\n");
@@ -350,6 +388,13 @@ fn cg_emit_print_tagged(v: ptr<Ast>, tag: i64) -> i64 {
     var k: i64 = tag & 15;
     if k == 1 {
         cg_emit(v);
+        if cg_e_fresh(v) != 0 && ld_can_free() != 0 {
+            // a joined text, shown and freed
+            emit_cstr("    push rax\n    mov rcx, rax\n");
+            cg_lib_call(cg_tok(CT_SAY));
+            ld_free_top();
+            return 1;
+        }
         emit_cstr("    mov rcx, rax\n");
         cg_lib_call(cg_tok(CT_SAY));
         return 1;

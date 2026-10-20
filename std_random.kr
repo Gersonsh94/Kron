@@ -1,15 +1,21 @@
 kron_program
 kron_domain std_random;
 kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_exp.kr";
+acquire_domain "std_stats.kr";
 kron_definitions
 
 // std_random.kr -- pseudorandom numbers.
 //
-// A linear congruential generator, not the xorshift one would normally
-// reach for: the language has no bitwise and/or/xor yet, only shifts, so
-// the mixing has to come from multiplication. The constants are the ones
-// from Numerical Recipes, and the intermediate product stays well inside a
-// signed 64-bit integer.
+// A linear congruential generator, with the constants of Numerical
+// Recipes; the intermediate product stays well inside a signed 64-bit
+// integer. A seed gives the same sequence on every system, which is what
+// tests and replays need.
+//
+// It brings what it uses: std_math and std_exp for the normal
+// distribution, std_stats for the columns rnd_fill_* and rnd_shuffle work
+// on, so importing std_random alone is enough.
 //
 // Good enough to shuffle data, initialise weights and generate test
 // samples. Not good enough for cryptography, and not claimed to be.

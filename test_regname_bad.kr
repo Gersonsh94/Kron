@@ -1,0 +1,17 @@
+kron_program
+kron_domain test_regname_bad;
+kron_imports
+kron_definitions
+
+// A function named like a register of the processor: refused. It was
+// called as the register -- call r8 jumped to whatever r8 held -- and
+// names like eax or xmm9 stopped the assembler with no reason given.
+
+fn r8(x: i64) -> i64 {
+    return x + 1;
+}
+
+fn main() -> i64 {
+    print(r8(41));
+    return 0;
+}

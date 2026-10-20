@@ -21,6 +21,7 @@ fn cg_run(root: ptr<Ast>) -> i64 {
     lq_done = 0;
     cg_lam_cur = -1;
     cg_in_raw = 0;
+    ld_done = 0;
     // A module has no preamble: it is text for the compiler's own build,
     // which has its own entry, and like bare metal it has no runtime -- no
     // failure traces, no debugger hooks, no system libraries.
@@ -71,6 +72,12 @@ fn cg_run(root: ptr<Ast>) -> i64 {
             } else if k == AST_FUNCTION {
                 if (d.type_info & 0xFFFF) == VIS_EXPORTED {
                     cg_has_exp = 1;
+                }
+                if d.data != 0 && cg_err_msg == 0 && cg_is_regname(d.data) != 0 {
+                    cg_err_tok = d.data;
+                    cg_err_msg = "a function cannot take the name of a register of the processor ";
+                    cg_err_hint = "  hint: give it another name: the assembly the compiler writes calls a function by its name\r\n";
+                    cg_had_error = 1;
                 }
                 if d.data != 0 && fn_count < CG_MAX_FUNCS {
                     cg_qs(&fn_toks, fn_count, d.data);
@@ -420,7 +427,7 @@ fn cg_module_global_bad(d: ptr<Ast>) -> i64 {
     }
     v = d.right;
     if v != 0 {
-        if v.node_type == AST_INTEGER_LIT || v.node_type == AST_FLOAT_LIT {
+        if cg_global_lit_fits(d) != 0 {
             return 0;
         }
         return 1;
@@ -428,6 +435,39 @@ fn cg_module_global_bad(d: ptr<Ast>) -> i64 {
     tag = cg_decl_vtag(d) & 15;
     if tag == 2 || tag == 3 {
         return 1;
+    }
+    return 0;
+}
+
+// 1 when the name is one of the registers kasm reads in an operand -- a
+// function by that name would be called as the register: call r8
+fn cg_is_regname(t: ptr<Tok>) -> i64 {
+    var names: i64 = "rax rcx rdx rbx rsp rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15 eax ecx edx ebx esp ebp esi edi r8d r9d r10d r11d r12d r13d r14d r15d ax cx dx bx sp bp si di r8w r9w r10w r11w r12w r13w r14w r15w al cl dl bl spl bpl sil dil r8b r9b r10b r11b r12b r13b r14b r15b xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7 xmm8 xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15 ";
+    var p: i64 = names;
+    var n: i64 = t.length;
+    var i: i64 = 0;
+    var ok: i64 = 0;
+    if n < 2 || n > 5 {
+        return 0;
+    }
+    while cg_b(p) != 0 {
+        ok = 1;
+        i = 0;
+        while i < n {
+            if cg_b(p + i) != cg_b(t.value + i) {
+                ok = 0;
+                break;
+            }
+            i += 1;
+        }
+        if ok == 1 && cg_b(p + n) == 32 {
+            return 1;
+        }
+        // the next name
+        while cg_b(p) != 32 {
+            p += 1;
+        }
+        p += 1;
     }
     return 0;
 }

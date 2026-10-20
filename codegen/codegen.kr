@@ -15,6 +15,7 @@ acquire_domain "cg_kt.kr";
 acquire_domain "cg_expr.kr";
 acquire_domain "cg_struct.kr";
 acquire_domain "cg_emit.kr";
+acquire_domain "cg_lend.kr";
 kron_definitions
 
 // =========================================================================
@@ -41,11 +42,12 @@ kron_definitions
 //   cg_expr.kr      conditions, leaves, globals, reals
 //   cg_struct.kr    struct fields and values, list<S>
 //   cg_emit.kr      cg_emit: one function per kind of node
+//   cg_lend.kr      texts lent to a call: the parameters a function only reads
 //
 // Like every part, it runs with no runtime underneath: memory through
 // ptr<Ast> and ptr<Tok> fields and peek / poke, its tables through their
-// address. Its output is byte for byte the output of the assembly it
-// replaces.
+// address. When it replaced the assembly its output was that assembly's,
+// byte for byte; what it does better since is in DECISIONS.md.
 // =========================================================================
 
 // the door's helpers, in codegen.asm: the line map of main.asm, a real
@@ -185,6 +187,7 @@ fn cg_tok_init() -> i64 {
     cg_tok_set(CT_STREAM, 0, "stream", 6);
     cg_tok_set(CT_SPTR, 0, "bytes", 5);
     cg_tok_set(CT_SLEN, 0, "len", 3);
+    cg_tok_set(CT_TEXT_FREE, TOK_IDENT, "text_free", 9);
     return 0;
 }
 

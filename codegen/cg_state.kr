@@ -66,6 +66,7 @@ const CT_ENV: i64 = 34;
 const CT_STREAM: i64 = 35;
 const CT_SPTR: i64 = 36;
 const CT_SLEN: i64 = 37;
+const CT_TEXT_FREE: i64 = 38;
 
 // --- the output ---
 var cg_out: i64;
@@ -309,3 +310,31 @@ var kdb_prev: i64;
 var cg_toks: [u8; 1152];
 var cg_numbuf: [u8; 32];
 var cg_lmap_line: i64;                   // the line lmap_lookup gave back
+
+// --- texts lent to a call (cg_lend.kr) ---
+var ld_done: i64;                        // the masks are worked out
+var ld_mask: [i64; 4096];                // per function: its READ parameters,
+var ld_vmask: [i64; 4096];               // and its VIEW ones
+var ld_fixed: [i64; 4096];               // 1: described by the table
+var ld_np: i64;                          // the function being worked on:
+var ld_ptok: [i64; 64];                  // its parameters' names,
+var ld_ptext: i64;                       // which are texts,
+var ld_ntok: [i64; 64];                  // how often the body writes each,
+var ld_nseen: [i64; 64];                 // and the tokens the walk found
+var ld_seen: [i64; 4096];                // (64 per parameter)
+var ld_keep: i64;                        // the parameters found kept
+var ld_ret: i64;                         // and returned
+var ld_ar: i64;                          // ld_analyze's answer: READ,
+var ld_av: i64;                          // VIEW
+var ld_changed: i64;                     // a local carries more than before
+var ld_abort: i64;                       // the walk met what it does not know
+var ld_raw: i64;
+var ld_invar: i64;
+var ld_nloc: i64;                        // the names the body declares
+var ld_loc: [i64; 512];
+var ld_nlv: i64;                         // the declarations the walk saw,
+var ld_lv: [i64; 512];
+var ld_lvtext: [i64; 512];               // and whether each says 'text'
+var ld_lvc: [i64; 512];                  // and what each carries
+var ld_plan_lit: i64;                    // ld_plan's answer
+var ld_plan_fresh: i64;
