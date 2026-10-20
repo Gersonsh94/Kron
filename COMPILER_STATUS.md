@@ -6,10 +6,10 @@ code for Windows, Linux (x86-64 and ARM64) and macOS on Apple silicon, and
 WebAssembly for the web, from one source.
 
 The compiler is written in x86-64 assembly and, part by part, in Kron:
-since 19-10-2026 the lexer, the parser, the semantic pass and the code
-generator are Kron (`lexer/lexer.kr`, `parser/parser.kr`,
-`semantic/semantic.kr`, `codegen/codegen.kr`). It depends on no C
-runtime, and kasm alone builds it.
+since 19-10-2026 the lexer, the parser, the semantic pass, the code
+generator and the assembler are Kron (`lexer/lexer.kr`, `parser/parser.kr`,
+`semantic/semantic.kr`, `codegen/codegen.kr`, `kasm.kr`). It depends
+on no C runtime, and kasm alone builds it.
 
 ---
 
@@ -17,7 +17,7 @@ runtime, and kasm alone builds it.
 
 The compiler moves to Kron, one part per delivery (DECISIONS.md, "The
 compiler moves to Kron, part by part"); from now on all development and
-optimization is in Kron. Parts 1, 2, 3 and 4:
+optimization is in Kron. Parts 1 to 5:
 
 | Area | What |
 |---|---|
@@ -25,20 +25,22 @@ optimization is in Kron. Parts 1, 2, 3 and 4:
 | The parser | `parser/parser.kr` and `parser_state.kr`, `parser_stmt.kr`, `parser_expr.kr`, `parser_titan.kr`, `parser_ng.kr` (6,343 lines) with `include/ast.kr`; `parser/parser.asm` (10,079 lines of assembly before) is now only its door, 179 lines |
 | The semantic pass | `semantic/semantic.kr` (971 lines); `semantic/semantic.asm` (1,676 lines of assembly before) is now only its door, 135 lines |
 | The code generator | `codegen/codegen.kr` and the 14 `cg_*.kr` files it imports (12,236 lines) with `include/defs.kr`; `codegen/codegen.asm` (20,559 lines of assembly before) is now only its door, 267 lines |
+| The assembler | `kasm.kr` and the 5 `ks_*.kr` files it imports (4,232 lines); `kasm.asm` (8,102 lines of assembly before) is now only its door, 228 lines |
 | `--module` | `kronc part.kr --module` writes `part_kr.asm`: the functions alone, no runtime, no entry; its globals carry its name; it refuses `main`, `export` and globals computed at start; `extern "kronc"` names a function of the compiler outside the part |
-| The build | `KRONPARTS.bat` makes the parts in Kron again (lexer, parser, semantic pass, code generator); BUILD.bat and BOOTSTRAP.bat call it with stage1 and stage2, so the fixpoint covers them |
+| The build | `KRONPARTS.bat` makes the parts in Kron again (lexer, parser, semantic pass, code generator, assembler); BUILD.bat and BOOTSTRAP.bat call it with stage1 and stage2, so the fixpoint covers them |
 | kasm | a label defined twice is an error; `resb`/`resq` outside `.bss` are zeros; `1e5` in `dq` |
 | Language | a global array given values keeps them (`var t: [i64; 4] = [1, 2, 3, 4];`), as data; a character Kron does not use, and a text with no closing quote, are errors with their line and column; a parameter after a `ptr<T>` one no longer takes its element width; a function of more than 250 statements no longer crashes the compiler; a hexadecimal global with an E among its digits, and a `bool` global given `true` or `false`, are right |
 
-Still in assembly, in the order they come: kasm and the writers (PE, ELF,
-Mach-O, wasm, ARM64), main.
+Still in assembly, in the order they come: the writers (PE, ELF, Mach-O,
+wasm, KRN, ARM64), the translators (xarm, xwasm) and karm, main.
 
 Checked: the Kron lexer gives the same tokens as the assembly one, the
 Kron parser the same tree, tables and errors, the Kron semantic pass the
-same errors, positions and hints, and the Kron code generator the same
-text byte for byte, for every target, on every `.kr` file of the
-repository and on thousands of generated files; `-S` of every test is the
-same text. Tests: Windows 105 plus the debug test, Linux 104, ARM64 104,
+same errors, positions and hints, the Kron code generator the same text
+byte for byte, for every target, and the Kron assembler the same bytes
+(the whole compiler included) and the same errors, on every `.kr` file of
+the repository and on thousands of generated files; `-S` of every test is
+the same text. Tests: Windows 105 plus the debug test, Linux 104, ARM64 104,
 web 100, macOS (emulated) 103, 38 refused programs.
 
 ## 0b. STATE AT 18-10-2026
@@ -65,7 +67,6 @@ WebGPU (Dawn).
 
 | File | Lines | Role |
 |---|---:|---|
-| `kasm.asm` | 7,712 | Kron's own x86-64 assembler |
 | `karm.asm` | 5,259 | Kron's own ARM64 assembler |
 | `xarm.asm` | 4,762 | x86-64 text -> ARM64 text, with the Linux and the macOS shims |
 | `main.asm` | 4,641 | Driver, CLI, pipeline, ELF writers, the web page |
@@ -78,6 +79,8 @@ WebGPU (Dawn).
 | `semantic/semantic.asm` | 135 | The door to it, by hand; `semantic/semantic_kr.asm` is made by `kronc --module` |
 | `codegen/*.kr` | 12,236 | x86-64 code emission, the runtimes, the register allocator, in Kron (since 19-10-2026; with `include/defs.kr`) |
 | `codegen/codegen.asm` | 267 | The door to it, by hand; `codegen/codegen_kr.asm` is made by `kronc --module` |
+| `kasm.kr`, `ks_*.kr` | 4,232 | Kron's own x86-64 assembler, in Kron (since 19-10-2026) |
+| `kasm.asm` | 228 | The door to it, by hand; `kasm_kr.asm` is made by `kronc --module` |
 | `macho.asm` | 1,235 | Mach-O executable for macOS, with its ad-hoc signature (SHA-256) |
 | `runtime/runtime.asm` | 784 | Runtime support |
 | `pe_writer.asm` | 765 | PE32+ writer |
@@ -86,7 +89,7 @@ WebGPU (Dawn).
 | `include/kron_types.inc` | 664 | Token, AST and type constants |
 | `include/win64_api.inc` | 122 | Win64 API declarations |
 | `include/web_host.inc` | 1,661 | `web/kron_web.js`, carried by the compiler (generated by `web/make_host.kr`) |
-| **Total (assembly)** | **~37,600** | eleven modules and their doors (the parser, the semantic pass and the code generator left it 19-10-2026) |
+| **Total (assembly)** | **~29,700** | ten modules and their doors (the parser, the semantic pass, the code generator and the assembler left it 19-10-2026) |
 
 Beside the compiler: `web/kron_web.js` (941 lines, the host of the web
 target), `web/kron_serve.kr` (a web server in Kron) and 21 standard library
@@ -94,7 +97,7 @@ modules (`std_*.kr`, 11,849 lines).
 
 ## 1b. KASM — THE ASSEMBLER
 
-Kron assembles its own output. `kasm.asm` is a two-pass x86-64 assembler that
+Kron assembles its own output. `kasm.kr` is a two-pass x86-64 assembler that
 consumes the text the code generator produces and emits machine code bytes,
 removing the need for NASM.
 

@@ -1017,6 +1017,29 @@ parts 2 and 3, and for the four parts of the compiler compiled with
 - A file imports 16 others at most: `cg_state.kr` imports the three
   headers, so `codegen.kr` stays within it.
 
+Part 5, the assembler (done 19-10-2026): `kasm.kr` and the files it
+imports -- `ks_state.kr` (every global and constant), `ks_core.kr` (bytes,
+REX, ModRM and SIB, labels, externs and fixups, operands, numbers and
+expressions, the line tokeniser), `ks_pass.kr` (the two passes, the
+directives, the fixups, the flat image), `ks_encode.kr` (the instructions)
+and `ks_enc_mov.kr` (mov and xchg) -- with `kasm.asm` as its door. They
+stay at the top of the repository, where kasm has always been. The 8,102
+lines of assembly are 4,232 of Kron and a door of 228. It writes the same bytes as the assembly kasm: the
+whole compiler, `kron_all.asm`, assembles to the same executable with the
+one and with the other; so does every `.kr` file of the repository, built
+for every target, with `--debug` and with `--lib`; and 2,000 generated
+assembly files give the same bytes, or the same errors with the same
+numbers.
+
+- `parse_float` stays where karm, xwasm and the code generator call it:
+  the door turns the bits the Kron side computes into xmm0, so every part
+  reads a real the same way.
+- A line kasm cannot encode is reported with two numbers, the kinds of its
+  operands. A form that never reads an operand reports what the assembly
+  happened to hold in those registers -- the bytes of the source still to
+  read, and its length -- and so does the Kron one: the reports are the
+  same, number for number.
+
 ## Fixed 19-10-2026
 
 - A global or a constant given a hexadecimal number with an E among its
@@ -1103,6 +1126,10 @@ parts 2 and 3, and for the four parts of the compiler compiled with
 - kasm: a `%define` that stands for a memory operand (`%define SLOT
   [rbp - 24]`, then `mov SLOT, rax`) is not accepted; written out, the
   same line is.
+- The preprocessor skips an `%include` of a file that does not exist,
+  without a word: a part missing from its place builds a compiler that
+  imports its functions from kernel32, and Windows refuses to start it
+  (0xC0000139). Found when the files of part 5 landed elsewhere.
 - Linux threads: a 1 MB stack each, with the fail block at its bottom --
   deep recursion inside a thread would overwrite it before the system
   notices. Waiting for the same thread twice crashes on Linux (its stack is

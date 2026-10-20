@@ -1,0 +1,134 @@
+kron_program
+kron_domain ks_state;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The assembler's state: every global and constant of its files, in one
+// place, before anything that uses them.
+//
+// Byte buffers stay byte buffers (the code, the data, the names, the
+// current line and its tokens); every table holds i64 slots, whatever
+// width the assembly gave it. A table the assembly kept in 32 bits holds
+// the value as those 32 bits (ks_u32): reading it back gives what a
+// 'mov eax, [table + i*4]' gave.
+// =========================================================================
+
+// capacities: a program with the whole standard library, its failure-trace
+// labels and tables, is several times the size the first limits were set for
+const KASM_CODE_MAX: i64 = 8388608;
+const KASM_DATA_MAX: i64 = 4194304;
+const KASM_NAMES_MAX: i64 = 4194304;
+const KASM_LBL_MAX: i64 = 131072;
+const KASM_HASH_SIZE: i64 = 65536;
+const KASM_FIX_MAX: i64 = 524288;
+const KASM_EXT_MAX: i64 = 512;
+const KASM_EQU_MAX: i64 = 8192;
+const KASM_EQU_NAMES: i64 = 262144;
+
+// --- the output ---
+var kasm_code: [u8; 8388608];            // the machine code
+var kasm_code_len: i64;
+var kasm_data: [u8; 4194304];            // .data
+var kasm_data_len: i64;
+var kasm_org: i64;                       // 'org N' of a flat binary
+var kasm_org_set: i64;                   // the source said 'org'
+var p1_data_base: i64;                   // where .data and .bss went in pass one
+var p1_bss_base: i64;
+var kasm_bss_len: i64;                   // .bss: reserved, not written
+
+// --- the labels: names packed, NUL-ended; a hash of 65536 chains ---
+var lbl_names: [u8; 4194304];
+var lbl_names_len: i64;
+var lbl_name_off: [i64; 131072];
+var lbl_addr: [i64; 131072];
+var lbl_section: [i64; 131072];          // 0 text, 1 data, 2 bss
+var lbl_pass: [i64; 131072];             // the pass that last defined it
+var lbl_is_equ: i64;                     // the label being defined is an equ
+var lbl_hash: [i64; 65536];              // index + 1 of the newest in a bucket
+var lbl_chain: [i64; 131072];            // the one before it in its bucket
+var lbl_count: i64;
+
+// --- references resolved after pass two ---
+var fix_at: [i64; 524288];               // where in the code the field sits
+var fix_label: [i64; 524288];
+var fix_addend: [i64; 524288];           // +N of a [rel label+N]
+var fix_kind: [i64; 524288];
+var fix_count: i64;
+var cur_fix_kind: i64;
+var data_base: i64;
+var bss_base: i64;                       // .bss at run time, after .data
+var bss_cursor: i64;                     // offset within .bss during a pass
+
+// --- external symbols, and the call sites that reach them ---
+var ext_names: [u8; 16384];
+var ext_names_len: i64;
+var ext_name_off: [i64; 512];
+var ext_count: i64;
+var extref_at: [i64; 512];
+var extref_sym: [i64; 512];
+var extref_count: i64;
+var ext_map: [i64; 512];                 // old index -> new, or -1 (defined here)
+var ext_used: [i64; 512];                // some call site reaches it
+var prn_new: i64;
+
+// --- the current line and its tokens ---
+var line_buf: [u8; 1024];
+var lbl_rest: [u8; 512];                 // what follows 'label:' on the line
+var tok_a: [u8; 64];                     // the mnemonic
+var tok_b: [u8; 512];                    // the first operand
+var tok_c: [u8; 512];                    // the second operand
+
+var cur_section: i64;                    // 0 text, 1 data, 2 bss
+var kasm_pass: i64;                      // 1 or 2
+var kasm_error: i64;
+var op_size: i64;                        // a 'byte'/'word'/'dword'/'qword' prefix
+var db_quote: i64;                       // the quote that opened a run of text
+var db_phase: i64;                       // 0 walking tok_b, 1 tok_c
+var dst_base: i64;                       // base register of a [base+disp] destination
+var src_base: i64;                       // the same, of the source
+var rex8_force: i64;                     // an 8-bit operand needs a REX byte
+var sse_pfx: i64;                        // F2 for the double forms, F3 single
+var dl_size: i64;                        // width of the current dw/dd/dq list
+var expr_ptr: i64;                       // where the expression being read is
+var last_label: [u8; 64];                // the label on the current line
+var cur_global: [u8; 64];                // innermost non-local label
+var qual_buf: [u8; 160];                 // 'global' + '.local'
+var qual_len: i64;                       // what ks_qualify_label measured
+var sib_disp: i64;                       // displacement of a [base+index*scale+N]
+var equ_names: [u8; 262144];             // the equ constants, packed
+var equ_names_len: i64;
+var equ_name_off: [i64; 8192];
+var equ_value: [i64; 8192];
+var equ_count: i64;
+var dst_addend: i64;                     // the first operand's addend, kept
+var kasm_line: i64;                      // the source line being assembled
+var kasm_err_line: i64;                  // where the first error was
+var err_lines: [i64; 64];                // every line it could not encode
+var err_dst: [i64; 64];                  // the kind of its destination
+var err_src: [i64; 64];                  // and of its source
+var err_count: i64;
+var err_mnem: [u8; 4096];                // 64 bytes of the line per error
+var cur_addend: i64;                     // the addend of the pending fixup
+
+// what parse_operand gives besides its kind: the value (rdx) and the
+// extra (r8: the base of a [base+disp])
+var po_val: i64;
+var po_r8: i64;
+var po_ecx: i64;                         // ks_match_reg_prefix: chars matched
+var sl_n: i64;                           // ks_copy_operand: bytes copied
+
+// The registers encode_line reports when it cannot encode a line: the
+// kind of the destination and of the source as the line left them -- or,
+// on a path that never set them, what run_pass had there: the bytes of
+// the source still to read, and the length of the whole.
+var en_r12: i64;
+var en_r13: i64;
+var en_r14: i64;
+var en_r15: i64;
+var rp_left: i64;                        // run_pass: bytes still to read
+var rp_len: i64;                         // the length of the source
+var rp_src: i64;                         // the source
+
+// parse_float: the value's bits go through here
+var pf_val: f64;

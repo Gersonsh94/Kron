@@ -1,0 +1,571 @@
+kron_program
+kron_domain ks_pass;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE PASSES, THE DIRECTIVES, THE FIXUPS, THE IMAGE
+// =========================================================================
+
+fn ks_init() -> i64 {
+    var i: i64 = 0;
+    kasm_org = 0;
+    kasm_org_set = 0;
+    kasm_code_len = 0;
+    kasm_data_len = 0;
+    kasm_bss_len = 0;
+    lbl_count = 0;
+    while i < KASM_HASH_SIZE {
+        ks_qs(&lbl_hash, i, 0);
+        i += 1;
+    }
+    lbl_names_len = 1;                   // offset 0: no name
+    ks_bs(&lbl_names, 0);
+    fix_count = 0;
+    cur_section = 0;
+    kasm_error = 0;
+    kasm_line = 0;
+    kasm_err_line = 0;
+    err_count = 0;
+    equ_count = 0;
+    equ_names_len = 0;
+    ks_bs(&cur_global, 0);
+    ext_count = 0;
+    ext_names_len = 1;
+    ks_bs(&ext_names, 0);
+    extref_count = 0;
+    kasm_bss_len = 0;
+    return 0;
+}
+
+// The data after the code, at the 16-byte aligned base the RIP fixups were
+// resolved against -> the image's length. A flat binary with 'org' and no
+// .data ends where its code ends: a boot sector is 512 bytes, not 512
+// rounded up.
+fn ks_build_image() -> i64 {
+    var n: i64 = kasm_code_len;
+    var b: i64 = data_base;
+    var i: i64 = 0;
+    while ks_ult(n, b) == 1 {
+        ks_bs(&kasm_code + n, 0);
+        n += 1;
+    }
+    while i != kasm_data_len {
+        ks_bs(&kasm_code + n + i, ks_b(&kasm_data + i));
+        i += 1;
+    }
+    if kasm_org_set != 0 && kasm_data_len == 0 {
+        return kasm_code_len;
+    }
+    return b + kasm_data_len;
+}
+
+// Pass one records where every label lands, pass two emits the bytes with
+// every reference resolved -> 1 assembled, 0 an error
+fn ks_assemble(src: i64, len: i64) -> i64 {
+    rp_src = src;
+    rp_len = len;
+    kasm_pass = 1;
+    bss_cursor = 0;
+    ks_run_pass();
+    p1_data_base = (kasm_code_len + 15) & -16;
+    p1_bss_base = (p1_data_base + kasm_data_len + 15) & -16;
+    kasm_pass = 2;
+    kasm_code_len = 0;
+    kasm_data_len = 0;
+    bss_cursor = 0;
+    cur_section = 0;
+    fix_count = 0;
+    // pass one took every forward reference for an extern: those guesses
+    // must not survive
+    extref_count = 0;
+    // .bss is measured on both passes
+    kasm_bss_len = 0;
+    ks_run_pass();
+    // the data after the code, the .bss after the data, 16-aligned
+    data_base = (kasm_code_len + 15) & -16;
+    bss_base = (data_base + kasm_data_len + 15) & -16;
+    ks_apply_fixups();
+    ks_prune_externs();
+    if kasm_error != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// the source, line by line
+fn ks_run_pass() -> i64 {
+    var s: i64 = rp_src;
+    var c: i64 = 0;
+    var n: i64 = 0;
+    var p: i64 = 0;
+    var k: i64 = 0;
+    kasm_line = 0;
+    rp_left = rp_len;
+    while rp_left != 0 {
+        kasm_line += 1;
+        n = 0;
+        while rp_left != 0 {
+            c = ks_b(s);
+            s += 1;
+            rp_left -= 1;
+            if c == 10 {
+                break;
+            }
+            if c != 13 && n < 510 {
+                ks_bs(&line_buf + n, c);
+                n += 1;
+            }
+        }
+        ks_bs(&line_buf + n, 0);
+        // a preprocessor line (%line, from nasm -E) is skipped; a directive
+        // in brackets ([extern X]) loses them
+        p = ks_skip_blanks(&line_buf);
+        c = ks_b(p);
+        if c != 37 {
+            if c == 91 {
+                ks_bs(p, 32);
+                while ks_b(p) != 0 {
+                    if ks_b(p) == 93 {
+                        ks_bs(p, 0);
+                        break;
+                    }
+                    p += 1;
+                }
+            }
+            k = ks_split_line(&line_buf);
+            if k != 0 {
+                ks_line_label(k);
+            } else {
+                ks_line_body();
+            }
+        }
+    }
+    return 0;
+}
+
+// what follows the label, or a line of its own
+fn ks_line_body() -> i64 {
+    if ks_b(&tok_a) == 0 {
+        return 0;
+    }
+    if ks_directive() != 0 {
+        return 0;
+    }
+    return ks_encode_line();
+}
+
+// A label is registered in both passes: pass one seeds the table for
+// forward references, pass two refreshes each address against the final
+// layout. One without a leading dot opens the scope the '.name' ones after
+// it belong to.
+fn ks_line_label(k: i64) -> i64 {
+    var p: i64 = 0;
+    var n: i64 = 0;
+    ks_copy_tok(&tok_a, &last_label);    // kept for a possible 'equ'
+    if ks_b(&tok_a) != 46 {
+        ks_copy_tok(&tok_a, &cur_global);
+    }
+    p = ks_qualify_label(&tok_a, ks_strlen(&tok_a));
+    n = qual_len;
+    // 'NAME equ value': a constant, not a place
+    lbl_is_equ = 0;
+    if k == 2 {
+        lbl_is_equ = ks_is_equ_word(ks_skip_blanks(&lbl_rest));
+    }
+    ks_add_label(p, n);
+    if k != 2 {
+        return 0;
+    }
+    // a data directive keeps the two-token shift; anything else is an
+    // instruction, tokenised as its own line
+    if ks_is_data_dir(&lbl_rest) == 0 {
+        ks_split_line(&lbl_rest);
+        return ks_line_body();
+    }
+    ks_copy_tok(&tok_b, &tok_a);
+    ks_copy_tok(&tok_c, &tok_b);
+    ks_bs(&tok_c, 0);
+    return ks_line_body();
+}
+
+// 'equ' (any case) and a blank or a tab
+fn ks_is_equ_word(p: i64) -> i64 {
+    var c: i64 = 0;
+    if (ks_b(p) | 32) != 101 || (ks_b(p + 1) | 32) != 113 || (ks_b(p + 2) | 32) != 117 {
+        return 0;
+    }
+    c = ks_b(p + 3);
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// directives -> 1 when the line was one, and is handled
+// -------------------------------------------------------------------------
+
+fn ks_directive() -> i64 {
+    if ks_is("section") == 1 { return ks_d_section(); }
+    if ks_is("bits") == 1 { return 1; }
+    if ks_is("global") == 1 { return 1; }
+    if ks_is("extern") == 1 { return ks_d_extern(); }
+    if ks_is("default") == 1 { return 1; }
+    if ks_is("db") == 1 { return ks_d_db(); }
+    if ks_is("dq") == 1 { return ks_d_dq(); }
+    if ks_is("resb") == 1 { return ks_d_res(ks_parse_expr(&tok_b)); }
+    if ks_is("resq") == 1 { return ks_d_res(ks_parse_expr(&tok_b) << 3); }
+    if ks_is("resw") == 1 { return ks_d_res(ks_parse_expr(&tok_b) << 1); }
+    if ks_is("resd") == 1 { return ks_d_res(ks_parse_expr(&tok_b) << 2); }
+    if ks_is("dw") == 1 {
+        dl_size = 2;
+        return ks_d_list();
+    }
+    if ks_is("dd") == 1 {
+        dl_size = 4;
+        return ks_d_list();
+    }
+    if ks_is("equ") == 1 {
+        // the name was shifted away: the copy kept when the label was seen
+        ks_add_equ(&last_label, ks_strlen(&last_label), ks_parse_expr(&tok_b));
+        return 1;
+    }
+    if ks_is("times") == 1 { return ks_d_times(); }
+    if ks_is("org") == 1 {
+        // where a flat binary is loaded: a .text label used as a value
+        // counts from there
+        kasm_org = ks_parse_expr(&tok_b);
+        kasm_org_set = 1;
+        return 1;
+    }
+    if ks_is("align") == 1 { return ks_d_align(); }
+    return 0;
+}
+
+fn ks_d_section() -> i64 {
+    if ks_str_eq(&tok_b, ".data") == 1 {
+        cur_section = 1;
+    } else if ks_str_eq(&tok_b, ".bss") == 1 {
+        cur_section = 2;
+    } else {
+        cur_section = 0;
+    }
+    return 1;
+}
+
+// up to the next multiple of N: nop in code, 0 in data
+fn ks_d_align() -> i64 {
+    var a: i64 = ks_parse_expr(&tok_b);
+    var n: i64 = 0;
+    if a == 0 {
+        return 1;
+    }
+    while 1 == 1 {
+        n = kasm_code_len;
+        if cur_section == 1 {
+            n = kasm_data_len;
+        }
+        if ks_urem(n, a) == 0 {
+            return 1;
+        }
+        if cur_section == 1 {
+            ks_emit_b(0);
+        } else {
+            ks_emit_b(0x90);
+        }
+    }
+    return 1;
+}
+
+// 'times N db V' (or dq): tok_b holds "N db V"
+fn ks_d_times() -> i64 {
+    var n: i64 = ks_parse_expr(&tok_b);
+    var s: i64 = ks_skip_blanks(expr_ptr);
+    var w: i64 = 1;
+    var v: i64 = 0;
+    if ks_b(s) == 100 {
+        if ks_b(s + 1) == 113 {
+            w = 8;
+        }
+        s = ks_skip_blanks(s + 2);
+    }
+    v = ks_parse_number(s);
+    while n != 0 {
+        if w == 8 {
+            ks_emit_q(v);
+        } else {
+            ks_emit_b(v);
+        }
+        n -= 1;
+    }
+    return 1;
+}
+
+// 'extern A, B, C': A in tok_b, "B, C" in tok_c; collected once
+fn ks_d_extern() -> i64 {
+    var s: i64 = 0;
+    var e: i64 = 0;
+    var c: i64 = 0;
+    if kasm_pass != 1 {
+        return 1;
+    }
+    ks_add_extern(&tok_b, ks_strlen(&tok_b));
+    s = &tok_c;
+    while 1 == 1 {
+        s = ks_skip_blanks(s);
+        c = ks_b(s);
+        if c == 0 {
+            return 1;
+        }
+        if c == 44 {
+            s += 1;
+        } else {
+            e = s;
+            c = ks_b(e);
+            while c != 0 && c != 44 && c != 32 && c != 9 {
+                e += 1;
+                c = ks_b(e);
+            }
+            ks_add_extern(s, e - s);
+            s = e;
+        }
+    }
+    return 1;
+}
+
+// resb / resw / resd / resq: room in .bss; anywhere else that many zeros
+fn ks_d_res(n: i64) -> i64 {
+    var a: i64 = 0;
+    if cur_section == 2 {
+        a = ks_bss_round8(n);
+        kasm_bss_len = kasm_bss_len + a;
+        bss_cursor = bss_cursor + a;
+        return 1;
+    }
+    while n != 0 {
+        ks_emit_b(0);
+        n -= 1;
+    }
+    return 1;
+}
+
+// db "text", 0, 'x', n1, n2: the values of tok_b and then of tok_c; with
+// 'org', values may be expressions of labels and constants
+fn ks_d_db() -> i64 {
+    var s: i64 = &tok_b;
+    var c: i64 = 0;
+    var v: i64 = 0;
+    db_phase = 0;
+    db_quote = 34;
+    c = ks_b(s);
+    if c == 34 || c == 39 {
+        db_quote = c;
+        s += 1;
+        while 1 == 1 {
+            c = ks_b(s);
+            if c == 0 {
+                return 1;
+            }
+            if c == db_quote {
+                break;
+            }
+            ks_emit_b(c);
+            s += 1;
+        }
+        s += 1;
+    }
+    while 1 == 1 {
+        c = ks_b(s);
+        if c == 0 {
+            if db_phase != 0 {
+                return 1;
+            }
+            db_phase = 1;
+            s = &tok_c;
+        } else if c == 44 || c == 32 || c == 9 {
+            s += 1;
+        } else if c == 34 || c == 39 {
+            db_quote = c;
+            s += 1;
+            while 1 == 1 {
+                c = ks_b(s);
+                if c == 0 || c == db_quote {
+                    break;
+                }
+                ks_emit_b(c);
+                s += 1;
+            }
+            if c == 0 {
+                // the end of the buffer inside the quotes
+                if db_phase != 0 {
+                    return 1;
+                }
+                db_phase = 1;
+                s = &tok_c;
+            } else {
+                s += 1;
+            }
+        } else if kasm_org_set != 0 {
+            v = ks_parse_expr(s);
+            if s == expr_ptr {
+                // nothing an expression starts with
+                kasm_error = 1;
+                if db_phase != 0 {
+                    return 1;
+                }
+                db_phase = 1;
+                s = &tok_c;
+            } else {
+                ks_emit_b(v);
+                s = expr_ptr;
+            }
+        } else {
+            if c < 48 || c > 57 {
+                if db_phase != 0 {
+                    return 1;
+                }
+                db_phase = 1;
+                s = &tok_c;
+            } else {
+                ks_emit_b(ks_parse_number(s));
+                // past the whole number: 0x51 is four characters
+                c = ks_b(s);
+                while c != 0 && c != 44 && c != 32 && c != 9 {
+                    s += 1;
+                    c = ks_b(s);
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+// dq: a '.' in a token that starts like a number makes it a real; 'dq
+// .label' and 'dq name.local' are addresses
+fn ks_d_dq() -> i64 {
+    var s: i64 = &tok_b;
+    var c: i64 = ks_b(s);
+    if c == 45 || c == 43 || (c >= 48 && c <= 57) {
+        while c != 0 && c != 44 {
+            if c == 46 {
+                ks_emit_q(ks_parse_float(&tok_b));
+                return 1;
+            }
+            s += 1;
+            c = ks_b(s);
+        }
+    }
+    dl_size = 8;
+    return ks_d_list();
+}
+
+// dw / dd / dq, one or many values: an expression each, or a label -- an
+// absolute address the linker fills in. With 'org' a label is a value too.
+fn ks_d_list() -> i64 {
+    var s: i64 = &tok_b;
+    var c: i64 = 0;
+    var n: i64 = 0;
+    var v: i64 = 0;
+    db_phase = 0;
+    while 1 == 1 {
+        c = ks_b(s);
+        if c == 0 {
+            if db_phase != 0 {
+                return 1;
+            }
+            db_phase = 1;
+            s = &tok_c;
+        } else if c == 44 || c == 32 || c == 9 {
+            s += 1;
+        } else if kasm_org_set == 0 && ks_dl_is_label(s) == 1 {
+            n = ks_dl_tok_len(s);
+            cur_addend = 0;
+            ks_add_fixup(ks_find_label(ks_qualify_label(s, n), qual_len), 6);
+            s = s + n;
+            ks_dl_emit(0);
+        } else {
+            v = ks_parse_expr(s);
+            s = expr_ptr;
+            ks_dl_emit(v);
+        }
+    }
+    return 1;
+}
+
+// up to a comma, a blank or the end
+fn ks_dl_tok_len(p: i64) -> i64 {
+    var n: i64 = 0;
+    var c: i64 = ks_b(p);
+    while c != 0 && c != 44 && c != 32 && c != 9 {
+        n += 1;
+        c = ks_b(p + n);
+    }
+    return n;
+}
+
+fn ks_dl_emit(v: i64) -> i64 {
+    if dl_size == 2 {
+        return ks_emit_w(v);
+    }
+    if dl_size == 4 {
+        return ks_emit_d(v);
+    }
+    return ks_emit_q(v);
+}
+
+// the token names a known label; an equ constant is a value
+fn ks_dl_is_label(p: i64) -> i64 {
+    var c: i64 = ks_b(p);
+    var n: i64 = 0;
+    if c >= 48 && c <= 57 {
+        return 0;
+    }
+    n = ks_dl_tok_len(p);
+    if ks_find_equ(p, n) != -1 {
+        return 0;
+    }
+    if ks_find_label(ks_qualify_label(p, n), qual_len) == -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// every rel32 field of pass two, patched with the distance from the end of
+// the field to its target; the absolute data slots (6) are the linker's
+fn ks_apply_fixups() -> i64 {
+    var i: i64 = 0;
+    var at: i64 = 0;
+    var l: i64 = 0;
+    var t: i64 = 0;
+    var sec: i64 = 0;
+    while ks_ult(i, fix_count) == 1 {
+        at = ks_q(&fix_at, i);
+        l = ks_q(&fix_label, i);
+        if l != 0xFFFFFFFF {
+            cur_fix_kind = ks_q(&fix_kind, i);
+            if cur_fix_kind != 6 {
+                t = ks_q(&lbl_addr, l);
+                sec = ks_q(&lbl_section, l);
+                if sec == 1 {
+                    t = t + data_base;
+                } else if sec == 2 {
+                    t = t + bss_base;
+                }
+                t = t + ks_q(&fix_addend, i);
+                ks_put_d(&kasm_code + at, t - (at + 4));
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// four bytes, little-endian
+fn ks_put_d(p: i64, v: i64) -> i64 {
+    ks_bs(p, v);
+    ks_bs(p + 1, v >>> 8);
+    ks_bs(p + 2, v >>> 16);
+    ks_bs(p + 3, v >>> 24);
+    return 0;
+}

@@ -1,0 +1,1597 @@
+kron_program
+kron_domain ks_core;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// BYTES, LABELS, OPERANDS, EXPRESSIONS AND LINES
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// emission: in pass one nothing is written, only the position advances,
+// so every label gets the address it will really have
+// -------------------------------------------------------------------------
+
+fn ks_emit_b(v: i64) -> i64 {
+    var n: i64 = 0;
+    if kasm_pass == 1 {
+        if cur_section == 1 {
+            kasm_data_len += 1;
+        } else {
+            kasm_code_len += 1;
+        }
+        return 0;
+    }
+    if cur_section == 1 {
+        n = kasm_data_len;
+        if ks_ult(n, KASM_DATA_MAX) == 0 {
+            kasm_error = 1;
+            return 0;
+        }
+        ks_bs(&kasm_data + n, v);
+        kasm_data_len += 1;
+        return 0;
+    }
+    n = kasm_code_len;
+    if ks_ult(n, KASM_CODE_MAX) == 0 {
+        kasm_error = 1;
+        return 0;
+    }
+    ks_bs(&kasm_code + n, v);
+    kasm_code_len += 1;
+    return 0;
+}
+
+fn ks_emit_w(v: i64) -> i64 {
+    ks_emit_b(v);
+    return ks_emit_b(v >>> 8);
+}
+
+fn ks_emit_d(v: i64) -> i64 {
+    ks_emit_b(v);
+    ks_emit_b(v >>> 8);
+    ks_emit_b(v >>> 16);
+    return ks_emit_b(v >>> 24);
+}
+
+fn ks_emit_q(v: i64) -> i64 {
+    ks_emit_d(v);
+    return ks_emit_d(v >>> 32);
+}
+
+// .bss sizes go up to a multiple of 8: 'flag resb 1' must not leave the
+// next variable on an odd address
+fn ks_bss_round8(v: i64) -> i64 {
+    return (v + 7) & -8;
+}
+
+// the current offset in the active section
+fn ks_here() -> i64 {
+    if cur_section == 1 {
+        return kasm_data_len;
+    }
+    if cur_section == 2 {
+        return bss_cursor;
+    }
+    return kasm_code_len;
+}
+
+// N for cr0..cr8, else -1
+fn ks_crnum(p: i64) -> i64 {
+    var d: i64 = 0;
+    if ks_b(p) != 99 || ks_b(p + 1) != 114 || ks_b(p + 3) != 0 {
+        return -1;
+    }
+    d = ks_u32(ks_b(p + 2) - 48);
+    if ks_ult(8, d) == 1 {
+        return -1;
+    }
+    return d;
+}
+
+// -------------------------------------------------------------------------
+// encoding helpers
+// -------------------------------------------------------------------------
+
+// a REX prefix when one is needed: W, R from the reg field, B from rm. An
+// 8-bit operand may be spl/bpl/sil/dil, reachable only with a REX byte.
+fn ks_emit_rex(w: i64, reg: i64, rm: i64) -> i64 {
+    var b: i64 = 0;
+    if (w & 255) != 0 {
+        b = b | 8;
+    }
+    if (reg & 8) != 0 {
+        b = b | 4;
+    }
+    if (rm & 8) != 0 {
+        b = b | 1;
+    }
+    if b == 0 && rex8_force == 0 {
+        return 0;
+    }
+    return ks_emit_b(64 | b);
+}
+
+// the REX byte, no W, when the ModRM reg or rm is r8..r15 / xmm8..xmm15:
+// after the F2 / F3 / 66 prefix, before 0F
+fn ks_sse_rex(reg: i64, rm: i64) -> i64 {
+    return ks_emit_rex(0, reg, rm);
+}
+
+fn ks_emit_modrm(md: i64, reg: i64, rm: i64) -> i64 {
+    return ks_emit_b(((md << 6) | ((reg & 7) << 3) | (rm & 7)) & 255);
+}
+
+// an error line of the table: where, the two kinds, and the text
+fn ks_err_record(dst: i64, src: i64, ops: i64) -> i64 {
+    var c: i64 = err_count;
+    kasm_error = 1;
+    if kasm_err_line == 0 {
+        kasm_err_line = kasm_line;
+    }
+    if ks_ult(c, 64) == 0 {
+        return 0;
+    }
+    ks_qs(&err_lines, c, ks_u32(kasm_line));
+    ks_qs(&err_dst, c, ks_u32(dst));
+    ks_qs(&err_src, c, ks_u32(src));
+    ks_record_err_mnem(c);
+    if ops != 0 {
+        ks_record_err_ops(c);
+    }
+    err_count = c + 1;
+    return 0;
+}
+
+// a reference, in pass two, to a label defined nowhere and no extern
+// (dst 99), not a jump to wherever a zero displacement points
+fn ks_unknown_label() -> i64 {
+    if kasm_pass != 2 {
+        return 0;
+    }
+    return ks_err_record(99, 0, 1);
+}
+
+// a label defined a second time (dst 98), reported in pass one
+fn ks_dup_label() -> i64 {
+    if kasm_pass != 1 {
+        return 0;
+    }
+    return ks_err_record(98, 0, 0);
+}
+
+// the slot copies tok_a, 15 characters at most: a report names the
+// instruction itself
+fn ks_record_err_mnem(c: i64) -> i64 {
+    var d: i64 = &err_mnem + c * 64;
+    var i: i64 = 0;
+    var ch: i64 = 0;
+    while i < 15 {
+        ch = ks_b(&tok_a + i);
+        if ch == 0 {
+            break;
+        }
+        ks_bs(d + i, ch);
+        i += 1;
+    }
+    ks_bs(d + i, 0);
+    return 0;
+}
+
+// then the operands, as far as 63 bytes go -- the name of a label defined
+// nowhere
+fn ks_record_err_ops(c: i64) -> i64 {
+    var d: i64 = &err_mnem + c * 64;
+    var n: i64 = 0;
+    var s: i64 = &tok_b;
+    var in_c: i64 = 0;
+    var ch: i64 = 0;
+    while ks_b(d + n) != 0 {
+        n += 1;
+    }
+    ks_bs(d + n, 32);
+    n += 1;
+    while n < 62 {
+        ch = ks_b(s);
+        if ch != 0 {
+            ks_bs(d + n, ch);
+            s += 1;
+            n += 1;
+        } else {
+            // the end of tok_b: tok_c after a comma, when there is one
+            if in_c != 0 || ks_b(&tok_c) == 0 {
+                break;
+            }
+            ks_bs(d + n, 44);
+            n += 1;
+            s = &tok_c;
+            in_c = 1;
+        }
+    }
+    ks_bs(d + n, 0);
+    return 0;
+}
+
+// RIP-relative: mod 00, rm 101, a disp32 resolved once the layout is known
+fn ks_emit_rip(reg: i64, lbl: i64) -> i64 {
+    if ks_u32(lbl) == 0xFFFFFFFF {
+        ks_unknown_label();
+    }
+    ks_emit_modrm(0, reg, 5);
+    ks_add_fixup(lbl, 3);                // 3: RIP-relative
+    return ks_emit_d(0);
+}
+
+// ModRM (mod 00, rm 100) and the SIB byte alone, the opcode and its
+// prefixes already out (movsd: F2 0F 11). An explicit displacement forces
+// mod 10.
+fn ks_emit_sib_modrm(reg: i64, v: i64) -> i64 {
+    var base: i64 = v & 255;
+    var idx: i64 = (v >>> 8) & 255;
+    var sc: i64 = (v >>> 16) & 3;
+    var md: i64 = 0;
+    if ks_u32(sib_disp) != 0 {
+        md = 2;
+    } else if (base & 7) == 5 {
+        md = 1;
+    }
+    ks_emit_modrm(md, reg, 4);
+    ks_emit_b(((sc << 6) | ((idx & 7) << 3) | (base & 7)) & 255);
+    if md == 2 {
+        return ks_emit_d(sib_disp);
+    }
+    if md != 0 {
+        return ks_emit_b(0);
+    }
+    return 0;
+}
+
+// ModRM mod 10 and a disp32 of -amount, with the SIB byte rsp/r12 always
+// need as a base
+fn ks_emit_mem_base_disp(reg: i64, base: i64, amount: i64) -> i64 {
+    var d: i64 = ks_u32(0 - amount);
+    ks_emit_modrm(2, reg, base);
+    if (base & 7) == 4 {
+        ks_emit_b(0x24);
+    }
+    return ks_emit_d(d);
+}
+
+// REX(W from w) <opcode> ModRM(rm 100) SIB for [base + index*scale];
+// rbp/r13 as a base take mod 01 and a disp8 of 0
+fn ks_emit_sib_mem(op: i64, reg: i64, v: i64, w: i64) -> i64 {
+    var base: i64 = v & 255;
+    var idx: i64 = (v >>> 8) & 255;
+    var sc: i64 = (v >>> 16) & 3;
+    var rex: i64 = 64;
+    var md: i64 = 0;
+    if (w & 1) != 0 {
+        rex = rex | 8;
+    }
+    if (reg & 8) != 0 {
+        rex = rex | 4;
+    }
+    if (idx & 8) != 0 {
+        rex = rex | 2;
+    }
+    if (base & 8) != 0 {
+        rex = rex | 1;
+    }
+    if rex != 64 || rex8_force != 0 {
+        ks_emit_b(rex);
+    }
+    ks_emit_b(op);
+    if ks_u32(sib_disp) != 0 {
+        md = 2;
+    } else if (base & 7) == 5 {
+        md = 1;
+    }
+    ks_emit_modrm(md, reg, 4);
+    ks_emit_b(((sc << 6) | ((idx & 7) << 3) | (base & 7)) & 255);
+    if md == 2 {
+        return ks_emit_d(sib_disp);
+    }
+    if md != 0 {
+        return ks_emit_b(0);
+    }
+    return 0;
+}
+
+// [base]: rsp/r12 need a SIB byte, rbp/r13 a disp8 of 0 (mod 00 there is
+// RIP-relative)
+fn ks_emit_mem_reg(reg: i64, base: i64) -> i64 {
+    var b: i64 = base & 7;
+    if b == 4 {
+        ks_emit_modrm(0, reg, base);
+        return ks_emit_b(0x24);
+    }
+    if b == 5 {
+        ks_emit_modrm(1, reg, base);
+        return ks_emit_b(0);
+    }
+    return ks_emit_modrm(0, reg, base);
+}
+
+// [rbp - disp], a disp8 when the offset fits in a signed byte
+fn ks_emit_mem_rbp(reg: i64, disp: i64) -> i64 {
+    if ks_ult(128, ks_u32(disp)) == 1 {
+        ks_emit_modrm(2, reg, 5);
+        return ks_emit_d(0 - disp);
+    }
+    ks_emit_modrm(1, reg, 5);
+    return ks_emit_b(0 - disp);
+}
+
+// -------------------------------------------------------------------------
+// the labels and the external symbols
+// -------------------------------------------------------------------------
+
+// an extern, once per name: every module redeclares the same ones
+fn ks_add_extern(p: i64, n: i64) -> i64 {
+    var c: i64 = ext_count;
+    var d: i64 = 0;
+    var i: i64 = 0;
+    if ks_find_extern(p, n) != -1 {
+        return 0;
+    }
+    if ks_ult(c, 512) == 0 {
+        return 0;
+    }
+    ks_qs(&ext_name_off, c, ks_u32(ext_names_len));
+    d = &ext_names + ext_names_len;
+    while i < n {
+        ks_bs(d + i, ks_b(p + i));
+        i += 1;
+    }
+    ks_bs(d + n, 0);
+    ext_names_len = ext_names_len + n + 1;
+    ext_count = c + 1;
+    return 0;
+}
+
+fn ks_ext_name(i: i64) -> i64 {
+    return &ext_names + ks_q(&ext_name_off, i);
+}
+
+// once both passes are done: an extern another module defines is no
+// import, nor one nobody calls; the rest are packed and the call sites
+// renumbered
+fn ks_prune_externs() -> i64 {
+    var i: i64 = 0;
+    var p: i64 = 0;
+    var at: i64 = 0;
+    var s: i64 = 0;
+    var m: i64 = 0;
+    var c: i64 = 0;
+    while i < 512 {
+        ks_qs(&ext_used, i, 0);
+        i += 1;
+    }
+    i = 0;
+    while ks_ult(i, extref_count) == 1 {
+        ks_qs(&ext_used, ks_q(&extref_sym, i), 1);
+        i += 1;
+    }
+    prn_new = 0;
+    i = 0;
+    while ks_ult(i, ext_count) == 1 {
+        p = ks_ext_name(i);
+        if ks_find_label(p, ks_strlen(p)) != -1 || ks_q(&ext_used, i) == 0 {
+            ks_qs(&ext_map, i, 0xFFFFFFFF);
+        } else {
+            ks_qs(&ext_map, i, ks_u32(prn_new));
+            prn_new += 1;
+        }
+        i += 1;
+    }
+    // the names packed in place: one never moves up
+    prn_new = 0;
+    at = 1;
+    i = 0;
+    while ks_ult(i, ext_count) == 1 {
+        if ks_q(&ext_map, i) != 0xFFFFFFFF {
+            s = ks_ext_name(i);
+            ks_qs(&ext_name_off, prn_new, ks_u32(at));
+            prn_new += 1;
+            c = 1;
+            while c != 0 {
+                c = ks_b(s);
+                ks_bs(&ext_names + at, c);
+                s += 1;
+                at += 1;
+            }
+        }
+        i += 1;
+    }
+    ext_count = prn_new;
+    ext_names_len = at;
+    prn_new = 0;
+    i = 0;
+    while ks_ult(i, extref_count) == 1 {
+        m = ks_q(&ext_map, ks_q(&extref_sym, i));
+        if m != 0xFFFFFFFF {
+            ks_qs(&extref_sym, prn_new, m);
+            ks_qs(&extref_at, prn_new, ks_q(&extref_at, i));
+            prn_new += 1;
+        }
+        i += 1;
+    }
+    extref_count = prn_new;
+    return 0;
+}
+
+fn ks_find_extern(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var s: i64 = 0;
+    var j: i64 = 0;
+    var same: i64 = 0;
+    while ks_ult(i, ext_count) == 1 {
+        s = ks_ext_name(i);
+        j = 0;
+        same = 1;
+        while j < n {
+            if ks_b(s + j) != ks_b(p + j) {
+                same = 0;
+                break;
+            }
+            j += 1;
+        }
+        if same == 1 && ks_b(s + n) == 0 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the dword about to be emitted is a call into an external symbol
+fn ks_add_extref(sym: i64) -> i64 {
+    var c: i64 = extref_count;
+    if ks_ult(c, 512) == 0 {
+        return 0;
+    }
+    ks_qs(&extref_at, c, ks_u32(ks_here()));
+    ks_qs(&extref_sym, c, ks_u32(sym));
+    extref_count = c + 1;
+    return 0;
+}
+
+// A name already known has its address refreshed: pass two supersedes pass
+// one. Defined twice in one pass it is an error -- except an equ, which
+// every module's headers repeat.
+fn ks_add_label(p: i64, n: i64) -> i64 {
+    var i: i64 = ks_find_label(p, n);
+    var h: i64 = 0;
+    var d: i64 = 0;
+    var j: i64 = 0;
+    if i != -1 {
+        if ks_q(&lbl_pass, i) == kasm_pass && lbl_is_equ == 0 {
+            return ks_dup_label();
+        }
+        ks_qs(&lbl_pass, i, kasm_pass);
+        ks_qs(&lbl_addr, i, ks_here());
+        ks_qs(&lbl_section, i, cur_section);
+        return 0;
+    }
+    i = lbl_count;
+    if ks_ult(i, KASM_LBL_MAX) == 0 || ks_ult(lbl_names_len + n + 2, KASM_NAMES_MAX) == 0 {
+        kasm_error = 1;                  // never dropped without a word
+        return 0;
+    }
+    h = ks_hash_of(p, n);
+    ks_qs(&lbl_chain, i, ks_q(&lbl_hash, h));
+    ks_qs(&lbl_hash, h, ks_u32(i + 1));
+    ks_qs(&lbl_name_off, i, ks_u32(lbl_names_len));
+    d = &lbl_names + lbl_names_len;
+    while j < n {
+        ks_bs(d + j, ks_b(p + j));
+        j += 1;
+    }
+    ks_bs(d + n, 0);
+    lbl_names_len = lbl_names_len + n + 1;
+    ks_qs(&lbl_pass, i, kasm_pass);
+    ks_qs(&lbl_addr, i, ks_here());
+    ks_qs(&lbl_section, i, cur_section);
+    lbl_count = i + 1;
+    return 0;
+}
+
+// the bucket of a name: h = h * 31 + c, folded to 16 bits
+fn ks_hash_of(p: i64, n: i64) -> i64 {
+    var h: i64 = 0;
+    var i: i64 = 0;
+    while i < n {
+        h = (h << 5) - h + ks_b(p + i);
+        i += 1;
+    }
+    return (h ^ (h >>> 16)) & 0xFFFF;
+}
+
+fn ks_find_label(p: i64, n: i64) -> i64 {
+    var e: i64 = ks_q(&lbl_hash, ks_hash_of(p, n));
+    var i: i64 = 0;
+    var s: i64 = 0;
+    var j: i64 = 0;
+    var same: i64 = 0;
+    while e != 0 {
+        i = e - 1;
+        s = &lbl_names + ks_q(&lbl_name_off, i);
+        j = 0;
+        same = 1;
+        while j < n {
+            if ks_b(s + j) != ks_b(p + j) {
+                same = 0;
+                break;
+            }
+            j += 1;
+        }
+        if same == 1 && ks_b(s + n) == 0 {
+            return i;
+        }
+        e = ks_q(&lbl_chain, i);
+    }
+    return -1;
+}
+
+// the dword about to be emitted is patched once every label is known
+fn ks_add_fixup(lbl: i64, kind: i64) -> i64 {
+    var c: i64 = fix_count;
+    if ks_ult(c, KASM_FIX_MAX) == 0 {
+        kasm_error = 1;
+        return 0;
+    }
+    ks_qs(&fix_at, c, ks_u32(ks_here()));
+    ks_qs(&fix_label, c, ks_u32(lbl));
+    ks_qs(&fix_kind, c, kind & 255);
+    ks_qs(&fix_addend, c, ks_u32(cur_addend));
+    fix_count = c + 1;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// operands
+//
+// ks_parse_operand(text) -> its kind; the value in po_val, the base of a
+// [base+disp] in po_r8
+//   0 none   1 a 64-bit register   2 an immediate   3 [rbp-N]
+//   4 a label   5 [rel label]   6 xmm   7 an 8-bit register
+//   8 a 32-bit register   9 [reg]   10 a 16-bit register   11 [rsp+N]
+//   12 [base+index*scale+N]   13 [base-N]
+// -------------------------------------------------------------------------
+
+// a size keyword, then a blank
+fn ks_size_kw(p: i64) -> i64 {
+    var c: i64 = ks_b(p);
+    if c == 98 {
+        if ks_memeq(p, "byte ", 5) == 1 {
+            op_size = 1;
+            return 5;
+        }
+        return 0;
+    }
+    if c == 113 {
+        if ks_memeq(p, "qword ", 6) == 1 {
+            op_size = 8;
+            return 6;
+        }
+        return 0;
+    }
+    if c == 100 {
+        if ks_memeq(p, "dword ", 6) == 1 {
+            op_size = 4;
+            return 6;
+        }
+        return 0;
+    }
+    if c == 119 {
+        if ks_memeq(p, "word ", 5) == 1 {
+            op_size = 2;
+            return 5;
+        }
+    }
+    return 0;
+}
+
+// an arithmetic operator in the text: + * / & | < > or ' -' (and '-'
+// when minus is set)
+fn ks_has_op(p: i64, minus: i64) -> i64 {
+    var c: i64 = ks_b(p);
+    while c != 0 {
+        if c == 43 || c == 42 || c == 47 || c == 38 || c == 124 || c == 60 || c == 62 {
+            return 1;
+        }
+        if minus != 0 && c == 45 {
+            return 1;
+        }
+        if minus == 0 && c == 32 && ks_b(p + 1) == 45 {
+            return 1;
+        }
+        p += 1;
+        c = ks_b(p);
+    }
+    return 0;
+}
+
+fn ks_po_imm(v: i64) -> i64 {
+    po_val = v;
+    return 2;
+}
+
+fn ks_parse_operand(text: i64) -> i64 {
+    var s: i64 = text;
+    var c: i64 = 0;
+    var v: i64 = 0;
+    var pl: i64 = 0;
+    var r: i64 = 0;
+    var d: i64 = 0;
+    cur_addend = 0;
+    if s != 0 {
+        s += ks_size_kw(s);
+    }
+    if s == 0 {
+        po_val = 0;
+        return 0;
+    }
+    c = ks_b(s);
+    if c == 0 {
+        po_val = 0;
+        return 0;
+    }
+    if c == 91 {
+        return ks_po_mem(s + 1);
+    }
+    if c == 126 || c == 40 {
+        return ks_po_imm(ks_parse_expr(s));
+    }
+    if c == 39 {
+        // 'x': a character, up to four packed little-endian; at the head of
+        // an expression ('a' - 10) when an operator follows the closing quote
+        if ks_b(s + 2) == 39 {
+            if ks_has_op(s + 3, 1) == 1 {
+                return ks_po_imm(ks_parse_expr(s));
+            }
+        }
+        v = 0;
+        pl = 1;
+        s += 1;
+        c = ks_b(s);
+        while c != 39 && c != 0 {
+            if pl != 0 {
+                v = ks_u32(v | ks_u32(c * pl));
+                pl = ks_u32(pl * 256);
+            }
+            s += 1;
+            c = ks_b(s);
+        }
+        return ks_po_imm(v);
+    }
+    // a number, or '-' and a digit; an operator after it makes it an
+    // expression ('0xBC+18')
+    d = c;
+    if c == 45 {
+        d = ks_b(s + 1);
+    }
+    if d >= 48 && d <= 57 {
+        if ks_has_op(s, 0) == 1 {
+            return ks_po_imm(ks_parse_expr(s));
+        }
+        return ks_po_imm(ks_parse_number(s));
+    }
+    // registers
+    r = ks_match_reg(s, ks_reg_table(64));
+    if r != -1 {
+        po_val = r;
+        return 1;
+    }
+    r = ks_xmm_num(s);
+    if r != -1 {
+        po_val = r;
+        return 6;
+    }
+    r = ks_match_reg(s, ks_reg_table(8));
+    if r != -1 {
+        po_val = r;
+        return 7;
+    }
+    r = ks_match_reg(s, ks_reg_table(32));
+    if r != -1 {
+        po_val = r;
+        return 8;
+    }
+    r = ks_match_reg(s, ks_reg_table(16));
+    if r != -1 {
+        po_val = r;
+        return 10;
+    }
+    // a name: an expression when an operator follows, an equ constant, or
+    // a label
+    if ks_has_op(s, 0) == 1 {
+        return ks_po_imm(ks_parse_expr(s));
+    }
+    r = ks_find_equ(s, ks_strlen(s));
+    if r != -1 {
+        return ks_po_imm(ks_q(&equ_value, r));
+    }
+    po_val = ks_u32(ks_find_label(ks_qualify_label(s, ks_strlen(s)), qual_len));
+    return 4;
+}
+
+// xmm0..xmm15 by number, else -1
+fn ks_xmm_num(s: i64) -> i64 {
+    var a: i64 = 0;
+    var b: i64 = 0;
+    if ks_b(s) != 120 || ks_b(s + 1) != 109 || ks_b(s + 2) != 109 {
+        return -1;
+    }
+    a = ks_u32(ks_b(s + 3) - 48);
+    if ks_ult(9, a) == 1 {
+        return -1;
+    }
+    b = ks_b(s + 4);
+    if b == 0 {
+        return a;
+    }
+    b = ks_u32(b - 48);
+    if ks_ult(9, b) == 1 || ks_b(s + 5) != 0 {
+        return -1;
+    }
+    a = a * 10 + b;
+    if a > 15 {
+        return -1;
+    }
+    return a;
+}
+
+// [ ... ]: s is past the '['
+fn ks_po_mem(s: i64) -> i64 {
+    var n: i64 = 0;
+    var p: i64 = 0;
+    var base: i64 = 0;
+    var r: i64 = 0;
+    var v: i64 = 0;
+    var c: i64 = 0;
+    if ks_memeq(s, "rel ", 4) == 1 {
+        s += 4;
+        cur_addend = 0;
+        n = ks_len_until_plus_or_bracket(s);
+        p = s + n;
+        po_r8 = p;
+        while ks_b(p) == 32 {
+            p += 1;
+        }
+        po_r8 = p;
+        if ks_b(p) == 45 {
+            cur_addend = ks_u32(0 - ks_parse_expr(p + 1));
+        } else if ks_b(p) == 43 {
+            cur_addend = ks_u32(ks_parse_expr(p + 1));
+        }
+        po_val = ks_u32(ks_find_label(ks_qualify_label(s, n), qual_len));
+        return 5;
+    }
+    base = ks_match_reg_prefix(s, ks_reg_table(64));
+    if base == -1 {
+        po_val = 0;
+        return 0;
+    }
+    s = ks_skip_blanks(s + po_ecx);
+    c = ks_b(s);
+    if c == 45 {
+        v = ks_u32(ks_parse_expr(ks_skip_blanks(s + 1)));
+        po_val = v;
+        if base == 5 {
+            return 3;
+        }
+        po_r8 = base;
+        return 13;
+    }
+    if c != 43 {
+        if c != 93 {
+            po_val = 0;
+            return 0;
+        }
+        po_val = base;
+        return 9;
+    }
+    s = ks_skip_blanks(s + 1) - 1;
+    c = ks_b(s + 1);
+    if c == 114 || c == 101 {
+        // an index register, a scale, a displacement
+        s += 1;
+        r = ks_match_reg_prefix(s, ks_reg_table(64));
+        if r == -1 {
+            po_val = 0;
+            return 0;
+        }
+        v = base | (r << 8);
+        c = ks_b(s);
+        while (c >= 97 && c <= 122) || (c >= 48 && c <= 57) {
+            s += 1;
+            c = ks_b(s);
+        }
+        if c == 42 {
+            c = ks_b(s + 1);
+            if c == 50 {
+                v = v | 0x10000;
+            } else if c == 52 {
+                v = v | 0x20000;
+            } else if c == 56 {
+                v = v | 0x30000;
+            }
+        }
+        sib_disp = 0;
+        c = ks_b(s);
+        while c == 42 || (c >= 48 && c <= 57) || ((c | 32) >= 97 && (c | 32) <= 122) {
+            s += 1;
+            c = ks_b(s);
+        }
+        s = ks_skip_blanks(s);
+        c = ks_b(s);
+        if c == 43 {
+            sib_disp = ks_u32(ks_parse_expr(ks_skip_blanks(s + 1)));
+        } else if c == 45 {
+            sib_disp = ks_u32(0 - ks_parse_expr(ks_skip_blanks(s + 1)));
+        }
+        po_val = v;
+        return 12;
+    }
+    v = ks_parse_expr(ks_skip_blanks(s + 1));
+    if base == 4 {
+        po_val = ks_u32(v);
+        return 11;
+    }
+    po_val = ks_u32(0 - v);
+    if base == 5 {
+        return 3;
+    }
+    po_r8 = base;
+    return 13;
+}
+
+// the register tables, in encoding order, 5 bytes an entry
+fn ks_reg_table(w: i64) -> i64 {
+    if w == 64 {
+        return "rax\0\0rcx\0\0rdx\0\0rbx\0\0rsp\0\0rbp\0\0rsi\0\0rdi\0\0r8\0\0\0r9\0\0\0r10\0\0r11\0\0r12\0\0r13\0\0r14\0\0r15";
+    }
+    if w == 32 {
+        return "eax\0\0ecx\0\0edx\0\0ebx\0\0esp\0\0ebp\0\0esi\0\0edi\0\0r8d\0\0r9d\0\0r10d\0r11d\0r12d\0r13d\0r14d\0r15d";
+    }
+    if w == 8 {
+        return "al\0\0\0cl\0\0\0dl\0\0\0bl\0\0\0spl\0\0bpl\0\0sil\0\0dil\0\0r8b\0\0r9b\0\0r10b\0r11b\0r12b\0r13b\0r14b\0r15b";
+    }
+    if w == 16 {
+        return "ax\0\0\0cx\0\0\0dx\0\0\0bx\0\0\0sp\0\0\0bp\0\0\0si\0\0\0di\0\0\0r8w\0\0r9w\0\0r10w\0r11w\0r12w\0r13w\0r14w\0r15w";
+    }
+    return "xmm0\0xmm1\0xmm2\0xmm3\0xmm4\0xmm5\0xmm6\0xmm7";
+}
+
+// the whole text is one of the 16 names: its index, else -1
+fn ks_match_reg(s: i64, t: i64) -> i64 {
+    return ks_match_reg_n(s, t, 16);
+}
+
+fn ks_match_reg_n(s: i64, t: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var e: i64 = 0;
+    var j: i64 = 0;
+    var c: i64 = 0;
+    var ok: i64 = 0;
+    while ks_ult(i, n) == 1 {
+        e = t + i * 5;
+        j = 0;
+        ok = 1;
+        c = ks_b(e);
+        while c != 0 {
+            if c != ks_b(s + j) {
+                ok = 0;
+                break;
+            }
+            j += 1;
+            c = ks_b(e + j);
+        }
+        if ok == 1 && ks_b(s + j) == 0 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the text starts with one of the names: its index and, in po_ecx, the
+// characters it took; else -1 and 0
+fn ks_match_reg_prefix(s: i64, t: i64) -> i64 {
+    var i: i64 = 0;
+    var e: i64 = 0;
+    var j: i64 = 0;
+    var c: i64 = 0;
+    var ok: i64 = 0;
+    while i < 16 {
+        e = t + i * 5;
+        j = 0;
+        ok = 1;
+        c = ks_b(e);
+        while c != 0 {
+            if c != ks_b(s + j) {
+                ok = 0;
+                break;
+            }
+            j += 1;
+            c = ks_b(e + j);
+        }
+        if ok == 1 {
+            po_ecx = j;
+            return i;
+        }
+        i += 1;
+    }
+    po_ecx = 0;
+    return -1;
+}
+
+// -------------------------------------------------------------------------
+// numbers and expressions
+// -------------------------------------------------------------------------
+
+// [-]ddd[.ddd][e[+-]ddd] -> the bits of the double: dq 3.14 in a data
+// section is an IEEE-754 double, not the integer 3
+fn ks_parse_float(text: i64) -> i64 {
+    var s: i64 = text;
+    var neg: i64 = 0;
+    var n: i64 = 0;
+    var fr: i64 = 0;
+    var pw: i64 = 1;
+    var dg: i64 = 0;
+    var c: i64 = 0;
+    var en: i64 = 0;
+    var ec: i64 = 0;
+    var x: f64 = 0;
+    var t: f64 = 0;
+    if ks_b(s) == 45 {
+        neg = 1;
+        s += 1;
+    }
+    c = ks_b(s);
+    while c >= 48 && c <= 57 {
+        n = n * 10 + (c - 48);
+        s += 1;
+        c = ks_b(s);
+    }
+    x = n as f64;
+    if c == 46 {
+        s += 1;
+        c = ks_b(s);
+        while c >= 48 && c <= 57 {
+            if dg < 17 {
+                fr = fr * 10 + (c - 48);
+                pw = pw * 10;
+                dg += 1;
+            }
+            s += 1;
+            c = ks_b(s);
+        }
+        if fr != 0 {
+            x = x + (fr as f64) / (pw as f64);
+        }
+    }
+    c = ks_b(s);
+    if c == 101 || c == 69 {
+        s += 1;
+        if ks_b(s) == 43 {
+            s += 1;
+        } else if ks_b(s) == 45 {
+            en = 1;
+            s += 1;
+        }
+        c = ks_b(s);
+        while c >= 48 && c <= 57 {
+            ec = ks_u32(ec * 10 + (c - 48));
+            s += 1;
+            if ks_ult(ec, 400) == 0 {
+                ec = 400;
+            }
+            c = ks_b(s);
+        }
+        n = 10;
+        t = n as f64;
+        while ec != 0 {
+            if en != 0 {
+                x = x / t;
+            } else {
+                x = x * t;
+            }
+            ec -= 1;
+        }
+    }
+    if neg != 0 {
+        n = 0;
+        t = n as f64;
+        x = t - x;
+    }
+    pf_val = x;
+    return ks_q(&pf_val, 0);
+}
+
+// decimal or 0x hex, with a '-'
+fn ks_parse_number(text: i64) -> i64 {
+    var s: i64 = text;
+    var neg: i64 = 0;
+    var v: i64 = 0;
+    var c: i64 = 0;
+    if ks_b(s) == 45 {
+        neg = 1;
+        s += 1;
+    }
+    if ks_b(s) == 48 && (ks_b(s + 1) == 120 || ks_b(s + 1) == 88) {
+        s += 2;
+        c = ks_b(s);
+        while 1 == 1 {
+            if c >= 48 && c <= 57 {
+                c = c - 48;
+            } else {
+                c = c | 32;
+                if c < 97 || c > 102 {
+                    break;
+                }
+                c = c - 87;
+            }
+            v = (v << 4) + c;
+            s += 1;
+            c = ks_b(s);
+        }
+    } else {
+        c = ks_b(s);
+        while c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            s += 1;
+            c = ks_b(s);
+        }
+    }
+    if neg != 0 {
+        v = 0 - v;
+    }
+    return v;
+}
+
+// an expression: | & << >> + - * / ( ) ~ unary -, numbers, 'chars', $,
+// equ constants and labels; division by zero leaves the value alone
+fn ks_parse_expr(text: i64) -> i64 {
+    expr_ptr = text;
+    return ks_ex_or();
+}
+
+fn ks_ex_or() -> i64 {
+    var v: i64 = ks_ex_and();
+    while 1 == 1 {
+        ks_ex_skipws();
+        if ks_b(expr_ptr) != 124 {
+            return v;
+        }
+        expr_ptr += 1;
+        v = v | ks_ex_and();
+    }
+    return v;
+}
+
+fn ks_ex_and() -> i64 {
+    var v: i64 = ks_ex_shift();
+    while 1 == 1 {
+        ks_ex_skipws();
+        if ks_b(expr_ptr) != 38 {
+            return v;
+        }
+        expr_ptr += 1;
+        v = v & ks_ex_shift();
+    }
+    return v;
+}
+
+fn ks_ex_shift() -> i64 {
+    var v: i64 = ks_ex_addsub();
+    var c: i64 = 0;
+    var k: i64 = 0;
+    while 1 == 1 {
+        ks_ex_skipws();
+        c = ks_b(expr_ptr);
+        if c == 60 && ks_b(expr_ptr + 1) == 60 {
+            expr_ptr += 2;
+            k = ks_ex_addsub() & 63;
+            v = v << k;
+        } else if c == 62 && ks_b(expr_ptr + 1) == 62 {
+            expr_ptr += 2;
+            k = ks_ex_addsub() & 63;
+            v = v >> k;
+        } else {
+            return v;
+        }
+    }
+    return v;
+}
+
+fn ks_ex_skipws() -> i64 {
+    var c: i64 = ks_b(expr_ptr);
+    while c == 32 || c == 9 {
+        expr_ptr += 1;
+        c = ks_b(expr_ptr);
+    }
+    return 0;
+}
+
+fn ks_ex_addsub() -> i64 {
+    var v: i64 = ks_ex_muldiv();
+    var c: i64 = 0;
+    while 1 == 1 {
+        ks_ex_skipws();
+        c = ks_b(expr_ptr);
+        if c == 43 {
+            expr_ptr += 1;
+            v = v + ks_ex_muldiv();
+        } else if c == 45 {
+            expr_ptr += 1;
+            v = v - ks_ex_muldiv();
+        } else {
+            return v;
+        }
+    }
+    return v;
+}
+
+fn ks_ex_muldiv() -> i64 {
+    var v: i64 = ks_ex_primary();
+    var c: i64 = 0;
+    var d: i64 = 0;
+    while 1 == 1 {
+        ks_ex_skipws();
+        c = ks_b(expr_ptr);
+        if c == 42 {
+            expr_ptr += 1;
+            v = v * ks_ex_primary();
+        } else if c == 47 {
+            expr_ptr += 1;
+            d = ks_ex_primary();
+            if d != 0 {
+                v = v / d;
+            }
+        } else {
+            return v;
+        }
+    }
+    return v;
+}
+
+fn ks_ex_primary() -> i64 {
+    var c: i64 = 0;
+    var v: i64 = 0;
+    var p: i64 = 0;
+    var pl: i64 = 1;
+    var k: i64 = 0;
+    ks_ex_skipws();
+    c = ks_b(expr_ptr);
+    if c == 40 {
+        expr_ptr += 1;
+        v = ks_ex_addsub();
+        ks_ex_skipws();
+        if ks_b(expr_ptr) == 41 {
+            expr_ptr += 1;
+        }
+        return v;
+    }
+    if c == 36 {
+        expr_ptr += 1;
+        return ks_here();
+    }
+    if c == 39 {
+        // up to four characters, packed little-endian
+        p = expr_ptr + 1;
+        c = ks_b(p);
+        while c != 39 && c != 34 && c != 0 {
+            if k < 4 {
+                v = ks_u32(v | ks_u32(c * pl));
+                pl = ks_u32(pl * 256);
+            }
+            k += 1;
+            p += 1;
+            c = ks_b(p);
+        }
+        expr_ptr = p + 1;
+        return v;
+    }
+    if c == 45 {
+        expr_ptr += 1;
+        return 0 - ks_ex_primary();
+    }
+    if c == 126 {
+        expr_ptr += 1;
+        return ~ks_ex_primary();
+    }
+    if c >= 48 && c <= 57 {
+        return ks_ex_number();
+    }
+    return ks_ex_symbol();
+}
+
+// decimal or 0x hex, advancing expr_ptr
+fn ks_ex_number() -> i64 {
+    var v: i64 = 0;
+    var c: i64 = 0;
+    if ks_b(expr_ptr) == 48 && (ks_b(expr_ptr + 1) == 120 || ks_b(expr_ptr + 1) == 88) {
+        expr_ptr += 2;
+        while 1 == 1 {
+            c = ks_b(expr_ptr);
+            if c >= 48 && c <= 57 {
+                c = c - 48;
+            } else {
+                c = c | 32;
+                if c < 97 || c > 102 {
+                    return v;
+                }
+                c = c - 87;
+            }
+            v = (v << 4) + c;
+            expr_ptr += 1;
+        }
+    }
+    c = ks_b(expr_ptr);
+    while c >= 48 && c <= 57 {
+        v = v * 10 + (c - 48);
+        expr_ptr += 1;
+        c = ks_b(expr_ptr);
+    }
+    return v;
+}
+
+// a name: an equ constant, else a label's place (a .text label counts from
+// 'org'; .data and .bss, only in a flat binary with 'org', from where pass
+// one put them), else 0
+fn ks_ex_symbol() -> i64 {
+    var s: i64 = expr_ptr;
+    var n: i64 = 0;
+    var c: i64 = ks_b(s);
+    var i: i64 = 0;
+    var a: i64 = 0;
+    var sec: i64 = 0;
+    while c == 95 || c == 46 || (c >= 48 && c <= 57) || ((c | 32) >= 97 && (c | 32) <= 122) {
+        n += 1;
+        c = ks_b(s + n);
+    }
+    expr_ptr = expr_ptr + n;
+    i = ks_find_equ(s, n);
+    if i != -1 {
+        return ks_q(&equ_value, i);
+    }
+    i = ks_find_label(ks_qualify_label(s, n), qual_len);
+    if i == -1 {
+        return 0;
+    }
+    a = ks_q(&lbl_addr, i);
+    sec = ks_q(&lbl_section, i);
+    if sec != 0 {
+        if kasm_org_set == 0 {
+            return a;
+        }
+        a = a + p1_data_base;
+        if sec != 1 {
+            a = a - p1_data_base + p1_bss_base;
+        }
+    }
+    return a + kasm_org;
+}
+
+fn ks_find_equ(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var s: i64 = 0;
+    var j: i64 = 0;
+    var same: i64 = 0;
+    while ks_ult(i, equ_count) == 1 {
+        s = &equ_names + ks_q(&equ_name_off, i);
+        j = 0;
+        same = 1;
+        while j != n {
+            if ks_b(p + j) != ks_b(s + j) {
+                same = 0;
+                break;
+            }
+            j += 1;
+        }
+        if same == 1 && ks_b(s + j) == 0 {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// a constant, refreshed in place when the same header defines it again
+fn ks_add_equ(p: i64, n: i64, v: i64) -> i64 {
+    var i: i64 = ks_find_equ(p, n);
+    var d: i64 = 0;
+    var j: i64 = 0;
+    if i != -1 {
+        ks_qs(&equ_value, i, v);
+        return 0;
+    }
+    i = equ_count;
+    if ks_ult(i, KASM_EQU_MAX) == 0 || ks_ult(equ_names_len + n + 2, KASM_EQU_NAMES) == 0 {
+        kasm_error = 1;                  // never dropped without a word
+        return 0;
+    }
+    ks_qs(&equ_name_off, i, ks_u32(equ_names_len));
+    d = &equ_names + equ_names_len;
+    while j != n {
+        ks_bs(d + j, ks_b(p + j));
+        j += 1;
+    }
+    ks_bs(d + j, 0);
+    equ_names_len = equ_names_len + j + 1;
+    ks_qs(&equ_value, i, v);
+    equ_count = i + 1;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// texts
+// -------------------------------------------------------------------------
+
+fn ks_strlen(p: i64) -> i64 {
+    var n: i64 = 0;
+    while ks_b(p + n) != 0 {
+        n += 1;
+    }
+    return n;
+}
+
+// the characters of a name: up to a '+', '-', blank or ']'
+fn ks_len_until_plus_or_bracket(p: i64) -> i64 {
+    var n: i64 = 0;
+    var c: i64 = ks_b(p);
+    while c != 0 && c != 93 && c != 43 && c != 45 && c != 32 {
+        n += 1;
+        c = ks_b(p + n);
+    }
+    return n;
+}
+
+fn ks_skip_blanks(p: i64) -> i64 {
+    var c: i64 = ks_b(p);
+    while c == 32 || c == 9 {
+        p += 1;
+        c = ks_b(p);
+    }
+    return p;
+}
+
+// the blanks at the end of a NUL-ended text, cut
+fn ks_trim_trailing(p: i64) -> i64 {
+    var n: i64 = ks_strlen(p);
+    var c: i64 = 0;
+    while n != 0 {
+        c = ks_b(p + n - 1);
+        if c != 32 && c != 9 {
+            return 0;
+        }
+        n -= 1;
+        ks_bs(p + n, 0);
+    }
+    return 0;
+}
+
+fn ks_copy_tok(s: i64, d: i64) -> i64 {
+    var c: i64 = 1;
+    while c != 0 {
+        c = ks_b(s);
+        ks_bs(d, c);
+        s += 1;
+        d += 1;
+    }
+    return 0;
+}
+
+// the text starts with a data directive and a blank: db dq dw dd resb resw
+// resd resq times equ
+fn ks_is_data_dir(p: i64) -> i64 {
+    if ks_dir_word(p, "db") == 1 { return 1; }
+    if ks_dir_word(p, "dq") == 1 { return 1; }
+    if ks_dir_word(p, "dw") == 1 { return 1; }
+    if ks_dir_word(p, "dd") == 1 { return 1; }
+    if ks_dir_word(p, "resb") == 1 { return 1; }
+    if ks_dir_word(p, "resw") == 1 { return 1; }
+    if ks_dir_word(p, "resd") == 1 { return 1; }
+    if ks_dir_word(p, "resq") == 1 { return 1; }
+    if ks_dir_word(p, "times") == 1 { return 1; }
+    if ks_dir_word(p, "equ") == 1 { return 1; }
+    return 0;
+}
+
+fn ks_dir_word(p: i64, w: i64) -> i64 {
+    var n: i64 = ks_strlen(w);
+    var c: i64 = 0;
+    if ks_memeq(p, w, n) == 0 {
+        return 0;
+    }
+    c = ks_b(p + n);
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+// A name starting with '.' belongs to the innermost non-local label, as in
+// NASM: the name to look up, its length in qual_len
+fn ks_qualify_label(p: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var c: i64 = 0;
+    if ks_b(p) != 46 {
+        qual_len = n;
+        return p;
+    }
+    c = ks_b(&cur_global);
+    while c != 0 && i < 60 {
+        ks_bs(&qual_buf + i, c);
+        i += 1;
+        c = ks_b(&cur_global + i);
+    }
+    while j != n && i < 156 {
+        ks_bs(&qual_buf + i, ks_b(p + j));
+        i += 1;
+        j += 1;
+    }
+    ks_bs(&qual_buf + i, 0);
+    qual_len = i;
+    return &qual_buf;
+}
+
+fn ks_str_eq(a: i64, b: i64) -> i64 {
+    var c: i64 = 0;
+    while 1 == 1 {
+        c = ks_b(a);
+        if c != ks_b(b) {
+            return 0;
+        }
+        if c == 0 {
+            return 1;
+        }
+        a += 1;
+        b += 1;
+    }
+    return 0;
+}
+
+// tok_a is this mnemonic or directive
+fn ks_is(m: i64) -> i64 {
+    return ks_str_eq(&tok_a, m);
+}
+
+// -------------------------------------------------------------------------
+// the line tokeniser: "    mov rax, [rbp-8]" -> tok_a "mov", tok_b "rax",
+// tok_c "[rbp-8]". -> 1 a label definition alone, 2 a label with something
+// after it (kept in lbl_rest, and in tok_b / tok_c), 0 neither
+// -------------------------------------------------------------------------
+
+// a quoted run keeps its ';' and ','; the copy stops at the end, at a ';'
+// outside quotes, or (comma set) at a ',' -- which is stepped over -- or
+// at 510 bytes. -> where the text stopped; the bytes copied in sl_n.
+
+fn ks_copy_operand(s: i64, d: i64, comma: i64) -> i64 {
+    var n: i64 = 0;
+    var q: i64 = 0;
+    var c: i64 = ks_b(s);
+    while c != 0 {
+        if q != 0 {
+            if c == q {
+                q = 0;
+            }
+        } else {
+            if comma != 0 && c == 44 {
+                sl_n = n;
+                return s + 1;
+            }
+            if c == 59 {
+                break;
+            }
+            if c == 39 || c == 34 {
+                q = c;
+            }
+        }
+        if n >= 510 {
+            break;
+        }
+        ks_bs(d + n, c);
+        n += 1;
+        s += 1;
+        c = ks_b(s);
+    }
+    sl_n = n;
+    return s;
+}
+
+fn ks_split_line(line: i64) -> i64 {
+    var s: i64 = line;
+    var c: i64 = 0;
+    var n: i64 = 0;
+    var p: i64 = 0;
+    ks_bs(&tok_a, 0);
+    ks_bs(&tok_b, 0);
+    ks_bs(&tok_c, 0);
+    s = ks_skip_blanks(s);
+    c = ks_b(s);
+    if c == 0 || c == 59 {
+        return 0;
+    }
+    // the first word
+    while 1 == 1 {
+        c = ks_b(s);
+        if c == 0 || c == 32 || c == 9 {
+            break;
+        }
+        if c == 58 {
+            ks_bs(&tok_a + n, 0);
+            return ks_split_label(s + 1);
+        }
+        if n >= 62 {
+            break;
+        }
+        ks_bs(&tok_a + n, c);
+        n += 1;
+        s += 1;
+    }
+    ks_bs(&tok_a + n, 0);
+    // NASM lets a label go without its colon before a data directive:
+    // kw_var db "var", 0
+    p = ks_skip_blanks(s);
+    if ks_is_data_dir(p) == 1 {
+        return ks_split_label(p);
+    }
+    op_size = 0;
+    s = ks_skip_blanks(s);
+    s = s + ks_size_kw(s);
+    s = ks_skip_blanks(s);
+    s = ks_copy_operand(s, &tok_b, 1);
+    // the blanks are trimmed before the end is written as well as after:
+    // what the buffer held from an earlier line counts the first time
+    ks_trim_trailing(&tok_b);
+    ks_bs(&tok_b + sl_n, 0);
+    ks_trim_trailing(&tok_b);
+    s = ks_skip_blanks(s);
+    ks_copy_operand(s, &tok_c, 0);
+    ks_bs(&tok_c + sl_n, 0);
+    ks_trim_trailing(&tok_c);
+    return 0;
+}
+
+// after 'label:' (or before a colonless label's directive): a definition may
+// follow on the same line, as in  name: dq 0
+fn ks_split_label(s: i64) -> i64 {
+    var n: i64 = 0;
+    var c: i64 = 0;
+    s = ks_skip_blanks(s);
+    c = ks_b(s);
+    if c == 0 || c == 59 {
+        return 1;
+    }
+    // the remainder verbatim
+    while n < 510 {
+        c = ks_b(s + n);
+        if c == 0 {
+            break;
+        }
+        ks_bs(&lbl_rest + n, c);
+        n += 1;
+    }
+    ks_bs(&lbl_rest + n, 0);
+    // and as its own line: one word, then the rest
+    n = 0;
+    while n < 510 {
+        c = ks_b(s);
+        if c == 0 || c == 32 || c == 9 {
+            break;
+        }
+        ks_bs(&tok_b + n, c);
+        n += 1;
+        s += 1;
+    }
+    ks_bs(&tok_b + n, 0);
+    s = ks_skip_blanks(s);
+    ks_copy_operand(s, &tok_c, 0);
+    ks_bs(&tok_c + sl_n, 0);
+    ks_trim_trailing(&tok_c);
+    return 2;
+}

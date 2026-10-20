@@ -1,0 +1,201 @@
+kron_program
+kron_domain kasm;
+kron_imports
+acquire_domain "ks_state.kr";
+acquire_domain "ks_core.kr";
+acquire_domain "ks_pass.kr";
+acquire_domain "ks_encode.kr";
+acquire_domain "ks_enc_mov.kr";
+kron_definitions
+
+// =========================================================================
+// KASM, THE KRON ASSEMBLER
+//
+// The fifth part of the compiler written in Kron. It turns the text the code
+// generator writes -- and the compiler's own sources, kron_all.asm -- into
+// x86-64 machine code. Two passes: the first records where every label
+// lands, the second emits the bytes with every reference resolved. It is not
+// a general assembler, and deliberately so: it has to understand exactly the
+// forms its own compiler writes, and its own source.
+//
+//   kasm.kr         the door's side in Kron, and the helpers every file uses
+//   ks_state.kr     the state: every global, before what uses it
+//   ks_core.kr      bytes, REX/ModRM/SIB, labels, externs, fixups,
+//                   operands, numbers, expressions, the line tokeniser
+//   ks_pass.kr      the passes, the directives, the fixups, the image
+//   ks_encode.kr    the instructions
+//   ks_enc_mov.kr   mov and xchg
+//
+// kronc --module turns it into kasm_kr.asm; kasm.asm beside it is the small
+// hand-written door the rest of the compiler calls through, under the names
+// and with the registers it always had.
+// =========================================================================
+
+// =========================================================================
+// memory, by address
+// =========================================================================
+
+fn ks_q(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn ks_qs(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+fn ks_b(p: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(p);
+    }
+    return r;
+}
+
+fn ks_bs(p: i64, v: i64) -> i64 {
+    raw {
+        poke8(p, v);
+    }
+    return 0;
+}
+
+// the low 32 bits, as a dword table of the assembly held them
+fn ks_u32(v: i64) -> i64 {
+    return v & 0xFFFFFFFF;
+}
+
+// a < b, unsigned
+fn ks_ult(a: i64, b: i64) -> i64 {
+    var top: i64 = 1;
+    top = top << 63;
+    if (a ^ top) < (b ^ top) {
+        return 1;
+    }
+    return 0;
+}
+
+// a mod b, unsigned, for a >= 0: what 'div' leaves in rdx
+fn ks_urem(a: i64, b: i64) -> i64 {
+    if b < 0 {
+        return a;
+    }
+    return a % b;
+}
+
+// the n bytes at a and at b are the same
+fn ks_memeq(a: i64, b: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if ks_b(a + i) != ks_b(b + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// =========================================================================
+// the door's side: what kasm.asm calls
+// =========================================================================
+
+fn ksk_code() -> i64 {
+    return &kasm_code;
+}
+
+fn ksk_data() -> i64 {
+    return &kasm_data;
+}
+
+fn ksk_code_size() -> i64 {
+    return kasm_code_len;
+}
+
+fn ksk_data_size() -> i64 {
+    return kasm_data_len;
+}
+
+fn ksk_bss_size() -> i64 {
+    return kasm_bss_len;
+}
+
+fn ksk_error_count() -> i64 {
+    return err_count;
+}
+
+fn ksk_error_dst(i: i64) -> i64 {
+    return ks_q(&err_dst, i);
+}
+
+fn ksk_error_src(i: i64) -> i64 {
+    return ks_q(&err_src, i);
+}
+
+fn ksk_error_line_at(i: i64) -> i64 {
+    return ks_q(&err_lines, i);
+}
+
+fn ksk_error_line() -> i64 {
+    return kasm_err_line;
+}
+
+fn ksk_had_error() -> i64 {
+    return kasm_error & 255;
+}
+
+fn ksk_error_mnem(i: i64) -> i64 {
+    return &err_mnem + (i << 6);
+}
+
+fn ksk_ext_count() -> i64 {
+    return ext_count;
+}
+
+fn ksk_ext_name(i: i64) -> i64 {
+    return ks_ext_name(i);
+}
+
+fn ksk_extref_count() -> i64 {
+    return extref_count;
+}
+
+fn ksk_extref_at(i: i64) -> i64 {
+    return ks_q(&extref_at, i);
+}
+
+fn ksk_extref_sym(i: i64) -> i64 {
+    return ks_q(&extref_sym, i);
+}
+
+fn ksk_label_addr(i: i64) -> i64 {
+    return ks_q(&lbl_addr, i);
+}
+
+fn ksk_fixup_count() -> i64 {
+    return fix_count;
+}
+
+fn ksk_fixup_at(i: i64) -> i64 {
+    return ks_q(&fix_at, i);
+}
+
+fn ksk_fixup_label(i: i64) -> i64 {
+    return ks_q(&fix_label, i);
+}
+
+fn ksk_fixup_addend(i: i64) -> i64 {
+    return ks_q(&fix_addend, i);
+}
+
+fn ksk_fixup_kind(i: i64) -> i64 {
+    return ks_q(&fix_kind, i);
+}
+
+fn ksk_label_section(i: i64) -> i64 {
+    return ks_q(&lbl_section, i);
+}
