@@ -42,6 +42,11 @@ kron_definitions
 //                                       a uniform, for the next draws
 //     gpu_draw(prog, mesh, tex)         tex 0: white
 //     gpu_draw_textures(prog, mesh, t0, t1, t2, t3)
+//     gpu_target(w, h)                  a render target: colour and depth
+//     gpu_target_texture(t)             its colour, as a texture
+//     gpu_target_depth(t)               its depth, as a texture (shadow maps)
+//     gpu_begin_target(t, clear)  gpu_end_target()
+//                                       draws into the target, before the frame
 //     gpu_cull(on)  gpu_depth(on)  gpu_blend(on)   for the shaders made after
 //     gpu_pixel(x, y)  gpu_save_bmp(path)          the last frame
 //     gpu_close()
@@ -87,8 +92,22 @@ var gt_view: i64;
 var gt_w: i64;
 var gt_h: i64;
 var gpu_white: i64;
+var gt_lay: i64;          // the layout each texture is read in (Vulkan)
+// render targets: a picture drawn into, then read as a texture
+var gr_w: i64;
+var gr_h: i64;
+var gr_cimg: i64;
+var gr_cmem: i64;
+var gr_cview: i64;
+var gr_dimg: i64;
+var gr_dmem: i64;
+var gr_dview: i64;
+var gr_fb: i64;
+var gr_ctex: i64;         // its colour, as a texture number
+var gr_dtex: i64;         // its depth, as a texture number
 // this frame
 var gpu_in_frame: i64;
+var gpu_in_target: i64;   // 1 between gpu_begin_target and gpu_end_target
 var gpu_draws: i64;
 
 fn gpu_lists() -> i64 {
@@ -109,6 +128,18 @@ fn gpu_lists() -> i64 {
     gt_view = list_new();
     gt_w = list_new();
     gt_h = list_new();
+    gt_lay = list_new();
+    gr_w = list_new();
+    gr_h = list_new();
+    gr_cimg = list_new();
+    gr_cmem = list_new();
+    gr_cview = list_new();
+    gr_dimg = list_new();
+    gr_dmem = list_new();
+    gr_dview = list_new();
+    gr_fb = list_new();
+    gr_ctex = list_new();
+    gr_dtex = list_new();
     return 0;
 }
 
@@ -120,6 +151,7 @@ extern "vulkan-1.dll", "libvulkan.so.1", "libvulkan.so" {
     fn vkGetPhysicalDeviceQueueFamilyProperties(pd: i64, count: i64, out: i64);
     fn vkGetPhysicalDeviceMemoryProperties(pd: i64, out: i64);
     fn vkCreateDevice(pd: i64, info: i64, alloc: i64, out: i64) -> i32;
+    fn vkGetPhysicalDeviceFeatures(pd: i64, out: i64);
     fn vkGetDeviceQueue(dev: i64, family: u32, index: u32, out: i64);
     fn vkCreateCommandPool(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
     fn vkAllocateCommandBuffers(dev: i64, info: i64, out: i64) -> i32;
@@ -165,6 +197,7 @@ extern "vulkan-1.dll", "libvulkan.so.1", "libvulkan.so" {
     fn vkCmdCopyBufferToImage(cmd: i64, buf: i64, img: i64, layout: u32, n: u32, regions: i64);
     fn vkCmdCopyBuffer(cmd: i64, src: i64, dst: i64, n: u32, regions: i64);
     fn vkCmdPipelineBarrier(cmd: i64, src: u32, dst: u32, flags: u32, nmem: u32, mem: i64, nbuf: u32, buf: i64, nimg: u32, img: i64);
+    fn vkCmdBlitImage(cmd: i64, src: i64, slayout: u32, dst: i64, dlayout: u32, n: u32, regions: i64, filter: u32);
 }
 
 var vk_inst: i64;
@@ -201,6 +234,8 @@ var vk_s: [u8; 16384];    // structures handed to Vulkan, built in place
 var vk_sn: i64;
 var vk_out: [i64; 64];
 var vk_res: i64;
+var vk_tpass: i64;        // the render pass render targets are drawn in
+var gpu_bc_on: i64;       // 1 when the card makes BC (compressed) textures
 
 // a zeroed run of n bytes of vk_s, aligned to 8
 fn vs(n: i64) -> i64 {
@@ -330,6 +365,11 @@ fn vk_map(mem: i64) -> i64 {
 }
 
 fn vk_image(w: i64, h: i64, format: i64, usage: i64) -> i64 {
+    return vk_image_mips(w, h, format, usage, 1);
+}
+
+// an image of levels mip levels; its view covers them all
+fn vk_image_mips(w: i64, h: i64, format: i64, usage: i64, levels: i64) -> i64 {
     var ii: i64 = vs(88);
     w32(ii, 0, 14);
     w32(ii, 20, 1);
@@ -337,7 +377,7 @@ fn vk_image(w: i64, h: i64, format: i64, usage: i64) -> i64 {
     w32(ii, 28, w);
     w32(ii, 32, h);
     w32(ii, 36, 1);
-    w32(ii, 40, 1);
+    w32(ii, 40, levels);
     w32(ii, 44, 1);
     w32(ii, 48, 1);
     w32(ii, 56, usage);
@@ -358,7 +398,7 @@ fn vk_image(w: i64, h: i64, format: i64, usage: i64) -> i64 {
     var aspect: i64 = 1;
     if format == 126 { aspect = 2; }
     w32(vi, 56, aspect);
-    w32(vi, 64, 1);
+    w32(vi, 64, levels);
     w32(vi, 72, 1);
     raw { vk_res = vkCreateImageView(vk_dev, vi, 0, vk_slot(6)); }
     if !vk_check(vk_res, "vkCreateImageView") { return 0; }
@@ -482,10 +522,20 @@ fn vk_open(w: i64, h: i64) -> i64 {
     w32(qi, 20, vk_family);
     w32(qi, 24, 1);
     w64(qi, 32, prio);
+    // the BC (compressed) texture formats, when the card has them: feature 22
+    var card: i64 = vs(224);
+    var en: i64 = vs(224);
+    raw { vkGetPhysicalDeviceFeatures(vk_pd, card); }
+    gpu_bc_on = 0;
+    if r32(card, 88) != 0 {
+        w32(en, 88, 1);
+        gpu_bc_on = 1;
+    }
     var di: i64 = vs(72);
     w32(di, 0, 3);
     w32(di, 20, 1);
     w64(di, 24, qi);
+    w64(di, 64, en);
     raw { vk_res = vkCreateDevice(vk_pd, di, 0, vk_slot(0)); }
     if !vk_check(vk_res, "vkCreateDevice") { return 0; }
     vk_dev = vk_got(0);
@@ -520,9 +570,7 @@ fn vk_open(w: i64, h: i64) -> i64 {
     vk_depth = vk_out[7];
     vk_depth_mem = vk_out[8];
     vk_depth_view = vk_out[9];
-    // host-cached: the frame is read back by the CPU every gpu_end, and
-    // uncached (write-combined) memory reads tens of times slower
-    if vk_buffer(w * h * 4, 2, 14) == 0 { return 0; }
+    if vk_buffer(w * h * 4, 2, 6) == 0 { return 0; }
     vk_read_buf = vk_out[2];
     vk_read_mem = vk_out[3];
     vk_read_map = vk_map(vk_read_mem);
@@ -860,21 +908,69 @@ fn vk_mesh(vsrc: i64, vbytes: i64, isrc: i64, ibytes: i64) -> i64 {
 }
 
 // w x h pixels, B G R A, at src
+// one barrier over count mip levels from base, layout old to nl
+fn vk_barrier_lv(img: i64, base: i64, count: i64, old: i64, nl: i64, src_access: i64, dst_access: i64, src_stage: i64, dst_stage: i64) -> i64 {
+    var b: i64 = vs(72);
+    w32(b, 0, 45);
+    w32(b, 16, src_access);
+    w32(b, 20, dst_access);
+    w32(b, 24, old);
+    w32(b, 28, nl);
+    w32(b, 32, 0 - 1);
+    w32(b, 36, 0 - 1);
+    w64(b, 40, img);
+    w32(b, 48, 1);
+    w32(b, 52, base);
+    w32(b, 56, count);
+    w32(b, 60, 0);
+    w32(b, 64, 1);
+    raw { vkCmdPipelineBarrier(vk_cmd, src_stage, dst_stage, 0, 0, 0, 0, 0, 1, b); }
+    return 0;
+}
+
+// blits mip level sm of img (sw x sh) into level dm (dw x dh), linearly
+fn vk_blit_mip(img: i64, sw: i64, sh: i64, sm: i64, dw: i64, dh: i64, dm: i64) -> i64 {
+    var r: i64 = vs(80);
+    w32(r, 0, 1);
+    w32(r, 4, sm);
+    w32(r, 12, 1);
+    w32(r, 28, sw);
+    w32(r, 32, sh);
+    w32(r, 36, 1);
+    w32(r, 40, 1);
+    w32(r, 44, dm);
+    w32(r, 52, 1);
+    w32(r, 68, dw);
+    w32(r, 72, dh);
+    w32(r, 76, 1);
+    raw { vkCmdBlitImage(vk_cmd, img, 6, img, 7, 1, r, 1); }
+    return 0;
+}
+
+// w x h pixels, B G R A, at src, with all its mip levels made on the card
 fn vk_texture(src: i64, w: i64, h: i64) -> i64 {
     vk_sn = 0;
     var n: i64 = w * h * 4;
+    var levels: i64 = 1;
+    var big: i64 = w;
+    if h > big { big = h; }
+    while big > 1 {
+        big = big >> 1;
+        levels = levels + 1;
+    }
     if vk_buffer(n, 1, 6) == 0 { return 0; }
     var sbuf: i64 = vk_out[2];
     var p: i64 = vk_map(vk_out[3]);
     if p == 0 { return 0; }
     hp_copy(p, src, n);
-    if vk_image(w, h, 44, 2 | 4) == 0 { return 0; }
+    if vk_image_mips(w, h, 44, 1 | 2 | 4, levels) == 0 { return 0; }
     var img: i64 = vk_out[7];
     list_add(gt_img, img);
     list_add(gt_mem, vk_out[8]);
     list_add(gt_view, vk_out[9]);
+    list_add(gt_lay, 5);
     vk_once_begin();
-    vk_barrier(img, 0, 7, 0, 4096, 1, 4096);
+    vk_barrier_lv(img, 0, levels, 0, 7, 0, 4096, 1, 4096);
     var rg: i64 = vs(56);
     w32(rg, 16, 1);
     w32(rg, 28, 1);
@@ -882,8 +978,285 @@ fn vk_texture(src: i64, w: i64, h: i64) -> i64 {
     w32(rg, 48, h);
     w32(rg, 52, 1);
     raw { vkCmdCopyBufferToImage(vk_cmd, sbuf, img, 7, 1, rg); }
-    vk_barrier(img, 7, 5, 4096, 32, 4096, 128);
+    // each level, halved, from the one before it
+    var i: i64 = 1;
+    var mw: i64 = w;
+    var mh: i64 = h;
+    while i < levels {
+        var nw: i64 = mw >> 1;
+        if nw < 1 { nw = 1; }
+        var nh: i64 = mh >> 1;
+        if nh < 1 { nh = 1; }
+        vk_barrier_lv(img, i - 1, 1, 7, 6, 4096, 2048, 4096, 4096);
+        vk_blit_mip(img, mw, mh, i - 1, nw, nh, i);
+        mw = nw;
+        mh = nh;
+        i = i + 1;
+    }
+    // every level is read by the shaders from now on
+    if levels > 1 {
+        vk_barrier_lv(img, 0, levels - 1, 6, 5, 2048, 32, 4096, 128);
+    }
+    vk_barrier_lv(img, levels - 1, 1, 7, 5, 4096, 32, 4096, 128);
     vk_once_end();
+    return 1;
+}
+
+// ------------------------------------------------ BC1 textures (Vulkan) ---
+// BC1 keeps a 4 x 4 block of colour in 8 bytes: two colours of 16 bits (565)
+// and a 2-bit index a pixel. The colours are encoded here, on the CPU, and
+// the mip levels are box-filtered on the CPU too (blits do not take BC).
+
+// the 565 colour of 8-bit channels
+fn bc1_pack(r: i64, g: i64, b: i64) -> i64 {
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+// the 8-bit channels of a 565 colour
+fn bc1_r(c: i64) -> i64 {
+    var r5: i64 = (c >> 11) & 31;
+    return (r5 << 3) | (r5 >> 2);
+}
+
+fn bc1_g(c: i64) -> i64 {
+    var g6: i64 = (c >> 5) & 63;
+    return (g6 << 2) | (g6 >> 4);
+}
+
+fn bc1_b(c: i64) -> i64 {
+    var b5: i64 = c & 31;
+    return (b5 << 3) | (b5 >> 2);
+}
+
+// palette entry k between endpoints a and b, one channel: k 0 a, 1 (2a+b)/3,
+// 2 (a+2b)/3, 3 b
+fn bc1_mix(a: i64, b: i64, k: i64) -> i64 {
+    if k == 0 { return a; }
+    if k == 1 { return (2 * a + b) / 3; }
+    if k == 2 { return (a + 2 * b) / 3; }
+    return b;
+}
+
+// squared distance of a pixel from palette entry k of the endpoints c0, c1
+fn bc1_dist(r: i64, g: i64, b: i64, c0: i64, c1: i64, k: i64) -> i64 {
+    var dr: i64 = r - bc1_mix(bc1_r(c0), bc1_r(c1), k);
+    var dg: i64 = g - bc1_mix(bc1_g(c0), bc1_g(c1), k);
+    var db: i64 = b - bc1_mix(bc1_b(c0), bc1_b(c1), k);
+    return dr * dr + dg * dg + db * db;
+}
+
+// channel c of pixel i of the block at (x0, y0) of a w x h BGRA picture;
+// 0 red, 1 green, 2 blue. Past the edge the picture's edge is repeated.
+fn bc1_ch(src: i64, w: i64, h: i64, x0: i64, y0: i64, i: i64, c: i64) -> i64 {
+    var x: i64 = x0 + (i & 3);
+    if x >= w { x = w - 1; }
+    var y: i64 = y0 + (i >> 2);
+    if y >= h { y = h - 1; }
+    var v: i64 = 0;
+    raw { v = peek8(src + (y * w + x) * 4 + 2 - c); }
+    return v;
+}
+
+// the 8 bytes of the block at (x0, y0), written at dst
+fn bc1_block(src: i64, w: i64, h: i64, x0: i64, y0: i64, dst: i64) -> i64 {
+    var mxr: i64 = 0;
+    var mxg: i64 = 0;
+    var mxb: i64 = 0;
+    var mnr: i64 = 255;
+    var mng: i64 = 255;
+    var mnb: i64 = 255;
+    var i: i64 = 0;
+    while i < 16 {
+        var r: i64 = bc1_ch(src, w, h, x0, y0, i, 0);
+        var g: i64 = bc1_ch(src, w, h, x0, y0, i, 1);
+        var b: i64 = bc1_ch(src, w, h, x0, y0, i, 2);
+        if r > mxr { mxr = r; }
+        if g > mxg { mxg = g; }
+        if b > mxb { mxb = b; }
+        if r < mnr { mnr = r; }
+        if g < mng { mng = g; }
+        if b < mnb { mnb = b; }
+        i = i + 1;
+    }
+    var c0: i64 = bc1_pack(mxr, mxg, mxb);
+    var c1: i64 = bc1_pack(mnr, mng, mnb);
+    if c0 < c1 {
+        var t: i64 = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    // c0 must be above c1, or the card reads the block as three colours
+    if c0 == c1 {
+        if c1 > 0 { c1 = c1 - 1; } else { c0 = 1; }
+    }
+    var word: i64 = 0;
+    i = 0;
+    while i < 16 {
+        var r: i64 = bc1_ch(src, w, h, x0, y0, i, 0);
+        var g: i64 = bc1_ch(src, w, h, x0, y0, i, 1);
+        var b: i64 = bc1_ch(src, w, h, x0, y0, i, 2);
+        var best: i64 = 0;
+        var bd: i64 = bc1_dist(r, g, b, c0, c1, 0);
+        var k: i64 = 1;
+        while k < 4 {
+            var d: i64 = bc1_dist(r, g, b, c0, c1, k);
+            if d < bd {
+                bd = d;
+                best = k;
+            }
+            k = k + 1;
+        }
+        // BC1 numbers c0, c1, then the two mixes: 2 is k 1 and 3 is k 2
+        var code: i64 = best;
+        if best == 1 { code = 2; }
+        if best == 2 { code = 3; }
+        if best == 3 { code = 1; }
+        word = word | (code << (i * 2));
+        i = i + 1;
+    }
+    raw {
+        poke8(dst, c0 & 255);
+        poke8(dst + 1, c0 >> 8);
+        poke8(dst + 2, c1 & 255);
+        poke8(dst + 3, c1 >> 8);
+        poke8(dst + 4, word & 255);
+        poke8(dst + 5, (word >> 8) & 255);
+        poke8(dst + 6, (word >> 16) & 255);
+        poke8(dst + 7, (word >> 24) & 255);
+    }
+    return 1;
+}
+
+// the size of the next mip level: half, never below 1
+fn bc1_next(x: i64) -> i64 {
+    var n: i64 = x >> 1;
+    if n < 1 { n = 1; }
+    return n;
+}
+
+// the next level down, BGRA: each pixel the average of the 2 x 2 above it
+fn bc1_half(src: i64, w: i64, h: i64, dst: i64) -> i64 {
+    var nw: i64 = bc1_next(w);
+    var nh: i64 = bc1_next(h);
+    var y: i64 = 0;
+    while y < nh {
+        var x: i64 = 0;
+        while x < nw {
+            var c: i64 = 0;
+            while c < 4 {
+                var s: i64 = 0;
+                var dy: i64 = 0;
+                while dy < 2 {
+                    var dx: i64 = 0;
+                    while dx < 2 {
+                        var sx: i64 = 2 * x + dx;
+                        if sx >= w { sx = w - 1; }
+                        var sy: i64 = 2 * y + dy;
+                        if sy >= h { sy = h - 1; }
+                        var v: i64 = 0;
+                        raw { v = peek8(src + (sy * w + sx) * 4 + c); }
+                        s = s + v;
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                var avg: i64 = s / 4;
+                raw { poke8(dst + (y * nw + x) * 4 + c, avg); }
+                c = c + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+
+// w x h BGRA at src, as BC1 with all its mip levels, on the card
+fn vk_texture_bc1(src: i64, w: i64, h: i64) -> i64 {
+    vk_sn = 0;
+    var levels: i64 = 1;
+    var big: i64 = w;
+    if h > big { big = h; }
+    while big > 1 {
+        big = big >> 1;
+        levels = levels + 1;
+    }
+    // the BC1 bytes of every level, and the BGRA of every level after the first
+    var blocks: i64 = 0;
+    var chain: i64 = 0;
+    var lw: i64 = w;
+    var lh: i64 = h;
+    var k: i64 = 0;
+    while k < levels {
+        blocks = blocks + ((lw + 3) / 4) * ((lh + 3) / 4) * 8;
+        if k > 0 { chain = chain + lw * lh * 4; }
+        lw = bc1_next(lw);
+        lh = bc1_next(lh);
+        k = k + 1;
+    }
+    var store: i64 = 0;
+    if chain > 0 {
+        store = hp_alloc(chain);
+        if store == 0 { return 0; }
+    }
+    if vk_buffer(blocks, 1, 6) == 0 { return 0; }
+    var sbuf: i64 = vk_out[2];
+    var p: i64 = vk_map(vk_out[3]);
+    if p == 0 { return 0; }
+    var rg: i64 = vs(56 * levels);
+    var at: i64 = 0;
+    var used: i64 = 0;
+    var cur: i64 = src;
+    var cw: i64 = w;
+    var ch: i64 = h;
+    k = 0;
+    while k < levels {
+        var start: i64 = at;
+        var bw: i64 = (cw + 3) / 4;
+        var bh: i64 = (ch + 3) / 4;
+        var by: i64 = 0;
+        while by < bh {
+            var bx: i64 = 0;
+            while bx < bw {
+                bc1_block(cur, cw, ch, bx * 4, by * 4, p + at);
+                at = at + 8;
+                bx = bx + 1;
+            }
+            by = by + 1;
+        }
+        // where this level sits in the buffer, and its size
+        var r: i64 = rg + k * 56;
+        w64(r, 0, start);
+        w32(r, 16, 1);
+        w32(r, 20, k);
+        w32(r, 28, 1);
+        w32(r, 44, cw);
+        w32(r, 48, ch);
+        w32(r, 52, 1);
+        if k + 1 < levels {
+            var nw: i64 = bc1_next(cw);
+            var nh: i64 = bc1_next(ch);
+            var dst: i64 = store + used;
+            bc1_half(cur, cw, ch, dst);
+            used = used + nw * nh * 4;
+            cur = dst;
+            cw = nw;
+            ch = nh;
+        }
+        k = k + 1;
+    }
+    if vk_image_mips(w, h, 131, 2 | 4, levels) == 0 { return 0; }
+    var img: i64 = vk_out[7];
+    list_add(gt_img, img);
+    list_add(gt_mem, vk_out[8]);
+    list_add(gt_view, vk_out[9]);
+    list_add(gt_lay, 5);
+    vk_once_begin();
+    vk_barrier_lv(img, 0, levels, 0, 7, 0, 4096, 1, 4096);
+    raw { vkCmdCopyBufferToImage(vk_cmd, sbuf, img, 7, levels, rg); }
+    vk_barrier_lv(img, 0, levels, 7, 5, 4096, 32, 4096, 128);
+    vk_once_end();
+    if store != 0 { hp_release(store); }
     return 1;
 }
 
@@ -956,7 +1329,7 @@ fn vk_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
         if t <= 0 || t > list_len(gt_view) { t = gpu_white; }
         w64(infos, k * 24, vk_sampler);
         w64(infos, k * 24 + 8, list_get(gt_view, t - 1));
-        w32(infos, k * 24 + 16, 5);
+        w32(infos, k * 24 + 16, list_get(gt_lay, t - 1));
         w32(writes, k * 64, 35);
         w64(writes, k * 64 + 16, set1);
         w32(writes, k * 64 + 24, k);
@@ -1001,6 +1374,156 @@ fn vk_end() -> i64 {
     if vk_once_end() == 0 { return 0; }
     raw { hp_copy(&gpu_read[0], vk_read_map, gpu_w * gpu_h * 4); }
     return 1;
+}
+
+// the pass a target is drawn in: colour and depth are kept, and left ready
+// for a shader to read (the same formats as the frame's pass, so the
+// programs' pipelines fit it too)
+fn vk_tpass_make() -> i64 {
+    var att: i64 = vs(72);
+    w32(att, 4, 44);
+    w32(att, 8, 1);
+    w32(att, 12, 1);                    // clear the colour
+    w32(att, 16, 0);                    // keep it
+    w32(att, 20, 2);
+    w32(att, 24, 1);
+    w32(att, 28, 0);
+    w32(att, 32, 5);                    // read by a shader after
+    w32(att, 36 + 4, 126);
+    w32(att, 36 + 8, 1);
+    w32(att, 36 + 12, 1);               // clear the depth
+    w32(att, 36 + 16, 0);               // keep it
+    w32(att, 36 + 20, 2);
+    w32(att, 36 + 24, 1);
+    w32(att, 36 + 28, 0);
+    w32(att, 36 + 32, 1000117000);      // depth, read by a shader after
+    var cref: i64 = vs(8);
+    w32(cref, 0, 0);
+    w32(cref, 4, 2);
+    var dref: i64 = vs(8);
+    w32(dref, 0, 1);
+    w32(dref, 4, 3);
+    var sub: i64 = vs(72);
+    w32(sub, 24, 1);
+    w64(sub, 32, cref);
+    w64(sub, 48, dref);
+    // the same dependency as the frame's pass, so the programs' pipelines
+    // fit this pass too; the wait for each job's fence orders the reads
+    var dep: i64 = vs(28);
+    w32(dep, 0, 0);
+    w32(dep, 4, 0 - 1);
+    w32(dep, 8, 1024 | 256);
+    w32(dep, 12, 4096);
+    w32(dep, 16, 256 | 1024);
+    w32(dep, 20, 2048);
+    var rp: i64 = vs(64);
+    w32(rp, 0, 38);
+    w32(rp, 20, 2);
+    w64(rp, 24, att);
+    w32(rp, 32, 1);
+    w64(rp, 40, sub);
+    w32(rp, 48, 1);
+    w64(rp, 56, dep);
+    raw { vk_res = vkCreateRenderPass(vk_dev, rp, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateRenderPass") { return 0; }
+    return vk_got(0);
+}
+
+// a target w x h: its colour (B G R A) and depth, with the framebuffer
+fn vk_target_make(w: i64, h: i64) -> i64 {
+    if vk_tpass == 0 {
+        vk_tpass = vk_tpass_make();
+        if vk_tpass == 0 { return 0; }
+    }
+    if vk_image(w, h, 44, 16 | 4) == 0 { return 0; }
+    var cimg: i64 = vk_out[7];
+    var cmem: i64 = vk_out[8];
+    var cview: i64 = vk_out[9];
+    if vk_image(w, h, 126, 32 | 4) == 0 { return 0; }
+    var dimg: i64 = vk_out[7];
+    var dmem: i64 = vk_out[8];
+    var dview: i64 = vk_out[9];
+    var views: i64 = vs(16);
+    w64(views, 0, cview);
+    w64(views, 8, dview);
+    var fbi: i64 = vs(64);
+    w32(fbi, 0, 37);
+    w64(fbi, 24, vk_tpass);
+    w32(fbi, 32, 2);
+    w64(fbi, 40, views);
+    w32(fbi, 48, w);
+    w32(fbi, 52, h);
+    w32(fbi, 56, 1);
+    raw { vk_res = vkCreateFramebuffer(vk_dev, fbi, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateFramebuffer") { return 0; }
+    var fb: i64 = vk_got(0);
+    list_add(gr_w, w);
+    list_add(gr_h, h);
+    list_add(gr_cimg, cimg);
+    list_add(gr_cmem, cmem);
+    list_add(gr_cview, cview);
+    list_add(gr_dimg, dimg);
+    list_add(gr_dmem, dmem);
+    list_add(gr_dview, dview);
+    list_add(gr_fb, fb);
+    // both as textures: the colour is read in its shader layout, the depth
+    // in the depth read-only layout
+    list_add(gt_img, cimg);
+    list_add(gt_mem, cmem);
+    list_add(gt_view, cview);
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    list_add(gt_lay, 5);
+    list_add(gr_ctex, list_len(gt_w));
+    list_add(gt_img, dimg);
+    list_add(gt_mem, dmem);
+    list_add(gt_view, dview);
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    list_add(gt_lay, 1000117000);
+    list_add(gr_dtex, list_len(gt_w));
+    return list_len(gr_w);
+}
+
+fn vk_begin_target(i: i64, clear: Vec4) -> i64 {
+    var w: i64 = list_get(gr_w, i);
+    var h: i64 = list_get(gr_h, i);
+    vk_sn = 0;
+    raw { vk_res = vkResetDescriptorPool(vk_dev, vk_fpool, 0); }
+    vk_once_begin();
+    var cv: i64 = vs(32);
+    wf32(cv, 0, clear.x);
+    wf32(cv, 4, clear.y);
+    wf32(cv, 8, clear.z);
+    wf32(cv, 12, clear.w);
+    wf32(cv, 16, 1.0);
+    var rb: i64 = vs(64);
+    w32(rb, 0, 43);
+    w64(rb, 16, vk_tpass);
+    w64(rb, 24, list_get(gr_fb, i));
+    w32(rb, 40, w);
+    w32(rb, 44, h);
+    w32(rb, 48, 2);
+    w64(rb, 56, cv);
+    raw { vkCmdBeginRenderPass(vk_cmd, rb, 0); }
+    var vp: i64 = vs(24);
+    wf32(vp, 0, 0.0);
+    wf32(vp, 4, h as f64);
+    wf32(vp, 8, w as f64);
+    wf32(vp, 12, 0.0 - (h as f64));
+    wf32(vp, 16, 0.0);
+    wf32(vp, 20, 1.0);
+    raw { vkCmdSetViewport(vk_cmd, 0, 1, vp); }
+    var sc: i64 = vs(16);
+    w32(sc, 8, w);
+    w32(sc, 12, h);
+    raw { vkCmdSetScissor(vk_cmd, 0, 1, sc); }
+    return 1;
+}
+
+fn vk_end_target() -> i64 {
+    raw { vkCmdEndRenderPass(vk_cmd); }
+    return vk_once_end();
 }
 
 fn vk_close() -> i64 {
@@ -1226,9 +1749,38 @@ fn gpu_texture(img: i64) -> i64 {
     return gpu_texture_bgra(q + 16, w, h);
 }
 
+// a picture of std_image on the card as BC1, a quarter of gpu_texture's memory
+// with all its mip levels. Vulkan, on a card with BC textures, for now.
+fn gpu_texture_bc1(img: i64) -> i64 {
+    var w: i64 = image_width(img);
+    var h: i64 = image_height(img);
+    if w <= 0 || h <= 0 {
+        fail "this is no picture" hint "image_load or image_new gives one";
+    }
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_kind != 1 {
+        fail "compressed textures are on Vulkan only, for now" hint "use gpu_texture here";
+    }
+    if gpu_bc_on == 0 {
+        fail "this graphics card has no BC textures" hint "use gpu_texture";
+    }
+    lock_take(HP_LOCK);
+    var q: i64 = im_pixels(img);
+    lock_give(HP_LOCK);
+    if vk_texture_bc1(q + 16, w, h) == 0 { return 0; }
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    return list_len(gt_w);
+}
+
 fn gpu_begin(clear: Vec4) -> i64 {
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_in_target == 1 {
+        fail "a render target is begun" hint "gpu_end_target first";
     }
     if gpu_in_frame == 1 {
         fail "a frame is already begun" hint "gpu_end it first";
@@ -1263,6 +1815,9 @@ fn gpu_draw(prog: i64, mesh: i64, tex: i64) -> i64 {
 
 // the frame is done: drawn, read back and put in the window when one is open
 fn gpu_end() -> i64 {
+    if gpu_in_target == 1 {
+        fail "a render target is begun" hint "gpu_end_target ends it";
+    }
     if gpu_in_frame == 0 {
         fail "no frame is begun" hint "gpu_begin first";
     }
@@ -1288,6 +1843,66 @@ fn gpu_end() -> i64 {
         }
     }
     return 1;
+}
+
+// ------------------------------------------------- render targets ---
+// A target is a picture the frame is not: draw into it between
+// gpu_begin_target and gpu_end_target, then read it as a texture in
+// the frame (or in another target) that comes after. Its depth is kept
+// too, for shadow maps. Vulkan only, for now.
+fn gpu_target(w: i64, h: i64) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_kind != 1 {
+        fail "render targets are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
+    }
+    if w <= 0 || h <= 0 || w * h > 4194304 {
+        fail "a target of this size cannot be made" hint "from 1 x 1 to 2048 x 2048";
+    }
+    return vk_target_make(w, h);
+}
+
+// the colour of a target, as a texture for gpu_draw
+fn gpu_target_texture(t: i64) -> i64 {
+    if t < 1 || t > list_len(gr_w) {
+        fail "no such target" hint "use what gpu_target gave";
+    }
+    return list_get(gr_ctex, t - 1);
+}
+
+// the depth of a target, as a texture: a shadow map when drawn from the light
+fn gpu_target_depth(t: i64) -> i64 {
+    if t < 1 || t > list_len(gr_w) {
+        fail "no such target" hint "use what gpu_target gave";
+    }
+    return list_get(gr_dtex, t - 1);
+}
+
+// the frame's draws go into the target, cleared to clear, until gpu_end_target
+fn gpu_begin_target(t: i64, clear: Vec4) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_in_frame == 1 {
+        fail "a frame is begun" hint "gpu_end it first, then draw the target";
+    }
+    if t < 1 || t > list_len(gr_w) {
+        fail "no such target" hint "use what gpu_target gave";
+    }
+    gpu_in_frame = 1;
+    gpu_in_target = 1;
+    gpu_draws = 0;
+    return vk_begin_target(t - 1, clear);
+}
+
+fn gpu_end_target() -> i64 {
+    if gpu_in_target == 0 {
+        fail "no render target is begun" hint "gpu_begin_target first";
+    }
+    gpu_in_target = 0;
+    gpu_in_frame = 0;
+    return vk_end_target();
 }
 
 // a pixel of the last frame: 0xRRGGBB

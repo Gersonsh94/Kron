@@ -12,6 +12,13 @@ REM                                textures, blending, a lit cube, a mesh
 REM                                made from lists, and the time of 30
 REM                                frames of 2000 cubes each. The cube is
 REM                                saved in tests\tmp\gpu_cube.bmp.
+REM     tests\gpu\gpu_target.kr    render targets: a picture drawn into,
+REM                                then read as colour and as depth (shadow
+REM                                maps). Vulkan only, for now.
+REM     tests\gpu\gpu_mip.kr       mipmaps: a fine checkerboard drawn small
+REM                                comes out grey, not black and white
+REM     tests\gpu\gpu_bc.kr        BC1 (compressed) textures: four colours on
+REM                                a 64 x 64 picture come out right
 REM     tests\gpu\gpu_window.kr    three seconds of a sphere and a cube in a
 REM                                window: frames a second, and that they
 REM                                reach the window
@@ -49,6 +56,9 @@ echo ============================================================
 echo.
 
 call :gputest gpu_basic
+call :gputest gpu_target
+call :gputest gpu_mip
+call :gputest gpu_bc
 call :gputest gpu_window
 call :gputest gpu_devices
 

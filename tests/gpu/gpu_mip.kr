@@ -1,0 +1,116 @@
+kron_program
+kron_domain gpu_mip;
+kron_imports
+acquire_domain "std_gpu.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: mipmaps. A 256 x 256 one-texel checkerboard drawn on a 32 x 32
+// frame is 8 times smaller than the picture: without mip levels the pixels
+// flicker between black and white; with them they are the average, grey.
+// Run by GPUTESTS.bat; the exit code is the number of checks that failed.
+// =========================================================================
+
+var failures: i64;
+const W: i64 = 32;
+const H: i64 = 32;
+const S: i64 = 256;
+var pix: [u8; 262144];
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+fn put(i: i64, v: i64) {
+    raw { poke32(&pix[0] + i * 4, v); }
+}
+
+// a grey within tol of v, channel by channel
+fn grey_near(c: i64, v: i64, tol: i64) -> i64 {
+    if iabs(channel(c, 0) - v) > tol { return 0; }
+    if iabs(channel(c, 1) - v) > tol { return 0; }
+    if iabs(channel(c, 2) - v) > tol { return 0; }
+    return 1;
+}
+
+fn check_grey(x: i64, y: i64, v: i64, tol: i64, what: i64) -> i64 {
+    var c: i64 = gpu_pixel(x, y);
+    var t: text = text_add(text_new(), what);
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ")");
+    return report(grey_near(c, v, tol), t);
+}
+
+fn quad(x0: f64, y0: f64, x1: f64, y1: f64, z: f64) -> i64 {
+    var v: i64 = list_new();
+    var i: i64 = list_new();
+    list_add_real(v, x0); list_add_real(v, y0); list_add_real(v, z); list_add_real(v, 0.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y0); list_add_real(v, z); list_add_real(v, 1.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y1); list_add_real(v, z); list_add_real(v, 1.0); list_add_real(v, 0.0);
+    list_add_real(v, x0); list_add_real(v, y1); list_add_real(v, z); list_add_real(v, 0.0); list_add_real(v, 0.0);
+    list_add(i, 0); list_add(i, 1); list_add(i, 2);
+    list_add(i, 0); list_add(i, 2); list_add(i, 3);
+    return gpu_mesh_lists(v, 5, i);
+}
+
+fn main() -> i64 {
+    say("GPU mipmap test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    var y: i64 = 0;
+    while y < S {
+        var x: i64 = 0;
+        while x < S {
+            if ((x + y) & 1) == 0 { put(y * S + x, 4294967295); }
+            else { put(y * S + x, 4278190080); }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var tex: i64 = 0;
+    raw { tex = gpu_texture_bgra(&pix[0], S, S); }
+    report(tex > 0, "the checkerboard is made as a texture");
+
+    var pic: text = "texture albedo;\nin pos: vec3;\nin uv: vec2;\nvar vuv: vec2;\nvertex {\n vuv = uv;\n position = vec4(pos, 1.0);\n}\nfragment {\n color = sample(albedo, vuv);\n}\n";
+    var ppic: i64 = gpu_shader(pic);
+    report(ppic != 0, "a shader with a texture compiles");
+    if ppic == 0 || tex == 0 {
+        return failures;
+    }
+    // shifted by half a texel, so each pixel samples the middle of a texel:
+    // without mip levels that texel is black or white, not the mix of four
+    var off: f64 = 0.00390625;
+    var full: i64 = quad(-1.0 + off, -1.0 + off, 1.0 + off, 1.0 + off, 0.5);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw(ppic, full, tex);
+    gpu_end();
+    check_grey(4, 4, 128, 12, "mip: top left, averaged to grey");
+    check_grey(16, 16, 128, 12, "mip: middle, averaged to grey");
+    check_grey(27, 9, 128, 12, "mip: another spot, averaged to grey");
+
+    if failures == 0 {
+        say("GPU mipmap test: all passed");
+    } else {
+        say("GPU mipmap test: some checks failed");
+    }
+    return failures;
+}
