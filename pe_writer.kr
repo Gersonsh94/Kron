@@ -1,0 +1,720 @@
+kron_program
+kron_domain pe_writer;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// PE WRITER: the Windows executable, written from the assembled program
+//
+// Writes a PE32+ executable with a 3-section layout, the same layout GoLink
+// produces: .text (code, then the import thunks), .data (data, then bss) and
+// .idata (the import table; for a DLL also the exports and the base
+// relocations). It was pe_writer.asm, and it is here now, byte for byte the
+// same: every offset and every order of writing is the one the assembly had.
+//
+// The assembled program comes from kasm, which is still in assembly for the
+// time being: kasm_get_code, kasm_get_fixup_*, kasm_find_label and the rest
+// are called through the door in pe_writer.asm, which also holds the three
+// flags main sets (--window, --lib and the DLL's file name).
+//
+// kasm resolves [rel data] assuming a flat layout, with the data right after
+// the code. This writer puts .data in its own section, so every disp32 of a
+// data or bss reference is worked out again against the real RVA: the
+// fixups kasm keeps say where each one is.
+// =========================================================================
+
+extern "kronc" {
+    fn kasm_get_code() -> i64;
+    fn kasm_get_code_size() -> i64;
+    fn kasm_get_data() -> i64;
+    fn kasm_get_data_size() -> i64;
+    fn kasm_get_bss_size() -> i64;
+    fn kasm_get_ext_count() -> i64;
+    fn kasm_get_ext_name(i: i64) -> i64;
+    fn kasm_get_extref_count() -> i64;
+    fn kasm_get_extref_at(i: i64) -> i64;
+    fn kasm_get_extref_sym(i: i64) -> i64;
+    fn kasm_find_label(name: i64, len: i64) -> i64;
+    fn kasm_get_fixup_count() -> i64;
+    fn kasm_get_fixup_at(i: i64) -> i64;
+    fn kasm_get_fixup_label(i: i64) -> i64;
+    fn kasm_get_fixup_addend(i: i64) -> i64;
+    fn kasm_get_fixup_kind(i: i64) -> i64;
+    fn kasm_get_label_section(i: i64) -> i64;
+    fn pw_label_addr(idx: i64) -> i64;
+    fn pw_export_count() -> i64;
+    fn pw_export_name(i: i64) -> i64;
+    fn pw_export_len(i: i64) -> i64;
+    fn pw_flag_gui() -> i64;
+    fn pw_flag_dll() -> i64;
+    fn pw_dll_file_addr() -> i64;
+}
+
+const PW_FILE_ALIGN: i64 = 512;      // 0x200
+const PW_SECT_ALIGN: i64 = 4096;     // 0x1000
+const PW_HDRS: i64 = 1024;           // 0x400: SizeOfHeaders
+const PW_THUNK: i64 = 6;             // one import thunk: FF 25 disp32
+const PW_TEXT_RVA: i64 = 4096;       // 0x1000
+const PW_IDATA_OFF_MAX: i64 = 4096;  // exports: the most names one DLL keeps
+
+var pw_buf: i64;
+var pw_code_ptr: i64;
+var pw_code_len: i64;
+var pw_data_ptr: i64;
+var pw_data_len: i64;
+var pw_bss_len: i64;
+var pw_ext_count: i64;
+var pw_xref_count: i64;
+var pw_thunks_off: i64;
+var pw_text_vsize: i64;
+var pw_text_raw: i64;
+var pw_text_foff: i64;
+var pw_bss_off_sec: i64;
+var pw_data_vsize: i64;
+var pw_data_raw: i64;
+var pw_data_foff: i64;
+var pw_idata_foff: i64;
+var pw_idata_size: i64;
+var pw_data_rva: i64;
+var pw_idata_rva: i64;
+var pw_idt_rva: i64;
+var pw_ilt_rva: i64;
+var pw_iat_rva: i64;
+var pw_names_intra: i64;
+var pw_entry_rva: i64;
+var pw_total: i64;
+var pw_base: i64;
+var pw_exp_n: i64;
+var pw_exp_dir: i64;
+var pw_exp_size: i64;
+var pw_rel_dir: i64;
+var pw_rel_size: i64;
+var pw_rel_page: i64;
+var pw_rel_block: i64;
+var pw_hint: [i64; 4096];            // each import name's RVA
+var pw_exp_order: [i64; 4096];       // the exports' numbers, sorted by name
+var pw_name: [u8; 320];              // "__ce_" and an export's name
+
+// -------------------------------------------------------------------------
+// bytes, by address
+// -------------------------------------------------------------------------
+
+fn pw_b(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn pw_sb(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn pw_q(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn pw_qs(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+// 1 when v is the -1 of a 32-bit register: kasm returns -1 in eax, which
+// leaves the top half of rax clear
+fn pw_neg1(v: i64) -> i64 {
+    if (v & 4294967295) == 4294967295 {
+        return 1;
+    }
+    return 0;
+}
+
+// the buffer is at pw_buf; these write little endian at an offset of it
+fn pw_put8(off: i64, v: i64) -> i64 {
+    var a: i64 = pw_buf + off;
+    pw_sb(a, v & 255);
+    return 0;
+}
+
+fn pw_put16(off: i64, v: i64) -> i64 {
+    var a: i64 = pw_buf + off;
+    pw_sb(a, v & 255);
+    pw_sb(a + 1, (v >> 8) & 255);
+    return 0;
+}
+
+fn pw_put32(off: i64, v: i64) -> i64 {
+    var a: i64 = pw_buf + off;
+    var i: i64 = 0;
+    while i < 4 {
+        pw_sb(a + i, (v >> (i * 8)) & 255);
+        i += 1;
+    }
+    return 0;
+}
+
+fn pw_put64(off: i64, v: i64) -> i64 {
+    var a: i64 = pw_buf + off;
+    var i: i64 = 0;
+    while i < 8 {
+        pw_sb(a + i, (v >> (i * 8)) & 255);
+        i += 1;
+    }
+    return 0;
+}
+
+// rounds v up to a multiple of a (a is a power of two)
+fn pw_align(v: i64, a: i64) -> i64 {
+    return (v + a - 1) & (0 - a);
+}
+
+// zeroes n bytes from address a
+fn pw_zero(a: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        pw_sb(a + i, 0);
+        i += 1;
+    }
+    return 0;
+}
+
+// the length of the zero-ended text at p
+fn pw_cstrlen(p: i64) -> i64 {
+    var n: i64 = 0;
+    while pw_b(p + n) != 0 {
+        n += 1;
+    }
+    return n;
+}
+
+// the names the writer needs, written out byte by byte
+fn pw_set_main(dst: i64) -> i64 {
+    // "main"
+    pw_sb(dst + 0, 109);
+    pw_sb(dst + 1, 97);
+    pw_sb(dst + 2, 105);
+    pw_sb(dst + 3, 110);
+    pw_sb(dst + 4, 0);
+    return 0;
+}
+
+fn pw_set_dllmain(dst: i64) -> i64 {
+    // "__dll_main"
+    pw_sb(dst + 0, 95);
+    pw_sb(dst + 1, 95);
+    pw_sb(dst + 2, 100);
+    pw_sb(dst + 3, 108);
+    pw_sb(dst + 4, 108);
+    pw_sb(dst + 5, 95);
+    pw_sb(dst + 6, 109);
+    pw_sb(dst + 7, 97);
+    pw_sb(dst + 8, 105);
+    pw_sb(dst + 9, 110);
+    pw_sb(dst + 10, 0);
+    return 0;
+}
+
+fn pw_set_dllname(dst: i64) -> i64 {
+    // "kernel32.dll"
+    pw_sb(dst + 0, 107);
+    pw_sb(dst + 1, 101);
+    pw_sb(dst + 2, 114);
+    pw_sb(dst + 3, 110);
+    pw_sb(dst + 4, 101);
+    pw_sb(dst + 5, 108);
+    pw_sb(dst + 6, 51);
+    pw_sb(dst + 7, 50);
+    pw_sb(dst + 8, 46);
+    pw_sb(dst + 9, 100);
+    pw_sb(dst + 10, 108);
+    pw_sb(dst + 11, 108);
+    pw_sb(dst + 12, 0);
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the import names, the exports' order, and the DLL tables
+// -------------------------------------------------------------------------
+
+// 1 when the export numbered a sorts after the one numbered b, by name
+fn pw_name_cmp(a: i64, b: i64) -> i64 {
+    var sa: i64 = pw_export_name(a);
+    var la: i64 = pw_export_len(a);
+    var sb: i64 = pw_export_name(b);
+    var lb: i64 = pw_export_len(b);
+    var i: i64 = 0;
+    var ca: i64 = 0;
+    var cb: i64 = 0;
+    while i < la {
+        if i >= lb {
+            return 1;
+        }
+        ca = pw_b(sa + i);
+        cb = pw_b(sb + i);
+        if ca > cb {
+            return 1;
+        }
+        if ca < cb {
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// pw_rel_close(r14): the block being written gets its size, padded to four
+// bytes. Returns the next free offset in .idata.
+fn pw_rel_close(r14: i64) -> i64 {
+    var rc: i64 = r14;
+    if pw_rel_block == -1 {
+        return rc;
+    }
+    if (rc & 2) != 0 {
+        pw_put16(pw_idata_foff + rc, 0);
+        rc += 2;
+    }
+    pw_put32(pw_idata_foff + pw_rel_block + 4, rc - pw_rel_block);
+    return rc;
+}
+
+// a DLL's export directory and base relocations, after the imports in
+// .idata; grows pw_idata_size
+fn pw_dll_tables() -> i64 {
+    var n: i64 = 0;
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var num: i64 = 0;
+    var r14: i64 = 0;
+    var funcs: i64 = 0;
+    var names: i64 = 0;
+    var nums: i64 = 0;
+    var nlen: i64 = 0;
+    var nptr: i64 = 0;
+    var lab: i64 = 0;
+    var k: i64 = 0;
+    var c: i64 = 0;
+    var off: i64 = 0;
+    var fixn: i64 = 0;
+    var lbl: i64 = 0;
+    var rva: i64 = 0;
+    var page: i64 = 0;
+    var rel_dir: i64 = 0;
+    var rel_size: i64 = 0;
+    n = pw_export_count();
+    pw_exp_n = n;
+    // the order of the names: a sort of their numbers, by insertion
+    i = 0;
+    while i < n {
+        pw_qs(&pw_exp_order, i, i);
+        i += 1;
+    }
+    i = 1;
+    while i < n {
+        j = i;
+        while j > 0 {
+            if pw_name_cmp(pw_q(&pw_exp_order, j - 1), pw_q(&pw_exp_order, j)) == 0 {
+                break;
+            }
+            num = pw_q(&pw_exp_order, j - 1);
+            pw_qs(&pw_exp_order, j - 1, pw_q(&pw_exp_order, j));
+            pw_qs(&pw_exp_order, j, num);
+            j -= 1;
+        }
+        i += 1;
+    }
+    // where it goes: after the imports, on 8 bytes; what follows cleared
+    pw_exp_dir = (pw_idata_size + 7) & (0 - 8);
+    pw_zero(pw_buf + pw_idata_foff + pw_exp_dir, 65536);
+    // the tables: the functions, the names' addresses, the numbers
+    r14 = pw_exp_dir + 40;
+    funcs = r14;
+    r14 = r14 + n * 4;
+    names = r14;
+    r14 = r14 + n * 4;
+    nums = r14;
+    r14 = r14 + n * 2;
+    r14 = (r14 + 3) & (0 - 4);
+    // the directory
+    off = pw_idata_foff + pw_exp_dir;
+    pw_put32(off + 16, 1);
+    pw_put32(off + 20, n);
+    pw_put32(off + 24, n);
+    pw_put32(off + 28, pw_idata_rva + funcs);
+    pw_put32(off + 32, pw_idata_rva + names);
+    pw_put32(off + 36, pw_idata_rva + nums);
+    // each export, in the sorted order: its name's address, its name, its
+    // number, and the RVA of its entry
+    i = 0;
+    while i < n {
+        num = pw_q(&pw_exp_order, i);
+        pw_put32(pw_idata_foff + names + i * 4, pw_idata_rva + r14);
+        nlen = pw_export_len(num);
+        nptr = pw_export_name(num);
+        k = 0;
+        while k < nlen {
+            pw_sb(pw_buf + pw_idata_foff + r14 + k, pw_b(nptr + k));
+            k += 1;
+        }
+        pw_sb(pw_buf + pw_idata_foff + r14 + nlen, 0);
+        // the label of its entry: __ce_<name>
+        pw_sb(&pw_name + 0, 95);
+        pw_sb(&pw_name + 1, 95);
+        pw_sb(&pw_name + 2, 99);
+        pw_sb(&pw_name + 3, 101);
+        pw_sb(&pw_name + 4, 95);
+        k = 0;
+        while k < nlen {
+            pw_sb(&pw_name + 5 + k, pw_b(nptr + k));
+            k += 1;
+        }
+        pw_sb(&pw_name + 5 + nlen, 0);
+        r14 = r14 + nlen + 1;
+        // its number in the ordinal table, which is the sorted position
+        pw_put16(pw_idata_foff + nums + i * 2, i);
+        // the function: the entry's RVA
+        lab = kasm_find_label(&pw_name, 5 + nlen);
+        if pw_neg1(lab) == 0 {
+            pw_put32(pw_idata_foff + funcs + i * 4, PW_TEXT_RVA + pw_label_addr(lab));
+        }
+        i += 1;
+    }
+    // the DLL's own name
+    pw_put32(pw_exp_dir + pw_idata_foff + 12, pw_idata_rva + r14);
+    k = 0;
+    while 1 == 1 {
+        c = pw_b(pw_dll_file_addr() + k);
+        pw_sb(pw_buf + pw_idata_foff + r14, c);
+        r14 += 1;
+        k += 1;
+        if c == 0 {
+            break;
+        }
+    }
+    pw_exp_size = r14 - pw_exp_dir;
+    // DataDirectory[0], the exports
+    pw_put32(320, pw_exp_dir + pw_idata_rva);
+    pw_put32(324, pw_exp_size);
+    // ---- the base relocations ----
+    r14 = (r14 + 3) & (0 - 4);
+    pw_rel_dir = r14;
+    rel_dir = r14;
+    pw_rel_page = -1;
+    pw_rel_block = -1;
+    fixn = kasm_get_fixup_count();
+    i = 0;
+    while i < fixn {
+        if kasm_get_fixup_kind(i) == 6 {
+            lbl = kasm_get_fixup_label(i);
+            if pw_neg1(lbl) == 0 {
+                rva = kasm_get_fixup_at(i) + pw_data_rva;
+                page = rva & (0 - 4096);
+                if page != pw_rel_page {
+                    r14 = pw_rel_close(r14);
+                    pw_rel_page = page;
+                    pw_rel_block = r14;
+                    pw_put32(pw_idata_foff + r14, page);
+                    r14 += 8;
+                }
+                pw_put16(pw_idata_foff + r14, (rva & 4095) | 40960);   // 0xA000: DIR64
+                r14 += 2;
+            }
+        }
+        i += 1;
+    }
+    r14 = pw_rel_close(r14);
+    rel_size = r14 - rel_dir;
+    pw_rel_size = rel_size;
+    // DataDirectory[5], the base relocations
+    pw_put32(360, rel_dir + pw_idata_rva);
+    pw_put32(364, rel_size);
+    pw_idata_size = r14;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the whole executable
+// -------------------------------------------------------------------------
+
+// Writes the executable into buf (at least 2 MB). Returns its length.
+fn pe_write(buf: i64) -> i64 {
+    var i: i64 = 0;
+    var k: i64 = 0;
+    var r14: i64 = 0;
+    var r15: i64 = 0;
+    var disp: i64 = 0;
+    var target: i64 = 0;
+    var fix_at: i64 = 0;
+    var kind: i64 = 0;
+    var lbl: i64 = 0;
+    var sec: i64 = 0;
+    var off: i64 = 0;
+    var nlen: i64 = 0;
+    var nptr: i64 = 0;
+    var dllflag: i64 = 0;
+    var guiflag: i64 = 0;
+    var fixn: i64 = 0;
+    var entry: i64 = 0;
+    var ext: i64 = 0;
+    var dname: i64 = 0;
+    var mname: i64 = 0;
+    var mlen: i64 = 0;
+    var src: i64 = 0;
+    pw_buf = buf;
+    pw_code_ptr = kasm_get_code();
+    pw_code_len = kasm_get_code_size();
+    pw_data_ptr = kasm_get_data();
+    pw_data_len = kasm_get_data_size();
+    pw_bss_len = kasm_get_bss_size();
+    pw_ext_count = kasm_get_ext_count();
+    pw_xref_count = kasm_get_extref_count();
+    dllflag = pw_flag_dll();
+    guiflag = pw_flag_gui();
+    // ---- EntryPoint = TEXT_RVA + offset(main), or of __dll_main ----
+    pw_base = 5368709120;                 // 0x140000000
+    mname = &pw_name;
+    if dllflag != 0 {
+        pw_base = 6442450944;             // 0x180000000: where a DLL would go
+        pw_set_dllmain(mname);
+        mlen = 10;
+    } else {
+        pw_set_main(mname);
+        mlen = 4;
+    }
+    lbl = kasm_find_label(mname, mlen);
+    if pw_neg1(lbl) != 0 {
+        pw_entry_rva = PW_TEXT_RVA;
+    } else {
+        pw_entry_rva = PW_TEXT_RVA + pw_label_addr(lbl);
+    }
+    // ---- layout .text: [code][thunks] ----
+    pw_thunks_off = pw_align(pw_code_len, 16);
+    pw_text_vsize = pw_thunks_off + pw_ext_count * PW_THUNK;
+    pw_text_raw = pw_align(pw_text_vsize, PW_FILE_ALIGN);
+    pw_text_foff = PW_HDRS;
+    // ---- layout .data: [data][bss] ----
+    pw_bss_off_sec = pw_align(pw_data_len, 16);
+    pw_data_vsize = pw_bss_off_sec + pw_bss_len;
+    pw_data_raw = pw_align(pw_data_len, PW_FILE_ALIGN);
+    pw_data_foff = pw_text_foff + pw_text_raw;
+    // ---- .idata foff ----
+    pw_idata_foff = pw_data_foff + pw_data_raw;
+    // ---- section RVAs, derived from the real size ----
+    pw_data_rva = pw_align(PW_TEXT_RVA + pw_text_vsize, PW_SECT_ALIGN);
+    pw_idata_rva = pw_align(pw_data_rva + pw_data_vsize, PW_SECT_ALIGN);
+    // ---- internal .idata layout: IDT|ILT|IAT|names|dll ----
+    pw_idt_rva = pw_idata_rva;
+    pw_ilt_rva = pw_idata_rva + 40;
+    pw_iat_rva = pw_ilt_rva + (pw_ext_count + 1) * 8;
+    pw_names_intra = pw_iat_rva + (pw_ext_count + 1) * 8 - pw_idata_rva;
+    // ---- clear the headers, then .text and .data in the file ----
+    pw_zero(pw_buf, PW_HDRS);
+    pw_zero(pw_buf + PW_HDRS, pw_idata_foff - PW_HDRS);
+    // DOS
+    pw_put16(0, 23117);                   // 0x5A4D
+    pw_put32(60, 184);                    // e_lfanew = 0xB8
+    // PE signature
+    pw_put32(184, 17744);                 // 0x00004550
+    // COFF
+    pw_put16(188, 34404);                 // 0x8664
+    pw_put16(190, 3);                     // three sections
+    pw_put16(204, 240);
+    if dllflag == 0 {
+        pw_put16(206, 35);                // EXEC | LARGE_ADDR | RELOCS_STRIPPED
+    } else {
+        pw_put16(206, 8226);              // EXEC | LARGE_ADDR | DLL
+    }
+    // Optional
+    pw_put16(208, 523);                   // 0x020B: PE32+
+    pw_put8(210, 14);
+    pw_put32(212, pw_text_raw);           // SizeOfCode
+    pw_put32(224, pw_entry_rva);          // AddressOfEntryPoint
+    pw_put32(228, PW_TEXT_RVA);           // BaseOfCode
+    pw_put64(232, pw_base);               // ImageBase
+    pw_put32(240, PW_SECT_ALIGN);         // SectionAlignment
+    pw_put32(244, PW_FILE_ALIGN);         // FileAlignment
+    pw_put16(248, 6);                     // MajorOSVersion
+    pw_put16(256, 6);                     // MajorSubsystemVersion
+    pw_put32(268, PW_HDRS);               // SizeOfHeaders
+    if guiflag != 0 {
+        pw_put16(276, 2);                 // GUI: no console (--window)
+    } else {
+        pw_put16(276, 3);                 // console
+    }
+    if dllflag == 0 {
+        pw_put16(278, 0);                 // no ASLR
+    } else {
+        pw_put16(278, 96);                // 0x0060: relocated
+    }
+    pw_put64(280, 8388608);               // stack reserve: 8 MB
+    pw_put64(288, 65536);                 // stack commit
+    pw_put64(296, 1048576);               // heap reserve
+    pw_put64(304, 4096);                  // heap commit
+    pw_put32(316, 16);                    // NumberOfRvaAndSizes
+    // DataDirectory[1] IMPORT
+    pw_put32(328, pw_idt_rva);
+    pw_put32(332, 40);
+    // DataDirectory[12] IAT
+    pw_put32(416, pw_iat_rva);
+    pw_put32(420, (pw_ext_count + 1) * 8);
+    // ---- section headers @ 0x1C0 ----
+    // .text
+    pw_put64(448, 500236121134);         // ".text"
+    pw_put32(456, pw_text_vsize);
+    pw_put32(460, PW_TEXT_RVA);
+    pw_put32(464, pw_text_raw);
+    pw_put32(468, pw_text_foff);
+    pw_put32(484, 1610612768);            // R+X+CODE
+    // .data
+    pw_put64(488, 418564367406);           // ".data"
+    pw_put32(496, pw_data_vsize);
+    pw_put32(500, pw_data_rva);
+    pw_put32(504, pw_data_raw);
+    if pw_data_raw == 0 {
+        pw_put32(508, 0);                 // RawSize 0 -> PointerToRawData 0
+    } else {
+        pw_put32(508, pw_data_foff);
+    }
+    pw_put32(524, 3221225536);            // R+W+INIT_DATA
+    // .idata
+    pw_put64(528, 107152478071086);            // ".idata" (the first 8 bytes)
+    pw_put32(540, pw_idata_rva);
+    pw_put32(548, pw_idata_foff);
+    pw_put32(564, 1073741888);            // R+INIT_DATA
+    // ---- copy CODE into .text ----
+    k = 0;
+    while k < pw_code_len {
+        pw_sb(pw_buf + pw_text_foff + k, pw_b(pw_code_ptr + k));
+        k += 1;
+    }
+    // ---- copy DATA into .data ----
+    k = 0;
+    while k < pw_data_len {
+        pw_sb(pw_buf + pw_data_foff + k, pw_b(pw_data_ptr + k));
+        k += 1;
+    }
+    // ---- THUNKS at the end of .text ----
+    i = 0;
+    while i < pw_ext_count {
+        r14 = pw_thunks_off + i * PW_THUNK + pw_text_foff;
+        pw_put8(r14, 255);                // FF
+        pw_put8(r14 + 1, 37);             // 25
+        // disp32 = IATslot_rva - (thunk_rva + 6)
+        disp = (pw_iat_rva + i * 8) - (PW_TEXT_RVA + pw_thunks_off + i * PW_THUNK + 6);
+        pw_put32(r14 + 2, disp);
+        i += 1;
+    }
+    // ---- PATCH external call sites (E8 rel32 -> thunk) ----
+    i = 0;
+    while i < pw_xref_count {
+        r14 = kasm_get_extref_at(i);
+        r15 = kasm_get_extref_sym(i);
+        target = PW_TEXT_RVA + pw_thunks_off + r15 * PW_THUNK;
+        disp = target - (PW_TEXT_RVA + r14 + 4);
+        pw_put32(pw_text_foff + r14, disp);
+        i += 1;
+    }
+    // ---- RE-PATCH [rel data/bss] against the real RVA of .data ----
+    fixn = kasm_get_fixup_count();
+    i = 0;
+    while i < fixn {
+        kind = kasm_get_fixup_kind(i);
+        if kind == 6 {
+            // a 'dq label' inside .data: the final virtual address
+            lbl = kasm_get_fixup_label(i);
+            if pw_neg1(lbl) == 0 {
+                sec = kasm_get_label_section(lbl);
+                off = pw_label_addr(lbl);
+                if sec == 0 {
+                    target = PW_TEXT_RVA;
+                } else {
+                    target = pw_data_rva;
+                    if sec == 2 {
+                        target += pw_bss_off_sec;
+                    }
+                }
+                target = target + off + pw_base;
+                fix_at = kasm_get_fixup_at(i);
+                pw_put64(pw_data_foff + fix_at, target);
+            }
+        } else {
+            if kind == 3 {
+                // RIP to a data or bss label; text labels are left alone
+                lbl = kasm_get_fixup_label(i);
+                if pw_neg1(lbl) == 0 {
+                    sec = kasm_get_label_section(lbl);
+                    if sec >= 1 {
+                        off = pw_label_addr(lbl);
+                        target = pw_data_rva;
+                        if sec == 2 {
+                            target += pw_bss_off_sec;
+                        }
+                        target = target + off + kasm_get_fixup_addend(i);
+                        fix_at = kasm_get_fixup_at(i);
+                        disp = target - (PW_TEXT_RVA + fix_at + 4);
+                        pw_put32(pw_text_foff + fix_at, disp);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    // ---- BUILD .idata ----
+    pw_zero(pw_buf + pw_idata_foff, 2048);
+    pw_put32(pw_idata_foff, pw_ilt_rva);
+    pw_put32(pw_idata_foff + 16, pw_iat_rva);
+    r14 = pw_names_intra;
+    i = 0;
+    while i < pw_ext_count {
+        pw_qs(&pw_hint, i, pw_idata_rva + r14);
+        nptr = kasm_get_ext_name(i);
+        nlen = pw_cstrlen(nptr);
+        k = 0;
+        while k <= nlen {
+            pw_sb(pw_buf + pw_idata_foff + r14 + 2 + k, pw_b(nptr + k));
+            k += 1;
+        }
+        r14 = r14 + 2 + nlen + 1;
+        if (r14 & 1) != 0 {
+            r14 += 1;
+        }
+        i += 1;
+    }
+    // the DLL's name, after the names
+    dname = pw_idata_rva + r14;
+    pw_set_dllname(&pw_name);
+    k = 0;
+    while k < 13 {
+        pw_sb(pw_buf + pw_idata_foff + r14 + k, pw_b(&pw_name + k));
+        k += 1;
+    }
+    r14 = r14 + 12 + 1;
+    pw_idata_size = r14;
+    pw_put32(pw_idata_foff + 12, dname);
+    // the import lookup and address tables, both the same
+    i = 0;
+    while i < pw_ext_count {
+        pw_put64(pw_ilt_rva - pw_idata_rva + pw_idata_foff + i * 8, pw_q(&pw_hint, i));
+        pw_put64(pw_iat_rva - pw_idata_rva + pw_idata_foff + i * 8, pw_q(&pw_hint, i));
+        i += 1;
+    }
+    if dllflag != 0 {
+        pw_dll_tables();
+    }
+    // .idata sizes
+    pw_put32(536, pw_idata_size);
+    pw_put32(544, pw_align(pw_idata_size, PW_FILE_ALIGN));
+    // SizeOfImage = align(IDATA_RVA + idata_size, SECT_ALIGN) + one page of margin
+    pw_put32(264, pw_align(pw_idata_rva + pw_idata_size, PW_SECT_ALIGN) + PW_SECT_ALIGN);
+    // total file = idata_foff + align(idata_size, FILE_ALIGN)
+    pw_total = pw_idata_foff + pw_align(pw_idata_size, PW_FILE_ALIGN);
+    return pw_total;
+}

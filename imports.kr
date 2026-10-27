@@ -1,0 +1,600 @@
+kron_program
+kron_domain imports;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// IMPORTS: acquire_domain, resolved and spliced into the program
+//
+// The part of the compiler that turns the program's acquire_domain
+// directives into one text: every module the program needs, in dependency
+// order, each once, spliced in where the first directive was, with a map
+// from the lines of that text back to the files they came from.
+//
+// It was in main.asm (expand_imports, imp_resolve, imp_extract, the line
+// map). It is here now, with the same answers, the same limits and the same
+// error codes, and it reads the same text the same way.
+//
+// Reading a file is the one thing it does not do: the door asks the system
+// for it. imp_read(name, len_out) returns the address of the file's bytes
+// and its length through len_out; 0 when there is no such file, -1 when
+// the reading buffer is full. The door is in main.asm, and it goes when
+// main does.
+//
+// Error codes, in ip_err:
+//   1 a module cannot be opened        2 imports nest too deep
+//   3 too many modules, or imports     4 the line map is full
+//   5 the expanded text is too big     6 the imported files are too big
+// =========================================================================
+
+extern "kronc" {
+    fn imp_read(name: i64, len_out: i64) -> i64;
+}
+
+const IP_MAX: i64 = 64;        // modules a program can pull in, in total
+const IP_DEPTH: i64 = 8;       // how deep imports may nest
+const IP_KIDS: i64 = 16;       // imports one file may declare
+const IP_NAME: i64 = 256;      // a name, with its zero byte
+const IP_LMAP: i64 = 128;      // runs in the line map (main.asm keeps 128)
+
+var ip_names: [u8; 16384];     // the modules, in dependency order (64 x 256)
+var ip_count: i64;
+var ip_err: i64;
+var ip_errname: [u8; 256];
+var ip_dfs_name: [u8; 2048];   // the frame stack: its module names (8 x 256)
+var ip_dfs_kids: [u8; 32768];  // each frame's imports (8 x 16 x 256)
+var ip_nkids: [i64; 8];
+var ip_ki: [i64; 8];
+var ip_debug: i64;             // 1 for --debug: the debugger's module comes in
+var ip_dptr: [i64; 8];         // each frame's file: where its bytes are ...
+var ip_dlen: [i64; 8];         // ... and how long
+var ip_mptr: [i64; 64];        // each listed module's file, the same way
+var ip_mlen: [i64; 64];
+
+// the line map of the expansion: where each run of the output comes from
+var lm_count: i64;
+var lm_out: [i64; 128];        // the output line a run starts at
+var lm_src: [i64; 128];        // the line of its file it starts at
+var lm_file: [i64; 128];       // the file's name (one copy per name)
+var lm_names: [u8; 33280];     // those names (128 x 260)
+var lm_names_n: i64;
+var lm_outline: i64;
+var lm_srcline: i64;
+var lm_hdrskip: i64;
+
+var ip_out: i64;               // the output buffer
+var ip_cap: i64;               // its size; past it the expansion fails
+var ip_outlen: i64;            // bytes written so far
+var ip_prog: i64;              // the program's name, for the size errors
+
+// -------------------------------------------------------------------------
+// bytes and names, by address
+// -------------------------------------------------------------------------
+
+fn ip_at(p: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(p);
+    }
+    return r;
+}
+
+fn ip_set(p: i64, v: i64) -> i64 {
+    raw {
+        poke8(p, v);
+    }
+    return 0;
+}
+
+fn ip_q(t: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(t + i * 8);
+    }
+    return r;
+}
+
+fn ip_qs(t: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(t + i * 8, v);
+    }
+    return 0;
+}
+
+// 1 when the two zero-ended names are the same
+fn ip_streq(a: i64, b: i64) -> i64 {
+    var i: i64 = 0;
+    while 1 == 1 {
+        if ip_at(a + i) != ip_at(b + i) {
+            return 0;
+        }
+        if ip_at(a + i) == 0 {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// copies zero-ended name src to dst, at most IP_NAME - 1 bytes
+fn ip_strcpy(dst: i64, src: i64) -> i64 {
+    var i: i64 = 0;
+    while i < IP_NAME - 1 {
+        var c: i64 = ip_at(src + i);
+        ip_set(dst + i, c);
+        if c == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+    ip_set(dst + i, 0);
+    return 0;
+}
+
+// the address of slot i of a table of names, 256 bytes each
+fn ip_slot(base: i64, i: i64) -> i64 {
+    return base + i * IP_NAME;
+}
+
+// 1 when the n bytes at p are the word w
+fn ip_word(p: i64, w: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        if ip_at(p + i) != ip_at(w + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// -------------------------------------------------------------------------
+// the directives of one file: acquire_domain "name"; into frame f's kids
+// -------------------------------------------------------------------------
+
+// reads the imports of the text [p, p + n) as the children of frame f, the
+// way imp_extract reads them: a line at a time, blanks skipped, the header
+// ends the list, and whatever is on an acquire_domain line up to its quote
+// (or the end of the line) is skipped
+fn ip_extract(p: i64, n: i64, f: i64) -> i64 {
+    var found: i64 = 0;
+    var c: i64 = 0;
+    var k: i64 = 0;
+    var dst: i64 = 0;
+    var done: i64 = 0;
+    while done == 0 {
+        while n > 0 && (ip_at(p) == 32 || ip_at(p) == 9) {
+            p += 1;
+            n -= 1;
+        }
+        if n == 0 {
+            break;
+        }
+        // the header ends the imports
+        if n >= 16 && ip_word(p, "kron_definitions", 16) == 1 {
+            break;
+        }
+        if n >= 14 && ip_word(p, "acquire_domain", 14) == 1 {
+            p += 14;
+            n -= 14;
+            while n > 0 && ip_at(p) != 34 && ip_at(p) != 10 {
+                p += 1;
+                n -= 1;
+            }
+            if n > 0 && ip_at(p) == 34 {
+                p += 1;
+                n -= 1;
+                if found >= IP_KIDS {
+                    ip_err = 3;
+                    break;
+                }
+                dst = ip_slot(&ip_dfs_kids, f * IP_KIDS + found);
+                k = 0;
+                while n > 0 && ip_at(p) != 34 && ip_at(p) != 10 && k < 255 {
+                    ip_set(dst + k, ip_at(p));
+                    k += 1;
+                    p += 1;
+                    n -= 1;
+                }
+                ip_set(dst + k, 0);
+                found += 1;
+            }
+        }
+        // to the start of the next line, which is consumed
+        while n > 0 {
+            c = ip_at(p);
+            p += 1;
+            n -= 1;
+            if c == 10 {
+                break;
+            }
+        }
+    }
+    ip_qs(&ip_ki, f, 0);
+    ip_qs(&ip_nkids, f, found);
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the list of modules, in dependency order
+// -------------------------------------------------------------------------
+
+// the name of the frame at depth d, in the frame stack
+fn ip_frame_name(d: i64) -> i64 {
+    return ip_slot(&ip_dfs_name, d);
+}
+
+// 1 when name is already on the stack, frames 1 to d (a cycle)
+fn ip_on_stack(name: i64, d: i64) -> i64 {
+    var i: i64 = 1;
+    while i <= d {
+        if ip_streq(ip_frame_name(i), name) == 1 {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// 1 when name is already in the list
+fn ip_listed(name: i64) -> i64 {
+    var i: i64 = 0;
+    while i < ip_count {
+        if ip_streq(ip_slot(&ip_names, i), name) == 1 {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// Depth first over the imports: a module is added after its own imports.
+// Returns 0, or -1 with ip_err and ip_errname saying what went wrong.
+// The program's own name is frame 0 and is never added.
+fn ip_resolve(prog: i64, text: i64, n: i64) -> i64 {
+    var kid: i64 = 0;
+    var d: i64 = 0;
+    var got: i64 = 0;
+    var lenp: i64 = 0;
+    var child: i64 = 0;
+    ip_count = 0;
+    ip_err = 0;
+    ip_strcpy(ip_frame_name(0), prog);
+    ip_extract(text, n, 0);
+    if ip_err != 0 {
+        ip_strcpy(&ip_errname, prog);
+        return -1;
+    }
+    // --debug: the program imports the debugger's module as well
+    if ip_debug == 1 && ip_q(&ip_nkids, 0) < IP_KIDS {
+        ip_strcpy(ip_slot(&ip_dfs_kids, ip_q(&ip_nkids, 0)), "std_debug.kr");
+        ip_qs(&ip_nkids, 0, ip_q(&ip_nkids, 0) + 1);
+    }
+    d = 0;
+    ip_qs(&ip_ki, 0, 0);
+    while 1 == 1 {
+        if ip_q(&ip_ki, d) < ip_q(&ip_nkids, d) {
+            kid = ip_q(&ip_ki, d);
+            ip_qs(&ip_ki, d, kid + 1);
+            child = ip_slot(&ip_dfs_kids, d * IP_KIDS + kid);
+            if ip_listed(child) == 1 {
+                continue;
+            }
+            if ip_on_stack(child, d) == 1 {
+                continue;
+            }
+            if d + 1 >= IP_DEPTH {
+                // the file that imports too deep is the one named
+                ip_err = 2;
+                ip_strcpy(&ip_errname, ip_frame_name(d));
+                return -1;
+            }
+            d += 1;
+            ip_strcpy(ip_frame_name(d), child);
+            lenp = 0;
+            got = imp_read(child, &lenp);
+            if got == -1 {
+                ip_err = 6;
+                ip_strcpy(&ip_errname, child);
+                return -1;
+            }
+            if got == 0 {
+                ip_err = 1;
+                ip_strcpy(&ip_errname, child);
+                return -1;
+            }
+            ip_qs(&ip_dptr, d, got);
+            ip_qs(&ip_dlen, d, lenp);
+            ip_qs(&ip_ki, d, 0);
+            ip_extract(got, lenp, d);
+            if ip_err != 0 {
+                ip_strcpy(&ip_errname, child);
+                return -1;
+            }
+        } else {
+            // every child done: the frame's own file goes on the list
+            if d == 0 {
+                return 0;
+            }
+            if ip_count >= IP_MAX {
+                ip_err = 3;
+                ip_strcpy(&ip_errname, ip_frame_name(d));
+                return -1;
+            }
+            ip_strcpy(ip_slot(&ip_names, ip_count), ip_frame_name(d));
+            ip_qs(&ip_mptr, ip_count, ip_q(&ip_dptr, d));
+            ip_qs(&ip_mlen, ip_count, ip_q(&ip_dlen, d));
+            ip_count += 1;
+            d -= 1;
+        }
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the line map: a run of the output comes from a file, from a line
+// -------------------------------------------------------------------------
+
+// the file name copy for name, one per name (the same pointer every time)
+fn lm_file_of(name: i64) -> i64 {
+    var i: i64 = 0;
+    var p: i64 = 0;
+    var k: i64 = 0;
+    while i < lm_count {
+        if ip_streq(ip_q(&lm_file, i), name) == 1 {
+            return ip_q(&lm_file, i);
+        }
+        i += 1;
+    }
+    p = &lm_names + lm_names_n;
+    while k < 255 && ip_at(name + k) != 0 {
+        ip_set(p + k, ip_at(name + k));
+        k += 1;
+    }
+    ip_set(p + k, 0);
+    lm_names_n += k + 1;
+    return p;
+}
+
+// a run of the output starts at line out, from line src of file name
+fn lm_add(out: i64, name: i64, src: i64) -> i64 {
+    var f: i64 = 0;
+    if lm_count >= IP_LMAP {
+        ip_err = 4;
+        ip_strcpy(&ip_errname, ip_prog);
+        return 0;
+    }
+    f = lm_file_of(name);
+    ip_qs(&lm_out, lm_count, out);
+    ip_qs(&lm_src, lm_count, src);
+    ip_qs(&lm_file, lm_count, f);
+    lm_count += 1;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the expansion: the program's text, with every import spliced in
+// -------------------------------------------------------------------------
+
+// writes one byte of the output; 0 when the buffer is full (ip_err = 5)
+fn ip_put(c: i64) -> i64 {
+    if ip_outlen >= ip_cap {
+        ip_err = 5;
+        ip_strcpy(&ip_errname, ip_prog);
+        return 0;
+    }
+    ip_set(ip_out + ip_outlen, c);
+    ip_outlen += 1;
+    return 1;
+}
+
+// splices the modules in dependency order, at the first directive
+fn ip_emit_modules() -> i64 {
+    var m: i64 = 0;
+    var got: i64 = 0;
+    var lenp: i64 = 0;
+    var p: i64 = 0;
+    var n: i64 = 0;
+    var c: i64 = 0;
+    var hdr: i64 = 0;
+    while m < ip_count {
+        // read once, when the list was made
+        got = ip_q(&ip_mptr, m);
+        lenp = ip_q(&ip_mlen, m);
+        // skip the module's own header, counting the newlines it has
+        p = got;
+        n = lenp;
+        lm_hdrskip = 0;
+        hdr = 0;
+        while n >= 16 {
+            if ip_word(p, "kron_definitions", 16) == 1 {
+                hdr = 1;
+                p += 16;
+                n -= 16;
+                break;
+            }
+            if ip_at(p) == 10 {
+                lm_hdrskip += 1;
+            }
+            p += 1;
+            n -= 1;
+        }
+        if hdr == 0 {
+            // no header: the file goes in whole, from its first byte
+            p = got;
+            n = lenp;
+        }
+        lm_add(lm_outline, ip_slot(&ip_names, m), lm_hdrskip + 1);
+        while n > 0 {
+            c = ip_at(p);
+            if ip_put(c) == 0 {
+                return -1;
+            }
+            if c == 10 {
+                lm_outline += 1;
+            }
+            p += 1;
+            n -= 1;
+        }
+        if ip_put(10) == 0 {
+            return -1;
+        }
+        lm_outline += 1;
+        m += 1;
+    }
+    return 0;
+}
+
+// 1 when position at of src begins a line (the start, or after a newline or
+// a carriage return)
+fn ip_bol(src: i64, at: i64) -> i64 {
+    var prev: i64 = 0;
+    if at == 0 {
+        return 1;
+    }
+    prev = ip_at(src + at - 1);
+    if prev == 10 || prev == 13 {
+        return 1;
+    }
+    return 0;
+}
+
+// Expands the program text src (n bytes, named prog) into out (cap bytes).
+// Returns the length written, or -1 with ip_err and ip_errname saying why.
+// A directive whose name is not in quotes is copied from its first character
+// on, the way the assembly did it; one with no closing quote ends the text
+// there, with the modules not spliced.
+fn ip_expand(prog: i64, src: i64, n: i64, out: i64, cap: i64) -> i64 {
+    var at: i64 = 0;
+    var c: i64 = 0;
+    var k: i64 = 0;
+    var first: i64 = 1;
+    var sp: i64 = 0;
+    ip_out = out;
+    ip_cap = cap;
+    ip_outlen = 0;
+    ip_prog = prog;
+    ip_err = 0;
+    lm_count = 0;
+    lm_names_n = 0;
+    lm_outline = 1;
+    lm_srcline = 1;
+    lm_hdrskip = 0;
+    lm_add(1, prog, 1);
+    if ip_resolve(prog, src, n) == -1 {
+        return -1;
+    }
+    while at < n {
+        if n - at >= 14 && ip_bol(src, at) == 1 && ip_word(src + at, "acquire_domain", 14) == 1 {
+            at += 14;
+            while at < n && (ip_at(src + at) == 32 || ip_at(src + at) == 9) {
+                at += 1;
+            }
+            if at >= n {
+                return ip_outlen;
+            }
+            if ip_at(src + at) != 34 {
+                // no quote: the word and the blanks are gone, the rest is text
+                c = ip_at(src + at);
+                if ip_put(c) == 0 {
+                    return -1;
+                }
+                at += 1;
+                if c == 10 {
+                    lm_outline += 1;
+                    lm_srcline += 1;
+                }
+                continue;
+            }
+            // the name, up to its closing quote, at most 255 characters
+            at += 1;
+            k = 0;
+            while 1 == 1 {
+                if at >= n {
+                    return ip_outlen;
+                }
+                if ip_at(src + at) == 34 || k >= 255 {
+                    break;
+                }
+                at += 1;
+                k += 1;
+            }
+            at += 1;
+            // the directive's line is consumed
+            while at < n {
+                c = ip_at(src + at);
+                at += 1;
+                if c == 10 {
+                    lm_srcline += 1;
+                    break;
+                }
+            }
+            if first == 1 {
+                first = 0;
+                if ip_emit_modules() == -1 {
+                    return -1;
+                }
+            }
+            // back in the program, at the line after the directive
+            lm_add(lm_outline, prog, lm_srcline);
+            continue;
+        }
+        c = ip_at(src + at);
+        if ip_put(c) == 0 {
+            return -1;
+        }
+        at += 1;
+        if c == 10 {
+            lm_outline += 1;
+            lm_srcline += 1;
+        }
+    }
+    return ip_outlen;
+}
+
+// -------------------------------------------------------------------------
+// the door's view: the results, by address, and the --debug switch
+// -------------------------------------------------------------------------
+
+// sets the --debug switch before ip_expand: 1 when the build is a debug one
+fn ip_debug_set(v: i64) -> i64 {
+    ip_debug = v;
+    return 0;
+}
+
+// the error code of the last expansion (0 when it went well)
+fn ip_err_get() -> i64 {
+    return ip_err;
+}
+
+// the address of the name that went with the error
+fn ip_errname_addr() -> i64 {
+    return &ip_errname;
+}
+
+// how many runs the line map has
+fn ip_lm_count_get() -> i64 {
+    return lm_count;
+}
+
+// the address of one line map table: 0 the output lines, 1 the file names,
+// 2 the lines of the files
+fn ip_lm_addr(which: i64) -> i64 {
+    if which == 0 {
+        return &lm_out;
+    }
+    if which == 1 {
+        return &lm_file;
+    }
+    return &lm_src;
+}
+
+// how many modules the last expansion resolved
+fn ip_count_get() -> i64 {
+    return ip_count;
+}
+
+// the address of the resolved list: 256 bytes a name, in dependency order
+fn ip_names_addr() -> i64 {
+    return &ip_names;
+}

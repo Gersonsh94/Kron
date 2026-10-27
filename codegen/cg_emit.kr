@@ -178,6 +178,14 @@ fn cg_e_decl_slots(n: ptr<Ast>) -> i64 {
     var sz: i64 = 0;
     if len != 0 {
         aw = (col >> 4) & 15;
+        // an array of structs: each element takes the struct's own bytes
+        if t != 0 && t.kind != KW_STR {
+            s = cg_find_struct(t);
+            if s != -1 {
+                pending_estruct = s + 1;
+                return (len * cg_struct_bytes(s) + 7) >>> 3;
+            }
+        }
         if aw == 0 || aw > 4 {
             return len;
         }
@@ -213,6 +221,7 @@ fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
     col = n.col;
     pending_vtag = cg_decl_vtag(n);
     pending_struct = -1;
+    pending_estruct = 0;
     pending_elem = n.child_count;            // pointer element width, 0 if none
     pending_unsigned = (col >> 1) & 1;       // the type was u8..u64
     pending_float = col & 1;                 // the type is a real

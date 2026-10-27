@@ -1,0 +1,65 @@
+kron_program
+kron_domain test_structarray;
+kron_imports
+acquire_domain "std_math3d.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: an element of an array of structs is that element. Its fields
+// read and write the element at the index, its copy and its passing by
+// value take the element, and a field of a struct inside it works too.
+//
+// Expected output: 1.000000, 4.000000, 30, 4.000000, 30, 7, 0.500000,
+// 4.000000, 6.000000, 2.500000, 5, 0
+// =========================================================================
+
+struct Sm { a: i64; scale: f32; }
+struct Xf { pos: Vec3; rot: Mat4; scale: f32; }
+struct Box { id: i64; inner: Xf; }
+
+var garr: [Sm; 3];
+var arr: [Xf; 3];
+var gb: [Box; 2];
+
+fn take(m: Mat4, k: i64, s: f64, x: Xf) -> f64 {
+    return m4_get(m, 1, 1) + k + s + x.scale;
+}
+
+fn ta(x: Sm) -> i64 {
+    return x.a;
+}
+
+fn main() {
+    garr[0].scale = 1.0;
+    garr[1].scale = 4.0;
+    garr[2].a = 30;
+    garr[2].scale = 9.0;
+    print(garr[0].scale);                     // 1.000000
+    print(garr[1].scale);                     // 4.000000
+    print(garr[2].a);                         // 30
+
+    var s: Sm = garr[1];                      // a copy of the element
+    print(s.scale);                           // 4.000000
+    print(ta(garr[2]));                       // 30: passed by value
+
+    var la: [Sm; 2];                          // a local array of structs
+    la[1].a = 7;
+    la[1].scale = 0.5;
+    var t: Sm = la[1];
+    print(t.a);                               // 7
+    print(t.scale);                           // 0.500000
+
+    garr[0] = s;                              // a whole element assigned
+    print(garr[0].scale);                     // 4.000000
+
+    arr[1].rot = m4_identity();
+    arr[1].scale = 4.0;
+    print(take(arr[1].rot, 1, 0.0, arr[1]));  // 6.000000
+
+    gb[1].inner.scale = 2.5;                  // a struct inside an element
+    gb[1].id = 5;
+    print(gb[1].inner.scale);                 // 2.500000
+    print(gb[1].id);                          // 5
+    print(gb[0].id);                          // 0
+    return 0;
+}

@@ -404,8 +404,9 @@ fn prs_postfix() -> ptr<Ast> {
             }
             n.left = field;
             n.data = e.data;               // the variable, carried along
-            // the node this one reads FROM: m.v.x keeps its middle field
-            if e.node_type == AST_MEMBER {
+            // the node this one reads FROM: m.v.x keeps its middle field,
+            // and a[i].x keeps the index: the element, not element 0
+            if e.node_type == AST_MEMBER || e.node_type == AST_INDEX {
                 n.right = e;
             }
             e = n;

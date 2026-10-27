@@ -101,8 +101,7 @@ Decisions of point 1:
   `arena_slice`, `arena_free`, `slice_len`, `slice_get`, `slice_set`. A slice
   fits in one `i64` (position, arena and generation). `arena_free` does not
   give the memory back: it bumps the generation, and every earlier slice
-  fails when used. Stepping outside a slice fails too. 64 MB pool in `.bss`,
-  256 arenas at once. The parser turns `v[i]` on a `slice<i64>` into
+  fails when used. Stepping outside a slice fails too. 256 arenas at once. The parser turns `v[i]` on a `slice<i64>` into
   `slice_get(v, i)` and `v[i] = x` into `slice_set(v, i, x)`. Integers only.
   Using `slice` without importing `std_arena.kr` is an error. Tests:
   `test_arena_lib`, `test_slice`, `test_slice_bad`.
@@ -205,7 +204,7 @@ What Kron is missing for it, by what blocks most:
 | missing | why | status |
 |---|---|---|
 | `slice<f64>` | weights and activations are reals whose size is only known at run time (read from the model file). **The only real blocker at language level.** | pending; extends `slice<i64>` |
-| large memory | weights take from 60 MB to several GB; the `std_arena` pool is 64 MB | pending |
+| large memory | weights take from 60 MB to several GB | **done**: each arena gets its own memory from the system (see "Large memory") |
 | positioned read | read a large weight file in parts; `loadfile` reads it whole. Ganimedes needs it too | pending |
 | wide SIMD (AVX) | matrix products with 4-8 numbers per instruction instead of 2; also needs `RA_FREGS` raised (kasm REX on SSE) | pending |
 | fast `exp` and `sqrt` | used millions of times per generated word | pending |
@@ -1228,6 +1227,25 @@ called `text_free` itself.
   before a delivery.
 
 ## Known limits, still to fix
+- Limits of the program (raised 2026-10-27): the source with its imports is
+  at most 16 MB (`SRC_BUFFER_SIZE`), the generated code 16 MB
+  (`CODE_BUFFER_SIZE`), the token table 64 MB (`TOKEN_BUFFER_SIZE`, which is
+  2796202 tokens: a dense program hits it first, at about 2.8 M tokens) and
+  the AST 256 MB (`AST_BUFFER_SIZE`). Past each one the compiler stops with a
+  message that names the limit; a source file longer than 16 MB is refused
+  with "the source file is longer than 16 MB" (it was cut in silence before).
+  Still open: at most 4096 functions per program (`CG_MAX_FUNCS`); past that
+  a call to a function that exists reports "unknown function", which is the
+  wrong message. Until the buffers go to Kron, a program that exceeds a limit
+  is split with `--module`, or trimmed.
+- Expansion of imports, moved to Kron (imports.kr): the same text, the same
+  line map and the same error codes as the assembly it replaces, checked on
+  the 812 corpus files and on error cases (missing module, cycle, too deep,
+  too many, errors in an imported module, --debug, CRLF, empty module). Two
+  intended changes: a module longer than 4 MB is an error (code 6) where the
+  old code read 4 MB and went on in silence, and so is a text longer than
+  4 MB (code 5), where the old code wrote past its buffer. Code 4 is a line
+  map past 128 runs.
 
 - Text arguments are checked as handles, or as addresses between 64 KB and
   2^47: any other integer passed where a text is expected could still be
@@ -1269,3 +1287,34 @@ called `text_free` itself.
 
 - The `--dump` option writes nothing.
 - `jup_` prefixes on internal symbols.
+
+## Large memory (std_arena, 26-10-2026)
+
+- **Each arena gets its own memory from the system.** `arena_new(words)` asks
+  VirtualAlloc (Windows) or mmap (Linux) for the bytes, whole pages, zeroed.
+  The 64 MB pool in `.bss` is gone: an arena can hold 80 MB, 1 GB or whatever
+  the system gives, and several big arenas can live at once. `arena_free` still
+  keeps the memory for new slices.
+- **Limits**: an arena holds at most 4294967295 i64 (32 GB), because a slice's
+  offset has 32 bits. Asking for more fails with "arena too big". Still 256
+  arenas at once.
+- **Slices unchanged** for programs: the same three fields (offset, arena,
+  generation), the same `slice_get` / `slice_set` / `slice_len` checks, the
+  same `v[i]` lowering. The offset is now inside the arena, not inside a
+  global pool.
+- **Two holes closed on the way**: an index to an arena that was never made
+  now fails ("no such arena") instead of reading the pool at a wrong place; a
+  header beyond what was handed out fails ("no such slice") instead of reading
+  whatever memory is there; and `arena_slice` tests `n` against the room left
+  in a form that cannot overflow (a size near 2^63 used to pass the test).
+- Raw access stays inside `std_arena.kr` (the library), as in `std_heap.kr`.
+  Programs see no address.
+- Tests: `test_arena_big` (an 80 MB slice in a 128 MB arena, a second 256 MB
+  arena, a failing `arena_new(4294967296)` seen through `failed()`). The older
+  `test_arena_lib`, `test_slice`, `test_simd4` and `test_arenatok` give the same
+  output as before.
+- Not done here: the generation field has 23 bits, so an arena freed more than
+  about 8 million times stops giving usable slices: every use fails. Nothing
+  unsafe happens, the old pool had the same limit. Positioned
+  read (`loadfile` reads whole files), AVX, `exp`/`sqrt` and low-precision
+  numbers stay pending, as in the table above.

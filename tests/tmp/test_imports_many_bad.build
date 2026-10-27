@@ -1,0 +1,6 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file...ERROR: acquire_domain: too many modules (more than 64, or more than 16 imports in one file), at 'test_imports_many_bad.kr'
+  hint: check the chain of imports: each module imports only what it uses

@@ -7,6 +7,55 @@ kron_definitions
 // STRUCT FIELDS, STRUCT VALUES, list<S>
 // =========================================================================
 
+// the exact bytes of a struct, as a copy moves them
+fn cg_struct_bytes(sid: i64) -> i64 {
+    return cg_u32(cg_q(&struct_bytes, sid));
+}
+
+// cg_index_struct(index node) -> the struct an element of that array is, or
+// -1 when the array is not an array of structs
+fn cg_index_struct(idx: ptr<Ast>) -> i64 {
+    var i: i64 = cg_find_var_idx(idx.data);
+    var e: i64 = 0;
+    if i != -1 {
+        e = cg_q(&var_estruct, i);
+    } else {
+        i = cg_find_global(idx.data);
+        if i == -1 {
+            return -1;
+        }
+        e = cg_q(&g_estruct, i);
+    }
+    if e == 0 {
+        return -1;
+    }
+    return e - 1;
+}
+
+// cg_member_chain_index(member node) -> the index node a chain of fields
+// starts from, as in a[i].b.c, or 0 when the chain starts from a name
+fn cg_member_chain_index(m: ptr<Ast>) -> ptr<Ast> {
+    var p: ptr<Ast> = m;
+    while p.node_type == AST_MEMBER && p.right != 0 {
+        p = p.right;
+    }
+    if p.node_type == AST_INDEX {
+        return p;
+    }
+    return 0;
+}
+
+// cg_emit_elem_addr(index node, struct id): rdx = the address of that
+// element, its index scaled by the struct's bytes. Uses rax, rcx and rdx.
+fn cg_emit_elem_addr(idx: ptr<Ast>, sid: i64) -> i64 {
+    cg_emit_index_value(idx);                // the flat index in rax, bounds checked
+    emit_cstr("    mov rcx, rax\n    imul rcx, rcx, ");
+    emit_u32(cg_struct_bytes(sid));
+    emit_cstr("\n");
+    cg_emit_idx_base(idx.data);              // rdx = the array's base
+    return emit_cstr("    add rdx, rcx\n");
+}
+
 // cg_member_resolve(member node): the chain walked inward first, so a.b.c
 // resolves b before c and each field is looked up in the struct the one
 // before landed in. Leaves the byte offset in mem_off, the struct reached
@@ -27,21 +76,26 @@ fn cg_member_resolve(m: ptr<Ast>) -> i64 {
     } else {
         mem_off = 0;
         mem_sid = -1;
-        i = cg_find_var_idx(m.data);
-        if i != -1 {
-            s = cg_q(&var_structs, i);
-            mem_sid = s;
-            if s == -1 {
-                mem_sid = cg_var_pstruct(i);     // p: ptr<S> -- p.x is a field of S
-            }
+        if inner != 0 && inner.node_type == AST_INDEX {
+            // a[i].f: the field of the struct an element of a holds
+            mem_sid = cg_index_struct(inner);
         } else {
-            // a struct global
-            i = cg_find_global(m.data);
+            i = cg_find_var_idx(m.data);
             if i != -1 {
-                s = cg_q(&g_structs, i);
+                s = cg_q(&var_structs, i);
                 mem_sid = s;
                 if s == -1 {
-                    mem_sid = cg_glob_pstruct(i);
+                    mem_sid = cg_var_pstruct(i);     // p: ptr<S> -- p.x is a field of S
+                }
+            } else {
+                // a struct global
+                i = cg_find_global(m.data);
+                if i != -1 {
+                    s = cg_q(&g_structs, i);
+                    mem_sid = s;
+                    if s == -1 {
+                        mem_sid = cg_glob_pstruct(i);
+                    }
                 }
             }
         }
@@ -83,7 +137,23 @@ fn cg_member_enum(m: ptr<Ast>) -> i64 {
 fn cg_member_global(m: ptr<Ast>) -> i64 {
     var i: i64 = 0;
     var off: i64 = 0;
+    var idx: ptr<Ast> = 0;
     cg_member_resolve(m);
+    // a[i].f: the address is the element's, computed now, plus the field
+    idx = cg_member_chain_index(m);
+    if idx != 0 {
+        if cg_index_struct(idx) != -1 {
+            emit_cstr("    push rax\n");    // a value being stored waits in rax
+            cg_emit_elem_addr(idx, cg_index_struct(idx));
+            if mem_off != 0 {
+                emit_cstr("    add rdx, ");
+                emit_u32(mem_off);
+                emit_cstr("\n");
+            }
+            emit_cstr("    pop rax\n");
+            return 1;
+        }
+    }
     i = cg_find_var_idx(m.data);
     if i != -1 {
         // a local ptr<S>: mov rdx, [rbp-N], then the offset
@@ -241,6 +311,9 @@ fn cg_struct_kind(e: ptr<Ast>) -> i64 {
         cg_member_resolve(e);
         return mem_sid;
     }
+    if k == AST_INDEX {
+        return cg_index_struct(e);           // a[i] of an array of structs
+    }
     if k == AST_CALL {
         if e.owner_type == FNVAL_MARK {
             return -1;
@@ -310,6 +383,9 @@ fn cg_emit_struct_addr(e: ptr<Ast>) -> i64 {
             emit_u32(off);
             emit_cstr("]\n");
         }
+    } else if k == AST_INDEX {
+        cg_emit_elem_addr(e, s);             // a[i] of an array of structs
+        emit_cstr("    mov rax, rdx\n");
     } else if k == AST_CALL {
         cg_sret_kind = 0;                    // into a temporary
         cg_emit(e);                          // rax = where the result is

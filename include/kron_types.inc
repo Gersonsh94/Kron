@@ -535,7 +535,7 @@
 %define TARGET_WEB          5       ; WebAssembly in a browser (or node): xwasm
 %define TARGET_MACOS        6       ; macOS on Apple silicon: xarm with its macOS shim, Mach-O
 
-%define SRC_BUFFER_SIZE     (4  * 1024 * 1024)   ; 4  MB  source .kr
+%define SRC_BUFFER_SIZE     (16 * 1024 * 1024)   ; 16 MB  source .kr
 ; acquire_domain resolution (main.asm)
 %define IMP_MAX             64      ; modules a program can pull in, in total
 %define IMP_DEPTH           8       ; how deep imports may nest
@@ -544,9 +544,9 @@
 %define BLOCK_RAW           0x524157 ; AST.type_info of a block written as raw { }
 %define SLICE_GET_MARK      0x534C4943 ; AST.owner_type of a call the parser made from v[i]
 %define SEM_MAX_WARN        64      ; warnings the semantic pass keeps
-%define TOKEN_BUFFER_SIZE   (8  * 1024 * 1024)   ; 8  MB  token table
-%define AST_BUFFER_SIZE     (32 * 1024 * 1024)   ; 32 MB  AST nodes
-%define CODE_BUFFER_SIZE    (8  * 1024 * 1024)   ; 8  MB  generated code
+%define TOKEN_BUFFER_SIZE   (64 * 1024 * 1024)   ; 64 MB  token table
+%define AST_BUFFER_SIZE     (256 * 1024 * 1024)   ; 256 MB  AST nodes
+%define CODE_BUFFER_SIZE    (16 * 1024 * 1024)   ; 16 MB  generated code
 %define SYM_BUFFER_SIZE     (4  * 1024 * 1024)   ; 4  MB  symbol table
 
 ; --- CODEGEN TABLE CAPACITIES (raised from the original 64/128 ceilings) ---

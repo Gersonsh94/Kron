@@ -1,0 +1,827 @@
+kron_program
+kron_domain elf_writer;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// ELF WRITER: the Linux executable and shared object, written from the
+// assembled program
+//
+// Writes a 64-bit ELF: the executable for x86-64 and AArch64, the shared
+// object for --lib, and the program that calls the system's libraries
+// (the loader's name, its five functions, the tables it reads). It was
+// elf_write, elf_write_arm, elf_write_so, elf_dynamic and their helpers in
+// main.asm, and it is here now, byte for byte the same: every offset, every
+// value and every order of writing is the one the assembly had.
+//
+// The assembled program comes from kasm and karm, which are still in
+// assembly: they are called directly, or through the door in elf_writer.asm,
+// which also holds the static tables (the loader's names, the section names)
+// and the flags main sets (out_dynamic, out_android, the output's name).
+//
+// Numbers in the file are written at fixed offsets with el_p8/16/32/64; the
+// reads of the assembled image go through el_g8/el_g32/el_g64. Everything
+// else is arithmetic on addresses, with no raw code outside these helpers.
+// =========================================================================
+
+extern "kronc" {
+    fn kasm_build_image() -> i64;
+    fn kasm_get_code() -> i64;
+    fn kasm_get_code_size() -> i64;
+    fn kasm_get_data_size() -> i64;
+    fn kasm_get_bss_size() -> i64;
+    fn kasm_get_fixup_count() -> i64;
+    fn kasm_get_fixup_kind(i: i64) -> i64;
+    fn kasm_get_fixup_label(i: i64) -> i64;
+    fn kasm_get_fixup_at(i: i64) -> i64;
+    fn kasm_get_label_section(i: i64) -> i64;
+    fn kasm_find_label(name: i64, len: i64) -> i64;
+    fn karm_build_image() -> i64;
+    fn karm_get_code() -> i64;
+    fn karm_get_code_len() -> i64;
+    fn karm_get_data_off() -> i64;
+    fn karm_get_data_len() -> i64;
+    fn karm_get_bss_size() -> i64;
+    fn karm_get_entry() -> i64;
+    fn karm_label(name: i64) -> i64;
+    fn karm_reloc_count() -> i64;
+    fn karm_reloc_at(i: i64) -> i64;
+    fn codegen_export_count() -> i64;
+    fn ew_label_addr(idx: i64) -> i64;
+    fn ew_export_name(i: i64) -> i64;
+    fn ew_export_len(i: i64) -> i64;
+    fn ew_get_hsize() -> i64;
+    fn ew_get_base() -> i64;
+    fn ew_put_hb(hsize: i64, base: i64) -> i64;
+    fn ew_out_dynamic() -> i64;
+    fn ew_out_android() -> i64;
+    fn ew_prepare_name() -> i64;
+    fn ew_addr_interp_x86() -> i64;
+    fn ew_addr_interp_arm() -> i64;
+    fn ew_addr_strtab() -> i64;
+    fn ew_addr_strtab_and() -> i64;
+    fn ew_addr_got_names() -> i64;
+    fn ew_addr_shnames() -> i64;
+    fn ew_addr_start() -> i64;
+    fn ew_len_strtab() -> i64;
+}
+
+// what the writer keeps between its steps
+var el_img: i64;                     // the image's length
+var el_dbase: i64;                   // .data inside the image (x86-64 image)
+var el_bbase: i64;                   // .bss inside the image
+var el_got: [i64; 5];                // the addresses of __got_dlopen ... __got_exit
+var el_pl: [i64; 7];                 // elf_dynamic: the PT_LOAD header, kept aside
+var el_arm: i64;                     // elf_write_so: 1 for ARM64
+var el_code: i64;                    // the image's code length
+var el_doff: i64;                    // where its .data starts
+var el_dlen: i64;                    // .data's length
+var el_boff: i64;                    // where its .bss starts
+var el_blen: i64;                    // .bss's length
+var el_falign: i64;                  // the page the segments are aligned to
+var el_F: i64;                       // the table segment: in the file
+var el_V: i64;                       // and in memory
+var el_exp: i64;                     // exports
+var el_strsz: i64;                   // the strings' length
+var el_sym: i64;                     // offsets in the table segment
+var el_hash: i64;
+var el_rela: i64;
+var el_nrel: i64;                    // relocations written
+var el_end: i64;                     // the table segment's length
+var el_name: [u8; 320];              // "__ce_" and an export's name
+var el_android: i64;                 // the C library is Android's (bionic)
+var el_soname: i64;                  // the library's file name, without its folder
+var el_soname_off: i64;              // where it is in the strings
+var el_shoff: i64;                   // the section headers
+var el_shend: i64;                   // and the file's end after them
+
+// -------------------------------------------------------------------------
+// bytes and words, by address
+// -------------------------------------------------------------------------
+
+fn el_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn el_p16(a: i64, v: i64) -> i64 {
+    raw {
+        poke16(a, v);
+    }
+    return 0;
+}
+
+fn el_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn el_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn el_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn el_g32(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek32(a);
+    }
+    return r;
+}
+
+fn el_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+// n bytes from src to dst
+fn el_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke8(dst + i, peek8(src + i));
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+// n zero bytes at dst
+fn el_zero(dst: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke8(dst + i, 0);
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+// the length of the zero-ended string at p
+fn el_cstrlen(p: i64) -> i64 {
+    var n: i64 = 0;
+    while el_g8(p + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+// 1 when v is the -1 of a 32-bit register: kasm and karm return -1 in eax,
+// which leaves the top half of rax clear
+fn el_neg1(v: i64) -> i64 {
+    if (v & 4294967295) == 4294967295 {
+        return 1;
+    }
+    return 0;
+}
+
+// one entry of the dynamic table at d: tag and value; the next entry's place
+fn el_dyn(d: i64, tag: i64, val: i64) -> i64 {
+    el_p64(d, tag);
+    el_p64(d + 8, val);
+    return d + 16;
+}
+
+// one relocation at the end of those of the table at tbl: where, what, addend
+fn el_rel_add(tbl: i64, where: i64, info: i64, addend: i64) -> i64 {
+    var at: i64 = tbl + el_rela_at();
+    el_p64(at, where);
+    el_p64(at + 8, info);
+    el_p64(at + 16, addend);
+    el_nrel = el_nrel + 1;
+    return 0;
+}
+
+// where the next relocation goes, in the table segment
+fn el_rela_at() -> i64 {
+    return el_rela + el_nrel * 24;
+}
+
+// the ELF hash of the n bytes at p
+fn el_elf_hash(p: i64, n: i64) -> i64 {
+    var h: i64 = 0;
+    var i: i64 = 0;
+    var g: i64 = 0;
+    while i < n {
+        h = (h << 4) + el_g8(p + i);
+        h = h & 4294967295;
+        g = h >> 28;
+        if g != 0 {
+            h = h ^ (g << 4);
+        }
+        h = h & 268435455;
+        i = i + 1;
+    }
+    return h;
+}
+
+// the address of a label of the image kasm or karm built, 0 when there is
+// none: data and bss are where the writer put them, in memory at the base
+fn el_va(name: i64, len: i64) -> i64 {
+    var idx: i64 = kasm_find_label(name, len);
+    if el_neg1(idx) == 1 {
+        return 0;
+    }
+    var sec: i64 = kasm_get_label_section(idx);
+    var at: i64 = ew_label_addr(idx);
+    if sec == 1 {
+        at = at + el_dbase;
+    }
+    if sec == 2 {
+        at = at + el_bbase;
+    }
+    return at + ew_get_base();
+}
+
+// the addresses of the five loader functions, in el_got: each by name from
+// the table of names, the way the x86-64 writers look them up
+fn el_fill_got_va() -> i64 {
+    var nm: i64 = ew_addr_got_names();
+    var k: i64 = 0;
+    while k < 5 {
+        var nl: i64 = el_cstrlen(nm);
+        el_p64(&el_got + k * 8, el_va(nm, nl));
+        nm = nm + nl + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// the same for the AArch64 writer: karm finds the labels
+fn el_fill_got_arm() -> i64 {
+    var nm: i64 = ew_addr_got_names();
+    var k: i64 = 0;
+    while k < 5 {
+        var nl: i64 = el_cstrlen(nm);
+        el_p64(&el_got + k * 8, karm_label(nm));
+        nm = nm + nl + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------- executables ---
+
+// The 64 bytes of the ELF header and the one program header of an
+// executable, the x86-64 or the AArch64 one.
+fn el_head_exe(out: i64, entry: i64, machine: i64, fsz: i64, memsz: i64, ph_align: i64) -> i64 {
+    el_p64(out, 0x00010102464C457F);     // 7F 'E' 'L' 'F', 64-bit, little-endian, v1
+    el_p64(out + 8, 0);
+    el_p64(out + 16, machine);           // executable, the machine, version 1
+    el_p64(out + 24, entry);
+    el_p64(out + 32, 64);                // program headers right after
+    el_p64(out + 40, 0);                 // no section headers
+    el_p64(out + 48, 0x0038004000000000); // flags 0, header 64 bytes, ph entry 56
+    el_p64(out + 56, 1);                 // one program header
+    el_p64(out + 64, 0x0000000700000001); // PT_LOAD, read-write-execute
+    el_p64(out + 72, 0);                 // from file offset 0
+    el_p64(out + 80, 0x400000);          // virtual address
+    el_p64(out + 88, 0x400000);          // physical address
+    el_p64(out + 96, fsz);               // bytes in the file
+    el_p64(out + 104, memsz);            // bytes in memory: up to the end of .bss
+    el_p64(out + 112, ph_align);
+    el_p64(out + 120, 0);
+    return 0;
+}
+
+// The x86-64 executable. Returns its length.
+fn el_write(out: i64) -> i64 {
+    var hs: i64 = ew_get_hsize();
+    var base: i64 = ew_get_base();
+    var img: i64 = kasm_build_image();
+    el_img = img;
+    // the image goes after the 0x80 bytes of headers
+    el_copy(out + hs, kasm_get_code(), img);
+    // where kasm put .data and .bss inside the image
+    var r14: i64 = (kasm_get_code_size() + 15) / 16 * 16;
+    var r15: i64 = (r14 + kasm_get_data_size() + 15) / 16 * 16;
+    el_dbase = r14;
+    el_bbase = r15;
+    // fill every 'dq label' with its final address
+    var cnt: i64 = kasm_get_fixup_count();
+    var k: i64 = 0;
+    while k < cnt {
+        if kasm_get_fixup_kind(k) == 6 {
+            var lbl: i64 = kasm_get_fixup_label(k);
+            if el_neg1(lbl) == 0 {
+                var sec: i64 = kasm_get_label_section(lbl);
+                var val: i64 = ew_label_addr(lbl);
+                if sec == 1 {
+                    val = val + r14;
+                }
+                if sec == 2 {
+                    val = val + r15;
+                }
+                val = val + base;
+                el_p64(out + hs + r14 + kasm_get_fixup_at(k), val);
+            }
+        }
+        k = k + 1;
+    }
+    // the entry point: _start, from the preamble, or 0
+    var entry: i64 = 0;
+    var sidx: i64 = kasm_find_label(ew_addr_start(), 6);
+    if el_neg1(sidx) == 0 {
+        entry = ew_label_addr(sidx);
+    }
+    entry = entry + base;
+    var fsz: i64 = img + hs;
+    var memsz: i64 = kasm_get_bss_size() + r15 + hs;
+    el_head_exe(out, entry, 0x00000001003E0002, fsz, memsz, 4096);
+    if ew_out_dynamic() != 0 {
+        el_fill_got_va();
+        el_dynamic(out, 0);
+    }
+    return fsz;
+}
+
+// The AArch64 executable. Returns its length.
+fn el_write_arm(out: i64) -> i64 {
+    var hs: i64 = ew_get_hsize();
+    var img: i64 = karm_build_image();
+    el_img = img;
+    el_copy(out + hs, karm_get_code(), img);
+    var entry: i64 = karm_get_entry();
+    var fsz: i64 = img + hs;
+    var memsz: i64 = karm_get_bss_size() + (img + 15) / 16 * 16 + hs;
+    el_head_exe(out, entry, 0x0000000100B70002, fsz, memsz, 65536);
+    if ew_out_dynamic() != 0 {
+        el_fill_got_arm();
+        el_dynamic(out, 1);
+    }
+    return fsz;
+}
+
+// The program that calls the system's libraries: the header area of 1 KB,
+// at fixed places (elf_dynamic in elf_writer.asm's history):
+//     64  four program headers: PT_PHDR, PT_INTERP, PT_LOAD, PT_DYNAMIC
+//    288  the loader's name
+//    320  the strings: the libraries and the five functions
+//    448  the symbols, 448 + 24 each; 592 the hash table; 632 the relocations
+//    752  the dynamic table
+// arm: 0 x86-64, 1 ARM64. The loader maps the C library and stores the five
+// functions in __got_* before _start runs.
+fn el_dynamic(out: i64, arm: i64) -> i64 {
+    var k: i64 = 0;
+    // the PT_LOAD aside, the area cleared
+    while k < 7 {
+        el_p64(&el_pl + k * 8, el_g64(out + 64 + k * 8));
+        k = k + 1;
+    }
+    k = 8;
+    while k < 128 {
+        el_p64(out + k * 8, 0);
+        k = k + 1;
+    }
+    el_p64(out + 56, 4);                 // four program headers
+    // PT_PHDR
+    el_p64(out + 64, 0x0000000400000006);
+    el_p64(out + 72, 64);
+    el_p64(out + 80, 0x400040);
+    el_p64(out + 88, 0x400040);
+    el_p64(out + 96, 224);
+    el_p64(out + 104, 224);
+    el_p64(out + 112, 8);
+    // PT_INTERP: the loader's name, copied with its 0 byte
+    el_p64(out + 120, 0x0000000400000003);
+    el_p64(out + 128, 288);
+    el_p64(out + 136, 0x400120);
+    el_p64(out + 144, 0x400120);
+    var src: i64 = ew_addr_interp_x86();
+    if arm != 0 {
+        src = ew_addr_interp_arm();
+    }
+    var n: i64 = 0;
+    var c: i64 = 1;
+    while c != 0 {
+        c = el_g8(src + n);
+        el_p8(out + 288 + n, c);
+        n = n + 1;
+    }
+    el_p64(out + 152, n);
+    el_p64(out + 160, n);
+    el_p64(out + 168, 1);
+    // PT_LOAD, as the writer made it
+    k = 0;
+    while k < 7 {
+        el_p64(out + 176 + k * 8, el_g64(&el_pl + k * 8));
+        k = k + 1;
+    }
+    // PT_DYNAMIC
+    el_p64(out + 232, 0x0000000600000002);
+    el_p64(out + 240, 752);
+    el_p64(out + 248, 0x4002F0);
+    el_p64(out + 256, 0x4002F0);
+    el_p64(out + 264, 192);
+    el_p64(out + 272, 192);
+    el_p64(out + 280, 8);
+    // the strings
+    el_copy(out + 320, ew_addr_strtab(), ew_len_strtab());
+    // the symbols: 1 dlopen, 2 dlsym, 3 pthread_create, 4 pthread_detach,
+    // 5 exit -- global functions, undefined here
+    el_p64(out + 472, 0x1200000026);
+    el_p64(out + 496, 0x120000002D);
+    el_p64(out + 520, 0x1200000033);
+    el_p64(out + 544, 0x1200000042);
+    el_p64(out + 568, 0x1200000051);
+    // the hash table: one bucket, six symbols, nothing defined
+    el_p64(out + 592, 0x0000000600000001);
+    // the relocations: each word of el_got gets its function
+    var rt: i64 = 6;                     // R_X86_64_GLOB_DAT
+    if arm != 0 {
+        rt = 1025;                       // R_AARCH64_GLOB_DAT
+    }
+    k = 0;
+    while k < 5 {
+        var rs: i64 = out + 632 + k * 24;
+        el_p64(rs, el_g64(&el_got + k * 8));
+        el_p64(rs + 8, ((k + 1) << 32) | rt);
+        k = k + 1;
+    }
+    // the dynamic table
+    var d: i64 = out + 752;
+    d = el_dyn(d, 1, 1);                 // DT_NEEDED libc.so.6
+    d = el_dyn(d, 1, 11);                // DT_NEEDED libdl.so.2
+    d = el_dyn(d, 1, 22);                // DT_NEEDED libpthread.so.0
+    d = el_dyn(d, 4, 0x400250);          // DT_HASH
+    d = el_dyn(d, 5, 0x400140);          // DT_STRTAB
+    d = el_dyn(d, 6, 0x4001C0);          // DT_SYMTAB
+    d = el_dyn(d, 10, ew_len_strtab());  // DT_STRSZ
+    d = el_dyn(d, 11, 24);               // DT_SYMENT
+    d = el_dyn(d, 7, 0x400278);          // DT_RELA
+    d = el_dyn(d, 8, 120);               // DT_RELASZ
+    d = el_dyn(d, 9, 24);                // DT_RELAENT
+    return d;
+}
+
+// ------------------------------------------------------------ shared objects ---
+
+// The section headers at the end of the file: .dynsym .dynstr .dynamic
+// .shstrtab, their names after the tables, the ELF header pointing at them.
+fn el_sections(out: i64) -> i64 {
+    var rb: i64 = el_F + el_end;         // the names of the sections
+    var shn: i64 = ew_addr_shnames();
+    el_copy(out + rb, shn, 36);
+    rb = (rb + 36 + 7) / 8 * 8;
+    el_shoff = rb;
+    var hd: i64 = out + rb;              // five headers of 64 bytes
+    el_zero(hd, 320);
+    // 1 .dynsym: SHT_DYNSYM, allocated, its strings section 2
+    el_p64(hd + 64, 0x0000000B00000001);
+    el_p64(hd + 72, 2);
+    el_p64(hd + 80, el_V + el_sym);
+    el_p64(hd + 88, el_F + el_sym);
+    el_p64(hd + 96, (el_exp + 6) * 24);
+    el_p64(hd + 104, 0x0000000100000002); // link 2, info 1
+    el_p64(hd + 112, 8);
+    el_p64(hd + 120, 24);
+    // 2 .dynstr
+    el_p64(hd + 128, 0x0000000300000009);
+    el_p64(hd + 136, 2);
+    el_p64(hd + 144, el_V + 224);
+    el_p64(hd + 152, el_F + 224);
+    el_p64(hd + 160, el_strsz);
+    el_p64(hd + 176, 1);
+    // 3 .dynamic: SHT_DYNAMIC, written and allocated, strings section 2
+    el_p64(hd + 192, 0x0000000600000011);
+    el_p64(hd + 200, 3);
+    el_p64(hd + 208, el_V);
+    el_p64(hd + 216, el_F);
+    el_p64(hd + 224, 224);
+    el_p64(hd + 232, 2);
+    el_p64(hd + 240, 8);
+    el_p64(hd + 248, 16);
+    // 4 .shstrtab
+    el_p64(hd + 256, 0x000000030000001A);
+    el_p64(hd + 280, el_F + el_end);
+    el_p64(hd + 288, 36);
+    el_p64(hd + 304, 1);
+    el_shend = rb + 320;
+    // the ELF header: where they are, their size, how many, which has names
+    el_p64(out + 40, el_shoff);
+    el_p32(out + 58, 0x00050040);        // shentsize 64, shnum 5
+    el_p16(out + 62, 4);                 // shstrndx 4
+    return 0;
+}
+
+// Writes the shared object (--lib) for x86-64 (arm 0) or AArch64 (arm 1).
+// The file: the ELF and program headers, the image at 512 as kasm or karm
+// made it, then the tables the loader reads on a page of their own.
+// Returns the file's length.
+fn el_write_so(out: i64, arm: i64) -> i64 {
+    el_arm = arm;
+    ew_put_hb(512, 512);
+    var code: i64 = 0;
+    if arm == 0 {
+        el_img = kasm_build_image();
+        el_code = kasm_get_code_size();
+        el_doff = (el_code + 15) / 16 * 16;
+        el_dbase = el_doff;
+        el_dlen = kasm_get_data_size();
+        el_boff = (el_dlen + el_doff + 15) / 16 * 16;
+        el_bbase = el_boff;
+        el_blen = kasm_get_bss_size();
+        code = kasm_get_code();
+        el_falign = 4096;
+    } else {
+        el_img = karm_build_image();
+        el_code = karm_get_code_len();
+        el_doff = karm_get_data_off();
+        el_dlen = karm_get_data_len();
+        el_boff = (el_dlen + 65535) / 65536 * 65536 + el_doff;
+        el_blen = karm_get_bss_size();
+        code = karm_get_code();
+        el_falign = 65536;
+    }
+    // the image at 512, zeros before it
+    el_zero(out, 512);
+    el_copy(out + 512, code, el_img);
+    // the table segment: after the file's end and after the end of .bss in
+    // memory, both on a page boundary
+    var zs: i64 = el_img + 512;
+    el_F = (zs + el_falign - 1) / el_falign * el_falign;
+    el_zero(out + zs, el_F - zs);
+    el_V = (el_boff + el_blen + 512 + el_falign - 1) / el_falign * el_falign;
+    // its layout: dynamic table (12 entries), strings, symbols, hash table,
+    // relocations
+    el_exp = codegen_export_count();
+    var strsz: i64 = ew_len_strtab();    // the strings: the loader's, then the exports'
+    var k: i64 = 0;
+    while k < el_exp {
+        strsz = strsz + ew_export_len(k) + 1;
+        k = k + 1;
+    }
+    // and the library's own name, DT_SONAME
+    el_soname_off = strsz;
+    strsz = strsz + el_cstrlen(el_soname) + 1;
+    el_strsz = strsz;
+    el_sym = (strsz + 224 + 7) / 8 * 8;
+    el_hash = el_sym + (el_exp + 6) * 24;
+    var nb: i64 = el_exp;
+    if nb == 0 {
+        nb = 1;
+    }
+    el_rela = (el_hash + (nb + el_exp + 6 + 2) * 4 + 7) / 8 * 8;
+    // clear the table segment as far as the relocations
+    var tbl: i64 = out + el_F;
+    el_zero(tbl, el_rela);
+    // the strings
+    var sa: i64 = ew_addr_strtab();
+    if el_android != 0 {
+        sa = ew_addr_strtab_and();
+    }
+    el_copy(tbl + 224, sa, ew_len_strtab());
+    // the loader's five symbols, as for a program with externs
+    var sy: i64 = tbl + el_sym;
+    el_p64(sy + 24, 0x1200000026);
+    el_p64(sy + 48, 0x120000002D);
+    el_p64(sy + 72, 0x1200000033);
+    el_p64(sy + 96, 0x1200000042);
+    el_p64(sy + 120, 0x1200000051);
+    // each export: its name in the strings, its symbol (6 on), its place in
+    // the hash table
+    var r15: i64 = ew_len_strtab();      // where the next name goes
+    k = 0;
+    while k < el_exp {
+        var nptr: i64 = ew_export_name(k);
+        var nlen: i64 = ew_export_len(k);
+        el_copy(tbl + 224 + r15, nptr, nlen);
+        // its entry: the address of __ce_<name>, the name cut to 300 bytes
+        var n: i64 = 0;
+        while n < nlen {
+            if n >= 300 {
+                break;
+            }
+            el_p8(&el_name + 5 + n, el_g8(nptr + n));
+            n = n + 1;
+        }
+        el_p8(&el_name + 0, 95);
+        el_p8(&el_name + 1, 95);
+        el_p8(&el_name + 2, 99);
+        el_p8(&el_name + 3, 101);
+        el_p8(&el_name + 4, 95);
+        el_p8(&el_name + 5 + n, 0);
+        var clen: i64 = n + 5;
+        var val: i64 = 0;
+        if el_arm == 0 {
+            val = el_va(&el_name, clen);
+        } else {
+            val = karm_label(&el_name);
+        }
+        // the symbol: 6 + the export's number
+        var sym: i64 = tbl + el_sym + (k + 6) * 24;
+        el_p64(sym + 8, val);
+        el_p64(sym, 0x0001001200000000 | r15);   // GLOBAL FUNC, section 1 (defined)
+        // the hash table: elf_hash(name) % the exports
+        var h: i64 = el_elf_hash(nptr, nlen);
+        var bkt: i64 = h % el_exp;
+        var hb: i64 = tbl + el_hash;
+        var bucket: i64 = hb + 8 + bkt * 4;
+        var chain: i64 = hb + 8 + (el_exp + k + 6) * 4;
+        el_p32(chain, el_g32(bucket));
+        el_p32(bucket, k + 6);
+        // next
+        r15 = r15 + nlen + 1;
+        k = k + 1;
+    }
+    // the library's own name
+    var sn: i64 = el_soname;
+    var dp: i64 = tbl + el_soname_off + 224;
+    var sc: i64 = 1;
+    while sc != 0 {
+        sc = el_g8(sn);
+        el_p8(dp, sc);
+        sn = sn + 1;
+        dp = dp + 1;
+    }
+    // the hash table's sizes
+    var hsz: i64 = el_exp;
+    if hsz == 0 {
+        hsz = 1;
+    }
+    el_p32(tbl + el_hash, hsz);
+    el_p32(tbl + el_hash + 4, el_exp + 6);
+    // the relocations: the five words the loader fills
+    el_nrel = 0;
+    var gn: i64 = ew_addr_got_names();
+    k = 0;
+    while k < 5 {
+        var gl: i64 = el_cstrlen(gn);
+        var roff: i64 = 0;
+        if el_arm == 0 {
+            roff = el_va(gn, gl);
+        } else {
+            roff = karm_label(gn);
+        }
+        var info: i64 = (k + 1) << 32;
+        if el_arm == 0 {
+            info = info | 6;             // R_X86_64_GLOB_DAT
+        } else {
+            info = info | 1025;          // R_AARCH64_GLOB_DAT
+        }
+        el_rel_add(tbl, roff, info, 0);
+        gn = gn + gl + 1;
+        k = k + 1;
+    }
+    // every word holding an address: RELATIVE, the address its addend
+    if el_arm == 0 {
+        var fc: i64 = kasm_get_fixup_count();
+        k = 0;
+        while k < fc {
+            if kasm_get_fixup_kind(k) == 6 {
+                var lb: i64 = kasm_get_fixup_label(k);
+                if el_neg1(lb) == 0 {
+                    var sec: i64 = kasm_get_label_section(lb);
+                    var a: i64 = ew_label_addr(lb);
+                    if sec == 1 {
+                        a = a + el_doff;
+                    }
+                    if sec == 2 {
+                        a = a + el_boff;
+                    }
+                    a = a + 512;
+                    var slot: i64 = kasm_get_fixup_at(k) + el_doff + 512;
+                    el_p64(out + slot, a);      // the file holds it too
+                    el_rel_add(tbl, slot, 8, a);   // R_X86_64_RELATIVE
+                }
+            }
+            k = k + 1;
+        }
+    } else {
+        var rc: i64 = karm_reloc_count();
+        k = 0;
+        while k < rc {
+            var slot2: i64 = karm_reloc_at(k) + el_doff + 512;
+            el_rel_add(tbl, slot2, 1027, el_g64(out + slot2));  // R_AARCH64_RELATIVE
+            k = k + 1;
+        }
+    }
+    el_end = el_rela + el_nrel * 24;
+    // the dynamic table: what the library needs -- the C library's
+    // libc.so.6, libdl.so.2 and libpthread.so.0 on Linux, libc.so and
+    // libdl.so on Android -- its own name, and where the tables are
+    var d: i64 = tbl;
+    d = el_dyn(d, 1, 1);                 // DT_NEEDED
+    if el_android == 0 {
+        d = el_dyn(d, 1, 11);
+    } else {
+        d = el_dyn(d, 1, 9);
+    }
+    if el_android == 0 {
+        d = el_dyn(d, 1, 22);
+    }
+    d = el_dyn(d, 14, el_soname_off);    // DT_SONAME
+    d = el_dyn(d, 4, el_V + el_hash);    // DT_HASH
+    d = el_dyn(d, 5, el_V + 224);        // DT_STRTAB
+    d = el_dyn(d, 6, el_V + el_sym);     // DT_SYMTAB
+    d = el_dyn(d, 10, el_strsz);         // DT_STRSZ
+    d = el_dyn(d, 11, 24);               // DT_SYMENT
+    d = el_dyn(d, 7, el_V + el_rela);    // DT_RELA
+    d = el_dyn(d, 8, el_nrel * 24);      // DT_RELASZ
+    d = el_dyn(d, 9, 24);                // DT_RELAENT
+    // the ELF header
+    el_p64(out, 0x00010102464C457F);
+    el_p64(out + 8, 0);
+    if arm == 0 {
+        el_p64(out + 16, 0x00000001003E0003);   // a shared object, x86-64
+    } else {
+        el_p64(out + 16, 0x0000000100B70003);   // a shared object, AArch64
+    }
+    el_p64(out + 24, 0);                 // no entry
+    el_p64(out + 32, 64);
+    el_p64(out + 40, 0);
+    el_p64(out + 48, 0x0038004000000000);
+    // the program headers
+    var ph: i64 = out + 64;
+    var nph: i64 = 0;
+    if arm == 0 {
+        el_p64(ph, 0x0000000700000001);     // the image, read write run
+        el_p64(ph + 8, 0);
+        el_p64(ph + 16, 0);
+        el_p64(ph + 24, 0);
+        el_p64(ph + 32, el_img + 512);
+        el_p64(ph + 40, el_boff + el_blen + 512);
+        el_p64(ph + 48, el_falign);
+        ph = ph + 56;
+        nph = 3;
+    } else {
+        el_p64(ph, 0x0000000500000001);     // the code, read and run
+        el_p64(ph + 8, 0);
+        el_p64(ph + 16, 0);
+        el_p64(ph + 24, 0);
+        el_p64(ph + 32, el_code + 512);
+        el_p64(ph + 40, el_code + 512);
+        el_p64(ph + 48, 65536);
+        el_p64(ph + 56, 0x0000000600000001); // the data, read and write: .data, then .bss
+        el_p64(ph + 64, el_doff + 512);
+        el_p64(ph + 72, el_doff + 512);
+        el_p64(ph + 80, el_doff + 512);
+        el_p64(ph + 88, el_dlen);
+        el_p64(ph + 96, el_boff - el_doff + el_blen);
+        el_p64(ph + 104, 65536);
+        ph = ph + 112;
+        nph = 4;
+    }
+    // the tables, read and write
+    el_p64(ph, 0x0000000600000001);
+    el_p64(ph + 8, el_F);
+    el_p64(ph + 16, el_V);
+    el_p64(ph + 24, el_V);
+    el_p64(ph + 32, el_end);
+    el_p64(ph + 40, el_end);
+    el_p64(ph + 48, el_falign);
+    // PT_DYNAMIC: the start of the tables
+    el_p64(ph + 56, 0x0000000600000002);
+    el_p64(ph + 64, el_F);
+    el_p64(ph + 72, el_V);
+    el_p64(ph + 80, el_V);
+    el_p64(ph + 88, 224);
+    el_p64(ph + 96, 224);
+    el_p64(ph + 104, 8);
+    el_p64(out + 56, nph);               // the total, as the assembly had it
+    // the section headers, at the file's end: the tools read them, and
+    // Android's loader insists on .dynamic and its strings
+    el_sections(out);
+    return el_shend;
+}
+
+// The prepared name of the shared object: its file name for DT_SONAME, and
+// whether the C library is Android's. Called before el_write_so.
+fn el_prepare() -> i64 {
+    var p: i64 = ew_prepare_name();
+    var q: i64 = p;
+    var c: i64 = 1;
+    while c != 0 {
+        c = el_g8(p);
+        if c == 47 {
+            q = p + 1;
+        }
+        if c == 92 {
+            q = p + 1;
+        }
+        if c != 0 {
+            p = p + 1;
+        }
+    }
+    el_soname = q;
+    el_android = ew_out_android();
+    return 0;
+}

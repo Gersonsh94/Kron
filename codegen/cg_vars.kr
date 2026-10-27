@@ -59,6 +59,8 @@ fn cg_add_var(t: ptr<Tok>, slots: i64) -> i64 {
 fn cg_var_take_pending(i: i64) -> i64 {
     cg_qs(&var_structs, i, pending_struct);
     pending_struct = -1;
+    cg_qs(&var_estruct, i, pending_estruct);
+    pending_estruct = 0;
     cg_qs(&var_elemsz, i, pending_elem);
     pending_elem = 0;
     cg_qs(&var_isfloat, i, pending_float);

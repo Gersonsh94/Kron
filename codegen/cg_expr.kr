@@ -353,6 +353,14 @@ fn cg_global_note(d: ptr<Ast>) -> i64 {
     cg_qs(&g_aw, i, (c >> 4) & 15);
     cg_qs(&g_vtag, i, c >> 8);
     cg_qs(&g_structs, i, -1);
+    cg_qs(&g_estruct, i, 0);
+    // an array of structs: remember the struct its elements are
+    if d.type_info != 0 && d.left != 0 && d.left.kind != KW_STR {
+        s = cg_find_struct(d.left);
+        if s != -1 {
+            cg_qs(&g_estruct, i, s + 1);
+        }
+    }
     g_count = i + 1;
     // a struct-typed global (not an array of them)
     if d.type_info != 0 || d.left == 0 {
@@ -404,6 +412,13 @@ fn cg_global_decl(d: ptr<Ast>) -> i64 {
         if v != 0 {
             if v.node_type == AST_ARRAY_LIT && d.type_info != 0 {
                 return cg_global_arrlit(d);
+            }
+        }
+        // an array of structs: each element takes the struct's own bytes
+        if d.type_info != 0 && d.left != 0 && d.left.kind != KW_STR {
+            s = cg_find_struct(d.left);
+            if s != -1 {
+                n = (cg_u32(d.type_info) * cg_struct_bytes(s) + 7) >>> 3;
             }
         }
         // packed elements: [u8; 4096] reserves 512 qwords, not 4096

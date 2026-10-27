@@ -23,6 +23,7 @@ var par_ast_root: i64;
 var par_last_array_len: i64;
 var par_last_row_len: i64;         // elements per row of a 2-D array, 0 flat
 var par_last_arr_elem: i64;        // bytes per element of an array type
+var par_last_arr_tok: i64;         // the name token of an array's element type, a struct or 0
 var par_last_ptr_elem: i64;
 var par_last_ptr_tok: i64;         // ptr<S>: the name token of S, else 0
 var par_last_is_float: i64;
@@ -142,7 +143,7 @@ const NG_MAXDECL: i64 = 16384;
 const NG_MAXMOD: i64 = 72;
 const NG_MAXT: i64 = 512;
 const NG_MAXI: i64 = 4096;
-const NG_MAXTOK: i64 = 349500;     // TOKEN_BUFFER_SIZE / TOKEN_SIZE, rounded down
+const NG_MAXTOK: i64 = 2796202;     // TOKEN_BUFFER_SIZE / TOKEN_SIZE, rounded down
 const NG_ARGTOK: i64 = 65536;
 const NG_TEXT: i64 = 1048576;
 
@@ -157,8 +158,8 @@ var ng_mod_len: [i64; 72];
 var ng_mod_alias: [i64; 72];       // the program's name for it, or 0
 var ng_mod_alen: [i64; 72];
 var ng_nmod: i64;
-var ng_tokmod: [u8; 349500];       // which module each token is from
-var ng_tokflag: [i64; 349500];     // template t starts here: t + 1
+var ng_tokmod: [u8; 2796202];       // which module each token is from
+var ng_tokflag: [i64; 2796202];     // template t starts here: t + 1
 
 // --- declarations at the top of a module ---
 var ng_d_tok: [i64; 16384];        // the name token
@@ -193,11 +194,11 @@ var ng_ni: i64;
 // --- token stores ---
 var ng_args: [u8; 1572864];        // NG_ARGTOK tokens
 var ng_nargs: i64;
-var ng_itok: [u8; 8388000];        // NG_MAXTOK tokens
+var ng_itok: [u8; 67108848];        // NG_MAXTOK tokens
 var ng_nitok: i64;
-var ng_sub: [u8; 8388000];
+var ng_sub: [u8; 67108848];
 var ng_nsub: i64;
-var ng_out: [u8; 8388000];
+var ng_out: [u8; 67108848];
 var ng_nout: i64;
 var ng_text: [u8; 1048576];
 var ng_ntext: i64;

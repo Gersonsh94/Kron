@@ -455,6 +455,7 @@ fn prs_var() -> ptr<Ast> {
     par_last_is_float = 0;
     par_last_is_unsigned = 0;
     par_last_arr_elem = 0;
+    par_last_arr_tok = 0;
     par_last_row_len = 0;
     par_last_vtag = 0;
     par_decl_typed = 0;
@@ -469,6 +470,9 @@ fn prs_var() -> ptr<Ast> {
         }
         if prs_type() == 0 {
             return 0;
+        }
+        if typetok == 0 {
+            typetok = par_last_arr_tok;    // [S; N]: the element is the struct S
         }
         par_note_pstruct(name);        // var p: ptr<S>
         par_decl_typed = 1;
@@ -2114,6 +2118,10 @@ fn prs_type_array() -> i64 {
     // the element's width; a nested '[' leaves the inner array's
     if k != TOK_LBRACKET {
         w = prs_type_width(k);
+    }
+    // a name here is the element's type: a struct, when it is one
+    if k == TOK_IDENTIFIER {
+        par_last_arr_tok = prs_cur();
     }
     if prs_type() == 0 {
         par_last_array_len = 0;

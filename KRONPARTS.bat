@@ -13,6 +13,7 @@ REM       parser\parser.kr  makes  parser\parser_kr.asm
 REM       semantic\semantic.kr  makes  semantic\semantic_kr.asm
 REM       codegen\codegen.kr    makes  codegen\codegen_kr.asm
 REM       kasm.kr               makes  kasm_kr.asm
+REM       imports.kr            makes  imports_kr.asm
 REM
 REM   kron_all.asm includes those files, so kasm still builds the
 REM   whole compiler alone. BUILD.bat and BOOTSTRAP.bat call this
@@ -36,6 +37,12 @@ if errorlevel 1 exit /b 1
 call :part codegen\codegen.kr
 if errorlevel 1 exit /b 1
 call :part kasm.kr
+if errorlevel 1 exit /b 1
+call :part imports.kr
+if errorlevel 1 exit /b 1
+call :part pe_writer.kr
+if errorlevel 1 exit /b 1
+call :part elf_writer.kr
 if errorlevel 1 exit /b 1
 exit /b 0
 

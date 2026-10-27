@@ -1,0 +1,33 @@
+kron_program
+kron_domain test_imports_many_bad;
+kron_imports
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_math.kr";
+kron_definitions
+
+// =========================================================================
+// NEGATIVE TEST: more than 16 imports in one file
+//
+// The import pass takes at most 16 acquire_domain lines from one file. The
+// seventeenth is an error that names the file, so the program is rejected.
+// =========================================================================
+
+fn main() -> i64 {
+    print(1);
+    return 0;
+}

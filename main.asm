@@ -109,6 +109,7 @@ section .data
     msg_err_target db "ERROR: unknown target", 13, 10
                  db "  hint: use --target=windows, --target=linux, --target=linux-arm64, --target=web, --target=krn or --target=bare", 13, 10, 0
     msg_err_read db "ERROR: cannot read the file.", 13, 10, 0
+    msg_err_long db "ERROR: the source file is longer than 16 MB.", 13, 10, 0
     msg_imp_pre  db "ERROR: acquire_domain: ", 0
     msg_slice_imp db 13, 10, "ERROR: slice<...> uses std_arena.kr, which is not imported", 13, 10
                   db "  hint: add  acquire_domain ", 34, "std_arena.kr", 34, ";  to the header", 13, 10, 0
@@ -126,9 +127,12 @@ section .data
     msg_imp_deep db "imports nest deeper than 8 levels, at '", 0
     msg_imp_many db "too many modules (more than 64, or more than 16 imports in one file), at '", 0
     msg_imp_post db "'", 13, 10, 0
+    msg_imp_lines db "the line map is full: more than 128 runs of lines from the imports, at '", 0
+    msg_imp_size db "the program with its imports is longer than 16 MB, at '", 0
+    msg_imp_pool db "a module is longer than 16 MB, or the modules are longer than 64 MB together, at '", 0
     msg_imp_hint1 db "  hint: the file has to be in the program's folder, with its .kr extension", 13, 10, 0
     msg_imp_hint2 db "  hint: check the chain of imports: each module imports only what it uses", 13, 10, 0
-    msg_err_lex  db "ERROR: the program with its modules is too big for the lexer: more than 349000 tokens.", 13, 10, 0
+    msg_err_lex  db "ERROR: the program with its modules is too big for the lexer: more than 2796202 tokens.", 13, 10, 0
     d_lex_char   db "a character Kron does not use ", 0
     d_hint_lexchar db "  hint: outside a ", 34, "...", 34, " text and a // comment, Kron is written with letters, digits, _ and its operators", 13, 10, 0
     d_lex_text   db "a text with no closing quote", 0
@@ -238,45 +242,13 @@ section .bss
     arg_output   resb 512
     arg_flag_S   resb 1        ; -S: write the .asm instead of the .exe
     imp_pathbuf  resb 512      ; a module's name, next to the program
-    ew_count     resq 1        ; elf_write: fixups to visit
-    ew_lbl       resq 1        ; elf_write: the label of the current fixup
-    ew_sec       resq 1        ; elf_write: its section
-    ew_val       resq 1        ; elf_write: the address to store
-    ew_img       resq 1        ; elf_write: length of the flat image
     ew_hsize     resq 1        ; bytes of headers before the image: 128, 1024 with externs
     ew_base      resq 1        ; where the image is in memory: 0x400000 + ew_hsize
-    ew_dbase     resq 1        ; elf_write: .data inside the image
-    ew_bbase     resq 1        ; elf_write: .bss inside the image
-    ew_got       resq 5        ; the addresses of __got_dlopen ... __got_exit
-    ed_load      resq 7        ; elf_dynamic: the PT_LOAD header, kept aside
     out_dynamic  resb 1        ; the program calls the system's libraries
     arg_flag_lib resb 1        ; --lib: a library (.dll .so .dylib), not a program
     out_android  resb 1        ; --target=android (out_target ARM64)
     out_ios      resb 1        ; --target=ios (out_target MACOS)
     mac_idbuf    resb 520      ; a framework dylib's install name
-    es_arm       resq 1        ; elf_write_so: 1 for ARM64
-    es_img       resq 1        ; the image's length
-    es_code      resq 1        ; its code's length
-    es_doff      resq 1        ; where its .data starts
-    es_dlen      resq 1        ; .data's length
-    es_boff      resq 1        ; where its .bss starts
-    es_blen      resq 1        ; .bss's length
-    es_falign    resq 1        ; the page the segments are aligned to
-    es_F         resq 1        ; the table segment: in the file
-    es_V         resq 1        ; and in memory
-    es_exp       resq 1        ; exports
-    es_strsz     resq 1
-    es_sym       resq 1        ; offsets in the table segment
-    es_hash      resq 1
-    es_rela      resq 1
-    es_nrel      resq 1        ; relocations written
-    es_end       resq 1        ; the table segment's length
-    es_name      resb 320      ; "__ce_" and an export's name
-    es_android   resb 1        ; the C library is Android's (bionic)
-    es_soname    resq 1        ; the library's file name, without its folder
-    es_soname_off resq 1       ; where it is in the strings
-    es_shoff     resq 1        ; the section headers
-    es_shend     resq 1        ; and the file's end after them
     arg_flag_check resb 1      ; --check: report errors, write nothing
     arg_flag_debug resb 1      ; --debug: a build the debugger can stop
     arg_flag_window resb 1     ; --window: a Windows program with no console
@@ -301,16 +273,20 @@ section .bss
     ; The walk keeps an explicit stack of frames rather than recursing: each
     ; frame holds a file's name and the imports read from its header.
     imp_count    resd 1                 ; modules in the resolved list
-    imp_i        resd 1                 ; next one to splice
-    imp_emitted  resd 1                 ; list already spliced
     imp_err      resd 1                 ; 1 cannot open, 2 too deep, 3 too many
     imp_names    resb IMP_MAX * 256     ; the resolved list, in order
     imp_errname  resb 260
-    dfs_depth    resd 1
-    dfs_nkids    resd IMP_DEPTH
-    dfs_ki       resd IMP_DEPTH
-    dfs_name     resb IMP_DEPTH * 256
-    dfs_kids     resb IMP_DEPTH * IMP_KIDS * 256
+    ; --- the import pass's reading (imports.kr, through imp_read) -------------
+    ; Each module's bytes go to a place of their own in imp_pool: the pass
+    ; holds them all at once. 64 MB together, 4 MB for one file.
+    imp_pool       resb IMP_POOL
+    imp_pool_used  resq 1
+    imp_src        resq 1               ; expand_imports' arguments, kept
+    imp_len        resq 1               ; across the calls into Kron
+    imp_out        resq 1
+    imp_ret        resq 1
+    imp_lmbytes    resq 1
+    imp_nbytes     resq 1
     pp_name      resb 260               ; filename from a %include
     ; --- line map -------------------------------------------------------
     ; expand_imports splices whole files into exp_buffer, so a line number
@@ -321,13 +297,12 @@ section .bss
     ; One entry per switch of file: two per import plus the first, so 128
     ; covers 63 imports. Imports are one level deep, so no nesting.
     LMAP_MAX     equ 128
+    IMP_POOL     equ 67108864           ; 64 MB for the modules' bytes
     lmap_out     resq LMAP_MAX          ; first line in the expanded text
     lmap_file    resq LMAP_MAX          ; pointer to the file name
     lmap_src     resq LMAP_MAX          ; line it starts at in that file
     lmap_count   resq 1
     cg_hint_msg  resq 1                     ; hint of a codegen type error
-    lmap_names   resb (LMAP_MAX * 260)  ; names copied: inc_name is reused
-    lmap_names_n resq 1
     lmap_outline resq 1        ; line being written in the expanded text
     lmap_srcline resq 1        ; line being read in the main file
     lmap_hdrskip resq 1        ; lines of the importee's own module header
@@ -500,6 +475,8 @@ main:
     mov  [rel src_size], rax
     test rax, rax
     jz   .error_read
+    cmp  rax, SRC_BUFFER_SIZE       ; read_file stops at the buffer: a file this long was cut
+    jae  .error_long
     
     ; expand  acquire_domain "file.jup";  directives into exp_buffer
     sub  rsp, 32
@@ -1648,6 +1625,13 @@ main:
     pop  rbp
     ret
     
+.error_long:
+    lea  rcx, [rel msg_err_long]
+    call print_string
+    mov  eax, 2
+    pop  rbp
+    ret
+
 .error_read:
     lea  rcx, [rel msg_err_read]
     call print_string
@@ -1674,10 +1658,26 @@ main:
     cmp  eax, 2
     jne  .ei_n3
     lea  rcx, [rel msg_imp_deep]
+    jmp  .ei_say
 .ei_n3:
     cmp  eax, 3
-    jne  .ei_say
+    jne  .ei_n4
     lea  rcx, [rel msg_imp_many]
+    jmp  .ei_say
+.ei_n4:
+    cmp  eax, 4
+    jne  .ei_n5
+    lea  rcx, [rel msg_imp_lines]
+    jmp  .ei_say
+.ei_n5:
+    cmp  eax, 5
+    jne  .ei_n6
+    lea  rcx, [rel msg_imp_size]
+    jmp  .ei_say
+.ei_n6:
+    cmp  eax, 6
+    jne  .ei_say
+    lea  rcx, [rel msg_imp_pool]
 .ei_say:
     call print_string
     lea  rcx, [rel imp_errname]
@@ -2594,96 +2594,6 @@ print_string:
     ret
 
 ; ==============================================================================
-; expand_imports(rcx = source, rdx = length, r8 = output buffer)
-;   -> rax = length of the expanded text
-;
-; Replaces every  acquire_domain "file.jup";  directive with that file's text.
-; One level deep: imports inside an imported file are left as-is, which keeps
-; the pass finite without needing cycle detection.
-; ==============================================================================
-; ==============================================================================
-; lmap_add(rcx = first expanded line, rdx = file name, r8 = line in that file)
-; The name is copied, because inc_name is reused by the next import.
-; ==============================================================================
-lmap_add:
-    push rbx
-    push rsi
-    push rdi
-    push r9
-    mov  rbx, [rel lmap_count]
-    cmp  rbx, LMAP_MAX
-    jae  .full
-    lea  r9, [rel lmap_out]
-    mov  [r9 + rbx*8], rcx
-    lea  r9, [rel lmap_src]
-    mov  [r9 + rbx*8], r8
-    ; a file named before keeps its one copy: a file is the same pointer in
-    ; every entry (the traces and the debugger number files by it)
-    push rcx
-    push rdx
-    xor  ecx, ecx
-.same:
-    cmp  rcx, rbx
-    jae  .same_none
-    lea  r9, [rel lmap_file]
-    mov  rdi, [r9 + rcx*8]
-    mov  rsi, rdx
-.same_cmp:
-    mov  al, [rsi]
-    cmp  al, [rdi]
-    jne  .same_next
-    test al, al
-    jz   .same_found
-    inc  rsi
-    inc  rdi
-    jmp  .same_cmp
-.same_next:
-    inc  rcx
-    jmp  .same
-.same_found:
-    lea  r9, [rel lmap_file]
-    mov  rdi, [r9 + rcx*8]
-    mov  [r9 + rbx*8], rdi
-    pop  rdx
-    pop  rcx
-    inc  rbx
-    mov  [rel lmap_count], rbx
-    jmp  .full
-.same_none:
-    pop  rdx
-    pop  rcx
-    ; copy the name into lmap_names
-    mov  r9, [rel lmap_names_n]
-    lea  rdi, [rel lmap_names]
-    add  rdi, r9
-    push rdi
-    mov  rsi, rdx
-    xor  rcx, rcx
-.cp:
-    mov  al, [rsi + rcx]
-    mov  [rdi + rcx], al
-    test al, al
-    jz   .cp_done
-    inc  rcx
-    cmp  rcx, 255
-    jb   .cp
-.cp_done:
-    mov  byte [rdi + rcx], 0
-    inc  rcx
-    add  [rel lmap_names_n], rcx
-    pop  rdi
-    lea  r9, [rel lmap_file]
-    mov  [r9 + rbx*8], rdi
-    inc  rbx
-    mov  [rel lmap_count], rbx
-.full:
-    pop  r9
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; ==============================================================================
 ; lmap_lookup(rcx = expanded line) -> rax = file name, rdx = line in that file
 ; Falls back to the input file and the line as given when the map is empty.
 ; ==============================================================================
@@ -2813,661 +2723,8 @@ imp_strcpy:
     pop  rax
     ret
 
-; ==============================================================================
-; imp_extract(rcx = text, rdx = length, r8d = frame) -- read the imports a
-; file declares and keep them as that frame's children.
-;
-; Only the header counts: the scan stops at 'kron_definitions'. A directive
-; has to start a line, after optional blanks, exactly as the splice below
-; requires. More than IMP_KIDS imports in one file are an error.
-; ==============================================================================
-imp_extract:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push r9
-    push r10
-    push r11
-    mov  rsi, rcx                    ; cursor
-    mov  r9, rdx                     ; remaining
-    xor  r10d, r10d                  ; children found
-.ix_line:
-    ; skip blanks at the start of the line
-    test r9, r9
-    jz   .ix_done
-    mov  al, [rsi]
-    cmp  al, ' '
-    je   .ix_blank
-    cmp  al, 9
-    je   .ix_blank
-    jmp  .ix_word
-.ix_blank:
-    inc  rsi
-    dec  r9
-    jmp  .ix_line
-.ix_word:
-    ; the header ends here
-    cmp  r9, 16
-    jb   .ix_acq
-    cmp  dword [rsi],    'kron'
-    jne  .ix_acq
-    cmp  dword [rsi+4],  '_def'
-    jne  .ix_acq
-    cmp  dword [rsi+8],  'init'
-    jne  .ix_acq
-    cmp  dword [rsi+12], 'ions'
-    je   .ix_done
-.ix_acq:
-    cmp  r9, 14
-    jb   .ix_skip
-    cmp  dword [rsi],    'acqu'
-    jne  .ix_skip
-    cmp  dword [rsi+4],  'ire_'
-    jne  .ix_skip
-    cmp  dword [rsi+8],  'doma'
-    jne  .ix_skip
-    cmp  word  [rsi+12], 'in'
-    jne  .ix_skip
-    add  rsi, 14
-    sub  r9, 14
-.ix_sp:
-    test r9, r9
-    jz   .ix_done
-    mov  al, [rsi]
-    cmp  al, 34
-    je   .ix_open
-    cmp  al, 10
-    je   .ix_skip
-    inc  rsi
-    dec  r9
-    jmp  .ix_sp
-.ix_open:
-    inc  rsi
-    dec  r9
-    cmp  r10d, IMP_KIDS
-    jae  .ix_toomany
-    ; destination: dfs_kids[frame][child]
-    mov  eax, r8d
-    imul eax, eax, IMP_KIDS
-    add  eax, r10d
-    shl  rax, 8
-    lea  rdi, [rel dfs_kids]
-    add  rdi, rax
-    xor  ecx, ecx
-.ix_name:
-    test r9, r9
-    jz   .ix_named
-    mov  al, [rsi]
-    cmp  al, 34
-    je   .ix_named
-    cmp  al, 10
-    je   .ix_named
-    cmp  ecx, 255
-    jae  .ix_named
-    mov  [rdi], al
-    inc  rdi
-    inc  rsi
-    dec  r9
-    inc  ecx
-    jmp  .ix_name
-.ix_named:
-    mov  byte [rdi], 0
-    inc  r10d
-.ix_skip:
-    ; to the start of the next line
-    test r9, r9
-    jz   .ix_done
-    mov  al, [rsi]
-    inc  rsi
-    dec  r9
-    cmp  al, 10
-    jne  .ix_skip
-    jmp  .ix_line
-.ix_toomany:
-    mov  dword [rel imp_err], 3
-.ix_done:
-    mov  eax, r8d
-    shl  rax, 2
-    lea  rdi, [rel dfs_nkids]
-    add  rdi, rax
-    mov  [rdi], r10d
-    lea  rdi, [rel dfs_ki]
-    add  rdi, rax
-    mov  dword [rdi], 0
-    pop  r11
-    pop  r10
-    pop  r9
-    pop  rdi
-    pop  rsi
-    pop  rdx
-    pop  rcx
-    pop  rbx
-    pop  rax
-    ret
 
 ; ==============================================================================
-; imp_resolve(rcx = program text, rdx = length) -> eax = 0, or -1 with
-; imp_err and imp_errname saying what went wrong.
-;
-; Depth-first over the imports. A module is added to the list after all of
-; its own imports, so the list comes out in dependency order. One already in
-; the list is not visited again -- two modules may share a third -- and one
-; already on the stack is a cycle, cut the same way.
-; ==============================================================================
-imp_resolve:
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push r8
-    push r12
-    push r13
-    push r14
-    push r15
-    mov  dword [rel imp_count], 0
-    mov  dword [rel imp_err], 0
-    mov  dword [rel dfs_depth], 0
-    ; frame 0 is the program itself: its name is never added to the list
-    lea  rdi, [rel dfs_name]
-    lea  rsi, [rel arg_input]
-    call imp_strcpy
-    xor  r8d, r8d
-    call imp_extract
-    mov  eax, [rel imp_err]
-    test eax, eax
-    jnz  .ir_fail_self
-    ; --debug: the program imports the debugger's module as well
-    cmp  byte [rel arg_flag_debug], 0
-    je   .ir_loop
-    mov  eax, [rel dfs_nkids]
-    cmp  eax, IMP_KIDS
-    jae  .ir_loop
-    shl  rax, 8
-    lea  rdi, [rel dfs_kids]
-    add  rdi, rax
-    lea  rsi, [rel s_std_debug]
-    call imp_strcpy
-    mov  eax, [rel dfs_nkids]
-    inc  eax
-    mov  [rel dfs_nkids], eax
-.ir_loop:
-    mov  r12d, [rel dfs_depth]
-    mov  eax, r12d
-    shl  rax, 2
-    lea  rsi, [rel dfs_ki]
-    add  rsi, rax
-    mov  ecx, [rsi]
-    lea  rdi, [rel dfs_nkids]
-    add  rdi, rax
-    mov  edx, [rdi]
-    cmp  ecx, edx
-    jae  .ir_pop
-    inc  ecx
-    mov  [rsi], ecx
-    dec  ecx
-    ; r13 = the child's name
-    mov  eax, r12d
-    imul eax, eax, IMP_KIDS
-    add  eax, ecx
-    shl  rax, 8
-    lea  r13, [rel dfs_kids]
-    add  r13, rax
-    ; already in the list?
-    xor  r14d, r14d
-.ir_done_scan:
-    cmp  r14d, [rel imp_count]
-    jae  .ir_not_done
-    mov  eax, r14d
-    shl  rax, 8
-    lea  rdi, [rel imp_names]
-    add  rdi, rax
-    mov  rsi, r13
-    call imp_streq
-    test eax, eax
-    jnz  .ir_loop
-    inc  r14d
-    jmp  .ir_done_scan
-.ir_not_done:
-    ; on the stack right now? then it is a cycle: cut it
-    mov  r14d, 1
-.ir_stack_scan:
-    cmp  r14d, r12d
-    ja   .ir_push
-    mov  eax, r14d
-    shl  rax, 8
-    lea  rdi, [rel dfs_name]
-    add  rdi, rax
-    mov  rsi, r13
-    call imp_streq
-    test eax, eax
-    jnz  .ir_loop
-    inc  r14d
-    jmp  .ir_stack_scan
-.ir_push:
-    mov  eax, r12d
-    inc  eax
-    cmp  eax, IMP_DEPTH
-    jb   .ir_depth_ok
-    mov  dword [rel imp_err], 2
-    jmp  .ir_fail
-.ir_depth_ok:
-    mov  r12d, eax
-    mov  [rel dfs_depth], r12d
-    mov  eax, r12d
-    shl  rax, 8
-    lea  rdi, [rel dfs_name]
-    add  rdi, rax
-    mov  rsi, r13
-    call imp_strcpy
-    ; read the module and take its imports as this frame's children
-    mov  r15, rdi                    ; the name, kept for the error message
-    ; read_file destroys r13, r14 and r15 -- the same trap that once cut
-    ; imports short -- so the depth and the name ride on the stack across it.
-    ; Two pushes plus 40 bytes keep rsp 16-aligned at the call.
-    push r12
-    push r15
-    sub  rsp, 40
-    ; first next to the program, then as written -- as %include does
-    mov  rcx, r15
-    call imp_fullpath
-    mov  rcx, rax
-    lea  rdx, [rel inc_buffer]
-    mov  r8, SRC_BUFFER_SIZE
-    call read_file
-    test rax, rax
-    jnz  .ir_got
-    mov  rcx, [rsp + 40]             ; the name, from the stack: r15 is gone
-    lea  rdx, [rel inc_buffer]
-    mov  r8, SRC_BUFFER_SIZE
-    call read_file
-    jmp  .ir_got
-.ir_got:
-    add  rsp, 40
-    pop  r15
-    pop  r12
-    test rax, rax
-    jnz  .ir_read_ok
-    mov  dword [rel imp_err], 1
-    jmp  .ir_fail
-.ir_read_ok:
-    lea  rcx, [rel inc_buffer]
-    mov  rdx, rax
-    mov  r8d, r12d
-    call imp_extract
-    mov  eax, [rel imp_err]
-    test eax, eax
-    jnz  .ir_fail
-    jmp  .ir_loop
-.ir_pop:
-    ; every child done: the frame's own file goes on the list
-    test r12d, r12d
-    jz   .ir_ok                      ; frame 0 is the program itself
-    mov  eax, [rel imp_count]
-    cmp  eax, IMP_MAX
-    jb   .ir_room
-    mov  dword [rel imp_err], 3
-    mov  eax, r12d
-    shl  rax, 8
-    lea  r15, [rel dfs_name]
-    add  r15, rax
-    jmp  .ir_fail
-.ir_room:
-    shl  rax, 8
-    lea  rdi, [rel imp_names]
-    add  rdi, rax
-    mov  eax, r12d
-    shl  rax, 8
-    lea  rsi, [rel dfs_name]
-    add  rsi, rax
-    call imp_strcpy
-    mov  eax, [rel imp_count]
-    inc  eax
-    mov  [rel imp_count], eax
-    dec  r12d
-    mov  [rel dfs_depth], r12d
-    jmp  .ir_loop
-.ir_ok:
-    xor  eax, eax
-    jmp  .ir_out
-.ir_fail_self:
-    lea  r15, [rel arg_input]
-.ir_fail:
-    ; keep the name that failed for the diagnostic
-    lea  rdi, [rel imp_errname]
-    mov  rsi, r15
-    call imp_strcpy
-    mov  eax, -1
-.ir_out:
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  r8
-    pop  rdi
-    pop  rsi
-    pop  rdx
-    pop  rcx
-    pop  rbx
-    ret
-
-; ==============================================================================
-; elf_write(rcx = output buffer) -> rax = length of the Linux executable.
-; kasm has assembled the program into a flat image: the code, the data at the
-; next 16-byte boundary, the .bss right after -- the layout every [rel label]
-; was resolved against. The file is a 64-bit ELF with one loadable segment:
-; the whole file mapped read-write-execute at 0x400000, the image at file
-; offset 0x80, and the .bss after it in memory. Only the absolute addresses
-; ('dq label', fixup kind 6) are left to fill: kasm cannot know the base.
-; Linux needs no import table: the runtime reaches the system with syscall.
-; ==============================================================================
-; elf_write_arm(rcx = output) -> rax = file length. karm's image after the
-; 0x80 bytes of headers, as elf_write does for x86-64: the AArch64 machine
-; number (183), the entry from _start, and a 64 KB segment alignment, since
-; some ARM64 kernels use 64 KB pages. karm resolves every address itself.
-elf_write_arm:
-    push rbx
-    push rsi
-    push rdi
-    push r12
-    push r13
-    mov  r12, rcx
-    sub  rsp, 32
-    call karm_build_image
-    add  rsp, 32
-    mov  r13, rax                    ; image length
-    sub  rsp, 32
-    call karm_get_code
-    add  rsp, 32
-    mov  rsi, rax
-    mov  rdi, r12
-    add  rdi, [rel ew_hsize]
-    mov  rcx, r13
-    jmp  .ewa_copy
-.ewa_copy:
-    test rcx, rcx
-    jz   .ewa_copied
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    dec  rcx
-    jmp  .ewa_copy
-.ewa_copied:
-    sub  rsp, 32
-    call karm_get_entry
-    add  rsp, 32
-    mov  rbx, rax
-    mov  rdi, r12
-    mov  rax, 0x00010102464C457F     ; 7F 'E' 'L' 'F', 64-bit, little-endian, v1
-    mov  [rdi], rax
-    xor  eax, eax
-    mov  [rdi + 8], rax
-    mov  rax, 0x0000000100B70002     ; executable, AArch64, version 1
-    mov  [rdi + 16], rax
-    mov  [rdi + 24], rbx             ; entry
-    mov  rax, 64
-    mov  [rdi + 32], rax
-    xor  eax, eax
-    mov  [rdi + 40], rax
-    mov  rax, 0x0038004000000000
-    mov  [rdi + 48], rax
-    mov  rax, 1
-    mov  [rdi + 56], rax
-    mov  rax, 0x0000000700000001     ; PT_LOAD, read-write-execute
-    mov  [rdi + 64], rax
-    xor  eax, eax
-    mov  [rdi + 72], rax
-    mov  rax, 0x400000
-    mov  [rdi + 80], rax
-    mov  [rdi + 88], rax
-    mov  rax, r13
-    add  rax, [rel ew_hsize]
-    mov  [rdi + 96], rax             ; bytes in the file
-    mov  rbx, rax
-    sub  rsp, 32
-    call karm_get_bss_size
-    add  rsp, 32
-    mov  rcx, r13
-    add  rcx, 15
-    and  rcx, -16                    ; .bss starts 16-aligned after .data
-    add  rax, rcx
-    add  rax, [rel ew_hsize]
-    mov  [rdi + 104], rax            ; bytes in memory: up to the end of .bss
-    mov  rax, 0x10000
-    mov  [rdi + 112], rax
-    xor  eax, eax
-    mov  [rdi + 120], rax
-    cmp  byte [rel out_dynamic], 0
-    je   .ewa_static
-    ; the five words the loader fills: karm knows their addresses
-    lea  rsi, [rel ed_got_names]
-    lea  rdi, [rel ew_got]
-    mov  ecx, 5
-    jmp  .ewa_got
-.ewa_got:
-    test ecx, ecx
-    jz   .ewa_dyn
-    push rcx
-    push rsi
-    push rdi
-    mov  rcx, rsi
-    sub  rsp, 32
-    call karm_label
-    add  rsp, 32
-    pop  rdi
-    pop  rsi
-    pop  rcx
-    mov  [rdi], rax
-    add  rdi, 8
-    jmp  .ewa_skip
-.ewa_skip:
-    mov  al, [rsi]
-    inc  rsi
-    test al, al
-    jnz  .ewa_skip
-    dec  ecx
-    jmp  .ewa_got
-.ewa_dyn:
-    mov  rcx, r12
-    mov  edx, 1
-    call elf_dynamic
-.ewa_static:
-    mov  rax, rbx
-    pop  r13
-    pop  r12
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-elf_write:
-    push rbx
-    push rsi
-    push rdi
-    push r12
-    push r13
-    push r14
-    push r15
-    mov  r12, rcx                    ; the output
-    call kasm_build_image
-    mov  [rel ew_img], rax
-    ; the image goes after the 0x80 bytes of headers
-    call kasm_get_code
-    mov  rsi, rax
-    mov  rdi, r12
-    add  rdi, [rel ew_hsize]
-    mov  rcx, [rel ew_img]
-    jmp  .ew_copy
-.ew_copy:
-    test rcx, rcx
-    jz   .ew_copied
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    dec  rcx
-    jmp  .ew_copy
-.ew_copied:
-    ; where kasm put .data and .bss inside the image
-    call kasm_get_code_size
-    add  rax, 15
-    shr  rax, 4
-    shl  rax, 4
-    mov  r14, rax                    ; data base
-    call kasm_get_data_size
-    mov  r15, r14
-    add  r15, rax
-    add  r15, 15
-    and  r15, -16                    ; bss base, aligned as kasm resolves it
-    mov  [rel ew_dbase], r14
-    mov  [rel ew_bbase], r15
-    ; fill every 'dq label' with its final address
-    call kasm_get_fixup_count
-    mov  [rel ew_count], rax
-    xor  ebx, ebx
-    jmp  .ew_fix
-.ew_fix:
-    cmp  rbx, [rel ew_count]
-    jae  .ew_fixed
-    mov  rcx, rbx
-    call kasm_get_fixup_kind
-    cmp  eax, 6
-    jne  .ew_next
-    mov  rcx, rbx
-    call kasm_get_fixup_label
-    cmp  eax, -1
-    je   .ew_next
-    mov  [rel ew_lbl], rax
-    mov  rcx, rax
-    call kasm_get_label_section
-    mov  [rel ew_sec], rax
-    mov  rax, [rel ew_lbl]
-    call kasm_label_addr             ; offset inside its section
-    cmp  qword [rel ew_sec], 1
-    jne  .ew_notdata
-    add  rax, r14
-    jmp  .ew_based
-.ew_notdata:
-    cmp  qword [rel ew_sec], 2
-    jne  .ew_based
-    add  rax, r15
-    jmp  .ew_based
-.ew_based:
-    add  rax, [rel ew_base]          ; base of the image in memory
-    mov  [rel ew_val], rax
-    mov  rcx, rbx
-    call kasm_get_fixup_at           ; offset of the slot inside .data
-    mov  rdi, r12
-    add  rdi, [rel ew_hsize]
-    add  rdi, r14
-    add  rdi, rax
-    mov  rax, [rel ew_val]
-    mov  [rdi], rax
-    jmp  .ew_next
-.ew_next:
-    inc  rbx
-    jmp  .ew_fix
-.ew_fixed:
-    ; the entry point: _start, from the preamble
-    lea  rcx, [rel ew_start_name]
-    mov  rdx, 6
-    call kasm_find_label
-    cmp  eax, -1
-    je   .ew_noentry
-    call kasm_label_addr
-    jmp  .ew_entry
-.ew_noentry:
-    xor  eax, eax
-    jmp  .ew_entry
-.ew_entry:
-    add  rax, [rel ew_base]
-    mov  r13, rax                    ; entry address
-    ; ELF header, 64 bytes, then one program header, 56 bytes
-    mov  rdi, r12
-    mov  rax, 0x00010102464C457F     ; 7F 'E' 'L' 'F', 64-bit, little-endian, v1
-    mov  [rdi], rax
-    xor  eax, eax
-    mov  [rdi + 8], rax
-    mov  rax, 0x00000001003E0002     ; executable, x86-64, version 1
-    mov  [rdi + 16], rax
-    mov  [rdi + 24], r13             ; entry
-    mov  rax, 64
-    mov  [rdi + 32], rax             ; program headers right after
-    xor  eax, eax
-    mov  [rdi + 40], rax             ; no section headers
-    mov  rax, 0x0038004000000000     ; flags 0, header 64 bytes, ph entry 56
-    mov  [rdi + 48], rax
-    mov  rax, 1
-    mov  [rdi + 56], rax             ; one program header
-    mov  rax, 0x0000000700000001     ; PT_LOAD, read-write-execute
-    mov  [rdi + 64], rax
-    xor  eax, eax
-    mov  [rdi + 72], rax             ; from file offset 0
-    mov  rax, 0x400000
-    mov  [rdi + 80], rax             ; virtual address
-    mov  [rdi + 88], rax             ; physical address
-    mov  rax, [rel ew_img]
-    add  rax, [rel ew_hsize]
-    mov  [rdi + 96], rax             ; bytes in the file
-    mov  rbx, rax
-    call kasm_get_bss_size
-    add  rax, r15
-    add  rax, [rel ew_hsize]
-    mov  [rdi + 104], rax            ; bytes in memory: up to the end of .bss
-    mov  rax, 0x1000
-    mov  [rdi + 112], rax
-    xor  eax, eax
-    mov  [rdi + 120], rax
-    cmp  byte [rel out_dynamic], 0
-    je   .ew_static
-    ; the five words the loader fills
-    lea  rsi, [rel ed_got_names]
-    lea  rdi, [rel ew_got]
-    mov  r13d, 5
-    jmp  .ew_got
-.ew_got:
-    test r13d, r13d
-    jz   .ew_dyn
-    mov  rcx, rsi
-    xor  edx, edx
-    jmp  .ew_len
-.ew_len:
-    cmp  byte [rsi + rdx], 0
-    je   .ew_len_ok
-    inc  edx
-    jmp  .ew_len
-.ew_len_ok:
-    push rsi
-    push rdi
-    push rdx
-    call ew_va
-    pop  rdx
-    pop  rdi
-    pop  rsi
-    mov  [rdi], rax
-    add  rdi, 8
-    lea  rsi, [rsi + rdx + 1]
-    dec  r13d
-    jmp  .ew_got
-.ew_dyn:
-    mov  rcx, r12
-    xor  edx, edx
-    call elf_dynamic
-.ew_static:
-    mov  rax, rbx                    ; the file's length
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
 ; ew_set_layout(): the header area and the base of the image, from
 ; out_dynamic -- 128 bytes and 0x400080 for a program that reaches the system
 ; by its calls alone, 1 KB and 0x400400 for one linked with its libraries
@@ -3480,1024 +2737,6 @@ ew_set_layout:
     mov  [rel ew_hsize], rax
     add  rax, 0x400000
     mov  [rel ew_base], rax
-    ret
-
-; ew_va(rcx = name, rdx = its length) -> rax = the address of that label of
-; the image kasm built, 0 when there is none
-ew_va:
-    push rbx
-    push r12
-    call kasm_find_label
-    cmp  eax, -1
-    je   .va_none
-    mov  ebx, eax
-    mov  rcx, rbx
-    call kasm_get_label_section
-    mov  r12, rax
-    mov  rax, rbx
-    call kasm_label_addr
-    cmp  r12, 1
-    jne  .va_notdata
-    add  rax, [rel ew_dbase]
-    jmp  .va_based
-.va_notdata:
-    cmp  r12, 2
-    jne  .va_based
-    add  rax, [rel ew_bbase]
-.va_based:
-    add  rax, [rel ew_base]
-    pop  r12
-    pop  rbx
-    ret
-.va_none:
-    xor  eax, eax
-    pop  r12
-    pop  rbx
-    ret
-
-; ==============================================================================
-; elf_dynamic(rcx = the file, edx = 0 x86-64, 1 ARM64): the header area of a
-; program linked with the system's libraries, after its writer made the ELF
-; header and the PT_LOAD for 1 KB of headers. In the area, at fixed places:
-;     64  four program headers: PT_PHDR, PT_INTERP, PT_LOAD, PT_DYNAMIC
-;    288  the loader's name
-;    320  the strings: the libraries and the five functions
-;    448  the symbols, 448 + 24 each; 592 the hash table; 632 the relocations
-;    752  the dynamic table
-; The loader maps the C library (libdl and libpthread too, where they are
-; still apart from it), stores the five functions in __got_* (ew_got), and
-; starts the program at _start as the kernel would.
-; ==============================================================================
-elf_dynamic:
-    push rbx
-    push rsi
-    push rdi
-    mov  rdi, rcx
-    mov  ebx, edx
-    ; the PT_LOAD aside, the area cleared
-    xor  ecx, ecx
-.ed_keep:
-    mov  rax, [rdi + rcx*8 + 64]
-    lea  rdx, [rel ed_load]
-    mov  [rdx + rcx*8], rax
-    inc  ecx
-    cmp  ecx, 7
-    jb   .ed_keep
-    mov  ecx, 8
-.ed_zero:
-    xor  eax, eax
-    mov  [rdi + rcx*8], rax
-    inc  ecx
-    cmp  ecx, 128
-    jb   .ed_zero
-    mov  rax, 4
-    mov  [rdi + 56], rax             ; four program headers
-    ; PT_PHDR
-    mov  rax, 0x0000000400000006
-    mov  [rdi + 64], rax
-    mov  rax, 64
-    mov  [rdi + 72], rax
-    mov  rax, 0x400040
-    mov  [rdi + 80], rax
-    mov  [rdi + 88], rax
-    mov  rax, 224
-    mov  [rdi + 96], rax
-    mov  [rdi + 104], rax
-    mov  rax, 8
-    mov  [rdi + 112], rax
-    ; PT_INTERP
-    mov  rax, 0x0000000400000003
-    mov  [rdi + 120], rax
-    mov  rax, 288
-    mov  [rdi + 128], rax
-    mov  rax, 0x400120
-    mov  [rdi + 136], rax
-    mov  [rdi + 144], rax
-    lea  rsi, [rel ed_interp_x86]
-    test ebx, ebx
-    jz   .ed_interp
-    lea  rsi, [rel ed_interp_arm]
-.ed_interp:
-    xor  ecx, ecx
-.ed_icopy:
-    mov  al, [rsi + rcx]
-    mov  [rdi + rcx + 288], al
-    inc  ecx
-    test al, al
-    jnz  .ed_icopy
-    mov  [rdi + 152], rcx
-    mov  [rdi + 160], rcx
-    mov  rax, 1
-    mov  [rdi + 168], rax
-    ; PT_LOAD, as the writer made it
-    xor  ecx, ecx
-.ed_load:
-    lea  rdx, [rel ed_load]
-    mov  rax, [rdx + rcx*8]
-    mov  [rdi + rcx*8 + 176], rax
-    inc  ecx
-    cmp  ecx, 7
-    jb   .ed_load
-    ; PT_DYNAMIC
-    mov  rax, 0x0000000600000002
-    mov  [rdi + 232], rax
-    mov  rax, 752
-    mov  [rdi + 240], rax
-    mov  rax, 0x4002F0
-    mov  [rdi + 248], rax
-    mov  [rdi + 256], rax
-    mov  rax, 192
-    mov  [rdi + 264], rax
-    mov  [rdi + 272], rax
-    mov  rax, 8
-    mov  [rdi + 280], rax
-    ; the strings
-    lea  rsi, [rel ed_strtab]
-    xor  ecx, ecx
-.ed_scopy:
-    mov  al, [rsi + rcx]
-    mov  [rdi + rcx + 320], al
-    inc  ecx
-    cmp  ecx, ed_strtab_len
-    jb   .ed_scopy
-    ; the symbols: 1 dlopen, 2 dlsym, 3 pthread_create, 4 pthread_detach,
-    ; 5 exit -- global functions, undefined here
-    mov  rax, 0x1200000026
-    mov  [rdi + 472], rax
-    mov  rax, 0x120000002D
-    mov  [rdi + 496], rax
-    mov  rax, 0x1200000033
-    mov  [rdi + 520], rax
-    mov  rax, 0x1200000042
-    mov  [rdi + 544], rax
-    mov  rax, 0x1200000051
-    mov  [rdi + 568], rax
-    ; the hash table: one bucket, six symbols, nothing defined
-    mov  rax, 0x0000000600000001
-    mov  [rdi + 592], rax
-    ; the relocations: each word of ew_got gets its function
-    mov  edx, 6                      ; R_X86_64_GLOB_DAT
-    test ebx, ebx
-    jz   .ed_rtype
-    mov  edx, 1025                   ; R_AARCH64_GLOB_DAT
-.ed_rtype:
-    xor  ecx, ecx
-    lea  rsi, [rdi + 632]
-.ed_rela:
-    lea  rax, [rel ew_got]
-    mov  rax, [rax + rcx*8]
-    mov  [rsi], rax
-    lea  rax, [rcx + 1]
-    shl  rax, 32
-    or   rax, rdx
-    mov  [rsi + 8], rax
-    add  rsi, 24
-    inc  ecx
-    cmp  ecx, 5
-    jb   .ed_rela
-    ; the dynamic table
-    lea  rsi, [rdi + 752]
-    mov  rax, 1                      ; DT_NEEDED libc.so.6
-    mov  [rsi], rax
-    mov  rax, 1
-    mov  [rsi + 8], rax
-    mov  rax, 1                      ; DT_NEEDED libdl.so.2
-    mov  [rsi + 16], rax
-    mov  rax, 11
-    mov  [rsi + 24], rax
-    mov  rax, 1                      ; DT_NEEDED libpthread.so.0
-    mov  [rsi + 32], rax
-    mov  rax, 22
-    mov  [rsi + 40], rax
-    mov  rax, 4                      ; DT_HASH
-    mov  [rsi + 48], rax
-    mov  rax, 0x400250
-    mov  [rsi + 56], rax
-    mov  rax, 5                      ; DT_STRTAB
-    mov  [rsi + 64], rax
-    mov  rax, 0x400140
-    mov  [rsi + 72], rax
-    mov  rax, 6                      ; DT_SYMTAB
-    mov  [rsi + 80], rax
-    mov  rax, 0x4001C0
-    mov  [rsi + 88], rax
-    mov  rax, 10                     ; DT_STRSZ
-    mov  [rsi + 96], rax
-    mov  rax, ed_strtab_len
-    mov  [rsi + 104], rax
-    mov  rax, 11                     ; DT_SYMENT
-    mov  [rsi + 112], rax
-    mov  rax, 24
-    mov  [rsi + 120], rax
-    mov  rax, 7                      ; DT_RELA
-    mov  [rsi + 128], rax
-    mov  rax, 0x400278
-    mov  [rsi + 136], rax
-    mov  rax, 8                      ; DT_RELASZ
-    mov  [rsi + 144], rax
-    mov  rax, 120
-    mov  [rsi + 152], rax
-    mov  rax, 9                      ; DT_RELAENT
-    mov  [rsi + 160], rax
-    mov  rax, 24
-    mov  [rsi + 168], rax
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; ==============================================================================
-; elf_write_so(rcx = the file, edx = 0 x86-64, 1 ARM64) -> rax = its length.
-; A shared object (--lib), loaded anywhere: its addresses count from 0. The
-; file:
-;     0      the ELF header and the program headers
-;     512    the image -- code, .data, then .bss in memory -- as kasm or karm
-;            made it for an image at 512
-;     F      the tables the loader reads, on a page of their own in memory
-;            (es_V): the dynamic table, the strings, the symbols -- the
-;            loader's five (dlopen ... exit, as a program with externs has)
-;            and every export, its __ce_ entry -- a hash table, and the
-;            relocations: each word holding an address gets the load address
-;            added (RELATIVE), each __got_* its function (GLOB_DAT)
-; On ARM64 the code and the data are apart, the code read and run, the data
-; read and write: Android refuses a segment both written and run.
-; ==============================================================================
-elf_write_so:
-    push rbx
-    push rsi
-    push rdi
-    push r12
-    push r13
-    push r14
-    push r15
-    mov  r12, rcx
-    mov  [rel es_arm], rdx
-    mov  qword [rel ew_hsize], 512
-    mov  qword [rel ew_base], 512
-    cmp  qword [rel es_arm], 0
-    jne  .so_arm_img
-    ; ---- x86-64: kasm's image --------------------------------------------
-    call kasm_build_image
-    mov  [rel es_img], rax
-    call kasm_get_code_size
-    mov  [rel es_code], rax
-    add  rax, 15
-    and  rax, -16
-    mov  [rel es_doff], rax
-    mov  [rel ew_dbase], rax
-    mov  r14, rax
-    call kasm_get_data_size
-    mov  [rel es_dlen], rax
-    add  rax, r14
-    add  rax, 15
-    and  rax, -16
-    mov  [rel es_boff], rax
-    mov  [rel ew_bbase], rax
-    call kasm_get_bss_size
-    mov  [rel es_blen], rax
-    call kasm_get_code
-    mov  qword [rel es_falign], 0x1000
-    jmp  .so_copy
-.so_arm_img:
-    ; ---- ARM64: karm's -----------------------------------------------------
-    sub  rsp, 32
-    call karm_build_image
-    mov  [rel es_img], rax
-    call karm_get_code_len
-    mov  [rel es_code], rax
-    call karm_get_data_off
-    mov  [rel es_doff], rax
-    call karm_get_data_len
-    mov  [rel es_dlen], rax
-    add  rax, 0xFFFF
-    and  rax, -65536
-    add  rax, [rel es_doff]
-    mov  [rel es_boff], rax
-    call karm_get_bss_size
-    mov  [rel es_blen], rax
-    call karm_get_code
-    add  rsp, 32
-    mov  qword [rel es_falign], 0x10000
-    jmp  .so_copy
-.so_copy:
-    ; the image at 512, zeros before it
-    mov  rsi, rax
-    xor  ecx, ecx
-.so_zero_hdr:
-    xor  eax, eax
-    mov  [r12 + rcx*8], rax
-    inc  ecx
-    cmp  ecx, 64
-    jb   .so_zero_hdr
-    lea  rdi, [r12 + 512]
-    mov  rcx, [rel es_img]
-.so_cp:
-    test rcx, rcx
-    jz   .so_copied
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    dec  rcx
-    jmp  .so_cp
-.so_copied:
-    ; the table segment: after the file's end and after the end of .bss in
-    ; memory, both on a page boundary
-    mov  rax, [rel es_img]
-    add  rax, 512
-    mov  rbx, rax                    ; where the zeros start
-    mov  rcx, [rel es_falign]
-    dec  rcx
-    add  rax, rcx
-    not  rcx
-    and  rax, rcx
-    mov  [rel es_F], rax
-.so_pad:
-    cmp  rbx, rax
-    jae  .so_padded
-    mov  byte [r12 + rbx], 0
-    inc  rbx
-    jmp  .so_pad
-.so_padded:
-    mov  rax, [rel es_boff]
-    add  rax, [rel es_blen]
-    add  rax, 512
-    mov  rcx, [rel es_falign]
-    dec  rcx
-    add  rax, rcx
-    not  rcx
-    and  rax, rcx
-    mov  [rel es_V], rax
-    ; its layout: dynamic table (12 entries), strings, symbols, hash table,
-    ; relocations
-    call codegen_export_count
-    mov  [rel es_exp], rax
-    mov  r13, ed_strtab_len          ; the strings: the loader's, then the exports'
-    xor  ebx, ebx
-.so_strsz:
-    cmp  rbx, [rel es_exp]
-    jae  .so_strsz_done
-    mov  ecx, ebx
-    call codegen_export_name
-    add  r13, rdx
-    inc  r13
-    inc  rbx
-    jmp  .so_strsz
-.so_strsz_done:
-    ; and the library's own name, DT_SONAME
-    mov  [rel es_soname_off], r13
-    mov  rsi, [rel es_soname]
-.so_snl:
-    inc  r13
-    cmp  byte [rsi], 0
-    je   .so_snl_done
-    inc  rsi
-    jmp  .so_snl
-.so_snl_done:
-    mov  [rel es_strsz], r13
-    lea  rax, [r13 + 224 + 7]
-    and  rax, -8
-    mov  [rel es_sym], rax
-    mov  rcx, [rel es_exp]
-    add  rcx, 6
-    imul rcx, rcx, 24
-    add  rax, rcx
-    mov  [rel es_hash], rax
-    mov  rcx, [rel es_exp]
-    test rcx, rcx
-    jnz  .so_nb
-    mov  rcx, 1
-.so_nb:
-    mov  rdx, [rel es_exp]
-    add  rdx, 6
-    add  rcx, rdx
-    add  rcx, 2
-    shl  rcx, 2
-    add  rax, rcx
-    add  rax, 7
-    and  rax, -8
-    mov  [rel es_rela], rax
-    ; clear the table segment as far as the relocations
-    mov  rdi, r12
-    add  rdi, [rel es_F]
-    xor  ecx, ecx
-.so_clr:
-    cmp  rcx, rax
-    jae  .so_clr_done
-    mov  byte [rdi + rcx], 0
-    inc  rcx
-    jmp  .so_clr
-.so_clr_done:
-    ; the strings
-    mov  r14, r12
-    add  r14, [rel es_F]             ; r14: the table segment in the file
-    lea  rsi, [rel ed_strtab]
-    cmp  byte [rel es_android], 0
-    je   .so_s_glibc
-    lea  rsi, [rel ed_strtab_and]
-.so_s_glibc:
-    xor  ecx, ecx
-.so_s0:
-    mov  al, [rsi + rcx]
-    mov  [r14 + rcx + 224], al
-    inc  ecx
-    cmp  ecx, ed_strtab_len
-    jb   .so_s0
-    ; the loader's five symbols, as for a program with externs
-    mov  rdi, r14
-    add  rdi, [rel es_sym]
-    mov  rax, 0x1200000026
-    mov  [rdi + 24], rax
-    mov  rax, 0x120000002D
-    mov  [rdi + 48], rax
-    mov  rax, 0x1200000033
-    mov  [rdi + 72], rax
-    mov  rax, 0x1200000042
-    mov  [rdi + 96], rax
-    mov  rax, 0x1200000051
-    mov  [rdi + 120], rax
-    ; each export: its name in the strings, its symbol (6 on), its place in
-    ; the hash table
-    mov  r15, ed_strtab_len          ; where the next name goes
-    xor  ebx, ebx
-.so_exp:
-    cmp  rbx, [rel es_exp]
-    jae  .so_exp_done
-    mov  ecx, ebx
-    call codegen_export_name         ; rax = the name, rdx = its length
-    mov  rsi, rax
-    mov  r13, rdx
-    ; the string
-    xor  ecx, ecx
-.so_en:
-    cmp  rcx, r13
-    jae  .so_en_done
-    mov  al, [rsi + rcx]
-    lea  rdi, [r14 + r15 + 224]
-    mov  [rdi + rcx], al
-    inc  rcx
-    jmp  .so_en
-.so_en_done:
-    ; its entry: the address of __ce_<name>
-    push rsi
-    lea  rdi, [rel es_name]
-    mov  al, '_'
-    mov  [rdi], al
-    mov  [rdi + 1], al
-    mov  al, 'c'
-    mov  [rdi + 2], al
-    mov  al, 'e'
-    mov  [rdi + 3], al
-    mov  al, '_'
-    mov  [rdi + 4], al
-    xor  ecx, ecx
-.so_ln:
-    cmp  rcx, r13
-    jae  .so_ln_done
-    cmp  rcx, 300
-    jae  .so_ln_done
-    mov  al, [rsi + rcx]
-    mov  [rdi + rcx + 5], al
-    inc  rcx
-    jmp  .so_ln
-.so_ln_done:
-    mov  byte [rdi + rcx + 5], 0
-    lea  rdx, [rcx + 5]              ; the label's length
-    cmp  qword [rel es_arm], 0
-    jne  .so_ce_arm
-    lea  rcx, [rel es_name]
-    call ew_va
-    jmp  .so_ce_have
-.so_ce_arm:
-    lea  rcx, [rel es_name]
-    sub  rsp, 32
-    call karm_label
-    add  rsp, 32
-.so_ce_have:
-    pop  rsi
-    ; the symbol: 6 + the export's number
-    lea  rcx, [rbx + 6]
-    imul rcx, rcx, 24
-    mov  rdi, r14
-    add  rdi, [rel es_sym]
-    add  rdi, rcx
-    mov  [rdi + 8], rax              ; st_value
-    mov  rax, 0x0001001200000000     ; GLOBAL FUNC, section 1 (defined)
-    or   rax, r15
-    mov  [rdi], rax
-    ; the hash table: elf_hash(name) % the exports
-    xor  eax, eax
-    xor  ecx, ecx
-.so_h:
-    cmp  rcx, r13
-    jae  .so_h_done
-    shl  rax, 4
-    movzx edx, byte [rsi + rcx]
-    add  rax, rdx
-    mov  eax, eax
-    mov  rdx, rax
-    shr  rdx, 28
-    jz   .so_h_nog
-    shl  rdx, 4
-    xor  rax, rdx
-.so_h_nog:
-    and  rax, 0x0FFFFFFF
-    inc  rcx
-    jmp  .so_h
-.so_h_done:
-    xor  edx, edx
-    mov  rcx, [rel es_exp]
-    div  rcx                         ; rdx = the bucket
-    mov  rdi, r14
-    add  rdi, [rel es_hash]
-    ; chain[sym] = bucket[b]; bucket[b] = sym -- [nbucket][nchain][buckets]
-    ; [chains], four bytes each
-    lea  r8, [rbx + 6]
-    mov  r10, rdx
-    shl  r10, 2
-    add  r10, rdi
-    add  r10, 8                      ; &bucket[b]
-    mov  ecx, [r10]
-    mov  r9, [rel es_exp]
-    add  r9, r8
-    shl  r9, 2
-    add  r9, rdi
-    add  r9, 8                       ; &chain[sym]
-    mov  [r9], ecx
-    mov  [r10], r8d
-    ; next
-    add  r15, r13
-    inc  r15
-    inc  rbx
-    jmp  .so_exp
-.so_exp_done:
-    ; the library's own name
-    mov  rsi, [rel es_soname]
-    mov  rdi, r14
-    add  rdi, [rel es_soname_off]
-    add  rdi, 224
-.so_sn:
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    test al, al
-    jnz  .so_sn
-    ; the hash table's sizes
-    mov  rdi, r14
-    add  rdi, [rel es_hash]
-    mov  rax, [rel es_exp]
-    test rax, rax
-    jnz  .so_hb
-    mov  rax, 1
-.so_hb:
-    mov  [rdi], eax
-    mov  rax, [rel es_exp]
-    add  rax, 6
-    mov  [rdi + 4], eax
-    ; the relocations: the five words the loader fills
-    mov  qword [rel es_nrel], 0
-    lea  rsi, [rel ed_got_names]
-    xor  ebx, ebx
-.so_got:
-    cmp  rbx, 5
-    jae  .so_got_done
-    xor  edx, edx
-.so_gl:
-    cmp  byte [rsi + rdx], 0
-    je   .so_gl_ok
-    inc  rdx
-    jmp  .so_gl
-.so_gl_ok:
-    push rsi
-    push rdx
-    cmp  qword [rel es_arm], 0
-    jne  .so_got_arm
-    mov  rcx, rsi
-    call ew_va
-    jmp  .so_got_have
-.so_got_arm:
-    mov  rcx, rsi
-    sub  rsp, 32
-    call karm_label
-    add  rsp, 32
-.so_got_have:
-    mov  rcx, rax                    ; r_offset
-    lea  rdx, [rbx + 1]
-    shl  rdx, 32
-    mov  r8, 6                       ; R_X86_64_GLOB_DAT
-    cmp  qword [rel es_arm], 0
-    je   .so_got_t
-    mov  r8, 1025                    ; R_AARCH64_GLOB_DAT
-.so_got_t:
-    or   rdx, r8
-    xor  r8, r8
-    call so_rela
-    pop  rdx
-    pop  rsi
-    lea  rsi, [rsi + rdx + 1]
-    inc  rbx
-    jmp  .so_got
-.so_got_done:
-    ; every word holding an address: RELATIVE, the address its addend
-    cmp  qword [rel es_arm], 0
-    jne  .so_rel_arm
-    call kasm_get_fixup_count
-    mov  r13, rax
-    xor  ebx, ebx
-.so_fx:
-    cmp  rbx, r13
-    jae  .so_rel_done
-    mov  rcx, rbx
-    call kasm_get_fixup_kind
-    cmp  eax, 6
-    jne  .so_fx_next
-    mov  rcx, rbx
-    call kasm_get_fixup_label
-    cmp  eax, -1
-    je   .so_fx_next
-    mov  r15, rax
-    mov  rcx, rax
-    call kasm_get_label_section
-    mov  rsi, rax
-    mov  rax, r15
-    call kasm_label_addr
-    cmp  rsi, 1
-    jne  .so_fx_nd
-    add  rax, [rel es_doff]
-    jmp  .so_fx_b
-.so_fx_nd:
-    cmp  rsi, 2
-    jne  .so_fx_b
-    add  rax, [rel es_boff]
-.so_fx_b:
-    add  rax, 512
-    mov  r15, rax                    ; the address, as loaded at 0
-    mov  rcx, rbx
-    call kasm_get_fixup_at           ; the word, inside .data
-    add  rax, [rel es_doff]
-    add  rax, 512
-    mov  [r12 + rax], r15            ; the file holds it too
-    mov  rcx, rax
-    mov  rdx, 8                      ; R_X86_64_RELATIVE
-    mov  r8, r15
-    call so_rela
-.so_fx_next:
-    inc  rbx
-    jmp  .so_fx
-.so_rel_arm:
-    sub  rsp, 32
-    call karm_reloc_count
-    add  rsp, 32
-    mov  r13, rax
-    xor  ebx, ebx
-.so_ra:
-    cmp  rbx, r13
-    jae  .so_rel_done
-    mov  rcx, rbx
-    sub  rsp, 32
-    call karm_reloc_at               ; the word, inside .data
-    add  rsp, 32
-    add  rax, [rel es_doff]
-    add  rax, 512
-    mov  rcx, rax
-    mov  r8, [r12 + rax]             ; karm wrote the address for a load at 0
-    mov  rdx, 1027                   ; R_AARCH64_RELATIVE
-    call so_rela
-    inc  rbx
-    jmp  .so_ra
-.so_rel_done:
-    mov  rax, [rel es_nrel]
-    imul rax, rax, 24
-    add  rax, [rel es_rela]
-    mov  [rel es_end], rax
-    ; the dynamic table: what the library needs -- the C library's
-    ; libc.so.6, libdl.so.2 and libpthread.so.0 on Linux, libc.so and
-    ; libdl.so on Android -- its own name, and where the tables are
-    mov  rdi, r14
-    mov  rax, 1                      ; DT_NEEDED
-    mov  rdx, 1
-    call so_dyn
-    mov  rax, 1
-    mov  rdx, 11
-    cmp  byte [rel es_android], 0
-    je   .so_dn2
-    mov  rdx, 9
-.so_dn2:
-    call so_dyn
-    cmp  byte [rel es_android], 0
-    jne  .so_dn3
-    mov  rax, 1
-    mov  rdx, 22
-    call so_dyn
-.so_dn3:
-    mov  rax, 14                     ; DT_SONAME
-    mov  rdx, [rel es_soname_off]
-    call so_dyn
-    mov  rax, 4                      ; DT_HASH
-    mov  rdx, [rel es_V]
-    add  rdx, [rel es_hash]
-    call so_dyn
-    mov  rax, 5                      ; DT_STRTAB
-    mov  rdx, [rel es_V]
-    add  rdx, 224
-    call so_dyn
-    mov  rax, 6                      ; DT_SYMTAB
-    mov  rdx, [rel es_V]
-    add  rdx, [rel es_sym]
-    call so_dyn
-    mov  rax, 10                     ; DT_STRSZ
-    mov  rdx, [rel es_strsz]
-    call so_dyn
-    mov  rax, 11                     ; DT_SYMENT
-    mov  rdx, 24
-    call so_dyn
-    mov  rax, 7                      ; DT_RELA
-    mov  rdx, [rel es_V]
-    add  rdx, [rel es_rela]
-    call so_dyn
-    mov  rax, 8                      ; DT_RELASZ
-    mov  rdx, [rel es_nrel]
-    imul rdx, rdx, 24
-    call so_dyn
-    mov  rax, 9                      ; DT_RELAENT
-    mov  rdx, 24
-    call so_dyn
-    ; ---- the ELF header ---------------------------------------------------
-    mov  rdi, r12
-    mov  rax, 0x00010102464C457F
-    mov  [rdi], rax
-    xor  eax, eax
-    mov  [rdi + 8], rax
-    mov  rax, 0x00000001003E0003     ; a shared object, x86-64
-    cmp  qword [rel es_arm], 0
-    je   .so_mach
-    mov  rax, 0x0000000100B70003     ; a shared object, AArch64
-.so_mach:
-    mov  [rdi + 16], rax
-    xor  eax, eax
-    mov  [rdi + 24], rax             ; no entry
-    mov  rax, 64
-    mov  [rdi + 32], rax
-    xor  eax, eax
-    mov  [rdi + 40], rax
-    mov  rax, 0x0038004000000000
-    mov  [rdi + 48], rax
-    lea  rsi, [rdi + 64]             ; the program headers
-    cmp  qword [rel es_arm], 0
-    jne  .so_ph_arm
-    ; x86-64: the image, read write run
-    mov  rax, 0x0000000700000001
-    mov  [rsi], rax
-    xor  eax, eax
-    mov  [rsi + 8], rax
-    mov  [rsi + 16], rax
-    mov  [rsi + 24], rax
-    mov  rax, [rel es_img]
-    add  rax, 512
-    mov  [rsi + 32], rax
-    mov  rax, [rel es_boff]
-    add  rax, [rel es_blen]
-    add  rax, 512
-    mov  [rsi + 40], rax
-    mov  rax, [rel es_falign]
-    mov  [rsi + 48], rax
-    add  rsi, 56
-    mov  rax, 3
-    jmp  .so_ph_tab
-.so_ph_arm:
-    ; ARM64: the code, read and run
-    mov  rax, 0x0000000500000001
-    mov  [rsi], rax
-    xor  eax, eax
-    mov  [rsi + 8], rax
-    mov  [rsi + 16], rax
-    mov  [rsi + 24], rax
-    mov  rax, [rel es_code]
-    add  rax, 512
-    mov  [rsi + 32], rax
-    mov  [rsi + 40], rax
-    mov  rax, 0x10000
-    mov  [rsi + 48], rax
-    ; the data, read and write: .data, then .bss
-    mov  rax, 0x0000000600000001
-    mov  [rsi + 56], rax
-    mov  rax, [rel es_doff]
-    add  rax, 512
-    mov  [rsi + 64], rax
-    mov  [rsi + 72], rax
-    mov  [rsi + 80], rax
-    mov  rax, [rel es_dlen]
-    mov  [rsi + 88], rax
-    mov  rax, [rel es_boff]
-    sub  rax, [rel es_doff]
-    add  rax, [rel es_blen]
-    mov  [rsi + 96], rax
-    mov  rax, 0x10000
-    mov  [rsi + 104], rax
-    add  rsi, 112
-    mov  rax, 4
-.so_ph_tab:
-    mov  [rdi + 56], rax             ; how many program headers
-    ; the tables, read and write
-    mov  rax, 0x0000000600000001
-    mov  [rsi], rax
-    mov  rax, [rel es_F]
-    mov  [rsi + 8], rax
-    mov  rax, [rel es_V]
-    mov  [rsi + 16], rax
-    mov  [rsi + 24], rax
-    mov  rax, [rel es_end]
-    mov  [rsi + 32], rax
-    mov  [rsi + 40], rax
-    mov  rax, [rel es_falign]
-    mov  [rsi + 48], rax
-    ; PT_DYNAMIC: the start of the tables
-    mov  rax, 0x0000000600000002
-    mov  [rsi + 56], rax
-    mov  rax, [rel es_F]
-    mov  [rsi + 64], rax
-    mov  rax, [rel es_V]
-    mov  [rsi + 72], rax
-    mov  [rsi + 80], rax
-    mov  rax, 224
-    mov  [rsi + 88], rax
-    mov  [rsi + 96], rax
-    mov  rax, 8
-    mov  [rsi + 104], rax
-    ; ---- the section headers, at the file's end: the tools read them,
-    ; and Android's loader insists on .dynamic and its strings
-    call so_sections
-    ; the file's length: up to the end of the section headers
-    mov  rax, [rel es_shend]
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; so_prepare(): before elf_write_so -- the file's name, for DT_SONAME, and
-; whose C library it will meet. Preserves rcx.
-so_prepare:
-    push rcx
-    lea  rcx, [rel so_ext]
-    mov  [rel bin_ext_ptr], rcx
-    call build_bin_name
-    lea  rax, [rel out_bin_name]
-    mov  rdx, rax
-.sp_l:
-    mov  cl, [rax]
-    test cl, cl
-    jz   .sp_d
-    inc  rax
-    cmp  cl, '/'
-    je   .sp_s
-    cmp  cl, 92
-    je   .sp_s
-    jmp  .sp_l
-.sp_s:
-    mov  rdx, rax
-    jmp  .sp_l
-.sp_d:
-    mov  [rel es_soname], rdx
-    mov  al, [rel out_android]
-    mov  [rel es_android], al
-    pop  rcx
-    ret
-
-; so_dyn(rdi = where, rax = tag, rdx = value): one entry of the dynamic
-; table, rdi moved on
-so_dyn:
-    mov  [rdi], rax
-    mov  [rdi + 8], rdx
-    add  rdi, 16
-    ret
-
-; so_sections(): .dynsym .dynstr .dynamic .shstrtab after the tables, their
-; headers after their names; the ELF header pointed at them (r12 = the file)
-so_sections:
-    push rbx
-    push rsi
-    push rdi
-    mov  rbx, [rel es_F]
-    add  rbx, [rel es_end]           ; the names of the sections
-    lea  rsi, [rel so_shnames]
-    xor  ecx, ecx
-.ss_n:
-    mov  al, [rsi + rcx]
-    mov  [r12 + rbx], al
-    inc  rbx
-    inc  ecx
-    cmp  ecx, 36
-    jb   .ss_n
-    add  rbx, 7
-    and  rbx, -8
-    mov  [rel es_shoff], rbx
-    lea  rdi, [r12 + rbx]            ; five headers of 64 bytes
-    xor  ecx, ecx
-.ss_z:
-    xor  eax, eax
-    mov  [rdi + rcx*8], rax
-    inc  ecx
-    cmp  ecx, 40
-    jb   .ss_z
-    ; 1 .dynsym: SHT_DYNSYM, allocated, its strings section 2
-    lea  rsi, [rdi + 64]
-    mov  rax, 0x0000000B00000001
-    mov  [rsi], rax
-    mov  rax, 2
-    mov  [rsi + 8], rax
-    mov  rax, [rel es_V]
-    add  rax, [rel es_sym]
-    mov  [rsi + 16], rax
-    mov  rax, [rel es_F]
-    add  rax, [rel es_sym]
-    mov  [rsi + 24], rax
-    mov  rax, [rel es_exp]
-    add  rax, 6
-    imul rax, rax, 24
-    mov  [rsi + 32], rax
-    mov  rax, 0x0000000100000002     ; link 2, info 1
-    mov  [rsi + 40], rax
-    mov  rax, 8
-    mov  [rsi + 48], rax
-    mov  rax, 24
-    mov  [rsi + 56], rax
-    ; 2 .dynstr
-    lea  rsi, [rdi + 128]
-    mov  rax, 0x0000000300000009
-    mov  [rsi], rax
-    mov  rax, 2
-    mov  [rsi + 8], rax
-    mov  rax, [rel es_V]
-    add  rax, 224
-    mov  [rsi + 16], rax
-    mov  rax, [rel es_F]
-    add  rax, 224
-    mov  [rsi + 24], rax
-    mov  rax, [rel es_strsz]
-    mov  [rsi + 32], rax
-    mov  rax, 1
-    mov  [rsi + 48], rax
-    ; 3 .dynamic: SHT_DYNAMIC, written and allocated, strings section 2
-    lea  rsi, [rdi + 192]
-    mov  rax, 0x0000000600000011
-    mov  [rsi], rax
-    mov  rax, 3
-    mov  [rsi + 8], rax
-    mov  rax, [rel es_V]
-    mov  [rsi + 16], rax
-    mov  rax, [rel es_F]
-    mov  [rsi + 24], rax
-    mov  rax, 224
-    mov  [rsi + 32], rax
-    mov  rax, 2
-    mov  [rsi + 40], rax
-    mov  rax, 8
-    mov  [rsi + 48], rax
-    mov  rax, 16
-    mov  [rsi + 56], rax
-    ; 4 .shstrtab
-    lea  rsi, [rdi + 256]
-    mov  rax, 0x000000030000001A
-    mov  [rsi], rax
-    mov  rax, [rel es_F]
-    add  rax, [rel es_end]
-    mov  [rsi + 24], rax
-    mov  rax, 36
-    mov  [rsi + 32], rax
-    mov  rax, 1
-    mov  [rsi + 48], rax
-    add  rbx, 320
-    mov  [rel es_shend], rbx
-    ; the ELF header: where they are, their size, how many, which has names
-    mov  rax, [rel es_shoff]
-    mov  [r12 + 40], rax
-    mov  eax, 0x00050040             ; shentsize 64, shnum 5
-    mov  [r12 + 58], eax
-    mov  eax, 4                      ; shstrndx 4
-    mov  [r12 + 62], ax
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; so_rela(rcx = where, rdx = type and symbol, r8 = addend): one relocation,
-; at the end of those of elf_write_so (r14 = the table segment in the file)
-so_rela:
-    push rdi
-    mov  rax, [rel es_nrel]
-    imul rax, rax, 24
-    add  rax, [rel es_rela]
-    lea  rdi, [r14 + rax]
-    mov  [rdi], rcx
-    mov  [rdi + 8], rdx
-    mov  [rdi + 16], r8
-    inc  qword [rel es_nrel]
-    pop  rdi
     ret
 
 ; imp_fullpath(rcx = module name) -> rax = where to look for it first: the
@@ -4579,157 +2818,19 @@ imp_fullpath:
     pop  rbx
     ret
 
-expand_imports:
-    push rbx
-    push rsi
-    push rdi
-    push r12
-    push r13
-    push r14
-    push r15
-    mov  rbx, rcx                ; source start (for the line test)
-    mov  rsi, rcx                ; read cursor
-    mov  r12, rdx                ; bytes remaining
-    mov  rdi, r8                 ; write cursor
-    mov  r15, r8                 ; output start
-    mov  qword [rel lmap_count], 0
-    mov  qword [rel lmap_names_n], 0
-    mov  qword [rel lmap_outline], 1
-    mov  qword [rel lmap_srcline], 1
-    ; the text starts in the main file, line 1
-    mov  rcx, 1
-    lea  rdx, [rel arg_input]
-    mov  r8, 1
-    call lmap_add
-
-    ; work out every module the program needs, in order, before splicing
-    mov  rcx, rbx
-    mov  rdx, r12
-    call imp_resolve
-    cmp  eax, -1
-    je   .imp_fail
-    mov  dword [rel imp_emitted], 0
-
-.scan:
-    test r12, r12
-    jz   .done
-    cmp  r12, 14
-    jb   .copy
-    cmp  dword [rsi],    'acqu'
-    jne  .copy
-    cmp  dword [rsi+4],  'ire_'
-    jne  .copy
-    cmp  dword [rsi+8],  'doma'
-    jne  .copy
-    cmp  word  [rsi+12], 'in'
-    jne  .copy
-    ; the directive must start a line
-    cmp  rsi, rbx
-    je   .at_bol
-    mov  al, [rsi-1]
-    cmp  al, 10
-    je   .at_bol
-    cmp  al, 13
-    je   .at_bol
-    jmp  .copy
-.at_bol:
-    add  rsi, 14
-    sub  r12, 14
-.sp:
-    test r12, r12
-    jz   .done
-    mov  al, [rsi]
-    cmp  al, ' '
-    je   .sp_adv
-    cmp  al, 9
-    je   .sp_adv
-    jmp  .quote
-.sp_adv:
-    inc  rsi
-    dec  r12
-    jmp  .sp
-.quote:
-    cmp  al, 34                  ; opening quote
-    jne  .copy
-    inc  rsi
-    dec  r12
-    lea  r13, [rel inc_name]
-    xor  r14, r14
-.name:
-    test r12, r12
-    jz   .done
-    mov  al, [rsi]
-    cmp  al, 34
-    je   .name_end
-    cmp  r14, 255
-    jae  .name_end
-    mov  [r13 + r14], al
-    inc  r14
-    inc  rsi
-    dec  r12
-    jmp  .name
-.name_end:
-    mov  byte [r13 + r14], 0
-    inc  rsi
-    dec  r12
-.tail:
-    test r12, r12
-    jz   .load
-    mov  al, [rsi]
-    inc  rsi
-    dec  r12
-    cmp  al, 10
-    jne  .tail
-    inc  qword [rel lmap_srcline]   ; the directive line itself is consumed
-
-.load:
-    ; The whole resolved list goes in at the program's first directive, in
-    ; dependency order. Any later directive of the program is already inside
-    ; it: the line was consumed above and nothing more is written for it.
-    mov  eax, [rel imp_emitted]
-    test eax, eax
-    jz   .load_first
-    ; a later directive: its line is gone from the joined text, so the main
-    ; file's lines below it map from here (each one after the first put
-    ; every line below it one line early in errors and traces)
-    push rcx
-    push rdx
-    push r8
-    mov  rcx, [rel lmap_outline]
-    lea  rdx, [rel arg_input]
-    mov  r8, [rel lmap_srcline]
-    call lmap_add
-    pop  r8
-    pop  rdx
-    pop  rcx
-    jmp  .scan
-.load_first:
-    mov  dword [rel imp_emitted], 1
-    mov  dword [rel imp_i], 0
-.mod_next:
-    mov  eax, [rel imp_i]
-    cmp  eax, [rel imp_count]
-    jae  .mods_done
-    shl  rax, 8
-    push rsi
-    push rdi
-    lea  rsi, [rel imp_names]
-    add  rsi, rax
-    lea  rdi, [rel inc_name]
-    call imp_strcpy
-    pop  rdi
-    pop  rsi
-    mov  eax, [rel imp_i]
-    inc  eax
-    mov  [rel imp_i], eax
-    ; read_file clobbers r13, r14 and r15 as well, and r15 holds the start of
-    ; the output buffer -- .done subtracts it to get the final length. With a
-    ; single import this went unnoticed because .emit reassigns r13 and r14
-    ; right away and nothing read r15 until the end. With a second import the
-    ; damage from the first was already done: the length came out wrong and
-    ; the text was truncated, taking main with it.
-    ;
-    ; 8 pushes keep rsp 16-byte aligned; 32 bytes of shadow space keep it so.
+; ==============================================================================
+; imp_read(rcx = module name, rdx = address of a qword for the length)
+;   -> rax = where the module's bytes are, 0 when there is no such file,
+;      -1 when the file is longer than the room left (IMP_POOL bytes in all,
+;      at most SRC_BUFFER_SIZE for one file)
+;
+; The module is looked for next to the program first, then as written, as
+; %include does. Each file takes its own place in imp_pool, so the bytes of
+; one module stay where they are while the next is read. The import pass
+; (imports.kr, in Kron) calls this to read a file; the pass is in Kron, and
+; only this reading is here. Keeps every register but rax.
+; ==============================================================================
+imp_read:
     push rbx
     push rsi
     push rdi
@@ -4738,23 +2839,51 @@ expand_imports:
     push r14
     push r15
     push rbp
-    sub  rsp, 32
-    ; first next to the program, then as written -- as %include does
-    lea  rcx, [rel inc_name]
-    call imp_fullpath
+    sub  rsp, 40
+    mov  r12, rdx                   ; where the length goes
+    mov  r13, rcx                   ; the name
+    mov  rbx, [rel imp_pool_used]   ; the first free byte of the pool
+    mov  r14, IMP_POOL
+    sub  r14, rbx                   ; bytes left
+    jz   .ir_full
+    cmp  r14, SRC_BUFFER_SIZE
+    jbe  .ir_room
+    mov  r14, SRC_BUFFER_SIZE       ; one file at most this long
+.ir_room:
+    mov  rcx, r13
+    call imp_fullpath               ; first next to the program
     mov  rcx, rax
-    lea  rdx, [rel inc_buffer]
-    mov  r8, SRC_BUFFER_SIZE
+    lea  rdx, [rel imp_pool]
+    add  rdx, rbx
+    mov  r8, r14
     call read_file
     test rax, rax
-    jnz  .sp_got
-    lea  rcx, [rel inc_name]
-    lea  rdx, [rel inc_buffer]
-    mov  r8, SRC_BUFFER_SIZE
+    jnz  .ir_got
+    mov  rcx, r13                   ; then as written
+    lea  rdx, [rel imp_pool]
+    add  rdx, rbx
+    mov  r8, r14
     call read_file
-    jmp  .sp_got
-.sp_got:
-    add  rsp, 32
+    test rax, rax
+    jz   .ir_none
+.ir_got:
+    cmp  rax, r14
+    jae  .ir_full                   ; as long as the room: it may be cut short
+    mov  [r12], rax
+    lea  rcx, [rax + 15]            ; the next file starts on a 16-byte boundary
+    and  rcx, -16
+    add  rcx, rbx
+    mov  [rel imp_pool_used], rcx
+    lea  rax, [rel imp_pool]
+    add  rax, rbx
+    jmp  .ir_out
+.ir_none:
+    xor  eax, eax
+    jmp  .ir_out
+.ir_full:
+    mov  rax, -1
+.ir_out:
+    add  rsp, 40
     pop  rbp
     pop  r15
     pop  r14
@@ -4763,116 +2892,86 @@ expand_imports:
     pop  rdi
     pop  rsi
     pop  rbx
-    test rax, rax
-    jz   .mod_next               ; resolution already read it: cannot happen
-    mov  r13, rax                ; length
-    lea  r14, [rel inc_buffer]
-    ; An imported file carries its own module header.  Inlining it verbatim
-    ; would drop 'kron_program ... kron_definitions' into the middle of
-    ; the expanded text, so skip past the importee's 'kron_definitions'.
-    push r14
+    ret
+
+; ==============================================================================
+; expand_imports(rcx = source, rdx = length, r8 = output buffer)
+;   -> rax = length of the expanded text, or -1 with imp_err and imp_errname
+;
+; The import pass is in Kron: ip_expand, in imports.kr, resolves the imports
+; in dependency order, splices them in where the first acquire_domain is, and
+; keeps the line map and the error. This is its door: it sets the --debug
+; switch, runs the pass, and copies the results to where the rest of main
+; reads them (imp_err, imp_errname, lmap_count, lmap_out, lmap_file, lmap_src).
+; The Kron functions are called with the stack aligned and every value the
+; door still needs kept in memory, since they may use any register.
+; ==============================================================================
+expand_imports:
+    push rbx
+    push rsi
+    push rdi
+    push r12
     push r13
-    mov  qword [rel lmap_hdrskip], 0
-.hdr_find:
-    ; 'kron_definitions' is sixteen characters, four whole words. The old
-    ; name needed nineteen and a trailing word and byte; this is cleaner and,
-    ; more to the point, it is what the files now say. Leaving the old
-    ; comparisons here after the rename silently stopped every import from
-    ; expanding -- the compiler kept producing an .asm and NASM rejected it.
-    cmp  r13, 16
-    jb   .hdr_none
-    cmp  dword [r14],      'kron'
-    jne  .hdr_next
-    cmp  dword [r14+4],    '_def'
-    jne  .hdr_next
-    cmp  dword [r14+8],    'init'
-    jne  .hdr_next
-    cmp  dword [r14+12],   'ions'
-    jne  .hdr_next
-    add  r14, 16
-    sub  r13, 16
-    add  rsp, 16                 ; discard the saved start
-    jmp  .emit_first
-.hdr_next:
-    ; count the newlines stepped over: the imported text does not start at
-    ; the file's line 1 but at the line after 'kron_definitions', and
-    ; reporting line 1 there put every diagnostic three lines early.
-    cmp  byte [r14], 10
-    jne  .hdr_nonl
-    inc  qword [rel lmap_hdrskip]
-.hdr_nonl:
-    inc  r14
-    dec  r13
-    jmp  .hdr_find
-.hdr_none:
-    pop  r13                     ; no header: emit the file whole
-    pop  r14
-.emit_first:
-    ; a run of lines from the imported file starts here. Its own line 1 is
-    ; the one after its module header, which the skip above already passed.
-    push rcx
-    push rdx
-    push r8
-    mov  rcx, [rel lmap_outline]
-    lea  rdx, [rel inc_name]
-    mov  r8, [rel lmap_hdrskip]
-    inc  r8                      ; first line actually spliced
-    call lmap_add
-    pop  r8
-    pop  rdx
-    pop  rcx
-.emit:
-    test r13, r13
-    jz   .emit_end
-    mov  al, [r14]
-    mov  [rdi], al
-    cmp  al, 10
-    jne  .emit_nonl
-    inc  qword [rel lmap_outline]
-.emit_nonl:
-    inc  r14
-    inc  rdi
-    dec  r13
-    jmp  .emit
-.emit_end:
-    mov  byte [rdi], 10
-    inc  rdi
-    inc  qword [rel lmap_outline]
-    jmp  .mod_next
-.mods_done:
-    ; back in the main file, at the line after the directive
-    push rcx
-    push rdx
-    push r8
-    mov  rcx, [rel lmap_outline]
-    lea  rdx, [rel arg_input]
-    mov  r8, [rel lmap_srcline]
-    call lmap_add
-    pop  r8
-    pop  rdx
-    pop  rcx
-    jmp  .scan
-
-.copy:
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    dec  r12
-    cmp  al, 10
-    jne  .scan
-    inc  qword [rel lmap_outline]
-    inc  qword [rel lmap_srcline]
-    jmp  .scan
-
-.imp_fail:
-    mov  rax, -1                     ; the caller reports imp_err / imp_errname
-    jmp  .ei_out
-.done:
-    mov  byte [rdi], 0
-    mov  rax, rdi
-    sub  rax, r15
-.ei_out:
+    push r14
+    push r15
+    push rbp
+    sub  rsp, 40
+    mov  [rel imp_src], rcx
+    mov  [rel imp_len], rdx
+    mov  [rel imp_out], r8
+    mov  qword [rel imp_pool_used], 0
+    movzx rcx, byte [rel arg_flag_debug]
+    call ip_debug_set
+    lea  rcx, [rel arg_input]       ; the program's name, for the map
+    mov  rdx, [rel imp_src]
+    mov  r8,  [rel imp_len]
+    mov  r9,  [rel imp_out]
+    mov  r10, SRC_BUFFER_SIZE
+    call ip_expand
+    mov  [rel imp_ret], rax
+    call ip_err_get
+    mov  [rel imp_err], eax
+    call ip_errname_addr
+    lea  rcx, [rel imp_errname]
+    mov  rdx, rax
+    mov  r8, 256
+    call copy_bytes
+    call ip_lm_count_get
+    mov  [rel lmap_count], rax
+    shl  rax, 3                     ; the tables are qwords
+    mov  [rel imp_lmbytes], rax
+    mov  rcx, 0
+    call ip_lm_addr                 ; output lines
+    lea  rcx, [rel lmap_out]
+    mov  rdx, rax
+    mov  r8, [rel imp_lmbytes]
+    call copy_bytes
+    mov  rcx, 1
+    call ip_lm_addr                 ; file names
+    lea  rcx, [rel lmap_file]
+    mov  rdx, rax
+    mov  r8, [rel imp_lmbytes]
+    call copy_bytes
+    mov  rcx, 2
+    call ip_lm_addr                 ; lines of the files
+    lea  rcx, [rel lmap_src]
+    mov  rdx, rax
+    mov  r8, [rel imp_lmbytes]
+    call copy_bytes
+    ; the resolved list, which the checks for std_text, std_list and the
+    ; other library modules read (imp_have, the slice check)
+    call ip_count_get
+    mov  [rel imp_count], eax
+    shl  rax, 8
+    mov  [rel imp_nbytes], rax
+    call ip_names_addr
+    lea  rcx, [rel imp_names]
+    mov  rdx, rax
+    mov  r8, [rel imp_nbytes]
+    call copy_bytes
+    mov  rax, [rel imp_ret]
+    add  rsp, 40
+    pop  rbp
     pop  r15
     pop  r14
     pop  r13

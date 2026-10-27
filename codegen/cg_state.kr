@@ -147,6 +147,7 @@ var var_stride: [i64; 1024];             // elements per row of a 2-D array
 var var_aw: [i64; 1024];                 // bytes per element, 0 = 8
 var var_vtag: [i64; 1024];               // type tag: 1 text, 2 list, 3 map, 4 texts,
                                          // 5 a function value; the element above
+var var_estruct: [i64; 1024];            // an array of structs: its struct id + 1, 0 none
 // what the next cg_add_var attaches
 var pending_struct: i64;
 var pending_elem: i64;
@@ -207,6 +208,8 @@ var g_arrlen: [i64; 4096];
 var g_aw: [i64; 4096];
 var g_vtag: [i64; 4096];
 var g_structs: [i64; 4096];
+var g_estruct: [i64; 4096];              // a global array of structs: struct id + 1, 0 none
+var pending_estruct: i64;                // the struct an array of structs holds, + 1
 
 // --- loops ---
 var loop_depth: i64;
