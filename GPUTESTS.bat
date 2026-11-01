@@ -19,6 +19,8 @@ REM     tests\gpu\gpu_mip.kr       mipmaps: a fine checkerboard drawn small
 REM                                comes out grey, not black and white
 REM     tests\gpu\gpu_bc.kr        BC1 (compressed) textures: four colours on
 REM                                a 64 x 64 picture come out right
+REM     tests\gpu\gpu_inst.kr      instanced drawing: one square four times in
+REM                                one draw, each with its place and colour
 REM     tests\gpu\gpu_window.kr    three seconds of a sphere and a cube in a
 REM                                window: frames a second, and that they
 REM                                reach the window
@@ -59,6 +61,7 @@ call :gputest gpu_basic
 call :gputest gpu_target
 call :gputest gpu_mip
 call :gputest gpu_bc
+call :gputest gpu_inst
 call :gputest gpu_window
 call :gputest gpu_devices
 

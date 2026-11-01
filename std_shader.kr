@@ -28,6 +28,8 @@ kron_definitions
 //     in pos: vec3;                  // what each corner carries, in order
 //     in normal: vec3;
 //     in uv: vec2;
+//     instance offset: vec4;         // what each instance carries, after the
+//                                    // in ones (gpu_draw_instanced)
 //     var vnormal: vec3;             // from the vertex part to the pixel
 //     var vuv: vec2;                 // part, blended across the triangle
 //
@@ -61,6 +63,7 @@ kron_definitions
 //     shader_uniform_offset(s, name)    where a uniform is in it, -1 none
 //     shader_uniform_type(s, name)      SH_FLOAT ... SH_MAT4
 //     shader_inputs(s)  shader_input_type(s, i)  shader_textures(s)
+//     shader_instance_inputs(s)         how many of the inputs are per instance
 //     shader_error()                    the last error, a text
 //
 // The uniform block has the same layout on every system: each member at a
@@ -130,6 +133,7 @@ var u_size: i64;
 var tx_name: i64;
 var in_name: i64;
 var in_type: i64;
+var in_ninst: i64;                 // how many of the inputs are per instance (the last ones)
 var vy_name: i64;
 var vy_type: i64;
 var sh_vs: i64;        // the vertex block
@@ -149,6 +153,7 @@ var pr_uname: i64;
 var pr_utype: i64;
 var pr_uoff: i64;
 var pr_intype: i64;
+var pr_ninst: i64;
 var pr_ntex: i64;
 var pr_ready: i64;
 
@@ -633,7 +638,15 @@ fn sh_program() -> i64 {
             tk_next();
             list_add(tx_name, tk_name());
             tk_expect(";");
-        } else if tk_is("in") {
+        } else if tk_is("in") || tk_is("instance") {
+            // 'instance' inputs change once an instance, not once a corner;
+            // they come after the 'in' ones, at the next locations
+            var per_inst: i64 = 0;
+            if tk_is("instance") { per_inst = 1; }
+            if per_inst == 0 && in_ninst > 0 && !sh_bad() {
+                sh_fail("the 'in' inputs come before the 'instance' ones");
+            }
+            in_ninst = in_ninst + per_inst;
             tk_next();
             list_add(in_name, tk_name());
             tk_expect(":");
@@ -660,7 +673,7 @@ fn sh_program() -> i64 {
             tk_next();
             sh_fs = sh_block();
         } else {
-            sh_fail("expected uniform, texture, in, var, vertex or fragment");
+            sh_fail("expected uniform, texture, in, instance, var, vertex or fragment");
         }
     }
     u_size = (off + 15) / 16 * 16;
@@ -2289,6 +2302,7 @@ fn sh_reset() -> i64 {
     tx_name = list_new();
     in_name = list_new();
     in_type = list_new();
+    in_ninst = 0;
     vy_name = list_new();
     vy_type = list_new();
     sh_vs = -1;
@@ -2303,6 +2317,7 @@ fn sh_reset() -> i64 {
         pr_utype = list_new();
         pr_uoff = list_new();
         pr_intype = list_new();
+        pr_ninst = list_new();
         pr_ntex = list_new();
         pr_ready = 1;
     }
@@ -2345,6 +2360,7 @@ fn shader_compile(source: i64) -> i64 {
     list_add(pr_utype, u_type);
     list_add(pr_uoff, u_off);
     list_add(pr_intype, in_type);
+    list_add(pr_ninst, in_ninst);
     list_add(pr_ntex, list_len(tx_name));
     return list_len(pr_wgsl);
 }
@@ -2410,6 +2426,13 @@ fn shader_input_type(s: i64, k: i64) -> i64 {
     var i: i64 = sh_check(s) - 1;
     if i < 0 { return 0; }
     return list_get(list_get(pr_intype, i), k);
+}
+
+// how many of the inputs are 'instance' ones: the last of shader_inputs(s)
+fn shader_instance_inputs(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(pr_ninst, i);
 }
 
 fn shader_textures(s: i64) -> i64 {

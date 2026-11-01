@@ -1,0 +1,171 @@
+kron_program
+kron_domain test_audiofx;
+kron_imports
+acquire_domain "std_vorbis.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: the mixer, without a device (audio_open_silent, audio_render):
+// a synthesized sound mixed as it is; pitch; a low-pass; a voice placed in
+// space; the echo; a stream written by hand; an Ogg file streamed.
+// =========================================================================
+
+var buf: i64;
+
+fn side(i: i64, c: i64) -> i64 { return au_le16(buf + i * 4 + c * 2); }
+
+// root mean square of one side of frames a .. b
+fn rms(a: i64, b: i64, c: i64) -> i64 {
+    var s: f64 = 0.0;
+    var i: i64 = a;
+    while i < b {
+        var x: f64 = side(i, c) as f64;
+        s = s + x * x;
+        i = i + 1;
+    }
+    return fsqrt(s / ((b - a) as f64)) as i64;
+}
+
+// times one side goes from below 0 to 0 or above, frames a .. b
+fn rises(a: i64, b: i64) -> i64 {
+    var n: i64 = 0;
+    var i: i64 = a + 1;
+    while i < b {
+        if side(i - 1, 0) < 0 && side(i, 0) >= 0 { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn yes(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok { text_add(t, "ok    "); } else { text_add(t, "FAIL  "); }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn main() -> i64 {
+    audio_open_silent(48000);
+    buf = hp_alloc(96000 * 4 + 8);
+    // 1. a sine of 1000 Hz, mixed as it is: the sound's own samples
+    var sine: i64 = audio_synth(AU_SINE, 1000.0, 1000, 0.5, 0, 0);
+    var v: i64 = audio_play(sine, 1.0, 0);
+    audio_render(buf, 48000);
+    var same: i64 = 1;
+    var p: i64 = list_get(au_snd_addr, sine - 1);
+    var i: i64 = 0;
+    while i < 48000 {
+        if side(i, 0) != au_snd16(p, i, 0) { same = 0; }
+        i = i + 1;
+    }
+    yes(same, "a sound at volume 1 mixes to its own samples");
+    yes(rises(0, 48000) == 999, "the sine rises through 0 999 times in a second (it starts at 0)");
+    yes(rms(0, 48000, 0) > 11000 && rms(0, 48000, 0) < 11600, "and its loudness is half of full, as asked");
+    yes(audio_playing(v) == 1, "it plays to its end");
+    audio_render(buf, 1000);
+    yes(audio_playing(v) == 0, "and stops there");
+    // 2. pitch 2: the same sound, an octave up
+    v = audio_play(sine, 1.0, 0);
+    audio_set_pitch(v, 2.0);
+    audio_render(buf, 24000);
+    yes(rises(0, 24000) >= 999 && rises(0, 24000) <= 1001, "pitch 2: twice the rises in half the time");
+    audio_stop(v);
+    // 3. a low-pass at 300 Hz on a square of 6000 Hz takes most of it away
+    var sq: i64 = audio_synth(AU_SQUARE, 6000.0, 500, 0.5, 0, 0);
+    v = audio_play(sq, 1.0, 0);
+    audio_render(buf, 12000);
+    var full: i64 = rms(2000, 12000, 0);
+    audio_stop(v);
+    v = audio_play(sq, 1.0, 0);
+    audio_set_lowpass(v, 300.0);
+    audio_render(buf, 12000);
+    var low: i64 = rms(2000, 12000, 0);
+    audio_stop(v);
+    yes(low * 10 < full, "a low-pass at 300 Hz keeps under a tenth of a square at 6000 Hz");
+    // 4. space: a voice 5 to the right of a listener looking along -z
+    audio_listener(0.0, 0.0, 0.0, 0.0, 0.0, -1.0);
+    audio_set_distance(1.0, 100.0);
+    v = audio_play(sine, 1.0, 1);
+    audio_set_position(v, 5.0, 0.0, 0.0);
+    audio_render(buf, 4800);
+    var l5: i64 = rms(0, 4800, 0);
+    var r5: i64 = rms(0, 4800, 1);
+    yes(l5 < 50, "to the right: the left side is silent");
+    // 1/5 of the voice, less by the way to far: 11314 / 5 * 95 / 99 = 2171
+    yes(r5 > 2100 && r5 < 2250, "and the right one a fifth as loud, 5 away");
+    audio_set_position(v, 0.0, 0.0, -10.0);
+    audio_render(buf, 4800);
+    yes(iabs(rms(0, 4800, 0) - rms(0, 4800, 1)) < 30, "ahead: both sides alike");
+    yes(rms(0, 4800, 0) < r5, "and fainter, 10 away");
+    audio_set_position(v, 0.0, 0.0, -200.0);
+    audio_render(buf, 4800);
+    yes(rms(0, 4800, 0) == 0 && rms(0, 4800, 1) == 0, "beyond far: silent");
+    audio_stop(v);
+    // 5. the echo: a click, and half of it 10 ms later
+    var click: i64 = audio_synth(AU_SQUARE, 10.0, 1, 1.0, 0, 0);
+    audio_echo(10, 0.0, 0.5);
+    v = audio_play(click, 1.0, 0);
+    audio_render(buf, 1000);
+    var first: i64 = side(0, 0);
+    var later: i64 = side(480, 0);
+    yes(first > 30000 && iabs(later * 2 - first) < 4, "the echo: half the click, 480 frames later");
+    audio_echo(10, 0.0, 0.0);
+    // 6. a stream written by hand: what is written plays, then silence; ended, it stops
+    var st: i64 = audio_stream_new(4096);
+    var src: i64 = hp_alloc(2000 * 4 + 8);
+    i = 0;
+    while i < 2000 {
+        var x: i64 = i * 7;
+        raw {
+            poke16(src + i * 4, x);
+            poke16(src + i * 4 + 2, 0 - x);
+        }
+        i = i + 1;
+    }
+    yes(audio_stream_write(st, src, 2000) == 2000, "2000 frames written to a stream");
+    yes(audio_stream_room(st) == 2096, "and the room left is the rest");
+    v = audio_stream_play(st, 1.0);
+    audio_render(buf, 3000);
+    yes(side(1999, 0) == 13993 && side(1999, 1) == -13993 && side(2500, 0) == 0, "the stream plays what was written, then silence");
+    yes(audio_playing(v) == 1, "it waits for more");
+    audio_stream_end(st);
+    audio_render(buf, 100);
+    yes(audio_playing(v) == 0, "ended, it stops");
+    // 7. an Ogg file streamed: the same frames as decoded whole, give or take one
+    vorbis_open("tests/audio/vorbis_sine.ogg");
+    var whole, nwhole = vorbis_to_stereo(48000);
+    v = audio_stream_ogg("tests/audio/vorbis_sine.ogg", 1.0, 0);
+    var got: i64 = 0;
+    var worst: i64 = 0;
+    while got < 50000 {
+        audio_update();
+        audio_render(buf, 1000);
+        i = 0;
+        while i < 1000 && got + i < nwhole {
+            var d: i64 = iabs(side(i, 0) - au_le16(whole + (got + i) * 4));
+            if d > worst { worst = d; }
+            i = i + 1;
+        }
+        got = got + 1000;
+    }
+    yes(nwhole == 48000, "the Ogg file is 48000 frames at 48000");
+    yes(worst <= 2, "streamed, it is what the whole decode gives, within 2 steps");
+    yes(audio_playing(v) == 0, "and the stream ends with the file");
+    v = audio_stream_ogg("tests/audio/vorbis_sine.ogg", 1.0, 1);
+    got = 0;
+    while got < 120000 {
+        audio_update();
+        audio_render(buf, 1000);
+        got = got + 1000;
+    }
+    yes(audio_playing(v) == 1 && rms(0, 1000, 0) > 1000, "looped, it still plays after two and a half times its length");
+    audio_stop(v);
+    audio_close();
+    return 0;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}

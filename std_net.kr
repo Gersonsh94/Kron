@@ -15,6 +15,20 @@ kron_definitions
 //                                      closed the connection
 //   net_close(sock)
 //
+// UDP: datagrams, for games and discovery on a LAN.
+//   net_udp_open(port)                 a UDP socket on every interface; 0 any port
+//   net_udp_open_on(a, b, c, d, port)  the same, on one address
+//   net_udp_send(sock, a, b, c, d, port, address, length)
+//                                      one datagram to a.b.c.d:port; bytes sent
+//   net_udp_recv(sock, address, capacity)
+//                                      one datagram: its bytes (cut to capacity),
+//                                      waiting for it if none is there
+//   net_from_ip(i)  net_from_port()    who sent the last datagram received:
+//                                      octet i (0 to 3) of its address, its port
+//   net_udp_broadcast(sock, on)        1 lets it send to 255.255.255.255
+//   net_wait(sock, ms)                 1 when sock has something to read
+//                                      within ms milliseconds, else 0 (TCP too)
+//
 // Every function fails, with a cause and a hint, when the system refuses.
 //
 // One source for both systems. The net_sys_* layer at the top picks its
@@ -34,9 +48,12 @@ kron_definitions
 const NET_AF_INET: i64 = 2;
 const NET_SOCK_STREAM: i64 = 1;
 const NET_IPPROTO_TCP: i64 = 6;
+const NET_SOCK_DGRAM: i64 = 2;
+const NET_IPPROTO_UDP: i64 = 17;
 
 // Linux system call numbers (x86-64) and the two options used here
 const NET_SYS_CLOSE: i64 = 3;
+const NET_SYS_POLL: i64 = 7;
 const NET_SYS_SOCKET: i64 = 41;
 const NET_SYS_CONNECT: i64 = 42;
 const NET_SYS_ACCEPT: i64 = 43;
@@ -47,6 +64,7 @@ const NET_SYS_LISTEN: i64 = 50;
 const NET_SYS_SETSOCKOPT: i64 = 54;
 const NET_SOL_SOCKET: i64 = 1;
 const NET_SO_REUSEADDR: i64 = 2;
+const NET_SO_BROADCAST: i64 = 6;
 const NET_MSG_NOSIGNAL: i64 = 16384;     // a closed peer is an error, not a signal that kills
 
 shared var net_ready: i64;
@@ -60,6 +78,13 @@ shared var p_connect: i64;
 shared var p_send: i64;
 shared var p_recv: i64;
 shared var p_close: i64;
+shared var p_sendto: i64;
+shared var p_recvfrom: i64;
+shared var p_poll: i64;
+shared var p_setsockopt: i64;
+shared var p_lasterr: i64;
+shared var net_from: [i64; 2];         // the sender of the last datagram received
+shared var net_fromlen: [i64; 1];
 
 // Windows returns 32-bit ints in a 64-bit register, the high half undefined:
 // keep the low half, with its sign, so -1 is still -1.
@@ -116,6 +141,11 @@ fn net_init() -> i64 {
         p_send = dll_proc(lib, "send");
         p_recv = dll_proc(lib, "recv");
         p_close = dll_proc(lib, "closesocket");
+        p_sendto = dll_proc(lib, "sendto");
+        p_recvfrom = dll_proc(lib, "recvfrom");
+        p_poll = dll_proc(lib, "WSAPoll");
+        p_setsockopt = dll_proc(lib, "setsockopt");
+        p_lasterr = dll_proc(lib, "WSAGetLastError");
         r = call p_startup(514, &net_wsa);
     }
     r = net_int(r);
@@ -338,4 +368,179 @@ fn net_recv(sock: i64, address: i64, capacity: i64) -> i64 {
 // Closes a socket.
 fn net_close(sock: i64) -> i64 {
     return net_sys_close(sock);
+}
+
+// ---------------------------------------------------------------- UDP ---
+
+fn net_sys_udp() -> i64 {
+    var s: i64 = 0;
+    if net_is_linux() {
+        raw {
+            s = syscall(NET_SYS_SOCKET, NET_AF_INET, NET_SOCK_DGRAM, NET_IPPROTO_UDP);
+        }
+        return net_linux(s);
+    }
+    raw {
+        s = call p_socket(NET_AF_INET, NET_SOCK_DGRAM, NET_IPPROTO_UDP);
+    }
+    return s;
+}
+
+fn net_sys_sendto(s: i64, address: i64, length: i64, to: i64) -> i64 {
+    var r: i64 = 0;
+    var sa: [i64; 2];
+    sa[0] = to;
+    sa[1] = 0;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_SENDTO, s, address, length, NET_MSG_NOSIGNAL, &sa, 16);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_sendto(s, address, length, 0, &sa, 16);
+    }
+    return net_int(r);
+}
+
+fn net_sys_recvfrom(s: i64, address: i64, capacity: i64) -> i64 {
+    var r: i64 = 0;
+    net_from[0] = 0;
+    net_from[1] = 0;
+    net_fromlen[0] = 16;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_RECVFROM, s, address, capacity, 0, &net_from, &net_fromlen);
+        }
+        return net_linux(r);
+    }
+    raw {
+        r = call p_recvfrom(s, address, capacity, 0, &net_from, &net_fromlen);
+    }
+    return net_int(r);
+}
+
+// 1 when s has something to read within ms milliseconds
+fn net_sys_poll(s: i64, ms: i64) -> i64 {
+    var r: i64 = 0;
+    if net_is_linux() {
+        // struct pollfd: int fd, short events (POLLIN 1), short revents
+        var pfd: [i64; 1];
+        pfd[0] = (s & 4294967295) | (1 << 32);
+        raw {
+            r = syscall(NET_SYS_POLL, &pfd, 1, ms);
+        }
+        return net_linux(r);
+    }
+    // WSAPOLLFD: SOCKET fd (8 bytes), short events (POLLIN 0x300), short revents
+    var wfd: [i64; 2];
+    wfd[0] = s;
+    wfd[1] = 768;
+    raw {
+        r = call p_poll(&wfd, 1, ms);
+    }
+    return net_int(r);
+}
+
+fn net_udp_open_on(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    var s: i64 = 0;
+    var addr: [i64; 2];
+    net_init();
+    if port < 0 || port > 65535 {
+        fail "no such port" hint "from 0 to 65535; 0 lets the system choose";
+    }
+    s = net_sys_udp();
+    if s == -1 {
+        fail "cannot make a UDP socket" hint "the system refused: too many open sockets?";
+    }
+    addr[0] = net_addr(a, b, c, d, port);
+    addr[1] = 0;
+    if net_sys_bind(s, &addr) == -1 {
+        net_sys_close(s);
+        fail "cannot use this port" hint "another program may be using it";
+    }
+    return s;
+}
+
+fn net_udp_open(port: i64) -> i64 {
+    return net_udp_open_on(0, 0, 0, 0, port);
+}
+
+fn net_udp_send(sock: i64, a: i64, b: i64, c: i64, d: i64, port: i64, address: i64, length: i64) -> i64 {
+    var n: i64 = net_sys_sendto(sock, address, length, net_addr(a, b, c, d, port));
+    if n == -1 {
+        fail "the datagram could not be sent" hint "check the address, and net_udp_broadcast for 255.255.255.255";
+    }
+    return n;
+}
+
+fn net_udp_recv(sock: i64, address: i64, capacity: i64) -> i64 {
+    var n: i64 = net_sys_recvfrom(sock, address, capacity);
+    while n == -1 && net_is_linux() == 0 {
+        var e: i64 = 0;
+        raw { e = call p_lasterr(); }
+        e = net_int(e);
+        // WSAEMSGSIZE: the datagram was larger than capacity; its first
+        // capacity bytes are there, as Linux gives them
+        if e == 10040 {
+            return capacity;
+        }
+        // WSAECONNRESET: an earlier datagram of this socket reached a port
+        // nobody listens on. Not this datagram's error: wait for the next
+        if e != 10054 {
+            fail "nothing could be received" hint "the socket may be closed";
+        }
+        n = net_sys_recvfrom(sock, address, capacity);
+    }
+    if n == -1 {
+        fail "nothing could be received" hint "the socket may be closed";
+    }
+    return n;
+}
+
+// octet i (0 to 3) of the address of the last datagram's sender
+fn net_from_ip(i: i64) -> i64 {
+    if i < 0 || i > 3 {
+        fail "an address has four parts" hint "i from 0 to 3";
+    }
+    return (net_from[0] >> (32 + i * 8)) & 255;
+}
+
+fn net_from_port() -> i64 {
+    var v: i64 = net_from[0];
+    return (((v >> 16) & 255) << 8) | ((v >> 24) & 255);
+}
+
+fn net_udp_broadcast(sock: i64, on: i64) -> i64 {
+    var r: i64 = 0;
+    var one: [i64; 1];
+    one[0] = 0;
+    if on != 0 { one[0] = 1; }
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_SETSOCKOPT, sock, NET_SOL_SOCKET, NET_SO_BROADCAST, &one, 4);
+        }
+        r = net_linux(r);
+    } else {
+        // SOL_SOCKET 0xFFFF, SO_BROADCAST 0x20 on Windows
+        raw {
+            r = call p_setsockopt(sock, 65535, 32, &one, 4);
+        }
+        r = net_int(r);
+    }
+    if r == -1 {
+        fail "broadcast could not be set" hint "the system refused";
+    }
+    return 1;
+}
+
+// 1 when sock has something to read within ms milliseconds, else 0: a TCP
+// socket's data or a waiting client, a UDP datagram
+fn net_wait(sock: i64, ms: i64) -> i64 {
+    var r: i64 = net_sys_poll(sock, ms);
+    if r == -1 {
+        fail "the socket cannot be waited on" hint "it may be closed";
+    }
+    if r > 0 { return 1; }
+    return 0;
 }

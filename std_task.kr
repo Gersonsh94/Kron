@@ -1,0 +1,117 @@
+kron_program
+kron_domain std_task;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- work spread over every core.
+//
+//     shared var pos: [f64; 100000];
+//     shared var vel: [f64; 100000];
+//     task_for(100000, fn(i: i64) -> i64 {
+//         pos[i] = pos[i] + vel[i] * dt;      // dt: a local the fn keeps
+//         return 0;
+//     });
+//
+//   task_for(n, job)        job(i) for every i from 0 to n - 1, spread over
+//                           task_workers() threads, this one among them;
+//                           returns when every i is done. The order of the
+//                           i's, and which thread takes which, is not fixed.
+//   task_workers()          how many threads task_for uses: cpu_count()
+//   task_set_workers(n)     use n instead (1: everything on this thread)
+//
+// job runs in threads, so what it writes is 'shared var' (the compiler
+// checks it) and two i's must not write the same place without a lock
+// (locks 0 to 7 are the program's). The i's are handed out in chunks, a
+// lock taken once a chunk, so a light job over many i's costs little more
+// than the job itself. task_for is not called from inside a job; a fail in
+// a job stops the program as a fail anywhere does.
+//
+// Lock 17 is task_for's. The threads are made for each call and ended
+// before it returns: no thread is left waiting between calls (a waiting
+// pool would keep cores busy), at the cost of starting them each time --
+// tens of microseconds a thread.
+// =========================================================================
+
+const TK_LOCK: i64 = 17;
+const TK_MAX: i64 = 64;
+
+shared var tk_job: fn(i64) -> i64;
+shared var tk_next: i64;            // the next i to hand out
+shared var tk_end: i64;
+shared var tk_step: i64;            // i's in a chunk
+shared var tk_ready: i64;
+shared var tk_busy: i64;
+shared var tk_set: i64;             // task_set_workers, 0 none
+
+// takes chunks until there are none left
+fn tk_worker(arg: i64) -> i64 {
+    var f: fn(i64) -> i64 = tk_job;
+    while 1 == 1 {
+        lock_take(TK_LOCK);
+        var i: i64 = tk_next;
+        tk_next = tk_next + tk_step;
+        lock_give(TK_LOCK);
+        if i >= tk_end {
+            return 0;
+        }
+        var e: i64 = i + tk_step;
+        if e > tk_end { e = tk_end; }
+        while i < e {
+            f(i);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn task_workers() -> i64 {
+    if tk_set > 0 { return tk_set; }
+    var n: i64 = cpu_count();
+    if n < 1 { n = 1; }
+    if n > TK_MAX { n = TK_MAX; }
+    return n;
+}
+
+fn task_set_workers(n: i64) -> i64 {
+    if n < 0 || n > TK_MAX {
+        fail "no such number of workers" hint "from 1 to 64, or 0 for one a core";
+    }
+    tk_set = n;
+    return n;
+}
+
+fn task_for(n: i64, job: fn(i64) -> i64) -> i64 {
+    if n <= 0 { return 0; }
+    if tk_busy == 1 {
+        fail "task_for is running already" hint "it is not called from inside a job";
+    }
+    if tk_ready == 0 {
+        lock_init(TK_LOCK);
+        tk_ready = 1;
+    }
+    tk_busy = 1;
+    tk_job = job;
+    tk_next = 0;
+    tk_end = n;
+    var workers: i64 = task_workers();
+    if workers > n { workers = n; }
+    // about eight chunks a worker: small enough to even out, large enough
+    // that the lock is taken seldom
+    tk_step = n / (workers * 8);
+    if tk_step < 1 { tk_step = 1; }
+    var hs: [i64; 64];
+    var w: i64 = 1;
+    while w < workers {
+        hs[w] = thread_start(&tk_worker, w);
+        w = w + 1;
+    }
+    tk_worker(0);
+    w = 1;
+    while w < workers {
+        thread_wait(hs[w]);
+        w = w + 1;
+    }
+    tk_busy = 0;
+    return n;
+}

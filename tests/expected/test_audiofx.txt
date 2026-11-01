@@ -1,0 +1,22 @@
+ok    a sound at volume 1 mixes to its own samples
+ok    the sine rises through 0 999 times in a second (it starts at 0)
+ok    and its loudness is half of full, as asked
+ok    it plays to its end
+ok    and stops there
+ok    pitch 2: twice the rises in half the time
+ok    a low-pass at 300 Hz keeps under a tenth of a square at 6000 Hz
+ok    to the right: the left side is silent
+ok    and the right one a fifth as loud, 5 away
+ok    ahead: both sides alike
+ok    and fainter, 10 away
+ok    beyond far: silent
+ok    the echo: half the click, 480 frames later
+ok    2000 frames written to a stream
+ok    and the room left is the rest
+ok    the stream plays what was written, then silence
+ok    it waits for more
+ok    ended, it stops
+ok    the Ogg file is 48000 frames at 48000
+ok    streamed, it is what the whole decode gives, within 2 steps
+ok    and the stream ends with the file
+ok    looped, it still plays after two and a half times its length

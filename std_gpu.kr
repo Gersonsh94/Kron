@@ -42,6 +42,11 @@ kron_definitions
 //                                       a uniform, for the next draws
 //     gpu_draw(prog, mesh, tex)         tex 0: white
 //     gpu_draw_textures(prog, mesh, t0, t1, t2, t3)
+//     gpu_instances(max, floats_per_instance)     a buffer of instances
+//     gpu_instance_put(ib, i, x, y, z, w)  gpu_instance_list(ib, list)
+//     gpu_draw_instanced(prog, mesh, tex, ib, count)
+//                                       count copies in one draw; the shader
+//                                       reads each one's 'instance' inputs
 //     gpu_target(w, h)                  a render target: colour and depth
 //     gpu_target_texture(t)             its colour, as a texture
 //     gpu_target_depth(t)               its depth, as a texture (shadow maps)
@@ -74,6 +79,7 @@ var gpu_read: [u8; 8388608];          // the last frame, B G R A per pixel
 var gp_shader: i64;       // the std_shader number
 var gp_usize: i64;        // bytes of its uniform block
 var gp_stride: i64;       // bytes per vertex it takes
+var gp_istride: i64;      // bytes per instance it takes, 0 for none
 var gp_ntex: i64;
 var gp_pipe: i64;         // backend objects
 var gp_set: i64;
@@ -109,11 +115,25 @@ var gr_dtex: i64;         // its depth, as a texture number
 var gpu_in_frame: i64;
 var gpu_in_target: i64;   // 1 between gpu_begin_target and gpu_end_target
 var gpu_draws: i64;
+// instance buffers (gpu_instances): host-visible, written by the CPU
+var gi_buf: i64;
+var gi_mem: i64;
+var gi_map: i64;
+var gi_cap: i64;         // instances it holds
+var gi_floats: i64;      // floats an instance
+var gpu_inst_buf: i64;    // the draw being made: its instance buffer, 0 none
+var gpu_inst_count: i64;
 
 fn gpu_lists() -> i64 {
     gp_shader = list_new();
     gp_usize = list_new();
     gp_stride = list_new();
+    gp_istride = list_new();
+    gi_buf = list_new();
+    gi_mem = list_new();
+    gi_map = list_new();
+    gi_cap = list_new();
+    gi_floats = list_new();
     gp_ntex = list_new();
     gp_pipe = list_new();
     gp_set = list_new();
@@ -759,26 +779,40 @@ fn vk_program(sh: i64, usize: i64) -> i64 {
     w32(st, 48 + 20, 16);
     w64(st, 48 + 24, fsm);
     raw { w64(st, 48 + 32, "main"); }
-    // vertex input: one buffer, the inputs packed in order
+    // vertex input: buffer 0 the corners' inputs packed in order; buffer 1,
+    // when the shader has 'instance' inputs, theirs, once an instance
     var nin: i64 = shader_inputs(sh);
+    var ninst: i64 = shader_instance_inputs(sh);
     var attrs: i64 = vs(16 * 16);
     var off: i64 = 0;
+    var ioff: i64 = 0;
     var i: i64 = 0;
     while i < nin {
         var t: i64 = shader_input_type(sh, i);
         w32(attrs, i * 16, i);
-        w32(attrs, i * 16 + 4, 0);
         w32(attrs, i * 16 + 8, vk_format_of(t));
-        w32(attrs, i * 16 + 12, off);
-        off = off + sh_comps(t) * 4;
+        if i < nin - ninst {
+            w32(attrs, i * 16 + 4, 0);
+            w32(attrs, i * 16 + 12, off);
+            off = off + sh_comps(t) * 4;
+        } else {
+            w32(attrs, i * 16 + 4, 1);
+            w32(attrs, i * 16 + 12, ioff);
+            ioff = ioff + sh_comps(t) * 4;
+        }
         i = i + 1;
     }
-    var bind: i64 = vs(12);
+    var bind: i64 = vs(24);
     w32(bind, 4, off);
+    w32(bind, 12, 1);
+    w32(bind, 16, ioff);
+    w32(bind, 20, 1);                   // VK_VERTEX_INPUT_RATE_INSTANCE
+    var nbind: i64 = 1;
+    if ninst > 0 { nbind = 2; }
     var vis: i64 = vs(48);
     w32(vis, 0, 19);
     if nin > 0 {
-        w32(vis, 20, 1);
+        w32(vis, 20, nbind);
         w64(vis, 24, bind);
         w32(vis, 32, nin);
         w64(vis, 40, attrs);
@@ -1344,15 +1378,22 @@ fn vk_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
     w64(sets, 8, set1);
     var dofs: i64 = vs(8);
     w32(dofs, 0, at);
-    var bufs: i64 = vs(8);
+    var bufs: i64 = vs(16);
     w64(bufs, 0, list_get(gm_vbuf, mesh));
-    var offs: i64 = vs(8);
+    var nb: i64 = 1;
+    var ninst: i64 = 1;
+    if gpu_inst_buf > 0 {
+        w64(bufs, 8, list_get(gi_buf, gpu_inst_buf - 1));
+        nb = 2;
+        ninst = gpu_inst_count;
+    }
+    var offs: i64 = vs(16);
     raw {
         vkCmdBindPipeline(vk_cmd, 0, list_get(gp_pipe, prog));
         vkCmdBindDescriptorSets(vk_cmd, 0, vk_layout, 0, 2, sets, 1, dofs);
-        vkCmdBindVertexBuffers(vk_cmd, 0, 1, bufs, offs);
+        vkCmdBindVertexBuffers(vk_cmd, 0, nb, bufs, offs);
         vkCmdBindIndexBuffer(vk_cmd, list_get(gm_ibuf, mesh), 0, 1);
-        vkCmdDrawIndexed(vk_cmd, list_get(gm_count, mesh), 1, 0, 0, 0);
+        vkCmdDrawIndexed(vk_cmd, list_get(gm_count, mesh), ninst, 0, 0, 0);
     }
     return 1;
 }
@@ -1605,9 +1646,20 @@ fn gpu_shader(source: i64) -> i64 {
     if usize > GPU_MAX_UNIFORM {
         fail "the shader's uniforms take more than 2048 bytes" hint "use fewer, or a texture for big tables";
     }
+    var ninst: i64 = shader_instance_inputs(sh);
+    if ninst > 0 && gpu_kind != 1 {
+        fail "instance inputs are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
+    }
+    var istride: i64 = 0;
+    var k: i64 = shader_inputs(sh) - ninst;
+    while k < shader_inputs(sh) {
+        istride = istride + sh_comps(shader_input_type(sh, k)) * 4;
+        k = k + 1;
+    }
     list_add(gp_shader, sh);
     list_add(gp_usize, usize);
     list_add(gp_ntex, shader_textures(sh));
+    list_add(gp_istride, istride);
     var ok: i64 = 0;
     if gpu_kind == 1 {
         ok = vk_program(sh, usize);
@@ -1814,12 +1866,112 @@ fn gpu_draw_textures(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -
     if mesh < 1 || mesh > list_len(gm_count) {
         fail "no such mesh" hint "use what gpu_mesh gave";
     }
+    if list_get(gp_istride, p - 1) > 0 && gpu_inst_buf == 0 {
+        fail "this shader takes instances" hint "draw it with gpu_draw_instanced";
+    }
     if list_get(gm_stride, mesh - 1) != list_get(gp_stride, p - 1) {
         fail "the mesh's corners are not what the shader takes" hint "as many floats a corner as its in declarations";
     }
     if gpu_kind == 1 { return vk_draw(p - 1, mesh - 1, t0, t1, t2, t3); }
     if gpu_kind == 3 { return wg_draw(p - 1, mesh - 1, t0, t1, t2, t3); }
     return mt_draw(p - 1, mesh - 1, t0, t1, t2, t3);
+}
+
+// ---------------------------------------------------------- instances ---
+// A buffer of up to max instances, floats_per_instance floats each: what a
+// shader's 'instance' inputs take, in their order. Written by the program
+// (gpu_instance_put, gpu_instance_list) outside a frame; Vulkan only, for now.
+fn gpu_instances(max: i64, floats_per_instance: i64) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    if gpu_kind != 1 {
+        fail "instances are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
+    }
+    gpu_outside_frame();
+    if max < 1 || floats_per_instance < 1 || floats_per_instance > 64 || max * floats_per_instance > 16777216 {
+        fail "an instance buffer of this size cannot be made" hint "1 to 64 floats an instance, 16M floats at most";
+    }
+    var bytes: i64 = max * floats_per_instance * 4;
+    vk_sn = 0;
+    if vk_buffer(bytes, 128, 6) == 0 { return 0; }
+    var buf: i64 = vk_out[2];
+    var mem: i64 = vk_out[3];
+    var map: i64 = vk_map(mem);
+    if map == 0 { return 0; }
+    hp_zero(map, bytes);
+    list_add(gi_buf, buf);
+    list_add(gi_mem, mem);
+    list_add(gi_map, map);
+    list_add(gi_cap, max);
+    list_add(gi_floats, floats_per_instance);
+    return list_len(gi_buf);
+}
+
+fn gpu_inst_check(ib: i64) -> i64 {
+    if ib < 1 || ib > list_len(gi_buf) {
+        fail "no such instance buffer" hint "use what gpu_instances gave";
+    }
+    if gpu_in_frame == 1 {
+        fail "instances are written outside a frame" hint "before gpu_begin: the frame's draws read them when it ends";
+    }
+    return ib - 1;
+}
+
+// instance i's first four floats (as many as it has)
+fn gpu_instance_put(ib: i64, i: i64, x: f64, y: f64, z: f64, w: f64) -> i64 {
+    var k: i64 = gpu_inst_check(ib);
+    if i < 0 || i >= list_get(gi_cap, k) {
+        fail "no such instance" hint "from 0 to the buffer's size minus one";
+    }
+    var nf: i64 = list_get(gi_floats, k);
+    var p: i64 = list_get(gi_map, k) + i * nf * 4;
+    wf32(p, 0, x);
+    if nf > 1 { wf32(p, 4, y); }
+    if nf > 2 { wf32(p, 8, z); }
+    if nf > 3 { wf32(p, 12, w); }
+    return 1;
+}
+
+// the reals of a list<f64>, from instance 0 on: floats_per_instance a one
+fn gpu_instance_list(ib: i64, values: i64) -> i64 {
+    var k: i64 = gpu_inst_check(ib);
+    var n: i64 = list_len(values);
+    if n > list_get(gi_cap, k) * list_get(gi_floats, k) {
+        fail "more values than the instance buffer holds" hint "make it larger with gpu_instances";
+    }
+    var p: i64 = list_get(gi_map, k);
+    var i: i64 = 0;
+    while i < n {
+        wf32(p, i * 4, list_get_real(values, i));
+        i = i + 1;
+    }
+    return n;
+}
+
+// count instances of mesh, each with its values from buffer ib
+fn gpu_draw_instanced(prog: i64, mesh: i64, tex: i64, ib: i64, count: i64) -> i64 {
+    if ib < 1 || ib > list_len(gi_buf) {
+        fail "no such instance buffer" hint "use what gpu_instances gave";
+    }
+    var p: i64 = gpu_prog(prog);
+    if p == 0 { return 0; }
+    if list_get(gp_istride, p - 1) == 0 {
+        fail "this shader has no instance inputs" hint "declare them: instance offset: vec4;";
+    }
+    if list_get(gp_istride, p - 1) != list_get(gi_floats, ib - 1) * 4 {
+        fail "the instance buffer's floats are not what the shader takes" hint "as many floats an instance as its instance declarations";
+    }
+    if count < 0 || count > list_get(gi_cap, ib - 1) {
+        fail "more instances than the buffer holds" hint "make it larger with gpu_instances";
+    }
+    if count == 0 { return 1; }
+    gpu_inst_buf = ib;
+    gpu_inst_count = count;
+    var r: i64 = gpu_draw_textures(prog, mesh, tex, 0, 0, 0);
+    gpu_inst_buf = 0;
+    gpu_inst_count = 0;
+    return r;
 }
 
 fn gpu_draw(prog: i64, mesh: i64, tex: i64) -> i64 {

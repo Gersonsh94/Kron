@@ -33,6 +33,29 @@ kron_definitions
 //     audio_playing(voice)              1 while it has not ended
 //     audio_update()  audio_close()
 //
+// Effects, a voice at a time:
+//     audio_set_pitch(voice, ratio)     1 as recorded, 2 an octave up
+//     audio_set_lowpass(voice, hz)      only what is below hz; 0 off
+//     audio_echo(delay_ms, feedback, mix)   an echo on everything; mix 0 off
+// Sounds made here:
+//     audio_synth(wave, hz, ms, volume, attack_ms, release_ms)
+//                                       wave AU_SINE, AU_SQUARE, AU_SAW,
+//                                       AU_TRIANGLE or AU_NOISE
+// In space: a listener, and voices placed around it, fainter with distance
+// and to the side they are on (y is up):
+//     audio_listener(x, y, z, fx, fy, fz)   where it is, where it looks
+//     audio_set_position(voice, x, y, z)    the voice is placed from now on
+//     audio_set_distance(near, far)      full volume up to near, silent at far
+// Streams, for music that is not all in memory:
+//     audio_stream_new(frames)          a ring of stereo i16 frames
+//     audio_stream_room(s)  audio_stream_write(s, address, frames)
+//     audio_stream_end(s)               no more is coming: the voice ends
+//                                       when it has played what is there
+//     audio_stream_play(s, volume)      a voice playing it
+//     (std_vorbis: audio_stream_ogg(path, volume, loop))
+// Without a device, for tests and for writing sound to a file:
+//     audio_open_silent(rate)  audio_render(address, frames)
+//
 // On Linux the device is "default", or what KRON_AUDIO_DEVICE says.
 // =========================================================================
 
@@ -62,6 +85,47 @@ var au_scratch: [i64; 16];
 var au_ignore: i64;
 shared var aq_free: [i64; 8];            // AudioQueue: buffers given back
 shared var aq_ptr: [i64; 8];
+// effects and space, a voice at a time
+var au_v_stream: [i64; 64];              // the stream it plays, 0 a sound
+var au_v_step: [i64; 64];                // frames a frame, in 1/65536: 65536 as recorded
+var au_v_frac: [i64; 64];
+var au_v_lp: [i64; 64];                  // low-pass, 0 .. 65536: 65536 off
+var au_v_lpl: [i64; 64];
+var au_v_lpr: [i64; 64];
+var au_v_3d: [i64; 64];                  // 1 when placed
+var au_v_x: [f64; 64];
+var au_v_y: [f64; 64];
+var au_v_z: [f64; 64];
+var au_lx: f64;                          // the listener
+var au_ly: f64;
+var au_lz: f64;
+var au_lfx: f64;
+var au_lfz: f64 = -1.0;
+var au_near: f64 = 1.0;
+var au_far: f64 = 100.0;
+// the echo: a ring of 2 seconds at most, both sides
+var au_echo_buf: [i32; 384000];
+var au_echo_len: i64;                    // frames of delay, 0 off
+var au_echo_pos: i64;
+var au_echo_fb: i64;                     // 0 .. 256
+var au_echo_mix: i64;
+// streams
+var au_st_buf: [i64; 16];
+var au_st_cap: [i64; 16];
+var au_st_read: [i64; 16];               // frames taken and put, from the start
+var au_st_write: [i64; 16];
+var au_st_end: [i64; 16];
+var au_st_n: i64;
+// what refills streams, called by audio_update and audio_render: std_vorbis
+var au_hook: fn(i64) -> i64;
+var au_hook_on: i64;
+var au_noise: i64 = 22222;
+
+const AU_SINE: i64 = 0;
+const AU_SQUARE: i64 = 1;
+const AU_SAW: i64 = 2;
+const AU_TRIANGLE: i64 = 3;
+const AU_NOISE: i64 = 4;
 
 // ---------------------------------------------------------- the systems ---
 extern "winmm.dll" {
@@ -411,6 +475,7 @@ fn audio_play(sound: i64, volume: f64, looping: i64) -> i64 {
             au_v_right[i] = 256;
             au_v_loop[i] = looping;
             au_v_gen[i] = au_v_gen[i] + 1;
+            au_voice_clear(i);
             return i + 1 + au_v_gen[i] * 256;
         }
         i = i + 1;
@@ -456,6 +521,58 @@ fn audio_set_pan(v: i64, pan: f64) -> i64 {
     return 0;
 }
 
+fn au_voice_clear(i: i64) -> i64 {
+    au_v_stream[i] = 0;
+    au_v_step[i] = 65536;
+    au_v_frac[i] = 0;
+    au_v_lp[i] = 65536;
+    au_v_lpl[i] = 0;
+    au_v_lpr[i] = 0;
+    au_v_3d[i] = 0;
+    return 0;
+}
+
+// a voice placed in space: its two sides' volume (0 .. 256), from the
+// distance to the listener and the side it is on
+fn au_place(v: i64) -> i64 {
+    var dx: f64 = au_v_x[v] - au_lx;
+    var dy: f64 = au_v_y[v] - au_ly;
+    var dz: f64 = au_v_z[v] - au_lz;
+    var d: f64 = fsqrt(dx * dx + dy * dy + dz * dz);
+    var g: f64 = 1.0;
+    if d > au_near {
+        g = au_near / d;                        // inverse distance
+        // to silence at far, smoothly
+        var f: f64 = (au_far - d) / (au_far - au_near);
+        if f < 0.0 { f = 0.0; }
+        g = g * f;
+    }
+    // the listener's right: forward x up, up being y
+    var rx: f64 = 0.0 - au_lfz;
+    var rz: f64 = au_lfx;
+    var rl: f64 = fsqrt(rx * rx + rz * rz);
+    var pan: f64 = 0.0;
+    var hd: f64 = fsqrt(dx * dx + dz * dz);
+    if rl > 0.0 && hd > 0.000001 {
+        pan = (dx * rx + dz * rz) / (rl * hd);
+    }
+    var l: f64 = 1.0 - pan;
+    if l > 1.0 { l = 1.0; }
+    var r: f64 = 1.0 + pan;
+    if r > 1.0 { r = 1.0; }
+    au_v_left[v] = (l * g * 256.0) as i64;
+    au_v_right[v] = (r * g * 256.0) as i64;
+    return 0;
+}
+
+// one side's sample of a sound's frame
+fn au_snd16(addr: i64, frame: i64, side: i64) -> i64 {
+    var x: i64 = 0;
+    raw { x = peek16(addr + frame * 4 + side * 2); }
+    if x >= 32768 { x = x - 65536; }
+    return x;
+}
+
 // n frames of every voice, mixed into au_out
 fn au_mix(n: i64) -> i64 {
     var i: i64 = 0;
@@ -467,39 +584,106 @@ fn au_mix(n: i64) -> i64 {
     while v < AU_VOICES {
         var s: i64 = au_v_sound[v];
         if s != 0 {
-            var addr: i64 = list_get(au_snd_addr, s - 1);
-            var frames: i64 = list_get(au_snd_frames, s - 1);
+            if au_v_3d[v] == 1 { au_place(v); }
+            var st: i64 = au_v_stream[v];
+            var addr: i64 = 0;
+            var frames: i64 = 0;
+            if st == 0 {
+                addr = list_get(au_snd_addr, s - 1);
+                frames = list_get(au_snd_frames, s - 1);
+            } else {
+                addr = au_st_buf[st - 1];
+            }
             var pos: i64 = au_v_pos[v];
+            var frac: i64 = au_v_frac[v];
+            var step: i64 = au_v_step[v];
+            var lp: i64 = au_v_lp[v];
             var vl: i64 = au_v_vol[v] * au_v_left[v] / 256;
             var vr: i64 = au_v_vol[v] * au_v_right[v] / 256;
             var k: i64 = 0;
             while k < n {
-                if pos >= frames {
-                    if au_v_loop[v] == 1 && frames > 0 {
-                        pos = 0;
+                var l: i64 = 0;
+                var r: i64 = 0;
+                if st == 0 {
+                    if pos >= frames {
+                        if au_v_loop[v] == 1 && frames > 0 {
+                            pos = pos % frames;
+                        } else {
+                            au_v_sound[v] = 0;
+                            k = n;
+                        }
+                    }
+                    if k < n {
+                        l = au_snd16(addr, pos, 0);
+                        r = au_snd16(addr, pos, 1);
+                        if frac != 0 {
+                            // between two frames, by a straight line
+                            var nx: i64 = pos + 1;
+                            if nx >= frames {
+                                nx = frames - 1;
+                                if au_v_loop[v] == 1 { nx = 0; }
+                            }
+                            l = l + (au_snd16(addr, nx, 0) - l) * frac / 65536;
+                            r = r + (au_snd16(addr, nx, 1) - r) * frac / 65536;
+                        }
+                    }
+                } else {
+                    // a stream: what was written and not yet read
+                    var cap: i64 = au_st_cap[st - 1];
+                    if au_st_read[st - 1] >= au_st_write[st - 1] {
+                        if au_st_end[st - 1] == 1 {
+                            au_v_sound[v] = 0;
+                        }
+                        k = n;                  // nothing yet: silence
                     } else {
-                        au_v_sound[v] = 0;
-                        k = n;
+                        var at: i64 = au_st_read[st - 1] % cap;
+                        l = au_snd16(addr, at, 0);
+                        r = au_snd16(addr, at, 1);
+                        au_st_read[st - 1] = au_st_read[st - 1] + 1;
                     }
                 }
                 if k < n {
-                    var l: i64 = 0;
-                    var r: i64 = 0;
-                    raw {
-                        l = peek16(addr + pos * 4);
-                        r = peek16(addr + pos * 4 + 2);
+                    if lp < 65536 {
+                        au_v_lpl[v] = au_v_lpl[v] + (l - au_v_lpl[v]) * lp / 65536;
+                        au_v_lpr[v] = au_v_lpr[v] + (r - au_v_lpr[v]) * lp / 65536;
+                        l = au_v_lpl[v];
+                        r = au_v_lpr[v];
                     }
-                    if l >= 32768 { l = l - 65536; }
-                    if r >= 32768 { r = r - 65536; }
                     au_mixbuf[k * 2] = au_mixbuf[k * 2] + l * vl / 256;
                     au_mixbuf[k * 2 + 1] = au_mixbuf[k * 2 + 1] + r * vr / 256;
-                    pos = pos + 1;
+                    if st == 0 {
+                        frac = frac + step;
+                        pos = pos + frac / 65536;
+                        frac = frac % 65536;
+                    }
                     k = k + 1;
                 }
             }
             au_v_pos[v] = pos;
+            au_v_frac[v] = frac;
         }
         v = v + 1;
+    }
+    // the echo, on everything
+    if au_echo_len > 0 {
+        i = 0;
+        while i < n {
+            var c: i64 = 0;
+            while c < 2 {
+                var at2: i64 = au_echo_pos * 2 + c;
+                var dly: i64 = au_echo_buf[at2];
+                var x0: i64 = au_mixbuf[i * 2 + c];
+                au_mixbuf[i * 2 + c] = x0 + dly * au_echo_mix / 256;
+                var back: i64 = x0 + dly * au_echo_fb / 256;
+                if back > 1048576 { back = 1048576; }
+                if back < -1048576 { back = -1048576; }
+                au_echo_buf[at2] = back;
+                c = c + 1;
+            }
+            au_echo_pos = au_echo_pos + 1;
+            if au_echo_pos >= au_echo_len { au_echo_pos = 0; }
+            i = i + 1;
+        }
     }
     i = 0;
     while i < n * 2 {
@@ -512,9 +696,296 @@ fn au_mix(n: i64) -> i64 {
     return n;
 }
 
+// ----------------------------------------------------------------- effects ---
+fn audio_set_pitch(v: i64, ratio: f64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i < 0 { return 0; }
+    if ratio <= 0.0 || ratio > 16.0 {
+        fail "no such pitch" hint "above 0, up to 16: 1 as recorded, 2 an octave up";
+    }
+    if au_v_stream[i] != 0 && ratio != 1.0 {
+        fail "a stream plays as it is written" hint "change the pitch of sounds, not of streams";
+    }
+    au_v_step[i] = (ratio * 65536.0) as i64;
+    return 0;
+}
+
+// only what is below hz passes (one pole: 6 dB an octave); 0 takes it off
+fn audio_set_lowpass(v: i64, hz: f64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i < 0 { return 0; }
+    if hz <= 0.0 {
+        au_v_lp[i] = 65536;
+        return 0;
+    }
+    var w: f64 = 6.283185307179586 * hz;
+    var a: f64 = w / ((au_rate as f64) + w);
+    au_v_lp[i] = (a * 65536.0) as i64;
+    if au_v_lp[i] < 1 { au_v_lp[i] = 1; }
+    if au_v_lp[i] > 65536 { au_v_lp[i] = 65536; }
+    return 0;
+}
+
+// an echo on everything: delay_ms (up to 2000), how much comes back each
+// time (0 .. 0.95), how loud it is (0 takes it off)
+fn audio_echo(delay_ms: i64, feedback: f64, mix: f64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if delay_ms < 1 || delay_ms > 2000 {
+        fail "no such delay" hint "from 1 to 2000 milliseconds";
+    }
+    var len: i64 = au_rate * delay_ms / 1000;
+    if len > 192000 { len = 192000; }
+    if len < 1 { len = 1; }
+    var i: i64 = 0;
+    while i < len * 2 {
+        au_echo_buf[i] = 0;
+        i = i + 1;
+    }
+    au_echo_pos = 0;
+    au_echo_fb = (fclamp(feedback, 0.0, 0.95) * 256.0) as i64;
+    au_echo_mix = (fclamp(mix, 0.0, 1.0) * 256.0) as i64;
+    au_echo_len = len;
+    if au_echo_mix == 0 { au_echo_len = 0; }
+    return 1;
+}
+
+// ---------------------------------------------------------------- synthesis ---
+fn au_wave(wave: i64, phase: f64) -> f64 {
+    var p: f64 = phase - ffloor(phase);         // 0 .. 1 in a cycle
+    if wave == AU_SINE { return fsin(6.283185307179586 * p); }
+    if wave == AU_SQUARE {
+        if p < 0.5 { return 1.0; }
+        return 0.0 - 1.0;
+    }
+    if wave == AU_SAW { return 2.0 * p - 1.0; }
+    if wave == AU_TRIANGLE {
+        if p < 0.5 { return 4.0 * p - 1.0; }
+        return 3.0 - 4.0 * p;
+    }
+    au_noise = (au_noise * 1103515245 + 12345) & 2147483647;
+    return ((au_noise >> 8) as f64) / 4194304.0 - 1.0;
+}
+
+// a sound made here: wave at hz for ms, rising over attack_ms and falling
+// over release_ms at its end
+fn audio_synth(wave: i64, hz: f64, ms: i64, volume: f64, attack_ms: i64, release_ms: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if wave < 0 || wave > 4 {
+        fail "no such wave" hint "AU_SINE, AU_SQUARE, AU_SAW, AU_TRIANGLE or AU_NOISE";
+    }
+    if ms <= 0 || hz <= 0.0 {
+        fail "a sound needs a length and a pitch" hint "ms and hz above 0";
+    }
+    var n: i64 = au_rate * ms / 1000;
+    var na: i64 = au_rate * attack_ms / 1000;
+    var nr: i64 = au_rate * release_ms / 1000;
+    var p: i64 = hp_alloc(n * 4 + 8);
+    if p == 0 {
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    var i: i64 = 0;
+    var per: f64 = hz / (au_rate as f64);
+    while i < n {
+        var env: f64 = 1.0;
+        if na > 0 && i < na { env = (i as f64) / (na as f64); }
+        if nr > 0 && i >= n - nr {
+            var e2: f64 = ((n - i) as f64) / (nr as f64);
+            if e2 < env { env = e2; }
+        }
+        var x: f64 = au_wave(wave, per * (i as f64)) * env * volume * 32000.0;
+        var v: i64 = x as i64;
+        raw {
+            poke16(p + i * 4, v);
+            poke16(p + i * 4 + 2, v);
+        }
+        i = i + 1;
+    }
+    return au_add_sound(p, n);
+}
+
+// -------------------------------------------------------------------- space ---
+fn audio_listener(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) -> i64 {
+    au_lx = x;
+    au_ly = y;
+    au_lz = z;
+    au_lfx = fx;
+    au_lfz = fz;
+    return 0;
+}
+
+fn audio_set_position(v: i64, x: f64, y: f64, z: f64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i < 0 { return 0; }
+    au_v_x[i] = x;
+    au_v_y[i] = y;
+    au_v_z[i] = z;
+    au_v_3d[i] = 1;
+    au_place(i);
+    return 0;
+}
+
+fn audio_set_distance(near: f64, far: f64) -> i64 {
+    if near <= 0.0 || far <= near {
+        fail "no such distances" hint "0 < near < far";
+    }
+    au_near = near;
+    au_far = far;
+    return 0;
+}
+
+// ------------------------------------------------------------------ streams ---
+fn audio_stream_new(frames: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if au_st_n >= 16 {
+        fail "too many streams" hint "16 at most";
+    }
+    if frames < 1024 {
+        fail "a stream holds at least 1024 frames" hint "a quarter of a second or more is safe";
+    }
+    var p: i64 = hp_alloc(frames * 4 + 8);
+    if p == 0 {
+        fail "no memory for the stream" hint "a smaller one";
+    }
+    var k: i64 = au_st_n;
+    au_st_buf[k] = p;
+    au_st_cap[k] = frames;
+    au_st_read[k] = 0;
+    au_st_write[k] = 0;
+    au_st_end[k] = 0;
+    au_st_n = au_st_n + 1;
+    return k + 1;
+}
+
+fn au_stream(s: i64) -> i64 {
+    if s < 1 || s > au_st_n {
+        fail "no such stream" hint "use what audio_stream_new gave";
+    }
+    return s - 1;
+}
+
+// frames that can be written without overwriting what is not played yet
+fn audio_stream_room(s: i64) -> i64 {
+    var k: i64 = au_stream(s);
+    return au_st_cap[k] - (au_st_write[k] - au_st_read[k]);
+}
+
+// frames stereo i16 frames at address; as many as there is room for
+fn audio_stream_write(s: i64, address: i64, frames: i64) -> i64 {
+    var k: i64 = au_stream(s);
+    var n: i64 = frames;
+    var room: i64 = audio_stream_room(s);
+    if n > room { n = room; }
+    var i: i64 = 0;
+    while i < n {
+        var at: i64 = (au_st_write[k] + i) % au_st_cap[k];
+        var w: i64 = 0;
+        raw {
+            w = peek32(address + i * 4);
+            poke32(au_st_buf[k] + at * 4, w);
+        }
+        i = i + 1;
+    }
+    au_st_write[k] = au_st_write[k] + n;
+    return n;
+}
+
+fn audio_stream_end(s: i64) -> i64 {
+    au_st_end[au_stream(s)] = 1;
+    return 0;
+}
+
+// a voice playing stream s
+fn audio_stream_play(s: i64, volume: f64) -> i64 {
+    var k: i64 = au_stream(s);
+    var i: i64 = 0;
+    while i < AU_VOICES {
+        if au_v_sound[i] == 0 {
+            au_v_sound[i] = 1;          // not 0: playing; the stream gives the frames
+            au_v_pos[i] = 0;
+            au_v_vol[i] = (volume * 256.0) as i64;
+            au_v_left[i] = 256;
+            au_v_right[i] = 256;
+            au_v_loop[i] = 0;
+            au_v_gen[i] = au_v_gen[i] + 1;
+            au_voice_clear(i);
+            au_v_stream[i] = k + 1;
+            return i + 1 + au_v_gen[i] * 256;
+        }
+        i = i + 1;
+    }
+    fail "too many sounds playing at once" hint "64 at most: stop some";
+}
+
+// what refills streams before each mix (std_vorbis sets it)
+fn au_set_hook(f: fn(i64) -> i64) -> i64 {
+    au_hook = f;
+    au_hook_on = 1;
+    return 0;
+}
+
+fn au_run_hook() -> i64 {
+    if au_hook_on == 1 {
+        var f: fn(i64) -> i64 = au_hook;
+        f(0);
+    }
+    return 0;
+}
+
+// --------------------------------------------------------- without a device ---
+// the mixer alone: audio_render gives what a device would have played
+fn audio_open_silent(rate: i64) -> i64 {
+    if au_on == 1 {
+        fail "the sound is open already" hint "audio_close first";
+    }
+    if rate < 8000 || rate > 192000 {
+        fail "no such sample rate" hint "48000 or 44100";
+    }
+    au_rate = rate;
+    au_snd_addr = list_new();
+    au_snd_frames = list_new();
+    au_kind = 0;
+    var i: i64 = 0;
+    while i < AU_VOICES {
+        au_v_sound[i] = 0;
+        i = i + 1;
+    }
+    au_on = 1;
+    return 1;
+}
+
+// the next frames frames of the mix, stereo i16, at address
+fn audio_render(address: i64, frames: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open_silent first";
+    }
+    var done: i64 = 0;
+    while done < frames {
+        au_run_hook();
+        var n: i64 = frames - done;
+        if n > AU_CHUNK { n = AU_CHUNK; }
+        au_mix(n);
+        var i: i64 = 0;
+        while i < n * 2 {
+            var x: i64 = au_out[i];
+            raw { poke16(address + done * 4 + i * 2, x); }
+            i = i + 1;
+        }
+        done = done + n;
+    }
+    return frames;
+}
+
 // keeps the system's queue full: call it every frame
 fn audio_update() -> i64 {
     if au_on == 0 { return 0; }
+    au_run_hook();
+    if au_kind == 0 { return 0; }
     if au_kind == 1 { return wo_update(); }
     if au_kind == 2 { return al_update(); }
     if au_kind == 3 { return web_update(); }
@@ -627,6 +1098,13 @@ fn aq_update() -> i64 {
 
 fn audio_close() -> i64 {
     if au_on == 0 { return 0; }
+    au_hook_on = 0;
+    au_st_n = 0;
+    au_echo_len = 0;
+    if au_kind == 0 {
+        au_on = 0;
+        return 1;
+    }
     raw {
         if au_kind == 1 {
             au_ignore = waveOutReset(au_dev);

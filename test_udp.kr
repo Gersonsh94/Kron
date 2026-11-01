@@ -1,0 +1,72 @@
+kron_program
+kron_domain test_udp;
+kron_imports
+acquire_domain "std_net.kr";
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: UDP on this computer. Two sockets on 127.0.0.1 send datagrams to
+// each other; net_wait says when one is there and times out when none is;
+// the sender's address and port come with each.
+//
+// Expected output: nothing waiting, 5 bytes, hello, from 127.0.0.1 port
+// 47811, 3 bytes, ack, a datagram cut to 4 bytes: abcd, broadcast on
+// =========================================================================
+
+var buf: [u8; 64];
+
+fn show(n: i64) -> i64 {
+    var t: text = text_new();
+    var i: i64 = 0;
+    while i < n {
+        text_add_char(t, buf[i]);
+        i = i + 1;
+    }
+    say(t);
+    return 0;
+}
+
+fn main() -> i64 {
+    var a: i64 = net_udp_open_on(127, 0, 0, 1, 47811);
+    var b: i64 = net_udp_open_on(127, 0, 0, 1, 47812);
+    if net_wait(b, 50) == 0 { say("nothing waiting"); }
+    net_udp_send(a, 127, 0, 0, 1, 47812, "hello", 5);
+    if net_wait(b, 2000) == 1 {
+        var n: i64 = net_udp_recv(b, &buf, 64);
+        print(n);
+        show(n);
+        var t: text = text_add(text_new(), "from ");
+        text_add_int(t, net_from_ip(0));
+        text_add(t, ".");
+        text_add_int(t, net_from_ip(1));
+        text_add(t, ".");
+        text_add_int(t, net_from_ip(2));
+        text_add(t, ".");
+        text_add_int(t, net_from_ip(3));
+        text_add(t, " port ");
+        text_add_int(t, net_from_port());
+        say(t);
+        // the answer goes back where it came from
+        net_udp_send(b, net_from_ip(0), net_from_ip(1), net_from_ip(2), net_from_ip(3), net_from_port(), "ack", 3);
+    }
+    if net_wait(a, 2000) == 1 {
+        var m: i64 = net_udp_recv(a, &buf, 64);
+        print(m);
+        show(m);
+    }
+    net_udp_send(a, 127, 0, 0, 1, 47812, "abcdefgh", 8);
+    if net_wait(b, 2000) == 1 {
+        var k: i64 = net_udp_recv(b, &buf, 4);
+        var t2: text = text_add(text_new(), "a datagram cut to ");
+        text_add_int(t2, k);
+        text_add(t2, " bytes:");
+        say(t2);
+        show(k);
+    }
+    net_udp_broadcast(a, 1);
+    say("broadcast on");
+    net_close(a);
+    net_close(b);
+    return 0;
+}

@@ -1174,6 +1174,42 @@ called `text_free` itself.
   it needs them) is not done yet: `vorbis_next` gives a packet at a time
   for a program to do it. Tests: `test_ogg`, `test_vorbis`.
 
+## The engine's library list, first part (01-11-2026, Gerson: as many as can be done at once)
+
+- UDP in std_net: `net_udp_open`, `net_udp_send` to an address, `net_udp_recv`
+  with the sender in `net_from_ip` / `net_from_port`, `net_udp_broadcast`,
+  and `net_wait(sock, ms)` (poll / WSAPoll) for TCP and UDP alike. On
+  Windows a datagram too large for the buffer gives its first bytes, as on
+  Linux, and the WSAECONNRESET an earlier datagram to a closed port leaves
+  behind is passed over. Test: `test_udp` (Linux, and the Windows build
+  under Wine).
+- Instanced drawing: KSL takes `instance name: T;` after the `in` inputs;
+  the translators give them the next locations as before, and the Vulkan
+  pipeline reads them from a second buffer once an instance.
+  `gpu_instances(max, floats)`, `gpu_instance_put`, `gpu_instance_list`,
+  `gpu_draw_instanced(prog, mesh, tex, ib, count)`. The buffers are
+  host-visible, written outside a frame. Vulkan only, for now. Test:
+  `gpu_inst`, with the validation layer.
+- std_task: `task_for(n, job)` spreads job(i) over cpu_count() threads in
+  chunks, this thread among them, and returns when all are done. Threads
+  are made for each call, not kept waiting (a waiting pool keeps cores
+  busy). Lock 17 is its own. Measured: 1.9 times as fast on two cores.
+  Test: `test_task`.
+- std_audio: `audio_set_pitch`, `audio_set_lowpass` (one pole) a voice at
+  a time, `audio_echo` on everything; `audio_synth` (sine, square, saw,
+  triangle, noise, with attack and release); `audio_listener`,
+  `audio_set_position`, `audio_set_distance` (inverse distance to silence
+  at far, the side from the listener's right); streams
+  (`audio_stream_new/write/room/end/play`), and `audio_open_silent` /
+  `audio_render` to mix without a device. A voice at pitch 1 with no
+  filter mixes as before, sample for sample. std_vorbis:
+  `audio_stream_ogg(path, volume, loop)`, half a second ahead; each frame's
+  place in the file is worked out from the start, not added up (an added
+  step drifted 0.15 frames a second). Test: `test_audiofx`, 22 checks.
+- Not in this part: multitouch, video and XR (no device here to see them
+  work), compute shaders (a new stage in KSL and its three translators),
+  and MP3.
+
 ## std_gpu: render targets, mipmaps and BC1 (27-10-2026, Gerson)
 
 - `gpu_target(w, h)`, `gpu_begin_target` / `gpu_end_target`,

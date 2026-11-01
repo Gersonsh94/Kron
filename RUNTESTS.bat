@@ -80,6 +80,7 @@ set RUNLIST=%RUNLIST% test_aparam test_bool test_stream test_slit test_mat test_
 set RUNLIST=%RUNLIST% test_packed
 set RUNLIST=%RUNLIST% test_structarray
 set RUNLIST=%RUNLIST% test_ogg test_vorbis test_castdecl
+set RUNLIST=%RUNLIST% test_udp test_task test_audiofx
 set RUNLIST=%RUNLIST% test_bigreal test_fields
 set RUNLIST=%RUNLIST% test_text test_list test_map test_files test_os
 set RUNLIST=%RUNLIST% test_libthreads

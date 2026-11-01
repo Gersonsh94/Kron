@@ -1,0 +1,72 @@
+kron_program
+kron_domain test_task;
+kron_imports
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: task_for. A million squares, each i into its own place, then added
+// up; the same with one worker; a job that keeps a local of its caller; a
+// count under a lock; n smaller than the workers; n zero.
+//
+// Expected output: 1 (the workers), 333332833333500000 twice, 1999998,
+// 1000000, 3, 0
+// =========================================================================
+
+shared var sq: [i64; 1000000];
+shared var hits: i64;
+
+fn total() -> i64 {
+    var s: i64 = 0;
+    var i: i64 = 0;
+    while i < 1000000 {
+        s = s + sq[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i64 {
+    lock_init(0);
+    if task_workers() >= 1 { print(1); } else { print(0); }
+    task_for(1000000, fn(i: i64) -> i64 {
+        sq[i] = i * i;
+        return 0;
+    });
+    print(total());                          // 333332833333500000
+    var j: i64 = 0;
+    while j < 1000000 {
+        sq[j] = 0;
+        j = j + 1;
+    }
+    task_set_workers(1);
+    task_for(1000000, fn(i: i64) -> i64 {
+        sq[i] = i * i;
+        return 0;
+    });
+    print(total());                          // the same, on one thread
+    task_set_workers(0);
+    var k: i64 = 2;
+    task_for(1000000, fn(i: i64) -> i64 {
+        sq[i] = i * k;                       // k is the caller's local
+        return 0;
+    });
+    print(sq[999999]);                       // 1999998
+    task_for(1000000, fn(i: i64) -> i64 {
+        lock_take(0);
+        hits = hits + 1;
+        lock_give(0);
+        return 0;
+    });
+    print(hits);                             // 1000000
+    hits = 0;
+    task_for(3, fn(i: i64) -> i64 {
+        lock_take(0);
+        hits = hits + 1;
+        lock_give(0);
+        return 0;
+    });
+    print(hits);                             // 3
+    print(task_for(0, fn(i: i64) -> i64 { return 0; }));   // 0
+    return 0;
+}

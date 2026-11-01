@@ -1,0 +1,113 @@
+kron_program
+kron_domain gpu_inst;
+kron_imports
+acquire_domain "std_gpu.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: instanced drawing. One small square, drawn four times in one
+// draw, each instance with its own offset and colour from an instance
+// buffer: one in each quarter of the frame, nothing in the middle. Then two
+// instances written from a list. Run by GPUTESTS.bat; the exit code is the
+// number of checks that failed.
+// =========================================================================
+
+var failures: i64;
+const W: i64 = 64;
+const H: i64 = 64;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+fn check_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, what: i64) -> i64 {
+    var c: i64 = gpu_pixel(x, y);
+    var ok: i64 = 1;
+    if iabs(channel(c, 0) - r) > 8 || iabs(channel(c, 1) - g) > 8 || iabs(channel(c, 2) - b) > 8 { ok = 0; }
+    var t: text = text_add(text_new(), what);
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 1));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 2));
+    text_add(t, ")");
+    return report(ok, t);
+}
+
+fn main() -> i64 {
+    say("GPU instancing test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    var src: text = "in pos: vec3;\nin uv: vec2;\ninstance offset: vec4;\ninstance tint: vec4;\nvar vt: vec4;\nvertex {\n vt = tint;\n position = vec4(pos.x + offset.x, pos.y + offset.y, pos.z, 1.0);\n}\nfragment {\n color = vt;\n}\n";
+    var prog: i64 = gpu_shader(src);
+    report(prog != 0, "a shader with instance inputs compiles");
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    list_add_real(v, -0.1); list_add_real(v, -0.1); list_add_real(v, 0.5); list_add_real(v, 0.0); list_add_real(v, 0.0);
+    list_add_real(v, 0.1); list_add_real(v, -0.1); list_add_real(v, 0.5); list_add_real(v, 1.0); list_add_real(v, 0.0);
+    list_add_real(v, 0.1); list_add_real(v, 0.1); list_add_real(v, 0.5); list_add_real(v, 1.0); list_add_real(v, 1.0);
+    list_add_real(v, -0.1); list_add_real(v, 0.1); list_add_real(v, 0.5); list_add_real(v, 0.0); list_add_real(v, 1.0);
+    list_add(ix, 0); list_add(ix, 1); list_add(ix, 2);
+    list_add(ix, 0); list_add(ix, 2); list_add(ix, 3);
+    var sq: i64 = gpu_mesh_lists(v, 5, ix);
+    var ib: i64 = gpu_instances(16, 8);
+    report(ib > 0, "an instance buffer is made");
+    // offset (x, y, 0, 0), then the colour
+    gpu_instance_put(ib, 0, -0.5, 0.5, 0.0, 0.0);
+    gpu_instance_put(ib, 1, 0.5, 0.5, 0.0, 0.0);
+    gpu_instance_put(ib, 2, -0.5, -0.5, 0.0, 0.0);
+    gpu_instance_put(ib, 3, 0.5, -0.5, 0.0, 0.0);
+    // the whole buffer, offsets and colours, from a list
+    var all: i64 = list_new();
+    list_add_real(all, -0.5); list_add_real(all, 0.5); list_add_real(all, 0.0); list_add_real(all, 0.0);
+    list_add_real(all, 1.0); list_add_real(all, 0.0); list_add_real(all, 0.0); list_add_real(all, 1.0);
+    list_add_real(all, 0.5); list_add_real(all, 0.5); list_add_real(all, 0.0); list_add_real(all, 0.0);
+    list_add_real(all, 0.0); list_add_real(all, 1.0); list_add_real(all, 0.0); list_add_real(all, 1.0);
+    list_add_real(all, -0.5); list_add_real(all, -0.5); list_add_real(all, 0.0); list_add_real(all, 0.0);
+    list_add_real(all, 0.0); list_add_real(all, 0.0); list_add_real(all, 1.0); list_add_real(all, 1.0);
+    list_add_real(all, 0.5); list_add_real(all, -0.5); list_add_real(all, 0.0); list_add_real(all, 0.0);
+    list_add_real(all, 1.0); list_add_real(all, 1.0); list_add_real(all, 1.0); list_add_real(all, 1.0);
+    report(gpu_instance_list(ib, all) == 32, "four instances written from a list");
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_instanced(prog, sq, 0, ib, 4);
+    gpu_end();
+    check_pixel(16, 16, 255, 0, 0, "instance 0: top left, red");
+    check_pixel(48, 16, 0, 255, 0, "instance 1: top right, green");
+    check_pixel(16, 48, 0, 0, 255, "instance 2: bottom left, blue");
+    check_pixel(48, 48, 255, 255, 255, "instance 3: bottom right, white");
+    check_pixel(32, 32, 0, 0, 0, "nothing in the middle");
+    // the first instance moved to the middle with gpu_instance_put, and only
+    // two drawn: the bottom ones are gone
+    gpu_instance_put(ib, 0, 0.0, 0.0, 0.0, 0.0);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_instanced(prog, sq, 0, ib, 2);
+    gpu_end();
+    check_pixel(32, 32, 255, 0, 0, "instance 0 moved to the middle");
+    check_pixel(48, 16, 0, 255, 0, "instance 1 still top right");
+    check_pixel(16, 48, 0, 0, 0, "instance 2 not drawn");
+    if failures == 0 {
+        say("GPU instancing test: all passed");
+    } else {
+        say("GPU instancing test: some checks failed");
+    }
+    return failures;
+}

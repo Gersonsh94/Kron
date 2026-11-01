@@ -27,6 +27,12 @@ kron_definitions
 //     vorbis_next()  vorbis_sample(channel, i)    channels in Vorbis's order
 //     vorbis_to_stereo(rate)  the rest of the file as stereo i16: address, frames
 //     audio_load_ogg(path)    the whole file as a sound of std_audio
+//     audio_stream_ogg(path, volume, loop)
+//                             a voice playing the file as it is decoded,
+//                             half a second ahead: music without the whole
+//                             file in memory. audio_update keeps it going.
+//                             One at a time, and not with audio_load_ogg
+//                             while it plays (the decoder is one).
 //
 // Vorbis I as its specification gives it: codebooks, floor 1, residues 0,
 // 1 and 2, channel coupling, the inverse MDCT (through a complex FFT of the
@@ -67,6 +73,18 @@ fn vb_falloc(n: i64) -> i64 {
     vb_fn = vb_fn + n;
     return at;
 }
+
+// streaming (audio_stream_ogg, at the end)
+var vs_on: i64;
+var vs_stream: i64;          // std_audio's stream it fills, made once
+var vs_voice: i64;
+var vs_loop: i64;
+var vs_src: [f64; 16384];    // decoded frames not yet resampled, stereo
+var vs_n: i64;
+var vs_last: i64;            // 1 once the file has no more packets
+var vs_o: i64;               // frames given to the stream since it started
+var vs_base: i64;            // the frame of the file (looped on) vs_src starts at
+var vs_buf: i64;             // 1024 stereo i16 frames, for the stream
 
 // --------------------------------------------------------- the bit reader ---
 // bits come lowest first in each byte; past the end of the packet a read
@@ -1614,7 +1632,145 @@ fn audio_load_ogg(path: i64) -> i64 {
     if au_on == 0 {
         fail "the sound is not open" hint "audio_open first";
     }
+    if vs_on == 1 {
+        fail "an Ogg stream is playing" hint "audio_stop it first: the decoder is one";
+    }
     vorbis_open(path);
     var p, frames = vorbis_to_stereo(au_rate);
     return au_add_sound(p, frames);
+}
+
+// ------------------------------------------------------------- streaming ---
+
+// the decoder back to the first audio packet, the file kept
+fn vb_rewind() -> i64 {
+    vb_next_pk = 3;
+    vb_done = 0;
+    vb_prevn = 0;
+    vb_outn = 0;
+    return 0;
+}
+
+// the frames of the next packet into vs_src; 0 when the file has no more
+fn vs_more() -> i64 {
+    var n: i64 = vorbis_next();
+    while n == 0 {
+        n = vorbis_next();
+    }
+    if n < 0 && vs_loop == 1 {
+        vb_rewind();
+        n = vorbis_next();
+        while n == 0 {
+            n = vorbis_next();
+        }
+    }
+    if n < 0 { return 0; }
+    // what is behind the position goes
+    var k: i64 = vs_o * vb_rate / au_rate - vs_base;
+    if k > 0 {
+        var i: i64 = 0;
+        while i < (vs_n - k) * 2 {
+            vs_src[i] = vs_src[i + k * 2];
+            i = i + 1;
+        }
+        vs_n = vs_n - k;
+        vs_base = vs_base + k;
+    }
+    var j: i64 = 0;
+    while j < n && vs_n < 8192 {
+        vs_src[vs_n * 2] = vb_side(j, 0);
+        vs_src[vs_n * 2 + 1] = vb_side(j, 1);
+        vs_n = vs_n + 1;
+        j = j + 1;
+    }
+    return 1;
+}
+
+// as much as the stream has room for, at the device's rate
+fn vs_fill(arg: i64) -> i64 {
+    if vs_on == 0 { return 0; }
+    if vs_voice != 0 && audio_playing(vs_voice) == 0 {
+        vs_on = 0;                   // stopped: nothing more to decode
+        return 0;
+    }
+    var room: i64 = audio_stream_room(vs_stream);
+    var made: i64 = 0;
+    var inbuf: i64 = 0;
+    var going: i64 = 1;
+    while made < room && going == 1 {
+        // where this frame falls in the file, worked out from the start each
+        // time, not added up: an added step drifts (44100/48000 is no
+        // 65536th)
+        var pos: i64 = vs_o * vb_rate * 65536 / au_rate;
+        var k: i64 = (pos >> 16) - vs_base;
+        var k2: i64 = k + 1;
+        if k2 >= vs_n && vs_last == 0 {
+            if vs_more() == 0 {
+                // the file's end: its frames all in, as many out as the
+                // whole decode gives (vorbis_to_stereo), the last one with
+                // no neighbour after it
+                vs_last = 1;
+            }
+        } else if vs_last == 1 && vs_o >= (vs_base + vs_n) * au_rate / vb_rate {
+            going = 0;
+        } else {
+            if k2 >= vs_n { k2 = vs_n - 1; }
+            if k >= vs_n { k = vs_n - 1; }
+            var fr: f64 = ((pos & 65535) as f64) / 65536.0;
+            var c: i64 = 0;
+            while c < 2 {
+                var a: f64 = vs_src[k * 2 + c];
+                var b: f64 = vs_src[k2 * 2 + c];
+                var x: f64 = (a + (b - a) * fr) * 32767.0;
+                if x > 32767.0 { x = 32767.0; }
+                if x < -32768.0 { x = -32768.0; }
+                var v: i64 = x as i64;
+                raw { poke16(vs_buf + inbuf * 4 + c * 2, v); }
+                c = c + 1;
+            }
+            vs_o = vs_o + 1;
+            inbuf = inbuf + 1;
+            made = made + 1;
+            if inbuf == 1024 {
+                audio_stream_write(vs_stream, vs_buf, inbuf);
+                inbuf = 0;
+            }
+        }
+    }
+    if inbuf > 0 { audio_stream_write(vs_stream, vs_buf, inbuf); }
+    if going == 0 {
+        audio_stream_end(vs_stream);
+        vs_on = 0;
+    }
+    return made;
+}
+
+// a voice playing the Ogg Vorbis file at path as it is decoded
+fn audio_stream_ogg(path: i64, volume: f64, looping: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if vs_on == 1 && vs_voice != 0 && audio_playing(vs_voice) == 1 {
+        fail "an Ogg stream is playing already" hint "one at a time: audio_stop it first";
+    }
+    vorbis_open(path);
+    if vs_stream == 0 {
+        vs_stream = audio_stream_new(au_rate / 2);
+        vs_buf = hp_alloc(1024 * 4 + 8);
+    }
+    var k: i64 = vs_stream - 1;
+    au_st_read[k] = 0;
+    au_st_write[k] = 0;
+    au_st_end[k] = 0;
+    vs_o = 0;
+    vs_base = 0;
+    vs_n = 0;
+    vs_last = 0;
+    vs_loop = looping;
+    vs_voice = 0;
+    vs_on = 1;
+    au_set_hook(vs_fill);
+    vs_fill(0);
+    vs_voice = audio_stream_play(vs_stream, volume);
+    return vs_voice;
 }
