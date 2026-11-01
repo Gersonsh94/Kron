@@ -1,0 +1,1620 @@
+kron_program
+kron_domain std_vorbis;
+kron_imports
+acquire_domain "std_ogg.kr";
+acquire_domain "std_math.kr";
+acquire_domain "std_audio.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- Ogg Vorbis, decoded in Kron.
+//
+//     audio_open(48000);
+//     var music: i64 = audio_load_ogg("theme.ogg");   // a sound, as a .wav is
+//     audio_play(music, 0.5, 1);
+//
+// Or packet by packet, to stream it:
+//
+//     vorbis_open("theme.ogg");
+//     var n: i64 = vorbis_next();       // frames this packet gave, -1 at the end
+//     while n >= 0 {
+//         ... vorbis_sample(channel, i) for i from 0 to n - 1, from -1 to 1
+//         n = vorbis_next();
+//     }
+//
+//     vorbis_open(path)       1, or a fail; one file is open at a time
+//     vorbis_channels()  vorbis_rate()  vorbis_length()   frames in all
+//     vorbis_next()  vorbis_sample(channel, i)    channels in Vorbis's order
+//     vorbis_to_stereo(rate)  the rest of the file as stereo i16: address, frames
+//     audio_load_ogg(path)    the whole file as a sound of std_audio
+//
+// Vorbis I as its specification gives it: codebooks, floor 1, residues 0,
+// 1 and 2, channel coupling, the inverse MDCT (through a complex FFT of the
+// block's size), the windows and their overlap. Floor 0, which no encoder
+// of the last twenty years writes, is refused with a message. Up to 8
+// channels, blocks up to 8192.
+// =========================================================================
+
+const VB_IPOOL: i64 = 1048576;      // integers of the setup: books, trees
+const VB_FPOOL: i64 = 524288;       // the books' vectors
+const VB_CLS: i64 = 33024;          // classifications a vector
+
+// ------------------------------------------------------------ the pools ---
+var vb_ip: [i64; 1048576];
+var vb_in: i64;
+var vb_fp: [f64; 524288];
+var vb_fn: i64;
+
+fn vb_ialloc(n: i64) -> i64 {
+    if vb_in + n > VB_IPOOL {
+        fail "this Ogg Vorbis file's setup is too large" hint "its codebooks need more than 8 MB";
+    }
+    var at: i64 = vb_in;
+    var i: i64 = 0;
+    while i < n {
+        vb_ip[at + i] = 0;
+        i = i + 1;
+    }
+    vb_in = vb_in + n;
+    return at;
+}
+
+fn vb_falloc(n: i64) -> i64 {
+    if vb_fn + n > VB_FPOOL {
+        fail "this Ogg Vorbis file's setup is too large" hint "its codebooks need more than 4 MB of vectors";
+    }
+    var at: i64 = vb_fn;
+    vb_fn = vb_fn + n;
+    return at;
+}
+
+// --------------------------------------------------------- the bit reader ---
+// bits come lowest first in each byte; past the end of the packet a read
+// gives 0 and vb_eop is set
+var vb_pk: i64;
+var vb_pklen: i64;
+var vb_bit: i64;
+var vb_eop: i64;
+
+fn vb_start(i: i64) -> i64 {
+    vb_pk = ogg_packet(i);
+    vb_pklen = ogg_packet_len(i);
+    vb_bit = 0;
+    vb_eop = 0;
+    return 0;
+}
+
+fn vb_read(n: i64) -> i64 {
+    var v: i64 = 0;
+    var i: i64 = 0;
+    while i < n {
+        var at: i64 = vb_bit >> 3;
+        if at >= vb_pklen {
+            vb_eop = 1;
+            return 0;
+        }
+        var b: i64 = 0;
+        raw { b = peek8(vb_pk + at); }
+        v = v | (((b >> (vb_bit & 7)) & 1) << i);
+        vb_bit = vb_bit + 1;
+        i = i + 1;
+    }
+    return v;
+}
+
+fn vb_ilog(x: i64) -> i64 {
+    var r: i64 = 0;
+    var v: i64 = x;
+    while v > 0 {
+        r = r + 1;
+        v = v >> 1;
+    }
+    return r;
+}
+
+// the 32-bit float of a codebook: 21 bits of mantissa, a sign, 10 of exponent
+fn vb_f32(x: i64) -> f64 {
+    var v: f64 = (x & 2097151) as f64;
+    if (x & 2147483648) != 0 { v = 0.0 - v; }
+    var e: i64 = ((x >> 21) & 1023) - 788;
+    while e > 0 {
+        v = v * 2.0;
+        e = e - 1;
+    }
+    while e < 0 {
+        v = v * 0.5;
+        e = e + 1;
+    }
+    return v;
+}
+
+// 1 when b^e <= lim
+fn vb_powle(b: i64, e: i64, lim: i64) -> i64 {
+    var p: i64 = 1;
+    var i: i64 = 0;
+    while i < e {
+        p = p * b;
+        if p > lim { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// the largest r with r^dims <= entries
+fn vb_lookup1(entries: i64, dims: i64) -> i64 {
+    var r: i64 = 0;
+    while vb_powle(r + 1, dims, entries) == 1 {
+        r = r + 1;
+    }
+    return r;
+}
+
+// --------------------------------------------------------------- headers ---
+var vb_ch: i64;
+var vb_rate: i64;
+var vb_bs0: i64;
+var vb_bs1: i64;
+var vb_total: i64;          // frames in all: the last granule position
+var vb_next_pk: i64;        // the next packet to decode
+var vb_done: i64;           // frames given so far
+
+// codebooks
+var cb_n: i64;
+var cb_dims: [i64; 256];
+var cb_entries: [i64; 256];
+var cb_tree: [i64; 256];    // in vb_ip: two children a node; < 0 an entry, -(e+1)
+var cb_single: [i64; 256];  // the entry, + 1, of a book of one entry; else 0
+var cb_vq: [i64; 256];      // in vb_fp: entries x dims values, -1 for none
+var vb_avail: [i64; 33];
+
+fn vb_read_book(b: i64) -> i64 {
+    if vb_read(24) != 5653314 {
+        fail "this Ogg Vorbis file has a damaged codebook" hint "the setup header does not read";
+    }
+    var dims: i64 = vb_read(16);
+    var entries: i64 = vb_read(24);
+    var lens: i64 = vb_ialloc(entries + 1);
+    var i: i64 = 0;
+    if vb_read(1) == 0 {
+        var sparse: i64 = vb_read(1);
+        while i < entries {
+            if sparse == 1 {
+                if vb_read(1) == 1 { vb_ip[lens + i] = vb_read(5) + 1; }
+            } else {
+                vb_ip[lens + i] = vb_read(5) + 1;
+            }
+            i = i + 1;
+        }
+    } else {
+        var cur: i64 = 0;
+        var clen: i64 = vb_read(5) + 1;
+        while cur < entries {
+            var num: i64 = vb_read(vb_ilog(entries - cur));
+            i = 0;
+            while i < num && cur + i < entries {
+                vb_ip[lens + cur + i] = clen;
+                i = i + 1;
+            }
+            cur = cur + num;
+            clen = clen + 1;
+        }
+    }
+    // the vectors, worked out once for every entry
+    cb_vq[b] = -1;
+    var lookup: i64 = vb_read(4);
+    if lookup == 1 || lookup == 2 {
+        var minv: f64 = vb_f32(vb_read(32));
+        var delta: f64 = vb_f32(vb_read(32));
+        var vbits: i64 = vb_read(4) + 1;
+        var seq: i64 = vb_read(1);
+        var nvals: i64 = entries * dims;
+        if lookup == 1 { nvals = vb_lookup1(entries, dims); }
+        var mult: i64 = vb_ialloc(nvals + 1);
+        i = 0;
+        while i < nvals {
+            vb_ip[mult + i] = vb_read(vbits);
+            i = i + 1;
+        }
+        var tab: i64 = vb_falloc(entries * dims);
+        var e: i64 = 0;
+        while e < entries {
+            var last: f64 = 0.0;
+            var div: i64 = 1;
+            var d: i64 = 0;
+            while d < dims {
+                var off: i64 = e * dims + d;
+                if lookup == 1 { off = (e / div) % nvals; }
+                var x: f64 = (vb_ip[mult + off] as f64) * delta + minv + last;
+                if seq == 1 { last = x; }
+                vb_fp[tab + e * dims + d] = x;
+                div = div * nvals;
+                d = d + 1;
+            }
+            e = e + 1;
+        }
+        cb_vq[b] = tab;
+    } else if lookup != 0 {
+        fail "this Ogg Vorbis file has a codebook of an unknown kind" hint "the setup header does not read";
+    }
+    // the codewords: the lowest free one of each length, entry after entry,
+    // into a tree read a bit at a time, highest bit first
+    var tree: i64 = vb_ialloc(4 * entries + 4);
+    var nodes: i64 = 1;
+    var used: i64 = 0;
+    var first: i64 = 1;
+    i = 0;
+    while i < 33 {
+        vb_avail[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < entries {
+        var ln: i64 = vb_ip[lens + i];
+        if ln > 0 {
+            used = used + 1;
+            cb_single[b] = i + 1;
+            var code: i64 = 0;
+            if first == 1 {
+                first = 0;
+                var y: i64 = 1;
+                while y <= ln {
+                    vb_avail[y] = 1 << (32 - y);
+                    y = y + 1;
+                }
+            } else {
+                var z: i64 = ln;
+                while z > 0 && vb_avail[z] == 0 {
+                    z = z - 1;
+                }
+                if z == 0 {
+                    fail "this Ogg Vorbis file has a codebook with too many codes" hint "the setup header does not read";
+                }
+                var res: i64 = vb_avail[z];
+                vb_avail[z] = 0;
+                code = res >> (32 - ln);
+                if z != ln {
+                    var y2: i64 = ln;
+                    while y2 > z {
+                        vb_avail[y2] = res + (1 << (32 - y2));
+                        y2 = y2 - 1;
+                    }
+                }
+            }
+            // into the tree
+            var node: i64 = 0;
+            var bp: i64 = ln - 1;
+            while bp >= 0 {
+                var slot: i64 = tree + 2 * node + ((code >> bp) & 1);
+                if bp == 0 {
+                    vb_ip[slot] = 0 - (i + 1);
+                } else {
+                    var c: i64 = vb_ip[slot];
+                    if c == 0 {
+                        c = nodes;
+                        nodes = nodes + 1;
+                        vb_ip[slot] = c;
+                    }
+                    node = c;
+                }
+                bp = bp - 1;
+            }
+        }
+        i = i + 1;
+    }
+    if used != 1 { cb_single[b] = 0; }
+    cb_dims[b] = dims;
+    cb_entries[b] = entries;
+    cb_tree[b] = tree;
+    return 1;
+}
+
+// an entry of book b, read from the packet; -1 at its end
+fn vb_decode(b: i64) -> i64 {
+    if cb_single[b] != 0 {
+        vb_read(1);
+        return cb_single[b] - 1;
+    }
+    var tree: i64 = cb_tree[b];
+    var node: i64 = 0;
+    while 1 == 1 {
+        var bit: i64 = vb_read(1);
+        if vb_eop == 1 { return -1; }
+        var c: i64 = vb_ip[tree + 2 * node + bit];
+        if c < 0 { return 0 - c - 1; }
+        if c == 0 { return -1; }
+        node = c;
+    }
+    return -1;
+}
+
+// floors (type 1)
+var fl_n: i64;
+var fl_parts: [i64; 64];
+var fl_pclass: [i64; 2048];      // 32 a floor
+var fl_cdim: [i64; 1024];        // 16 classes a floor
+var fl_csub: [i64; 1024];
+var fl_cmaster: [i64; 1024];
+var fl_subbooks: [i64; 8192];    // 8 a class
+var fl_mult: [i64; 64];
+var fl_nv: [i64; 64];
+var fl_x: [i64; 16384];          // 256 a floor
+var fl_lo: [i64; 16384];
+var fl_hi: [i64; 16384];
+var fl_order: [i64; 16384];
+
+fn vb_read_floor(f: i64) -> i64 {
+    if vb_read(16) != 1 {
+        fail "this Ogg Vorbis file uses floor 0" hint "Kron reads floor 1, which every encoder of the last twenty years writes";
+    }
+    var parts: i64 = vb_read(5);
+    fl_parts[f] = parts;
+    var maxc: i64 = -1;
+    var i: i64 = 0;
+    while i < parts {
+        var c: i64 = vb_read(4);
+        fl_pclass[f * 32 + i] = c;
+        if c > maxc { maxc = c; }
+        i = i + 1;
+    }
+    var c2: i64 = 0;
+    while c2 <= maxc {
+        var k: i64 = f * 16 + c2;
+        fl_cdim[k] = vb_read(3) + 1;
+        var sc: i64 = vb_read(2);
+        fl_csub[k] = sc;
+        fl_cmaster[k] = -1;
+        if sc > 0 { fl_cmaster[k] = vb_read(8); }
+        var j: i64 = 0;
+        while j < (1 << sc) {
+            fl_subbooks[k * 8 + j] = vb_read(8) - 1;
+            j = j + 1;
+        }
+        c2 = c2 + 1;
+    }
+    fl_mult[f] = vb_read(2) + 1;
+    var rb: i64 = vb_read(4);
+    var x: i64 = f * 256;
+    fl_x[x] = 0;
+    fl_x[x + 1] = 1 << rb;
+    var nv: i64 = 2;
+    i = 0;
+    while i < parts {
+        var cls: i64 = fl_pclass[f * 32 + i];
+        var j2: i64 = 0;
+        while j2 < fl_cdim[f * 16 + cls] {
+            fl_x[x + nv] = vb_read(rb);
+            nv = nv + 1;
+            j2 = j2 + 1;
+        }
+        i = i + 1;
+    }
+    fl_nv[f] = nv;
+    // each point's neighbours among the points before it, and the order of x
+    i = 2;
+    while i < nv {
+        var lo: i64 = 0;
+        var hi: i64 = 1;
+        var k2: i64 = 0;
+        var lox: i64 = -1;
+        var hix: i64 = 1000000;
+        while k2 < i {
+            var xk: i64 = fl_x[x + k2];
+            if xk < fl_x[x + i] && xk > lox {
+                lox = xk;
+                lo = k2;
+            }
+            if xk > fl_x[x + i] && xk < hix {
+                hix = xk;
+                hi = k2;
+            }
+            k2 = k2 + 1;
+        }
+        fl_lo[x + i] = lo;
+        fl_hi[x + i] = hi;
+        i = i + 1;
+    }
+    i = 0;
+    while i < nv {
+        fl_order[x + i] = i;
+        i = i + 1;
+    }
+    i = 1;
+    while i < nv {
+        var t: i64 = fl_order[x + i];
+        var j3: i64 = i - 1;
+        while j3 >= 0 && fl_x[x + fl_order[x + j3]] > fl_x[x + t] {
+            fl_order[x + j3 + 1] = fl_order[x + j3];
+            j3 = j3 - 1;
+        }
+        fl_order[x + j3 + 1] = t;
+        i = i + 1;
+    }
+    return 1;
+}
+
+// residues
+var rs_n: i64;
+var rs_type: [i64; 64];
+var rs_begin: [i64; 64];
+var rs_end: [i64; 64];
+var rs_psize: [i64; 64];
+var rs_ncls: [i64; 64];
+var rs_cbook: [i64; 64];
+var rs_books: [i64; 32768];     // 64 classes x 8 passes a residue
+
+fn vb_read_residue(r: i64) -> i64 {
+    rs_type[r] = vb_read(16);
+    if rs_type[r] > 2 {
+        fail "this Ogg Vorbis file has a residue of an unknown kind" hint "the setup header does not read";
+    }
+    rs_begin[r] = vb_read(24);
+    rs_end[r] = vb_read(24);
+    rs_psize[r] = vb_read(24) + 1;
+    rs_ncls[r] = vb_read(6) + 1;
+    rs_cbook[r] = vb_read(8);
+    var casc: [i64; 64];
+    var i: i64 = 0;
+    while i < rs_ncls[r] {
+        var low: i64 = vb_read(3);
+        var high: i64 = 0;
+        if vb_read(1) == 1 { high = vb_read(5); }
+        casc[i] = high * 8 + low;
+        i = i + 1;
+    }
+    i = 0;
+    while i < rs_ncls[r] {
+        var j: i64 = 0;
+        while j < 8 {
+            var bk: i64 = -1;
+            if (casc[i] & (1 << j)) != 0 { bk = vb_read(8); }
+            rs_books[(r * 64 + i) * 8 + j] = bk;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// mappings
+var mp_n: i64;
+var mp_submaps: [i64; 64];
+var mp_ncoup: [i64; 64];
+var mp_mag: [i64; 16384];       // 256 steps a mapping
+var mp_ang: [i64; 16384];
+var mp_mux: [i64; 512];         // 8 channels a mapping
+var mp_sfloor: [i64; 1024];     // 16 submaps a mapping
+var mp_sres: [i64; 1024];
+
+fn vb_read_mapping(m: i64) -> i64 {
+    if vb_read(16) != 0 {
+        fail "this Ogg Vorbis file has a mapping of an unknown kind" hint "the setup header does not read";
+    }
+    mp_submaps[m] = 1;
+    if vb_read(1) == 1 { mp_submaps[m] = vb_read(4) + 1; }
+    mp_ncoup[m] = 0;
+    var bits: i64 = vb_ilog(vb_ch - 1);
+    if vb_read(1) == 1 {
+        mp_ncoup[m] = vb_read(8) + 1;
+        var i: i64 = 0;
+        while i < mp_ncoup[m] {
+            mp_mag[m * 256 + i] = vb_read(bits);
+            mp_ang[m * 256 + i] = vb_read(bits);
+            i = i + 1;
+        }
+    }
+    if vb_read(2) != 0 {
+        fail "this Ogg Vorbis file has a damaged mapping" hint "the setup header does not read";
+    }
+    var c: i64 = 0;
+    while c < vb_ch {
+        mp_mux[m * 8 + c] = 0;
+        if mp_submaps[m] > 1 { mp_mux[m * 8 + c] = vb_read(4); }
+        c = c + 1;
+    }
+    var s: i64 = 0;
+    while s < mp_submaps[m] {
+        vb_read(8);
+        mp_sfloor[m * 16 + s] = vb_read(8);
+        mp_sres[m * 16 + s] = vb_read(8);
+        s = s + 1;
+    }
+    return 1;
+}
+
+// modes
+var md_n: i64;
+var md_block: [i64; 64];
+var md_map: [i64; 64];
+
+fn vb_read_headers() -> i64 {
+    // identification
+    vb_start(0);
+    if vb_read(8) != 1 {
+        fail "this is no Ogg Vorbis file" hint "its first packet is not a Vorbis identification header";
+    }
+    vb_read(24);
+    vb_read(24);
+    if vb_read(32) != 0 {
+        fail "this Ogg Vorbis file is of an unknown version" hint "Kron reads Vorbis I";
+    }
+    vb_ch = vb_read(8);
+    vb_rate = vb_read(32);
+    vb_read(32);
+    vb_read(32);
+    vb_read(32);
+    vb_bs0 = 1 << vb_read(4);
+    vb_bs1 = 1 << vb_read(4);
+    if vb_ch < 1 || vb_ch > 8 {
+        fail "this Ogg Vorbis file has more channels than Kron decodes" hint "from 1 to 8";
+    }
+    if vb_bs0 < 64 || vb_bs1 > 8192 || vb_bs0 > vb_bs1 {
+        fail "this Ogg Vorbis file has blocks of a size Kron does not decode" hint "from 64 to 8192";
+    }
+    // setup (the comments, packet 1, are skipped)
+    vb_start(2);
+    if vb_read(8) != 5 {
+        fail "this Ogg Vorbis file has no setup header" hint "its third packet is not one";
+    }
+    vb_read(24);
+    vb_read(24);
+    vb_in = 0;
+    vb_fn = 0;
+    cb_n = vb_read(8) + 1;
+    var i: i64 = 0;
+    while i < cb_n {
+        vb_read_book(i);
+        i = i + 1;
+    }
+    var nt: i64 = vb_read(6) + 1;
+    i = 0;
+    while i < nt {
+        vb_read(16);
+        i = i + 1;
+    }
+    fl_n = vb_read(6) + 1;
+    i = 0;
+    while i < fl_n {
+        vb_read_floor(i);
+        i = i + 1;
+    }
+    rs_n = vb_read(6) + 1;
+    i = 0;
+    while i < rs_n {
+        vb_read_residue(i);
+        i = i + 1;
+    }
+    mp_n = vb_read(6) + 1;
+    i = 0;
+    while i < mp_n {
+        vb_read_mapping(i);
+        i = i + 1;
+    }
+    md_n = vb_read(6) + 1;
+    i = 0;
+    while i < md_n {
+        md_block[i] = vb_read(1);
+        vb_read(16);
+        vb_read(16);
+        md_map[i] = vb_read(8);
+        i = i + 1;
+    }
+    if vb_read(1) != 1 || vb_eop == 1 {
+        fail "this Ogg Vorbis file has a damaged setup header" hint "it does not end where it should";
+    }
+    return 1;
+}
+
+// ------------------------------------------------- the decoder's state ---
+var vb_vec: [f64; 32768];       // each channel's spectrum, 4096 a channel
+var vb_flat: [f64; 32768];      // residue 2: the channels interleaved
+var vb_cls: [i64; 264192];      // classifications, VB_CLS a vector
+var vb_fy: [i64; 2048];         // each channel's floor values, 256 a channel
+var vb_fused: [i64; 8];         // 1 when the channel's floor is used
+var vb_nores: [i64; 8];
+var vb_ffy: [i64; 256];
+var vb_step2: [i64; 256];
+var vb_curve: [i64; 4096];
+var vb_cur: [f64; 65536];       // this block in time, 8192 a channel
+var vb_prev: [f64; 65536];
+var vb_prevn: i64;
+var vb_out: [f64; 32768];       // the frames of the last packet, 4096 a channel
+var vb_outn: i64;
+var vb_dec: [i64; 8];           // the channels of a submap
+var vb_skip: [i64; 8];
+var vb_vat: [i64; 8];           // where each vector starts in vb_vec / vb_flat
+var vb_inv_db: [f64; 256];
+
+// ---------------------------------------------------- the tables of a size ---
+// s 0 the short blocks, 1 the long ones; N their size
+var tw_c: [f64; 8192];          // cos, sin of 2 pi j / N, j < N/2: 4096 a size
+var tw_s: [f64; 8192];
+var pre_c: [f64; 8192];         // the turn before the FFT, k < N/2
+var pre_s: [f64; 8192];
+var post_c: [f64; 16384];       // and after it, t < N: 8192 a size
+var post_s: [f64; 16384];
+var slope: [f64; 8192];         // a window's rise over N/2
+var brev: [i64; 16384];         // bit reversal of N
+
+fn vb_tables(s: i64, n: i64) -> i64 {
+    var h: i64 = n / 2;
+    var bits: i64 = vb_ilog(n) - 1;
+    var j: i64 = 0;
+    var pi: f64 = 3.14159265358979323846;
+    while j < h {
+        var a: f64 = 2.0 * pi * (j as f64) / (n as f64);
+        tw_c[s * 4096 + j] = fcos(a);
+        tw_s[s * 4096 + j] = fsin(a);
+        // 2 pi n0 k / N, n0 = 1/2 + N/4: pi ((k + N/2 k) mod 2N) / N
+        var m: i64 = (j + h * j) % (2 * n);
+        var b: f64 = pi * (m as f64) / (n as f64);
+        pre_c[s * 4096 + j] = fcos(b);
+        pre_s[s * 4096 + j] = fsin(b);
+        var q: f64 = fsin(((j as f64) + 0.5) / (h as f64) * pi / 2.0);
+        slope[s * 4096 + j] = fsin(pi / 2.0 * q * q);
+        j = j + 1;
+    }
+    j = 0;
+    while j < n {
+        // pi (t + n0) / N = pi (2t + 1 + N/2) / 2N
+        var c: f64 = pi * ((2 * j + 1 + h) as f64) / ((2 * n) as f64);
+        post_c[s * 8192 + j] = fcos(c);
+        post_s[s * 8192 + j] = fsin(c);
+        var r: i64 = 0;
+        var x: i64 = j;
+        var k: i64 = 0;
+        while k < bits {
+            r = (r << 1) | (x & 1);
+            x = x >> 1;
+            k = k + 1;
+        }
+        brev[s * 8192 + j] = r;
+        j = j + 1;
+    }
+    return 1;
+}
+
+// ----------------------------------------------------- the inverse MDCT ---
+var fft_re: [f64; 8192];
+var fft_im: [f64; 8192];
+
+// spec[at .. at + N/2) of size class s, into out[at2 .. at2 + N), as
+//   y[t] = sum over k of X[k] cos(2 pi / N (t + 1/2 + N/4)(k + 1/2))
+// through Z[k] = X[k] e^(i 2 pi n0 k / N), S = its inverse DFT unscaled,
+// y[t] = Re(e^(i pi (t + n0) / N) S[t])
+fn vb_imdct(s: i64, n: i64, at: i64, at2: i64) -> i64 {
+    var h: i64 = n / 2;
+    var t: i64 = 0;
+    while t < n {
+        var src: i64 = brev[s * 8192 + t];
+        if src < h {
+            var x: f64 = vb_vec[at + src];
+            fft_re[t] = x * pre_c[s * 4096 + src];
+            fft_im[t] = x * pre_s[s * 4096 + src];
+        } else {
+            fft_re[t] = 0.0;
+            fft_im[t] = 0.0;
+        }
+        t = t + 1;
+    }
+    var len: i64 = 2;
+    while len <= n {
+        var half: i64 = len / 2;
+        var step: i64 = n / len;
+        var i: i64 = 0;
+        while i < n {
+            var j: i64 = 0;
+            while j < half {
+                var wc: f64 = tw_c[s * 4096 + j * step];
+                var ws: f64 = tw_s[s * 4096 + j * step];
+                var a: i64 = i + j;
+                var b: i64 = a + half;
+                var br: f64 = fft_re[b] * wc - fft_im[b] * ws;
+                var bi: f64 = fft_re[b] * ws + fft_im[b] * wc;
+                fft_re[b] = fft_re[a] - br;
+                fft_im[b] = fft_im[a] - bi;
+                fft_re[a] = fft_re[a] + br;
+                fft_im[a] = fft_im[a] + bi;
+                j = j + 1;
+            }
+            i = i + len;
+        }
+        len = len * 2;
+    }
+    t = 0;
+    while t < n {
+        vb_cur[at2 + t] = post_c[s * 8192 + t] * fft_re[t] - post_s[s * 8192 + t] * fft_im[t];
+        t = t + 1;
+    }
+    return 0;
+}
+
+// ------------------------------------------------------- audio packets ---
+
+fn vb_floor_decode(f: i64, c: i64) -> i64 {
+    if vb_read(1) == 0 { return 0; }
+    var ranges: [i64; 4];
+    ranges[0] = 256;
+    ranges[1] = 128;
+    ranges[2] = 86;
+    ranges[3] = 64;
+    var nb: i64 = vb_ilog(ranges[fl_mult[f] - 1] - 1);
+    var y: i64 = c * 256;
+    vb_fy[y] = vb_read(nb);
+    vb_fy[y + 1] = vb_read(nb);
+    var off: i64 = 2;
+    var i: i64 = 0;
+    while i < fl_parts[f] {
+        var cls: i64 = fl_pclass[f * 32 + i];
+        var k: i64 = f * 16 + cls;
+        var cdim: i64 = fl_cdim[k];
+        var cbits: i64 = fl_csub[k];
+        var csub: i64 = (1 << cbits) - 1;
+        var cval: i64 = 0;
+        if cbits > 0 { cval = vb_decode(fl_cmaster[k]); }
+        var j: i64 = 0;
+        while j < cdim {
+            var book: i64 = fl_subbooks[k * 8 + (cval & csub)];
+            cval = cval >> cbits;
+            if book >= 0 {
+                vb_fy[y + off + j] = vb_decode(book);
+            } else {
+                vb_fy[y + off + j] = 0;
+            }
+            j = j + 1;
+        }
+        off = off + cdim;
+        i = i + 1;
+    }
+    if vb_eop == 1 { return 0; }
+    return 1;
+}
+
+fn vb_render_point(x0: i64, y0: i64, x1: i64, y1: i64, x: i64) -> i64 {
+    var dy: i64 = y1 - y0;
+    var adx: i64 = x1 - x0;
+    var ady: i64 = dy;
+    if ady < 0 { ady = 0 - ady; }
+    var off: i64 = ady * (x - x0) / adx;
+    if dy < 0 { return y0 - off; }
+    return y0 + off;
+}
+
+fn vb_render_line(x0: i64, y0: i64, x1: i64, y1: i64, n2: i64) -> i64 {
+    var dy: i64 = y1 - y0;
+    var adx: i64 = x1 - x0;
+    var ady: i64 = dy;
+    if ady < 0 { ady = 0 - ady; }
+    var base: i64 = dy / adx;
+    var x: i64 = x0;
+    var y: i64 = y0;
+    var err: i64 = 0;
+    var sy: i64 = base + 1;
+    if dy < 0 { sy = base - 1; }
+    var ab: i64 = base;
+    if ab < 0 { ab = 0 - ab; }
+    ady = ady - ab * adx;
+    if x < n2 { vb_curve[x] = y; }
+    x = x0 + 1;
+    while x < x1 {
+        err = err + ady;
+        if err >= adx {
+            err = err - adx;
+            y = y + sy;
+        } else {
+            y = y + base;
+        }
+        if x < n2 { vb_curve[x] = y; }
+        x = x + 1;
+    }
+    return 0;
+}
+
+// the curve of floor f from channel c's values, into vb_curve[0 .. n2)
+fn vb_floor_curve(f: i64, c: i64, n2: i64) -> i64 {
+    var ranges: [i64; 4];
+    ranges[0] = 256;
+    ranges[1] = 128;
+    ranges[2] = 86;
+    ranges[3] = 64;
+    var rng: i64 = ranges[fl_mult[f] - 1];
+    var x: i64 = f * 256;
+    var y: i64 = c * 256;
+    var nv: i64 = fl_nv[f];
+    vb_ffy[0] = vb_fy[y];
+    vb_ffy[1] = vb_fy[y + 1];
+    vb_step2[0] = 1;
+    vb_step2[1] = 1;
+    var i: i64 = 2;
+    while i < nv {
+        var lo: i64 = fl_lo[x + i];
+        var hi: i64 = fl_hi[x + i];
+        var pred: i64 = vb_render_point(fl_x[x + lo], vb_ffy[lo], fl_x[x + hi], vb_ffy[hi], fl_x[x + i]);
+        var val: i64 = vb_fy[y + i];
+        var highroom: i64 = rng - pred;
+        var lowroom: i64 = pred;
+        var room: i64 = lowroom;
+        if highroom < lowroom { room = highroom; }
+        room = room * 2;
+        if val != 0 {
+            vb_step2[lo] = 1;
+            vb_step2[hi] = 1;
+            vb_step2[i] = 1;
+            if val >= room {
+                if highroom > lowroom {
+                    vb_ffy[i] = val - lowroom + pred;
+                } else {
+                    vb_ffy[i] = pred - val + highroom - 1;
+                }
+            } else {
+                if (val & 1) == 1 {
+                    vb_ffy[i] = pred - (val + 1) / 2;
+                } else {
+                    vb_ffy[i] = pred + val / 2;
+                }
+            }
+        } else {
+            vb_step2[i] = 0;
+            vb_ffy[i] = pred;
+        }
+        i = i + 1;
+    }
+    var mult: i64 = fl_mult[f];
+    var lx: i64 = 0;
+    var ly: i64 = vb_ffy[fl_order[x]] * mult;
+    var hx: i64 = 0;
+    var hy: i64 = 0;
+    i = 1;
+    while i < nv {
+        var k: i64 = fl_order[x + i];
+        if vb_step2[k] == 1 {
+            hy = vb_ffy[k] * mult;
+            hx = fl_x[x + k];
+            vb_render_line(lx, ly, hx, hy, n2);
+            lx = hx;
+            ly = hy;
+        }
+        i = i + 1;
+    }
+    if hx < n2 { vb_render_line(hx, hy, n2, hy, n2); }
+    return 0;
+}
+
+// residue r into nvec vectors of size size each (vb_vat, vb_skip), of type
+// rtype (0 or 1); into vb_flat when flat is 1
+fn vb_residue_core(r: i64, nvec: i64, size: i64, rtype: i64, flat: i64) -> i64 {
+    var cb: i64 = rs_cbook[r];
+    var cpc: i64 = cb_dims[cb];
+    var lb: i64 = rs_begin[r];
+    if lb > size { lb = size; }
+    var le: i64 = rs_end[r];
+    if le > size { le = size; }
+    var ntr: i64 = le - lb;
+    if ntr <= 0 { return 0; }
+    var psize: i64 = rs_psize[r];
+    var nparts: i64 = ntr / psize;
+    var ncls: i64 = rs_ncls[r];
+    if nparts + cpc > VB_CLS {
+        fail "this Ogg Vorbis file has more partitions than Kron decodes" hint "a residue of very small partitions";
+    }
+    var pass: i64 = 0;
+    while pass < 8 {
+        var pc: i64 = 0;
+        while pc < nparts {
+            if pass == 0 {
+                var j: i64 = 0;
+                while j < nvec {
+                    if vb_skip[j] == 0 {
+                        var tv: i64 = vb_decode(cb);
+                        if tv < 0 { return 0; }
+                        var q: i64 = cpc - 1;
+                        while q >= 0 {
+                            vb_cls[j * VB_CLS + q + pc] = tv % ncls;
+                            tv = tv / ncls;
+                            q = q - 1;
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+            var w: i64 = 0;
+            while w < cpc && pc < nparts {
+                var j2: i64 = 0;
+                while j2 < nvec {
+                    if vb_skip[j2] == 0 {
+                        var vqb: i64 = rs_books[(r * 64 + vb_cls[j2 * VB_CLS + pc]) * 8 + pass];
+                        if vqb >= 0 {
+                            var dims: i64 = cb_dims[vqb];
+                            var tab: i64 = cb_vq[vqb];
+                            var off: i64 = vb_vat[j2] + lb + pc * psize;
+                            if rtype == 0 {
+                                var stp: i64 = psize / dims;
+                                var s: i64 = 0;
+                                while s < stp {
+                                    var e: i64 = vb_decode(vqb);
+                                    if e < 0 || tab < 0 { return 0; }
+                                    var d: i64 = 0;
+                                    while d < dims {
+                                        if flat == 1 {
+                                            vb_flat[off + s + d * stp] = vb_flat[off + s + d * stp] + vb_fp[tab + e * dims + d];
+                                        } else {
+                                            vb_vec[off + s + d * stp] = vb_vec[off + s + d * stp] + vb_fp[tab + e * dims + d];
+                                        }
+                                        d = d + 1;
+                                    }
+                                    s = s + 1;
+                                }
+                            } else {
+                                var s2: i64 = 0;
+                                while s2 < psize {
+                                    var e2: i64 = vb_decode(vqb);
+                                    if e2 < 0 || tab < 0 { return 0; }
+                                    var d2: i64 = 0;
+                                    while d2 < dims && s2 < psize {
+                                        if flat == 1 {
+                                            vb_flat[off + s2] = vb_flat[off + s2] + vb_fp[tab + e2 * dims + d2];
+                                        } else {
+                                            vb_vec[off + s2] = vb_vec[off + s2] + vb_fp[tab + e2 * dims + d2];
+                                        }
+                                        s2 = s2 + 1;
+                                        d2 = d2 + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    j2 = j2 + 1;
+                }
+                w = w + 1;
+                pc = pc + 1;
+            }
+        }
+        pass = pass + 1;
+    }
+    return 0;
+}
+
+// residue r of submap s's channels (vb_dec, nch of them), size n2 each
+fn vb_residue(r: i64, nch: i64, n2: i64) -> i64 {
+    var j: i64 = 0;
+    if rs_type[r] == 2 {
+        var any: i64 = 0;
+        while j < nch {
+            if vb_nores[vb_dec[j]] == 0 { any = 1; }
+            j = j + 1;
+        }
+        if any == 0 { return 0; }
+        var total: i64 = n2 * nch;
+        var i: i64 = 0;
+        while i < total {
+            vb_flat[i] = 0.0;
+            i = i + 1;
+        }
+        vb_skip[0] = 0;
+        vb_vat[0] = 0;
+        vb_residue_core(r, 1, total, 1, 1);
+        i = 0;
+        while i < n2 {
+            j = 0;
+            while j < nch {
+                vb_vec[vb_dec[j] * 4096 + i] = vb_flat[i * nch + j];
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+    while j < nch {
+        vb_skip[j] = vb_nores[vb_dec[j]];
+        vb_vat[j] = vb_dec[j] * 4096;
+        j = j + 1;
+    }
+    return vb_residue_core(r, nch, n2, rs_type[r], 0);
+}
+
+// the next audio packet: the frames it gives (0 for the first), -1 at the end
+fn vorbis_next() -> i64 {
+    while vb_next_pk < ogg_count() {
+        var got: i64 = vb_packet(vb_next_pk);
+        vb_next_pk = vb_next_pk + 1;
+        if got >= 0 { return got; }
+    }
+    return -1;
+}
+
+// packet p: the frames it gives, -1 when it is not an audio packet
+fn vb_packet(p: i64) -> i64 {
+    vb_start(p);
+    if vb_read(1) != 0 { return -1; }
+    var mode: i64 = vb_read(vb_ilog(md_n - 1));
+    if mode >= md_n { return -1; }
+    var blockflag: i64 = md_block[mode];
+    var n: i64 = vb_bs0;
+    var s: i64 = 0;
+    if blockflag == 1 {
+        n = vb_bs1;
+        s = 1;
+    }
+    var n2: i64 = n / 2;
+    var pf: i64 = 0;
+    var nf: i64 = 0;
+    if blockflag == 1 {
+        pf = vb_read(1);
+        nf = vb_read(1);
+    }
+    var m: i64 = md_map[mode];
+    var c: i64 = 0;
+    while c < vb_ch {
+        var f: i64 = mp_sfloor[m * 16 + mp_mux[m * 8 + c]];
+        vb_fused[c] = vb_floor_decode(f, c);
+        vb_nores[c] = 1 - vb_fused[c];
+        var i: i64 = 0;
+        while i < n2 {
+            vb_vec[c * 4096 + i] = 0.0;
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    var k: i64 = 0;
+    while k < mp_ncoup[m] {
+        var a: i64 = mp_mag[m * 256 + k];
+        var b: i64 = mp_ang[m * 256 + k];
+        if vb_nores[a] == 0 || vb_nores[b] == 0 {
+            vb_nores[a] = 0;
+            vb_nores[b] = 0;
+        }
+        k = k + 1;
+    }
+    var sm: i64 = 0;
+    while sm < mp_submaps[m] {
+        var nch: i64 = 0;
+        c = 0;
+        while c < vb_ch {
+            if mp_mux[m * 8 + c] == sm {
+                vb_dec[nch] = c;
+                nch = nch + 1;
+            }
+            c = c + 1;
+        }
+        vb_residue(mp_sres[m * 16 + sm], nch, n2);
+        sm = sm + 1;
+    }
+    // channel coupling, undone from the last step
+    k = mp_ncoup[m] - 1;
+    while k >= 0 {
+        var ma: i64 = mp_mag[m * 256 + k] * 4096;
+        var an: i64 = mp_ang[m * 256 + k] * 4096;
+        var j: i64 = 0;
+        while j < n2 {
+            var mv: f64 = vb_vec[ma + j];
+            var av: f64 = vb_vec[an + j];
+            if mv > 0.0 {
+                if av > 0.0 {
+                    vb_vec[an + j] = mv - av;
+                } else {
+                    vb_vec[an + j] = mv;
+                    vb_vec[ma + j] = mv + av;
+                }
+            } else {
+                if av > 0.0 {
+                    vb_vec[an + j] = mv + av;
+                } else {
+                    vb_vec[an + j] = mv;
+                    vb_vec[ma + j] = mv - av;
+                }
+            }
+            j = j + 1;
+        }
+        k = k - 1;
+    }
+    // the floors times the residues, into time, windowed
+    var ls: i64 = 0;
+    var lw: i64 = n2;
+    var lsz: i64 = 1;
+    if blockflag == 1 && pf == 0 {
+        ls = n / 4 - vb_bs0 / 4;
+        lw = vb_bs0 / 2;
+        lsz = 0;
+    }
+    var rs: i64 = n2;
+    var rw: i64 = n2;
+    var rsz: i64 = 1;
+    if blockflag == 1 && nf == 0 {
+        rs = n * 3 / 4 - vb_bs0 / 4;
+        rw = vb_bs0 / 2;
+        rsz = 0;
+    }
+    if blockflag == 0 {
+        lsz = 0;
+        rsz = 0;
+    }
+    c = 0;
+    while c < vb_ch {
+        var at: i64 = c * 4096;
+        var i2: i64 = 0;
+        if vb_fused[c] == 1 {
+            var fl: i64 = mp_sfloor[m * 16 + mp_mux[m * 8 + c]];
+            vb_floor_curve(fl, c, n2);
+            while i2 < n2 {
+                var v: i64 = vb_curve[i2];
+                if v < 0 { v = 0; }
+                if v > 255 { v = 255; }
+                vb_vec[at + i2] = vb_vec[at + i2] * vb_inv_db[v];
+                i2 = i2 + 1;
+            }
+        } else {
+            while i2 < n2 {
+                vb_vec[at + i2] = 0.0;
+                i2 = i2 + 1;
+            }
+        }
+        var at2: i64 = c * 8192;
+        vb_imdct(s, n, at, at2);
+        var t: i64 = 0;
+        while t < n {
+            var wv: f64 = 0.0;
+            if t >= ls && t < ls + lw {
+                wv = slope[lsz * 4096 + t - ls];
+            } else if t >= ls + lw && t < rs {
+                wv = 1.0;
+            } else if t >= rs && t < rs + rw {
+                wv = slope[rsz * 4096 + (rw - 1 - (t - rs))];
+            }
+            vb_cur[at2 + t] = vb_cur[at2 + t] * wv;
+            t = t + 1;
+        }
+        c = c + 1;
+    }
+    // from the middle of the last block to the middle of this one
+    var got: i64 = 0;
+    if vb_prevn > 0 {
+        got = vb_prevn / 4 + n / 4;
+        c = 0;
+        while c < vb_ch {
+            var t2: i64 = 0;
+            while t2 < got {
+                var pi: i64 = vb_prevn / 2 + t2;
+                var ci: i64 = n / 4 - vb_prevn / 4 + t2;
+                var sum: f64 = 0.0;
+                if pi >= 0 && pi < vb_prevn { sum = sum + vb_prev[c * 8192 + pi]; }
+                if ci >= 0 && ci < n { sum = sum + vb_cur[c * 8192 + ci]; }
+                vb_out[c * 4096 + t2] = sum;
+                t2 = t2 + 1;
+            }
+            c = c + 1;
+        }
+    }
+    c = 0;
+    while c < vb_ch {
+        var t3: i64 = 0;
+        while t3 < n {
+            vb_prev[c * 8192 + t3] = vb_cur[c * 8192 + t3];
+            t3 = t3 + 1;
+        }
+        c = c + 1;
+    }
+    vb_prevn = n;
+    if vb_total > 0 && vb_done + got > vb_total {
+        got = vb_total - vb_done;
+        if got < 0 { got = 0; }
+    }
+    vb_done = vb_done + got;
+    vb_outn = got;
+    return got;
+}
+
+// the 256 steps of floor 1, from -140 dB to 0: the table of the Vorbis I
+// specification (10.1), as libvorbis and ffmpeg have it
+fn vb_inv_db_init() -> i64 {
+    vb_inv_db[0] = 1.0649863213529898e-07;
+    vb_inv_db[1] = 1.1341951022814101e-07;
+    vb_inv_db[2] = 1.2079014766186447e-07;
+    vb_inv_db[3] = 1.2863978327004588e-07;
+    vb_inv_db[4] = 1.3699950329737476e-07;
+    vb_inv_db[5] = 1.459025043004658e-07;
+    vb_inv_db[6] = 1.553840860424316e-07;
+    vb_inv_db[7] = 1.654818078122844e-07;
+    vb_inv_db[8] = 1.7623574422032107e-07;
+    vb_inv_db[9] = 1.8768855625239667e-07;
+    vb_inv_db[10] = 1.998856049567621e-07;
+    vb_inv_db[11] = 2.128753067154321e-07;
+    vb_inv_db[12] = 2.2670913324418507e-07;
+    vb_inv_db[13] = 2.4144196686393116e-07;
+    vb_inv_db[14] = 2.5713222839840455e-07;
+    vb_inv_db[15] = 2.738421187586937e-07;
+    vb_inv_db[16] = 2.9163791737119027e-07;
+    vb_inv_db[17] = 3.105902237621194e-07;
+    vb_inv_db[18] = 3.3077409966608684e-07;
+    vb_inv_db[19] = 3.5226966588197683e-07;
+    vb_inv_db[20] = 3.7516213069466176e-07;
+    vb_inv_db[21] = 3.9954230146577174e-07;
+    vb_inv_db[22] = 4.2550681200737017e-07;
+    vb_inv_db[23] = 4.531586341727234e-07;
+    vb_inv_db[24] = 4.826074473385233e-07;
+    vb_inv_db[25] = 5.139700078871101e-07;
+    vb_inv_db[26] = 5.473706323755323e-07;
+    vb_inv_db[27] = 5.829418796565733e-07;
+    vb_inv_db[28] = 6.208247214090079e-07;
+    vb_inv_db[29] = 6.611693947888853e-07;
+    vb_inv_db[30] = 7.041359140202985e-07;
+    vb_inv_db[31] = 7.498946388295735e-07;
+    vb_inv_db[32] = 7.98627013409714e-07;
+    vb_inv_db[33] = 8.505263053848466e-07;
+    vb_inv_db[34] = 9.057982879312476e-07;
+    vb_inv_db[35] = 9.646621492720442e-07;
+    vb_inv_db[36] = 1.0273513453284977e-06;
+    vb_inv_db[37] = 1.0941143955278676e-06;
+    vb_inv_db[38] = 1.1652160765152075e-06;
+    vb_inv_db[39] = 1.2409384453349048e-06;
+    vb_inv_db[40] = 1.3215816352385445e-06;
+    vb_inv_db[41] = 1.4074654473006376e-06;
+    vb_inv_db[42] = 1.498930487286998e-06;
+    vb_inv_db[43] = 1.5963394162099576e-06;
+    vb_inv_db[44] = 1.7000785419440945e-06;
+    vb_inv_db[45] = 1.8105591834682855e-06;
+    vb_inv_db[46] = 1.9282194898551097e-06;
+    vb_inv_db[47] = 2.0535260318865767e-06;
+    vb_inv_db[48] = 2.1869757347303675e-06;
+    vb_inv_db[49] = 2.3290976969292387e-06;
+    vb_inv_db[50] = 2.4804558051982895e-06;
+    vb_inv_db[51] = 2.6416496439196635e-06;
+    vb_inv_db[52] = 2.813319042616058e-06;
+    vb_inv_db[53] = 2.9961443033243995e-06;
+    vb_inv_db[54] = 3.190850520695676e-06;
+    vb_inv_db[55] = 3.3982100831053685e-06;
+    vb_inv_db[56] = 3.619044946390204e-06;
+    vb_inv_db[57] = 3.854230726574315e-06;
+    vb_inv_db[58] = 4.1047005652217194e-06;
+    vb_inv_db[59] = 4.371447175799403e-06;
+    vb_inv_db[60] = 4.655528300645528e-06;
+    vb_inv_db[61] = 4.958070803695591e-06;
+    vb_inv_db[62] = 5.280273853713879e-06;
+    vb_inv_db[63] = 5.623416200251086e-06;
+    vb_inv_db[64] = 5.98885708313901e-06;
+    vb_inv_db[65] = 6.3780466916796286e-06;
+    vb_inv_db[66] = 6.792528438381851e-06;
+    vb_inv_db[67] = 7.233945325424429e-06;
+    vb_inv_db[68] = 7.704047675360925e-06;
+    vb_inv_db[69] = 8.204699952329975e-06;
+    vb_inv_db[70] = 8.737887583265547e-06;
+    vb_inv_db[71] = 9.305725143349264e-06;
+    vb_inv_db[72] = 9.910463631968014e-06;
+    vb_inv_db[73] = 1.0554501386650372e-05;
+    vb_inv_db[74] = 1.1240392268518917e-05;
+    vb_inv_db[75] = 1.197085566673195e-05;
+    vb_inv_db[76] = 1.2748789231409319e-05;
+    vb_inv_db[77] = 1.3577277968579438e-05;
+    vb_inv_db[78] = 1.4459606063610408e-05;
+    vb_inv_db[79] = 1.539927143312525e-05;
+    vb_inv_db[80] = 1.6400004824390635e-05;
+    vb_inv_db[81] = 1.7465768905822188e-05;
+    vb_inv_db[82] = 1.8600792827783152e-05;
+    vb_inv_db[83] = 1.9809576770057902e-05;
+    vb_inv_db[84] = 2.109691376972478e-05;
+    vb_inv_db[85] = 2.246791154902894e-05;
+    vb_inv_db[86] = 2.3928001610329375e-05;
+    vb_inv_db[87] = 2.5482977434876375e-05;
+    vb_inv_db[88] = 2.713900539674796e-05;
+    vb_inv_db[89] = 2.8902650228701532e-05;
+    vb_inv_db[90] = 3.0780909582972527e-05;
+    vb_inv_db[91] = 3.2781226764200255e-05;
+    vb_inv_db[92] = 3.491153256618418e-05;
+    vb_inv_db[93] = 3.7180281651671976e-05;
+    vb_inv_db[94] = 3.959646710427478e-05;
+    vb_inv_db[95] = 4.216966772219166e-05;
+    vb_inv_db[96] = 4.491009167395532e-05;
+    vb_inv_db[97] = 4.7828601964283735e-05;
+    vb_inv_db[98] = 5.093677464174107e-05;
+    vb_inv_db[99] = 5.424693154054694e-05;
+    vb_inv_db[100] = 5.777220212621614e-05;
+    vb_inv_db[101] = 6.152656715130433e-05;
+    vb_inv_db[102] = 6.552490958711132e-05;
+    vb_inv_db[103] = 6.978308374527842e-05;
+    vb_inv_db[104] = 7.431798439938575e-05;
+    vb_inv_db[105] = 7.914758316474035e-05;
+    vb_inv_db[106] = 8.429103763774037e-05;
+    vb_inv_db[107] = 8.976874960353598e-05;
+    vb_inv_db[108] = 9.560242324369028e-05;
+    vb_inv_db[109] = 0.00010181521065533161;
+    vb_inv_db[110] = 0.00010843174095498398;
+    vb_inv_db[111] = 0.0001154782366938889;
+    vb_inv_db[112] = 0.00012298267392907292;
+    vb_inv_db[113] = 0.00013097477494738996;
+    vb_inv_db[114] = 0.00013948624837212265;
+    vb_inv_db[115] = 0.00014855085464660078;
+    vb_inv_db[116] = 0.00015820453700143844;
+    vb_inv_db[117] = 0.000168485552421771;
+    vb_inv_db[118] = 0.00017943468992598355;
+    vb_inv_db[119] = 0.00019109535787720233;
+    vb_inv_db[120] = 0.00020351381681393832;
+    vb_inv_db[121] = 0.00021673929586540908;
+    vb_inv_db[122] = 0.0002308242255821824;
+    vb_inv_db[123] = 0.00024582448531873524;
+    vb_inv_db[124] = 0.0002617995487526059;
+    vb_inv_db[125] = 0.0002788127458188683;
+    vb_inv_db[126] = 0.0002969315683003515;
+    vb_inv_db[127] = 0.00031622787355445325;
+    vb_inv_db[128] = 0.00033677814644761384;
+    vb_inv_db[129] = 0.0003586638777051121;
+    vb_inv_db[130] = 0.0003819718840532005;
+    vb_inv_db[131] = 0.0004067945701535791;
+    vb_inv_db[132] = 0.00043323036516085267;
+    vb_inv_db[133] = 0.0004613841010723263;
+    vb_inv_db[134] = 0.000491367478389293;
+    vb_inv_db[135] = 0.0005232992698438466;
+    vb_inv_db[136] = 0.0005573062226176262;
+    vb_inv_db[137] = 0.0005935230874456465;
+    vb_inv_db[138] = 0.0006320935790427029;
+    vb_inv_db[139] = 0.000673170608934015;
+    vb_inv_db[140] = 0.0007169169839471579;
+    vb_inv_db[141] = 0.0007635062793269753;
+    vb_inv_db[142] = 0.0008131232461892068;
+    vb_inv_db[143] = 0.0008659645682200789;
+    vb_inv_db[144] = 0.0009222398512065411;
+    vb_inv_db[145] = 0.0009821722051128745;
+    vb_inv_db[146] = 0.001045999233610928;
+    vb_inv_db[147] = 0.0011139742564409971;
+    vb_inv_db[148] = 0.0011863665422424674;
+    vb_inv_db[149] = 0.001263463287614286;
+    vb_inv_db[150] = 0.0013455701991915703;
+    vb_inv_db[151] = 0.0014330128906294703;
+    vb_inv_db[152] = 0.0015261381631717086;
+    vb_inv_db[153] = 0.00162531528621912;
+    vb_inv_db[154] = 0.0017309373943135142;
+    vb_inv_db[155] = 0.0018434234661981463;
+    vb_inv_db[156] = 0.001963219605386257;
+    vb_inv_db[157] = 0.002090800553560257;
+    vb_inv_db[158] = 0.002226672600954771;
+    vb_inv_db[159] = 0.002371374284848571;
+    vb_inv_db[160] = 0.002525479532778263;
+    vb_inv_db[161] = 0.0026895992923527956;
+    vb_inv_db[162] = 0.0028643847908824682;
+    vb_inv_db[163] = 0.0030505286995321512;
+    vb_inv_db[164] = 0.0032487690914422274;
+    vb_inv_db[165] = 0.0034598924685269594;
+    vb_inv_db[166] = 0.003684735856950283;
+    vb_inv_db[167] = 0.003924190532416105;
+    vb_inv_db[168] = 0.0041792066767811775;
+    vb_inv_db[169] = 0.004450794775038958;
+    vb_inv_db[170] = 0.004740032833069563;
+    vb_inv_db[171] = 0.005048066843301058;
+    vb_inv_db[172] = 0.005376118700951338;
+    vb_inv_db[173] = 0.005725488997995853;
+    vb_inv_db[174] = 0.0060975635424256325;
+    vb_inv_db[175] = 0.006493817549198866;
+    vb_inv_db[176] = 0.006915822625160217;
+    vb_inv_db[177] = 0.007365251425653696;
+    vb_inv_db[178] = 0.00784388743340969;
+    vb_inv_db[179] = 0.008353627286851406;
+    vb_inv_db[180] = 0.008896492421627045;
+    vb_inv_db[181] = 0.009474636986851692;
+    vb_inv_db[182] = 0.010090352036058903;
+    vb_inv_db[183] = 0.010746080428361893;
+    vb_inv_db[184] = 0.01144442055374384;
+    vb_inv_db[185] = 0.012188144028186798;
+    vb_inv_db[186] = 0.012980197556316853;
+    vb_inv_db[187] = 0.013823725283145905;
+    vb_inv_db[188] = 0.0147220678627491;
+    vb_inv_db[189] = 0.01567879132926464;
+    vb_inv_db[190] = 0.016697686165571213;
+    vb_inv_db[191] = 0.017782796174287796;
+    vb_inv_db[192] = 0.018938422203063965;
+    vb_inv_db[193] = 0.020169148221611977;
+    vb_inv_db[194] = 0.021479854360222816;
+    vb_inv_db[195] = 0.02287573553621769;
+    vb_inv_db[196] = 0.02436232939362526;
+    vb_inv_db[197] = 0.025945531204342842;
+    vb_inv_db[198] = 0.027631618082523346;
+    vb_inv_db[199] = 0.02942727692425251;
+    vb_inv_db[200] = 0.031339626759290695;
+    vb_inv_db[201] = 0.03337625041604042;
+    vb_inv_db[202] = 0.0355452261865139;
+    vb_inv_db[203] = 0.037855155766010284;
+    vb_inv_db[204] = 0.04031519964337349;
+    vb_inv_db[205] = 0.04293510690331459;
+    vb_inv_db[206] = 0.045725274831056595;
+    vb_inv_db[207] = 0.04869675636291504;
+    vb_inv_db[208] = 0.05186134949326515;
+    vb_inv_db[209] = 0.05523158982396126;
+    vb_inv_db[210] = 0.058820851147174835;
+    vb_inv_db[211] = 0.06264336407184601;
+    vb_inv_db[212] = 0.06671427935361862;
+    vb_inv_db[213] = 0.0710497498512268;
+    vb_inv_db[214] = 0.07566696405410767;
+    vb_inv_db[215] = 0.08058422803878784;
+    vb_inv_db[216] = 0.08582104742527008;
+    vb_inv_db[217] = 0.09139817953109741;
+    vb_inv_db[218] = 0.0973377451300621;
+    vb_inv_db[219] = 0.10366330295801163;
+    vb_inv_db[220] = 0.11039993166923523;
+    vb_inv_db[221] = 0.11757434159517288;
+    vb_inv_db[222] = 0.12521497905254364;
+    vb_inv_db[223] = 0.1333521455526352;
+    vb_inv_db[224] = 0.142018124461174;
+    vb_inv_db[225] = 0.15124726295471191;
+    vb_inv_db[226] = 0.16107617318630219;
+    vb_inv_db[227] = 0.17154380679130554;
+    vb_inv_db[228] = 0.18269167840480804;
+    vb_inv_db[229] = 0.19456401467323303;
+    vb_inv_db[230] = 0.20720787346363068;
+    vb_inv_db[231] = 0.22067342698574066;
+    vb_inv_db[232] = 0.23501402139663696;
+    vb_inv_db[233] = 0.2502865493297577;
+    vb_inv_db[234] = 0.26655158400535583;
+    vb_inv_db[235] = 0.28387361764907837;
+    vb_inv_db[236] = 0.30232131481170654;
+    vb_inv_db[237] = 0.32196786999702454;
+    vb_inv_db[238] = 0.342891126871109;
+    vb_inv_db[239] = 0.36517414450645447;
+    vb_inv_db[240] = 0.38890519738197327;
+    vb_inv_db[241] = 0.4141784608364105;
+    vb_inv_db[242] = 0.44109413027763367;
+    vb_inv_db[243] = 0.46975889801979065;
+    vb_inv_db[244] = 0.5002864599227905;
+    vb_inv_db[245] = 0.5327979326248169;
+    vb_inv_db[246] = 0.567422091960907;
+    vb_inv_db[247] = 0.6042963862419128;
+    vb_inv_db[248] = 0.6435669660568237;
+    vb_inv_db[249] = 0.6853895783424377;
+    vb_inv_db[250] = 0.72993004322052;
+    vb_inv_db[251] = 0.7773650288581848;
+    vb_inv_db[252] = 0.8278825879096985;
+    vb_inv_db[253] = 0.8816830515861511;
+    vb_inv_db[254] = 0.9389798045158386;
+    vb_inv_db[255] = 1.0;
+    return 0;
+}
+
+// ------------------------------------------------------------- the front ---
+fn vorbis_open(path: i64) -> i64 {
+    if ogg_open(path) == 0 {
+        fail "this Ogg file could not be read" hint "check the path, and that it is an .ogg";
+    }
+    if ogg_count() < 3 {
+        fail "this Ogg file has no Vorbis in it" hint "it needs its three headers";
+    }
+    vb_read_headers();
+    vb_tables(0, vb_bs0);
+    vb_tables(1, vb_bs1);
+    vb_inv_db_init();
+    vb_total = 0;
+    var i: i64 = 0;
+    while i < ogg_count() {
+        if ogg_granule(i) > vb_total { vb_total = ogg_granule(i); }
+        i = i + 1;
+    }
+    vb_next_pk = 3;
+    vb_done = 0;
+    vb_prevn = 0;
+    vb_outn = 0;
+    return 1;
+}
+
+fn vorbis_channels() -> i64 { return vb_ch; }
+
+fn vorbis_rate() -> i64 { return vb_rate; }
+
+fn vorbis_length() -> i64 { return vb_total; }
+
+// sample i of channel c of the last packet, about -1 to 1
+fn vorbis_sample(c: i64, i: i64) -> f64 {
+    if c < 0 || c >= vb_ch || i < 0 || i >= vb_outn {
+        fail "no such sample" hint "a channel below vorbis_channels(), i below what vorbis_next gave";
+    }
+    return vb_out[c * 4096 + i];
+}
+
+// frame i of the last packet, as one side of stereo (0 left, 1 right). The
+// channels are in Vorbis's order (its specification, 4.3.9): with more than
+// two, the centre and the rear of that side are mixed in at -3 dB and the
+// low-frequency channel is left out; the sum is scaled not to clip.
+fn vb_side(i: i64, side: i64) -> f64 {
+    if vb_ch == 1 { return vb_out[i]; }
+    if vb_ch == 2 { return vb_out[side * 4096 + i]; }
+    var front: i64 = side * 2;          // L 0, R 2, with the centre at 1
+    var center: i64 = 1;
+    var rear: i64 = -1;
+    var rear2: i64 = -1;
+    if vb_ch == 4 {
+        front = side;                    // FL FR RL RR
+        center = -1;
+        rear = 2 + side;
+    }
+    if vb_ch == 5 || vb_ch == 6 { rear = 3 + side; }
+    if vb_ch == 7 {
+        rear = 3 + side;                 // FL C FR SL SR RC LFE
+        rear2 = 5;
+    }
+    if vb_ch == 8 {
+        rear = 3 + side;                 // FL C FR SL SR RL RR LFE
+        rear2 = 5 + side;
+    }
+    var x: f64 = vb_out[front * 4096 + i];
+    var w: f64 = 1.0;
+    if center >= 0 {
+        x = x + 0.7071 * vb_out[center * 4096 + i];
+        w = w + 0.7071;
+    }
+    if rear >= 0 {
+        x = x + 0.7071 * vb_out[rear * 4096 + i];
+        w = w + 0.7071;
+    }
+    if rear2 >= 0 {
+        x = x + 0.7071 * vb_out[rear2 * 4096 + i];
+        w = w + 0.7071;
+    }
+    return x / w;
+}
+
+// the file open, decoded from where it is to its end, as stereo i16 frames
+// at rate: the block of the heap and how many frames it holds
+fn vorbis_to_stereo(rate: i64) -> (i64, i64) {
+    if rate < 8000 || rate > 192000 {
+        fail "no such sample rate" hint "48000 or 44100";
+    }
+    var nin: i64 = vb_total - vb_done;
+    if nin <= 0 { nin = 1; }
+    // the file's frames, stereo i16 at its own rate
+    var src: i64 = hp_alloc(nin * 4 + 8);
+    if src == 0 {
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    var have: i64 = 0;
+    var n: i64 = vorbis_next();
+    while n >= 0 {
+        var i: i64 = 0;
+        while i < n && have < nin {
+            var c: i64 = 0;
+            while c < 2 {
+                var x: f64 = vb_side(i, c) * 32767.0;
+                if x > 32767.0 { x = 32767.0; }
+                if x < -32768.0 { x = -32768.0; }
+                var v: i64 = x as i64;
+                raw { poke16(src + have * 4 + c * 2, v); }
+                c = c + 1;
+            }
+            have = have + 1;
+            i = i + 1;
+        }
+        n = vorbis_next();
+    }
+    if have == 0 {
+        hp_release(src);
+        fail "this Ogg Vorbis file has no sound in it" hint "it has headers but no audio";
+    }
+    // to the rate asked for, by straight lines between frames
+    var nout: i64 = have * rate / vb_rate;
+    var p: i64 = hp_alloc(nout * 4 + 8);
+    if p == 0 {
+        hp_release(src);
+        fail "no memory for the sound" hint "a shorter one";
+    }
+    var o: i64 = 0;
+    while o < nout {
+        var pos: i64 = o * vb_rate * 65536 / rate;
+        var k: i64 = pos >> 16;
+        var fr: i64 = pos & 65535;
+        var k2: i64 = k + 1;
+        if k2 >= have { k2 = have - 1; }
+        var c2: i64 = 0;
+        while c2 < 2 {
+            var a: i64 = au_le16(src + k * 4 + c2 * 2);
+            var b: i64 = au_le16(src + k2 * 4 + c2 * 2);
+            var w: i64 = a + (b - a) * fr / 65536;
+            raw { poke16(p + o * 4 + c2 * 2, w); }
+            c2 = c2 + 1;
+        }
+        o = o + 1;
+    }
+    hp_release(src);
+    return p, nout;
+}
+
+// the whole file as a sound of std_audio: stereo, at the device's rate
+fn audio_load_ogg(path: i64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    vorbis_open(path);
+    var p, frames = vorbis_to_stereo(au_rate);
+    return au_add_sound(p, frames);
+}

@@ -11341,18 +11341,21 @@ prs_multiplicative:
 prs_cast:
     push rbp
     mov rbp, rsp
-    sub rsp, 80
-    mov [rbp-48], rbx
-    mov [rbp-40], r12
+    sub rsp, 192
+    mov [rbp-160], rbx
+    mov [rbp-152], r12
+    mov [rbp-144], r13
+    mov [rbp-136], r14
+    mov [rbp-128], r15
     sub rsp, 32
     call prs_unary
     add rsp, 32
-    mov r12, rax
+    mov r15, rax
     mov rax, 0
     mov [rbp-16], rax
     mov rax, 0
-    mov rbx, rax
-    cmp r12, 0
+    mov r14, rax
+    cmp r15, 0
     jne .L1116
     mov rax, 0
     jmp .__ret_1115
@@ -11380,6 +11383,26 @@ prs_cast:
     sub rsp, 32
     call prs_type_width
     add rsp, 32
+    mov r14, rax
+    mov rax, [rel __g_parser_par_last_is_float]
+    mov [rbp-32], rax
+    mov rax, [rel __g_parser_par_last_is_unsigned]
+    mov [rbp-40], rax
+    mov rax, [rel __g_parser_par_last_vtag]
+    mov [rbp-48], rax
+    mov rax, [rel __g_parser_par_last_array_len]
+    mov [rbp-56], rax
+    mov rax, [rel __g_parser_par_last_arr_elem]
+    mov [rbp-64], rax
+    mov rax, [rel __g_parser_par_last_ptr_elem]
+    mov [rbp-72], rax
+    mov rax, [rel __g_parser_par_last_row_len]
+    mov [rbp-80], rax
+    mov rax, [rel __g_parser_par_last_is_slice]
+    mov r13, rax
+    mov rax, [rel __g_parser_par_last_arr_tok]
+    mov r12, rax
+    mov rax, [rel __g_parser_par_last_ptr_tok]
     mov rbx, rax
     mov rax, 0
     mov [rel __g_parser_par_last_is_float], rax
@@ -11410,11 +11433,11 @@ prs_cast:
     jmp .L1124
 .L1123:
 .L1124:
-    mov rax, r12
+    mov rax, r15
     mov rdx, [rbp-16]
     add rdx, 16
     mov [rdx], rax
-    mov rax, rbx
+    mov rax, r14
     mov rdx, [rbp-16]
     add rdx, 40
     mov [rdx], rax
@@ -11425,15 +11448,38 @@ prs_cast:
     add rdx, 38
     mov [rdx], ax
     mov rax, [rbp-16]
-    mov r12, rax
+    mov r15, rax
+    mov rax, [rbp-32]
+    mov [rel __g_parser_par_last_is_float], rax
+    mov rax, [rbp-40]
+    mov [rel __g_parser_par_last_is_unsigned], rax
+    mov rax, [rbp-48]
+    mov [rel __g_parser_par_last_vtag], rax
+    mov rax, [rbp-56]
+    mov [rel __g_parser_par_last_array_len], rax
+    mov rax, [rbp-64]
+    mov [rel __g_parser_par_last_arr_elem], rax
+    mov rax, [rbp-72]
+    mov [rel __g_parser_par_last_ptr_elem], rax
+    mov rax, [rbp-80]
+    mov [rel __g_parser_par_last_row_len], rax
+    mov rax, r13
+    mov [rel __g_parser_par_last_is_slice], rax
+    mov rax, r12
+    mov [rel __g_parser_par_last_arr_tok], rax
+    mov rax, rbx
+    mov [rel __g_parser_par_last_ptr_tok], rax
 .L1120:
     jmp .L1118
 .L1119:
-    mov rax, r12
+    mov rax, r15
     jmp .__ret_1115
 .__ret_1115:
-    mov rbx, [rbp-48]
-    mov r12, [rbp-40]
+    mov rbx, [rbp-160]
+    mov r12, [rbp-152]
+    mov r13, [rbp-144]
+    mov r14, [rbp-136]
+    mov r15, [rbp-128]
     mov rsp, rbp
     pop rbp
     ret

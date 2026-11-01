@@ -1,0 +1,13 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic... OK
+[5/6] Codegen...
+test_multistruct_bad.kr:15:12: a struct cannot be one of several results 'v4'
+    return v4(1.0, 2.0, 3.0, 4.0), 7;
+           ^^
+  hint: return the struct alone (fn f() -> Vec4), or give the function a ptr<Vec4> to fill and return the rest

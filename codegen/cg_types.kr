@@ -460,6 +460,11 @@ fn cg_emit_return_multi(r: ptr<Ast>) -> i64 {
     var v: ptr<Ast> = r.right;
     var rest: ptr<Ast> = r.left;
     while v != 0 && w < 4 {
+        // a struct does not fit the registers the results go in: only its
+        // address would go, and the caller would read it as a number
+        if cg_arg_struct_id(v) != -1 {
+            cg_multi_struct_error(v);
+        }
         if cg_multi_float(cur_fn_multi, w) != 0 {
             cg_emit_float(v);
             emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");        // the bits go on the stack as they are

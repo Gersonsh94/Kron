@@ -247,6 +247,20 @@ fn prs_cast() -> ptr<Ast> {
     while prs_ct() == KW_AS {
         prs_adv();
         w = prs_type_width(prs_ct());  // before parse_type consumes it
+        // the type after 'as' is the cast's, not the declaration's this
+        // expression may be the value of: var l: i64 = f(3 as f64) stayed
+        // an i64 only by luck before, it was taken for a real. What the
+        // declaration parsed is put back once the cast has its own.
+        var sf: i64 = par_last_is_float;
+        var su: i64 = par_last_is_unsigned;
+        var sv: i64 = par_last_vtag;
+        var sal: i64 = par_last_array_len;
+        var sae: i64 = par_last_arr_elem;
+        var spe: i64 = par_last_ptr_elem;
+        var srl: i64 = par_last_row_len;
+        var ssl: i64 = par_last_is_slice;
+        var sat: i64 = par_last_arr_tok;
+        var spt: i64 = par_last_ptr_tok;
         par_last_is_float = 0;
         par_last_is_unsigned = 0;
         if prs_type() == 0 {
@@ -260,6 +274,16 @@ fn prs_cast() -> ptr<Ast> {
         c.type_info = w;
         c.col = prs_fu_bits();
         e = c;
+        par_last_is_float = sf;
+        par_last_is_unsigned = su;
+        par_last_vtag = sv;
+        par_last_array_len = sal;
+        par_last_arr_elem = sae;
+        par_last_ptr_elem = spe;
+        par_last_row_len = srl;
+        par_last_is_slice = ssl;
+        par_last_arr_tok = sat;
+        par_last_ptr_tok = spt;
     }
     return e;
 }

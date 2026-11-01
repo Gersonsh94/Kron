@@ -1144,6 +1144,18 @@ fn cg_real_int_error(e: ptr<Ast>, what: i64) -> i64 {
     return 0;
 }
 
+// a struct as one of several results: an error, it would arrive as its address
+fn cg_multi_struct_error(e: ptr<Ast>) -> i64 {
+    if cg_err_msg != 0 {
+        return 0;
+    }
+    cg_err_tok = cg_first_tok(e);
+    cg_err_msg = "a struct cannot be one of several results ";
+    cg_err_hint = "  hint: return the struct alone (fn f() -> Vec4), or give the function a ptr<Vec4> to fill and return the rest\r\n";
+    cg_had_error = 1;
+    return 0;
+}
+
 // every argument of a call to a function of the program against its
 // parameter: a real given to an integer parameter is cg_real_int_error
 fn cg_check_real_args(c: ptr<Ast>, f: i64) -> i64 {

@@ -1,0 +1,97 @@
+kron_program
+kron_domain test_vorbis;
+kron_imports
+acquire_domain "std_vorbis.kr";
+kron_definitions
+
+// =========================================================================
+// Audio test: the Vorbis decoder. Five files made by libvorbis (ffmpeg): a
+// sine, clicks over noise (short blocks between long ones), mono noise at
+// 22050, a chirp at the highest quality, and 5.1 noise. For each: its
+// channels, rate, length, the frames decoded, and each channel's energy
+// (the sum of its squares) and peak. Each file was checked sample by sample
+// against ffmpeg's decoder: within one step of 16 bits everywhere.
+// Then the sine as stereo i16 at 48000. tests/expected/test_vorbis.txt.
+// =========================================================================
+
+fn show(path: i64) -> i64 {
+    vorbis_open(path);
+    var ch: i64 = vorbis_channels();
+    var t: text = text_add(text_new(), path);
+    text_add(t, ": channels ");
+    text_add_int(t, ch);
+    text_add(t, " rate ");
+    text_add_int(t, vorbis_rate());
+    text_add(t, " length ");
+    text_add_int(t, vorbis_length());
+    say(t);
+    var energy: [f64; 8];
+    var peak: [f64; 8];
+    var c: i64 = 0;
+    while c < 8 {
+        energy[c] = 0.0;
+        peak[c] = 0.0;
+        c = c + 1;
+    }
+    var frames: i64 = 0;
+    var n: i64 = vorbis_next();
+    while n >= 0 {
+        var i: i64 = 0;
+        while i < n {
+            c = 0;
+            while c < ch {
+                var x: f64 = vorbis_sample(c, i);
+                energy[c] = energy[c] + x * x;
+                if x < 0.0 { x = 0.0 - x; }
+                if x > peak[c] { peak[c] = x; }
+                c = c + 1;
+            }
+            i = i + 1;
+        }
+        frames = frames + n;
+        n = vorbis_next();
+    }
+    var f: text = text_add(text_new(), "  frames ");
+    text_add_int(f, frames);
+    say(f);
+    c = 0;
+    while c < ch {
+        var e: text = text_add(text_new(), "  channel ");
+        text_add_int(e, c);
+        say(e);
+        print(energy[c]);
+        print(peak[c]);
+        c = c + 1;
+    }
+    return frames;
+}
+
+fn main() -> i64 {
+    say("Vorbis decode test");
+    show("tests/audio/vorbis_sine.ogg");
+    show("tests/audio/vorbis_clicks.ogg");
+    show("tests/audio/vorbis_mono.ogg");
+    show("tests/audio/vorbis_chirp.ogg");
+    show("tests/audio/vorbis_51.ogg");
+    vorbis_open("tests/audio/vorbis_sine.ogg");
+    var p, frames = vorbis_to_stereo(48000);
+    var t: text = text_add(text_new(), "stereo at 48000: frames ");
+    text_add_int(t, frames);
+    say(t);
+    var k: i64 = 0;
+    while k < 5 {
+        var at: i64 = k * 9600 + 1234;
+        var l: i64 = au_le16(p + at * 4);
+        var r: i64 = au_le16(p + at * 4 + 2);
+        var s: text = text_add(text_new(), "  frame ");
+        text_add_int(s, at);
+        text_add(s, ": ");
+        text_add_int(s, l);
+        text_add(s, " ");
+        text_add_int(s, r);
+        say(s);
+        k = k + 1;
+    }
+    hp_release(p);
+    return 0;
+}

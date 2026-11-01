@@ -1,0 +1,23 @@
+kron_program
+kron_domain test_multistruct_bad;
+kron_imports
+acquire_domain "std_math3d.kr";
+kron_definitions
+
+// =========================================================================
+// MUST BE REJECTED: a struct as one of several results. The results go in
+// registers, a struct does not fit them: only its address went, and the
+// caller read it as a number (a.x, a.y, ... all the address). Return the
+// struct alone, or give the function a ptr<Vec4> to fill.
+// =========================================================================
+
+fn pair() -> (Vec4, i64) {
+    return v4(1.0, 2.0, 3.0, 4.0), 7;
+}
+
+fn main() -> i64 {
+    var a, n = pair();
+    print(a.x);
+    print(n);
+    return 0;
+}

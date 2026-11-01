@@ -1,0 +1,38 @@
+kron_program
+kron_domain test_castdecl;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: the type a declaration writes is the declaration's, whatever casts
+// its value holds. var l: i64 = body(3 as f64) made l a real: the 'as f64'
+// inside the call left its type behind for the declaration to take, so
+// "l=" + l gave "l=7.0" and take(l) was a real given to an i64.
+// A declaration with no type still takes the real of a cast.
+//
+// Expected output: l=7, 7, 7, 3.000000, 2.500000, 4
+// =========================================================================
+
+fn body(x: f64) -> i64 {
+    return (x * 2.0 + 1.0) as i64;
+}
+
+fn take(n: i64) -> i64 {
+    return n;
+}
+
+fn main() -> i64 {
+    var l: i64 = body(3 as f64);
+    say("l=" + l);                          // l=7
+    print(take(l));                         // 7
+    var k: i64 = take(body(2.5 as f64)) + 1;
+    print(k);                               // 7
+    var q = 3 as f64;
+    print(q);                               // 3.000000
+    var r: f64 = body(1 as f64) as f64 - 0.5;
+    print(r);                               // 2.500000
+    var u: u8 = body(1.5 as f64) as u8;
+    print(u);                               // 4
+    return 0;
+}

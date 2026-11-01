@@ -1136,9 +1136,43 @@ called `text_free` itself.
   RUNTESTS.bat only `test_realint` and `test_fmix` had one, on purpose.
   They say `as i64` now and print what they printed. Tests:
   `test_realarg_bad`, `test_realret_bad`.
+- A struct as one of several results (`fn f() -> (Vec4, i64)`) arrived as
+  its address: the results go in registers and a struct does not fit
+  them, so `a.x`, `a.y` ... all read the address. It is an error now, at
+  the `return`: return the struct alone, or fill a `ptr<Vec4>`. Carrying a
+  struct among several results is not done yet. Test:
+  `test_multistruct_bad`.
 - std_gpu: making a mesh, shader, texture or target while a frame or a
   target is begun broke the program (on Vulkan it restarted the command
   buffer the frame was filling). It is an error with a hint now.
+
+- `var l: i64 = body(3 as f64)` made `l` a real: the type after `as`
+  was left behind for the declaration to take, so `"l=" + l` gave
+  `l=7.0` and `take(l)` was refused as a real. A cast now puts back what
+  the declaration parsed; a declaration with no type still takes the real
+  of a cast. Found in the engine. Test: `test_castdecl`.
+
+## Ogg Vorbis in Kron (01-11-2026, Gerson: the library the engine needs)
+
+- `std_ogg.kr` reads the Ogg container: the first logical stream, its
+  packets joined across pages, the granule of each page. `std_vorbis.kr`
+  decodes Vorbis I as its specification gives it -- codebooks, floor 1,
+  residues 0, 1 and 2, coupling, the inverse MDCT through a complex FFT
+  of the block's size, the windows and their overlap -- up to 8 channels
+  and blocks of 8192. Floor 0 (no encoder has written it in twenty
+  years) is refused with a message. `audio_load_ogg(path)` gives a sound
+  of std_audio, mixed to stereo by Vorbis's channel order.
+- Checked before delivery: a reference decoder written from the
+  specification first (outside Kron, for checking only), then the Kron
+  one against ffmpeg on five files (a sine; clicks over noise, short
+  blocks among long; mono at 22050; a chirp at the highest quality; 5.1):
+  every sample within 6e-7, the precision it is printed with. The floor's
+  256-step table is the specification's own, as libvorbis has it; a
+  geometric series in its place was off by 1.6e-4.
+- One file is open at a time; the decoder's tables are about 15 MB of
+  globals. Streaming a sound while it plays (std_audio taking frames as
+  it needs them) is not done yet: `vorbis_next` gives a packet at a time
+  for a program to do it. Tests: `test_ogg`, `test_vorbis`.
 
 ## std_gpu: render targets, mipmaps and BC1 (27-10-2026, Gerson)
 
