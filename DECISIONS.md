@@ -1039,6 +1039,31 @@ numbers.
   read, and its length -- and so does the Kron one: the reports are the
   same, number for number.
 
+## The rest of the assembly goes to Kron, piece by piece (Gerson, from 26-10-2026)
+
+Gerson's order, ten pieces: 1 imports, 2 the PE writer, 3 the ELF writer,
+4 the Mach-O writer, 5 xwasm, 6 the KRN writer, 7 xarm, 8 xwasm's reader
+side, 9 karm, 10 main (the bridge goes). Each piece keeps a door in assembly
+with the names the rest of the compiler calls, and the door saves the
+registers the old code kept; each writes the same bytes as the assembly it
+replaces, checked file by file before it is delivered.
+
+- Pieces 1 to 3 (26 and 27-10-2026): `imports.kr`, `pe_writer.kr`,
+  `elf_writer.kr`, each with its door.
+- Piece 4, Mach-O (01-11-2026): `macho_writer.kr`, 1,583 lines of
+  `macho.asm` become a door of about 80. The header and load commands, the
+  rebase and bind opcodes, the export trie of a dylib, the symbols and the
+  ad-hoc code signature with its SHA-256, in Kron. The same bytes as the
+  assembly for every program of RUNTESTS.bat built for macOS (122), and for
+  dylibs for macOS and iOS; each page's SHA-256 in the signature checked
+  against another implementation.
+- Piece 6, KRN (01-11-2026), taken before 5 because it is small:
+  `krn_writer.kr`, `krn.asm` its door. The same bytes for every program
+  built with `--target=krn` (123). The door keeps every register but rax:
+  main holds the file's length in r11 across `krn_get_image`.
+- Still in assembly: xwasm (3,990 lines), xarm (5,450), karm (5,290),
+  main (4,444), the runtime and the linker, and the doors.
+
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 
 A text the compiler makes for the program leaked at every call: a `"..."`

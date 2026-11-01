@@ -1,0 +1,1055 @@
+kron_program
+kron_domain macho_writer;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// MACH-O WRITER: the executable and the dylib for macOS and iOS on Apple
+// silicon (arm64), written from the program karm assembled
+//
+// karm has the code at 0x100004000 and .data on the next 16 KB page, as
+// macOS maps them: code readable and executable, data readable and
+// writable, never both. The file around that image:
+//
+//   0x0000      the header and its load commands (the first page of __TEXT)
+//   0x4000      the code                                          __TEXT
+//   T           .data, then .bss in memory only                   __DATA
+//   L           what dyld and the kernel read:                    __LINKEDIT
+//                 rebase   every dq of .data that holds an address, so the
+//                          image can be loaded anywhere (macOS requires it)
+//                 bind     the pointers the program takes from the system
+//                          library: pthread_create, pthread_detach,
+//                          dlopen, dlsym, exit
+//                 exports  __mh_execute_header, or a dylib's functions
+//                 symbols  and their names
+//                 the code signature: Apple silicon runs nothing unsigned,
+//                 and an ad-hoc one -- the SHA-256 of each 4 KB of the
+//                 file, no certificate -- is what a linker writes and the
+//                 kernel accepts for a program built on the machine or
+//                 copied to it
+//
+// It was macho.asm, and it is here now, byte for byte the same: every
+// offset, every value and every order of writing is the one the assembly
+// had. macho.asm is its door: macho_write calls mw_write, and the flags
+// main sets (mo_dylib, mo_platform, mo_idname) are read through it.
+// =========================================================================
+
+extern "kronc" {
+    fn karm_build_image() -> i64;
+    fn karm_get_code() -> i64;
+    fn karm_get_code_len() -> i64;
+    fn karm_get_data_len() -> i64;
+    fn karm_get_bss_size() -> i64;
+    fn karm_label(name: i64) -> i64;
+    fn karm_reloc_count() -> i64;
+    fn karm_reloc_at(i: i64) -> i64;
+    fn karm_reloc_text() -> i64;
+    fn codegen_export_count() -> i64;
+    fn ew_export_name(i: i64) -> i64;
+    fn ew_export_len(i: i64) -> i64;
+    fn mo_get_dylib() -> i64;
+    fn mo_get_platform() -> i64;
+    fn mo_get_idname() -> i64;
+}
+
+const MW_BASE: i64 = 4294967296;     // 0x100000000: where the image goes, 4 GB up
+const MW_CODE: i64 = 16384;          // where the code starts, in the file and in memory
+const MW_NSYM: i64 = 5;              // functions of the system library dyld binds
+
+var mw_out: i64;                     // the file being written
+var mw_n: i64;                       // its length so far
+var mw_lc: i64;                      // where the next load command goes
+var mw_ncmds: i64;
+var mw_name: i64;
+var mw_dylib: i64;                   // 1: a dylib (--lib)
+var mw_platform: i64;                // 1 macOS, 2 iOS
+var mw_code_len: i64;
+var mw_data_len: i64;
+var mw_bss_len: i64;
+var mw_text_sz: i64;                 // __TEXT: header page + code, page-aligned
+var mw_data_fsz: i64;                // __DATA in the file, page-aligned
+var mw_data_vsz: i64;                // and in memory, with .bss
+var mw_le_off: i64;
+var mw_rebase_off: i64;
+var mw_rebase_sz: i64;
+var mw_bind_off: i64;
+var mw_bind_sz: i64;
+var mw_export_off: i64;
+var mw_export_sz: i64;
+var mw_symoff: i64;
+var mw_stroff: i64;
+var mw_strsize: i64;
+var mw_sig_off: i64;
+var mw_sig_size: i64;
+var mw_entry: i64;
+var mw_got: [i64; 5];                // offsets in __DATA of the pointers dyld fills
+var mw_base: i64;                    // where the image goes: 4 GB up, 0 for a dylib
+var mw_ndef: i64;                    // symbols defined here: 1, or the exports
+var mw_exp_addr: [i64; 4096];        // a dylib: the offset of each export's entry
+var mw_lbl: [u8; 320];               // "__ce_" and an export's name
+var mw_identlen: i64;
+var mw_ncode: i64;                   // 4 KB pages the signature covers
+var mw_sp: i64;                      // where the signature is being written
+// SHA-256
+var mw_h: [u8; 32];
+var mw_w: [u8; 256];
+var mw_blk: [u8; 128];
+var mw_digest: [u8; 32];
+var mw_k: [u8; 256];
+var mw_kready: i64;
+
+// -------------------------------------------------------------------------
+// bytes and words, by address
+// -------------------------------------------------------------------------
+
+fn mw_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn mw_p16(a: i64, v: i64) -> i64 {
+    raw {
+        poke16(a, v);
+    }
+    return 0;
+}
+
+fn mw_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn mw_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn mw_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn mw_g32(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek32(a);
+    }
+    return r & 4294967295;
+}
+
+fn mw_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn mw_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke8(dst + i, peek8(src + i));
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+fn mw_fill(dst: i64, n: i64, v: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke8(dst + i, v);
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+fn mw_strlen(p: i64) -> i64 {
+    var n: i64 = 0;
+    while mw_g8(p + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+// rounded up to 16 KB
+fn mw_page(x: i64) -> i64 {
+    return (x + 16383) / 16384 * 16384;
+}
+
+// -------------------------------------------------------------------------
+// appended to the file
+// -------------------------------------------------------------------------
+
+fn mw_b(v: i64) -> i64 {
+    mw_p8(mw_out + mw_n, v & 255);
+    mw_n = mw_n + 1;
+    return 0;
+}
+
+fn mw_w16(v: i64) -> i64 {
+    mw_p16(mw_out + mw_n, v & 65535);
+    mw_n = mw_n + 2;
+    return 0;
+}
+
+fn mw_d(v: i64) -> i64 {
+    mw_p32(mw_out + mw_n, v & 4294967295);
+    mw_n = mw_n + 4;
+    return 0;
+}
+
+fn mw_q(v: i64) -> i64 {
+    mw_p64(mw_out + mw_n, v);
+    mw_n = mw_n + 8;
+    return 0;
+}
+
+// unsigned LEB128
+fn mw_uleb(x: i64) -> i64 {
+    var v: i64 = x;
+    while 1 == 1 {
+        var b: i64 = v & 127;
+        v = v >>> 7;
+        if v == 0 {
+            mw_b(b);
+            return 0;
+        }
+        mw_b(b | 128);
+    }
+    return 0;
+}
+
+// a name and its 0
+fn mw_str(p: i64) -> i64 {
+    var i: i64 = 0;
+    while 1 == 1 {
+        var c: i64 = mw_g8(p + i);
+        mw_b(c);
+        if c == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// zeros up to a multiple of 8
+fn mw_align8() -> i64 {
+    while (mw_n & 7) != 0 {
+        mw_b(0);
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the functions of the system library the program takes, and the word of
+// its .data that dyld fills with each: threads for the shim, and what
+// extern functions need -- dlopen, dlsym, and exit to end the program with
+// whatever the C library still buffers written out
+// -------------------------------------------------------------------------
+
+fn mw_sym_name(k: i64) -> i64 {
+    if k == 0 { return "_pthread_create"; }
+    if k == 1 { return "_pthread_detach"; }
+    if k == 2 { return "_dlopen"; }
+    if k == 3 { return "_dlsym"; }
+    return "_exit";
+}
+
+fn mw_sym_label(k: i64) -> i64 {
+    if k == 0 { return "__mac_got_create"; }
+    if k == 1 { return "__mac_got_detach"; }
+    if k == 2 { return "__got_dlopen"; }
+    if k == 3 { return "__got_dlsym"; }
+    return "__got_exit";
+}
+
+// =========================================================================
+// mw_write(out, the program's name, 0-ended) -> the file's length, 0 when
+// the image cannot be made
+// =========================================================================
+fn mw_write(out: i64, name: i64) -> i64 {
+    mw_out = out;
+    mw_name = name;
+    mw_dylib = mo_get_dylib();
+    mw_platform = mo_get_platform();
+    mw_base = MW_BASE;
+    if mw_dylib != 0 {
+        mw_base = 0;                  // a dylib: from 0, dyld slides it
+    }
+    // an address in a dq of the code cannot move with the image
+    if karm_reloc_text() != 0 {
+        return 0;
+    }
+    // the image: code, padding to a page, .data
+    karm_build_image();
+    mw_code_len = karm_get_code_len();
+    mw_data_len = karm_get_data_len();
+    mw_bss_len = karm_get_bss_size();
+    mw_text_sz = mw_page(mw_code_len) + MW_CODE;
+    mw_data_fsz = mw_page(mw_data_len);
+    mw_data_vsz = mw_page(mw_bss_len) + mw_data_fsz;
+    // the labels the file needs: the entry and the pointers to bind -- a
+    // dylib has no entry, and its exports instead
+    var a: i64 = 0;
+    var b: i64 = 0;
+    if mw_dylib == 0 {
+        a = karm_label("__mac_main");
+        if a == -1 {
+            return 0;
+        }
+        mw_entry = a - mw_base;
+        mw_ndef = 1;
+    } else {
+        mw_ndef = codegen_export_count();
+        b = 0;
+        while b < mw_ndef {
+            var np: i64 = ew_export_name(b);
+            var nl: i64 = ew_export_len(b);
+            mw_p8(&mw_lbl + 0, 95);
+            mw_p8(&mw_lbl + 1, 95);
+            mw_p8(&mw_lbl + 2, 99);
+            mw_p8(&mw_lbl + 3, 101);
+            mw_p8(&mw_lbl + 4, 95);
+            mw_copy(&mw_lbl + 5, np, nl);
+            mw_p8(&mw_lbl + 5 + nl, 0);
+            a = karm_label(&mw_lbl);
+            if a == -1 {
+                return 0;
+            }
+            mw_p64(&mw_exp_addr + b * 8, a - mw_base);
+            b = b + 1;
+        }
+    }
+    var k: i64 = 0;
+    while k < MW_NSYM {
+        a = karm_label(mw_sym_label(k));
+        if a == -1 {
+            return 0;
+        }
+        mw_p64(&mw_got + k * 8, a - mw_base - mw_text_sz);
+        k = k + 1;
+    }
+
+    // the header page, empty for now; the code and the data after it
+    mw_fill(mw_out, MW_CODE, 0);
+    mw_copy(mw_out + MW_CODE, karm_get_code(), mw_code_len);
+    mw_fill(mw_out + MW_CODE + mw_code_len, mw_text_sz - MW_CODE - mw_code_len, 0);
+    // .data: karm put it after the code padded to a page, as here
+    mw_copy(mw_out + mw_text_sz, karm_get_code() + mw_page(mw_code_len), mw_data_len);
+    mw_fill(mw_out + mw_text_sz + mw_data_len, mw_data_fsz - mw_data_len, 0);
+    mw_le_off = mw_text_sz + mw_data_fsz;
+    mw_n = mw_le_off;
+
+    // ---- __LINKEDIT ------------------------------------------------------
+    // rebase: type pointer, then for each address its offset in __DATA
+    mw_rebase_off = mw_n;
+    var nrel: i64 = karm_reloc_count();
+    if nrel != 0 {
+        mw_b(17);                     // REBASE_OPCODE_SET_TYPE_IMM | POINTER
+        var r: i64 = 0;
+        while r < nrel {
+            var at: i64 = karm_reloc_at(r);
+            mw_b(34 - mw_dylib);      // SET_SEGMENT_AND_OFFSET_ULEB: __DATA, segment 2 (1 in a dylib)
+            mw_uleb(at);
+            mw_b(81);                 // DO_REBASE_IMM_TIMES 1
+            r = r + 1;
+        }
+        mw_b(0);                      // DONE
+    }
+    mw_align8();
+    mw_rebase_sz = mw_n - mw_rebase_off;
+    // bind: library 1, each symbol at its pointer
+    mw_bind_off = mw_n;
+    mw_b(17);                         // SET_DYLIB_ORDINAL_IMM 1
+    mw_b(81);                         // SET_TYPE_IMM POINTER
+    k = 0;
+    while k < MW_NSYM {
+        mw_b(64);                     // SET_SYMBOL_TRAILING_FLAGS_IMM 0
+        mw_str(mw_sym_name(k));
+        mw_b(114 - mw_dylib);         // SET_SEGMENT_AND_OFFSET_ULEB, segment 2
+        mw_uleb(mw_g64(&mw_got + k * 8));
+        mw_b(144);                    // DO_BIND
+        k = k + 1;
+    }
+    mw_b(0);                          // DONE
+    mw_align8();
+    mw_bind_sz = mw_n - mw_bind_off;
+    // exports: a trie with one name, __mh_execute_header at offset 0 -- or,
+    // for a dylib, every export
+    mw_export_off = mw_n;
+    if mw_dylib != 0 {
+        mw_trie();
+    } else {
+        mw_b(0);                      // root: not a symbol
+        mw_b(1);                      // one edge
+        mw_str("__mh_execute_header");
+        mw_b(23);                     // the child node, from the trie's start
+        mw_b(2);                      // a symbol: flags 0, offset 0
+        mw_b(0);
+        mw_b(0);
+        mw_b(0);                      // no edges
+    }
+    mw_align8();
+    mw_export_sz = mw_n - mw_export_off;
+    // symbols: __mh_execute_header (or each export), then the ones the
+    // program takes from the system library. Their names: " ", 0, then each
+    mw_symoff = mw_n;
+    var sname: i64 = 0;
+    if mw_dylib != 0 {
+        // each export, "_" and its name, from 2
+        sname = 2;
+        b = 0;
+        while b < mw_ndef {
+            mw_d(sname);
+            mw_b(15);                 // N_SECT | N_EXT
+            mw_b(1);
+            mw_w16(0);
+            mw_q(mw_g64(&mw_exp_addr + b * 8) + mw_base);
+            sname = sname + ew_export_len(b) + 2;
+            b = b + 1;
+        }
+    } else {
+        mw_d(2);                      // name at 2
+        mw_b(15);                     // N_SECT | N_EXT
+        mw_b(1);                      // section 1, __text
+        mw_w16(16);                   // REFERENCED_DYNAMICALLY
+        mw_q(mw_base);
+        // the undefined ones, their names one after the other from 22 (2 + 20)
+        sname = 22;
+    }
+    k = 0;
+    while k < MW_NSYM {
+        mw_d(sname);
+        mw_b(1);                      // N_UNDF | N_EXT
+        mw_b(0);
+        mw_w16(256);                  // library ordinal 1
+        mw_q(0);
+        sname = sname + mw_strlen(mw_sym_name(k)) + 1;
+        k = k + 1;
+    }
+    mw_stroff = mw_n;
+    mw_b(32);
+    mw_b(0);
+    if mw_dylib != 0 {
+        b = 0;
+        while b < mw_ndef {
+            mw_b(95);
+            var ep: i64 = ew_export_name(b);
+            var el: i64 = ew_export_len(b);
+            var c: i64 = 0;
+            while c < el {
+                mw_b(mw_g8(ep + c));
+                c = c + 1;
+            }
+            mw_b(0);
+            b = b + 1;
+        }
+    } else {
+        mw_str("__mh_execute_header");
+    }
+    k = 0;
+    while k < MW_NSYM {
+        mw_str(mw_sym_name(k));
+        k = k + 1;
+    }
+    mw_align8();
+    mw_strsize = mw_n - mw_stroff;
+    // the signature goes at a multiple of 16; its size is known now
+    var at16: i64 = (mw_n + 15) / 16 * 16;
+    mw_fill(mw_out + mw_n, at16 - mw_n, 0);
+    mw_n = at16;
+    mw_sig_off = mw_n;
+    mw_ncode = (mw_n + 4095) / 4096;
+    mw_identlen = (mw_strlen(mw_name) + 1 + 15) / 16 * 16;
+    // 24 (super blob and its index) + 88 (code directory) + name + hashes
+    mw_sig_size = mw_ncode * 32 + 112 + mw_identlen;
+
+    // ---- the header and the load commands --------------------------------
+    mw_commands();
+    // ---- the signature: hashes of every 4 KB before it, header included --
+    mw_signature();
+    return mw_n;
+}
+
+// =========================================================================
+// THE LOAD COMMANDS
+// =========================================================================
+
+// the next 4 or 8 bytes of the load commands
+fn mw_lc_d(v: i64) -> i64 {
+    mw_p32(mw_lc, v & 4294967295);
+    mw_lc = mw_lc + 4;
+    return 0;
+}
+
+fn mw_lc_q(v: i64) -> i64 {
+    mw_p64(mw_lc, v);
+    mw_lc = mw_lc + 8;
+    return 0;
+}
+
+// a text in size bytes, padded with zeros
+fn mw_lc_str(p: i64, size: i64) -> i64 {
+    var i: i64 = 0;
+    var s: i64 = p;
+    while i < size {
+        var c: i64 = mw_g8(s);
+        mw_p8(mw_lc + i, c);
+        if c != 0 {
+            s = s + 1;
+        }
+        i = i + 1;
+    }
+    mw_lc = mw_lc + size;
+    return 0;
+}
+
+// a name in 16 bytes
+fn mw_lc_name(p: i64) -> i64 {
+    return mw_lc_str(p, 16);
+}
+
+// a command: its kind and size
+fn mw_cmd(kind: i64, size: i64) -> i64 {
+    mw_ncmds = mw_ncmds + 1;
+    mw_lc_d(kind);
+    mw_lc_d(size);
+    return 0;
+}
+
+fn mw_commands() -> i64 {
+    mw_lc = mw_out + 32;
+    mw_ncmds = 0;
+    if mw_dylib == 0 {
+        // __PAGEZERO: the first 4 GB, no access
+        mw_cmd(25, 72);               // LC_SEGMENT_64
+        mw_lc_name("__PAGEZERO");
+        mw_lc_q(0);                   // vmaddr
+        mw_lc_q(mw_base);             // vmsize
+        mw_lc_q(0);                   // fileoff
+        mw_lc_q(0);                   // filesize
+        mw_lc_d(0);                   // maxprot
+        mw_lc_d(0);                   // initprot
+        mw_lc_d(0);                   // nsects
+        mw_lc_d(0);                   // flags
+    }
+    // __TEXT: the header page and the code, read and execute
+    mw_cmd(25, 152);
+    mw_lc_name("__TEXT");
+    mw_lc_q(mw_base);
+    mw_lc_q(mw_text_sz);
+    mw_lc_q(0);
+    mw_lc_q(mw_text_sz);
+    mw_lc_d(5);
+    mw_lc_d(5);
+    mw_lc_d(1);
+    mw_lc_d(0);
+    mw_lc_name("__text");             // section __text
+    mw_lc_name("__TEXT");
+    mw_lc_q(mw_base + MW_CODE);       // addr
+    mw_lc_q(mw_code_len);             // size
+    mw_lc_d(MW_CODE);                 // offset
+    mw_lc_d(2);                       // align 2^2
+    mw_lc_d(0);                       // reloff
+    mw_lc_d(0);                       // nreloc
+    mw_lc_d(2147484672);              // PURE_INSTRUCTIONS | SOME_INSTRUCTIONS
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_d(0);
+    // __DATA: .data and .bss, read and write
+    mw_cmd(25, 232);
+    mw_lc_name("__DATA");
+    mw_lc_q(mw_base + mw_text_sz);
+    mw_lc_q(mw_data_vsz);
+    mw_lc_q(mw_text_sz);
+    mw_lc_q(mw_data_fsz);
+    mw_lc_d(3);
+    mw_lc_d(3);
+    mw_lc_d(2);
+    mw_lc_d(0);
+    mw_lc_name("__data");             // section __data
+    mw_lc_name("__DATA");
+    mw_lc_q(mw_base + mw_text_sz);
+    mw_lc_q(mw_data_len);
+    mw_lc_d(mw_text_sz);
+    mw_lc_d(4);                       // align 2^4
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_d(0);                       // S_REGULAR
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_name("__bss");              // section __bss
+    mw_lc_name("__DATA");
+    mw_lc_q(mw_base + mw_text_sz + mw_data_fsz);
+    mw_lc_q(mw_bss_len);
+    mw_lc_d(0);                       // offset: none, it is zeros
+    mw_lc_d(4);
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_d(1);                       // S_ZEROFILL
+    mw_lc_d(0);
+    mw_lc_d(0);
+    mw_lc_d(0);
+    // __LINKEDIT
+    mw_cmd(25, 72);
+    mw_lc_name("__LINKEDIT");
+    mw_lc_q(mw_base + mw_text_sz + mw_data_vsz);
+    var lsize: i64 = mw_sig_off + mw_sig_size - mw_le_off;
+    mw_lc_q(mw_page(lsize));          // vmsize
+    mw_lc_q(mw_le_off);
+    mw_lc_q(lsize);                   // filesize
+    mw_lc_d(1);
+    mw_lc_d(1);
+    mw_lc_d(0);
+    mw_lc_d(0);
+    // LC_DYLD_INFO_ONLY
+    mw_cmd(2147483682, 48);
+    mw_lc_d(mw_rebase_off);
+    mw_lc_d(mw_rebase_sz);
+    mw_lc_d(mw_bind_off);
+    mw_lc_d(mw_bind_sz);
+    mw_lc_d(0);                       // weak bind
+    mw_lc_d(0);
+    mw_lc_d(0);                       // lazy bind
+    mw_lc_d(0);
+    mw_lc_d(mw_export_off);
+    mw_lc_d(mw_export_sz);
+    // LC_SYMTAB
+    mw_cmd(2, 24);
+    mw_lc_d(mw_symoff);
+    mw_lc_d(mw_ndef + MW_NSYM);
+    mw_lc_d(mw_stroff);
+    mw_lc_d(mw_strsize);
+    // LC_DYSYMTAB: no locals, the defined ones, the rest undefined
+    mw_cmd(11, 80);
+    mw_lc_d(0);                       // ilocalsym
+    mw_lc_d(0);                       // nlocalsym
+    mw_lc_d(0);                       // iextdefsym
+    mw_lc_d(mw_ndef);                 // nextdefsym
+    mw_lc_d(mw_ndef);                 // iundefsym
+    mw_lc_d(MW_NSYM);                 // nundefsym
+    var z: i64 = 0;
+    while z < 12 {
+        mw_lc_d(0);
+        z = z + 1;
+    }
+    if mw_dylib == 0 {
+        // LC_LOAD_DYLINKER
+        mw_cmd(14, 32);
+        mw_lc_d(12);
+        mw_lc_str("/usr/lib/dyld", 20);
+    } else {
+        // LC_ID_DYLIB: @rpath/ and the file's name, the name a program that
+        // links with it records
+        mw_id_dylib();
+    }
+    // LC_UUID: from the code's first bytes and the size, the same for the
+    // same program
+    mw_cmd(27, 24);
+    mw_lc_q(mw_g64(mw_out + MW_CODE) ^ mw_code_len);
+    mw_lc_q(((mw_data_len << 20) ^ mw_bss_len) | 4611686018427387904);
+    // LC_BUILD_VERSION: macOS 11, the first on Apple silicon -- iOS 14
+    mw_cmd(50, 24);
+    mw_lc_d(mw_platform);             // 1 PLATFORM_MACOS, 2 PLATFORM_IOS
+    var minos: i64 = 720896;          // 0x000B0000: 11.0
+    if mw_platform == 2 {
+        minos = 917504;               // 0x000E0000: 14.0
+    }
+    mw_lc_d(minos);
+    mw_lc_d(minos);                   // sdk the same
+    mw_lc_d(0);                       // no tools
+    if mw_dylib == 0 {
+        // LC_MAIN
+        mw_cmd(2147483688, 24);
+        mw_lc_q(mw_entry);
+        mw_lc_q(0);
+    }
+    // LC_LOAD_DYLIB libSystem
+    mw_cmd(12, 56);
+    mw_lc_d(24);                      // name offset
+    mw_lc_d(2);                       // timestamp
+    mw_lc_d(86441984);                // current version 1319: 0x05270000
+    mw_lc_d(65536);                   // compatibility 1.0
+    mw_lc_str("/usr/lib/libSystem.B.dylib", 32);
+    // LC_CODE_SIGNATURE
+    mw_cmd(29, 16);
+    mw_lc_d(mw_sig_off);
+    mw_lc_d(mw_sig_size);
+    // the header itself
+    mw_p32(mw_out, 4277009103);       // MH_MAGIC_64 0xFEEDFACF
+    mw_p32(mw_out + 4, 16777228);     // CPU_TYPE_ARM64 0x0100000C
+    mw_p32(mw_out + 8, 0);            // all subtypes
+    mw_p32(mw_out + 12, 2);           // MH_EXECUTE
+    mw_p32(mw_out + 16, mw_ncmds);
+    mw_p32(mw_out + 20, mw_lc - mw_out - 32);
+    mw_p32(mw_out + 24, 2097285);     // NOUNDEFS DYLDLINK TWOLEVEL PIE: 0x00200085
+    if mw_dylib != 0 {
+        mw_p32(mw_out + 12, 6);       // MH_DYLIB
+        mw_p32(mw_out + 24, 1048709); // NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED: 0x00100085
+    }
+    mw_p32(mw_out + 28, 0);
+    return 0;
+}
+
+// LC_ID_DYLIB, the name "@rpath/<file>"
+fn mw_id_dylib() -> i64 {
+    var idname: i64 = mo_get_idname();
+    var len: i64 = mw_strlen(idname);
+    var size: i64 = (len + 8 + 24 + 7) / 8 * 8;
+    mw_cmd(13, size);
+    mw_lc_d(24);                      // the name's offset
+    mw_lc_d(2);                       // timestamp
+    mw_lc_d(65536);                   // current version 1.0
+    mw_lc_d(65536);                   // compatibility 1.0
+    // the name, padded with zeros to the command's end
+    mw_fill(mw_lc, size - 24, 0);
+    mw_copy(mw_lc, "@rpath/", 7);
+    mw_copy(mw_lc + 7, idname, len);
+    mw_lc = mw_lc + size - 24;
+    return 0;
+}
+
+// a dylib's exports. The root has an edge for every one, the whole name
+// "_<name>"; each child is a symbol: flags 0, its offset, no edges. The
+// root's offsets to its children take three bytes each, padded, so that
+// they are known before the children are written.
+fn mw_trie() -> i64 {
+    mw_b(0);                          // root: not a symbol
+    mw_b(mw_ndef);                    // its edges: a byte, so 255 at most
+    var b: i64 = 0;
+    while b < mw_ndef {
+        mw_b(95);
+        var np: i64 = ew_export_name(b);
+        var nl: i64 = ew_export_len(b);
+        var c: i64 = 0;
+        while c < nl {
+            mw_b(mw_g8(np + c));
+            c = c + 1;
+        }
+        mw_b(0);
+        // three bytes for the child's offset, filled below: where they are
+        // kept in the upper half of the export's entry
+        var e: i64 = mw_g64(&mw_exp_addr + b * 8);
+        mw_p64(&mw_exp_addr + b * 8, e | (mw_n << 32));
+        mw_b(128);
+        mw_b(128);
+        mw_b(0);
+        b = b + 1;
+    }
+    b = 0;
+    while b < mw_ndef {
+        // the child's offset from the trie's start, into its three bytes
+        var off: i64 = mw_n - mw_export_off;
+        var v: i64 = mw_g64(&mw_exp_addr + b * 8);
+        var wat: i64 = v >>> 32;
+        var eo: i64 = v & 4294967295;
+        mw_p64(&mw_exp_addr + b * 8, eo);   // only the offset again, for the symbols
+        mw_p8(mw_out + wat, (off & 127) | 128);
+        mw_p8(mw_out + wat + 1, ((off >>> 7) & 127) | 128);
+        mw_p8(mw_out + wat + 2, (off >>> 14) & 127);
+        // the child: its info's size, flags 0, the offset, no edges
+        var cnt: i64 = 0;
+        var t: i64 = eo;
+        cnt = 1;
+        t = t >>> 7;
+        while t != 0 {
+            cnt = cnt + 1;
+            t = t >>> 7;
+        }
+        mw_b(cnt + 1);                // terminal size: flags + offset
+        mw_b(0);                      // flags
+        mw_uleb(eo);
+        mw_b(0);                      // no edges
+        b = b + 1;
+    }
+    return 0;
+}
+
+// =========================================================================
+// THE CODE SIGNATURE (ad-hoc): a super blob holding one code directory
+// =========================================================================
+
+// four bytes at mw_sp, the most significant first
+fn mw_be32(v: i64) -> i64 {
+    mw_p8(mw_sp, (v >>> 24) & 255);
+    mw_p8(mw_sp + 1, (v >>> 16) & 255);
+    mw_p8(mw_sp + 2, (v >>> 8) & 255);
+    mw_p8(mw_sp + 3, v & 255);
+    mw_sp = mw_sp + 4;
+    return 0;
+}
+
+fn mw_signature() -> i64 {
+    mw_sp = mw_out + mw_sig_off;
+    // the super blob: magic, length, one index (code directory at 24)
+    mw_be32(4208856256);              // 0xFADE0CC0
+    mw_be32(mw_sig_size);
+    mw_be32(1);
+    mw_be32(0);                       // CSSLOT_CODEDIRECTORY
+    mw_be32(24);
+    mw_be32(0);                       // padding to 24
+    // the code directory, version 0x20400
+    mw_be32(4208856066);              // 0xFADE0C02
+    mw_be32(mw_sig_size - 24);        // length
+    mw_be32(132096);                  // version 0x20400
+    mw_be32(131074);                  // flags: adhoc, linker-signed (0x20002)
+    mw_be32(mw_identlen + 88);        // hashOffset
+    mw_be32(88);                      // identOffset
+    mw_be32(0);                       // nSpecialSlots
+    mw_be32(mw_ncode);                // nCodeSlots
+    mw_be32(mw_sig_off);              // codeLimit
+    mw_p8(mw_sp, 32);                 // hashSize
+    mw_p8(mw_sp + 1, 2);              // hashType: SHA-256
+    mw_p8(mw_sp + 2, 0);              // platform
+    mw_p8(mw_sp + 3, 12);             // pageSize: 4 KB
+    mw_sp = mw_sp + 4;
+    mw_be32(0);                       // spare2
+    mw_be32(0);                       // scatterOffset
+    mw_be32(0);                       // teamOffset
+    mw_be32(0);                       // spare3
+    mw_be32(0);                       // codeLimit64
+    mw_be32(0);
+    mw_be32(0);                       // execSegBase
+    mw_be32(0);
+    mw_be32(0);                       // execSegLimit: __TEXT
+    mw_be32(mw_text_sz);
+    mw_be32(0);                       // execSegFlags: the main binary
+    mw_be32(1);
+    // the identifier, padded
+    var i: i64 = 0;
+    var s: i64 = mw_name;
+    while i < mw_identlen {
+        var c: i64 = mw_g8(s);
+        mw_p8(mw_sp + i, c);
+        if c != 0 {
+            s = s + 1;
+        }
+        i = i + 1;
+    }
+    mw_sp = mw_sp + mw_identlen;
+    // one hash per 4 KB of the file before the signature
+    var pg: i64 = 0;
+    while pg < mw_ncode {
+        var len: i64 = mw_sig_off - pg * 4096;
+        if len > 4096 {
+            len = 4096;
+        }
+        mw_sha256(mw_out + pg * 4096, len);
+        mw_copy(mw_sp, &mw_digest, 32);
+        mw_sp = mw_sp + 32;
+        pg = pg + 1;
+    }
+    mw_n = mw_sig_off + mw_sig_size;
+    return 0;
+}
+
+// =========================================================================
+// SHA-256 of n bytes at p, into mw_digest
+// =========================================================================
+
+// the first 32 bits of the fractional parts of the cube roots of the first
+// 64 primes
+fn mw_k_init() -> i64 {
+    var k: i64 = &mw_k;
+    mw_p32(k + 0, 1116352408);
+    mw_p32(k + 4, 1899447441);
+    mw_p32(k + 8, 3049323471);
+    mw_p32(k + 12, 3921009573);
+    mw_p32(k + 16, 961987163);
+    mw_p32(k + 20, 1508970993);
+    mw_p32(k + 24, 2453635748);
+    mw_p32(k + 28, 2870763221);
+    mw_p32(k + 32, 3624381080);
+    mw_p32(k + 36, 310598401);
+    mw_p32(k + 40, 607225278);
+    mw_p32(k + 44, 1426881987);
+    mw_p32(k + 48, 1925078388);
+    mw_p32(k + 52, 2162078206);
+    mw_p32(k + 56, 2614888103);
+    mw_p32(k + 60, 3248222580);
+    mw_p32(k + 64, 3835390401);
+    mw_p32(k + 68, 4022224774);
+    mw_p32(k + 72, 264347078);
+    mw_p32(k + 76, 604807628);
+    mw_p32(k + 80, 770255983);
+    mw_p32(k + 84, 1249150122);
+    mw_p32(k + 88, 1555081692);
+    mw_p32(k + 92, 1996064986);
+    mw_p32(k + 96, 2554220882);
+    mw_p32(k + 100, 2821834349);
+    mw_p32(k + 104, 2952996808);
+    mw_p32(k + 108, 3210313671);
+    mw_p32(k + 112, 3336571891);
+    mw_p32(k + 116, 3584528711);
+    mw_p32(k + 120, 113926993);
+    mw_p32(k + 124, 338241895);
+    mw_p32(k + 128, 666307205);
+    mw_p32(k + 132, 773529912);
+    mw_p32(k + 136, 1294757372);
+    mw_p32(k + 140, 1396182291);
+    mw_p32(k + 144, 1695183700);
+    mw_p32(k + 148, 1986661051);
+    mw_p32(k + 152, 2177026350);
+    mw_p32(k + 156, 2456956037);
+    mw_p32(k + 160, 2730485921);
+    mw_p32(k + 164, 2820302411);
+    mw_p32(k + 168, 3259730800);
+    mw_p32(k + 172, 3345764771);
+    mw_p32(k + 176, 3516065817);
+    mw_p32(k + 180, 3600352804);
+    mw_p32(k + 184, 4094571909);
+    mw_p32(k + 188, 275423344);
+    mw_p32(k + 192, 430227734);
+    mw_p32(k + 196, 506948616);
+    mw_p32(k + 200, 659060556);
+    mw_p32(k + 204, 883997877);
+    mw_p32(k + 208, 958139571);
+    mw_p32(k + 212, 1322822218);
+    mw_p32(k + 216, 1537002063);
+    mw_p32(k + 220, 1747873779);
+    mw_p32(k + 224, 1955562222);
+    mw_p32(k + 228, 2024104815);
+    mw_p32(k + 232, 2227730452);
+    mw_p32(k + 236, 2361852424);
+    mw_p32(k + 240, 2428436474);
+    mw_p32(k + 244, 2756734187);
+    mw_p32(k + 248, 3204031479);
+    mw_p32(k + 252, 3329325298);
+    mw_kready = 1;
+    return 0;
+}
+
+// x turned right by n, in 32 bits
+fn mw_ror(x: i64, n: i64) -> i64 {
+    return ((x >>> n) | (x << (32 - n))) & 4294967295;
+}
+
+// one block of 64 bytes at p into mw_h
+fn mw_sha_block(p: i64) -> i64 {
+    var w: i64 = &mw_w;
+    var i: i64 = 0;
+    while i < 16 {
+        var v: i64 = (mw_g8(p + i * 4) << 24) | (mw_g8(p + i * 4 + 1) << 16) | (mw_g8(p + i * 4 + 2) << 8) | mw_g8(p + i * 4 + 3);
+        mw_p32(w + i * 4, v);
+        i = i + 1;
+    }
+    while i < 64 {
+        // w[i] = w[i-16] + s0(w[i-15]) + w[i-7] + s1(w[i-2])
+        var x: i64 = mw_g32(w + (i - 15) * 4);
+        var s0: i64 = mw_ror(x, 7) ^ mw_ror(x, 18) ^ (x >>> 3);
+        var y: i64 = mw_g32(w + (i - 2) * 4);
+        var s1: i64 = mw_ror(y, 17) ^ mw_ror(y, 19) ^ (y >>> 10);
+        mw_p32(w + i * 4, (mw_g32(w + (i - 16) * 4) + s0 + mw_g32(w + (i - 7) * 4) + s1) & 4294967295);
+        i = i + 1;
+    }
+    var hh: i64 = &mw_h;
+    var a: i64 = mw_g32(hh);
+    var b: i64 = mw_g32(hh + 4);
+    var c: i64 = mw_g32(hh + 8);
+    var d: i64 = mw_g32(hh + 12);
+    var e: i64 = mw_g32(hh + 16);
+    var f: i64 = mw_g32(hh + 20);
+    var g: i64 = mw_g32(hh + 24);
+    var h: i64 = mw_g32(hh + 28);
+    i = 0;
+    while i < 64 {
+        // t1 = h + S1(e) + ch(e, f, g) + k[i] + w[i]
+        var big1: i64 = mw_ror(e, 6) ^ mw_ror(e, 11) ^ mw_ror(e, 25);
+        var ch: i64 = (e & f) ^ ((e ^ 4294967295) & g);
+        var t1: i64 = (h + big1 + ch + mw_g32(&mw_k + i * 4) + mw_g32(w + i * 4)) & 4294967295;
+        // t2 = S0(a) + maj(a, b, c)
+        var big0: i64 = mw_ror(a, 2) ^ mw_ror(a, 13) ^ mw_ror(a, 22);
+        var maj: i64 = (a & b) ^ (a & c) ^ (b & c);
+        var t2: i64 = (big0 + maj) & 4294967295;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & 4294967295;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & 4294967295;
+        i = i + 1;
+    }
+    mw_p32(hh, (mw_g32(hh) + a) & 4294967295);
+    mw_p32(hh + 4, (mw_g32(hh + 4) + b) & 4294967295);
+    mw_p32(hh + 8, (mw_g32(hh + 8) + c) & 4294967295);
+    mw_p32(hh + 12, (mw_g32(hh + 12) + d) & 4294967295);
+    mw_p32(hh + 16, (mw_g32(hh + 16) + e) & 4294967295);
+    mw_p32(hh + 20, (mw_g32(hh + 20) + f) & 4294967295);
+    mw_p32(hh + 24, (mw_g32(hh + 24) + g) & 4294967295);
+    mw_p32(hh + 28, (mw_g32(hh + 28) + h) & 4294967295);
+    return 0;
+}
+
+fn mw_sha256(p: i64, n: i64) -> i64 {
+    if mw_kready == 0 {
+        mw_k_init();
+    }
+    // the first 32 bits of the fractional parts of the square roots of the
+    // first 8 primes
+    var hh: i64 = &mw_h;
+    mw_p32(hh, 1779033703);
+    mw_p32(hh + 4, 3144134277);
+    mw_p32(hh + 8, 1013904242);
+    mw_p32(hh + 12, 2773480762);
+    mw_p32(hh + 16, 1359893119);
+    mw_p32(hh + 20, 2600822924);
+    mw_p32(hh + 24, 528734635);
+    mw_p32(hh + 28, 1541459225);
+    var at: i64 = p;
+    var left: i64 = n;
+    while left >= 64 {
+        mw_sha_block(at);
+        at = at + 64;
+        left = left - 64;
+    }
+    // the rest, 0x80, zeros, and the length in bits at the end of one or two
+    // blocks
+    var blk: i64 = &mw_blk;
+    mw_fill(blk, 128, 0);
+    mw_copy(blk, at, left);
+    mw_p8(blk + left, 128);
+    var last: i64 = 64;
+    if left >= 56 {
+        last = 128;
+    }
+    var bits: i64 = n * 8;
+    var j: i64 = 0;
+    while j < 8 {
+        mw_p8(blk + last - 1 - j, bits & 255);
+        bits = bits >>> 8;
+        j = j + 1;
+    }
+    mw_sha_block(blk);
+    if last == 128 {
+        mw_sha_block(blk + 64);
+    }
+    // the digest, each word most significant byte first
+    var dg: i64 = &mw_digest;
+    var k: i64 = 0;
+    while k < 8 {
+        var v: i64 = mw_g32(hh + k * 4);
+        mw_p8(dg + k * 4, (v >>> 24) & 255);
+        mw_p8(dg + k * 4 + 1, (v >>> 16) & 255);
+        mw_p8(dg + k * 4 + 2, (v >>> 8) & 255);
+        mw_p8(dg + k * 4 + 3, v & 255);
+        k = k + 1;
+    }
+    return 0;
+}

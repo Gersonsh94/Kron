@@ -1,0 +1,252 @@
+kron_program
+kron_domain krn_writer;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KRN WRITER: Kron's own executable container (KRN_FORMAT.md)
+//
+// Takes the bytes kasm produced and wraps them: a 128-byte header, a
+// section table, a string pool, the section data, and a signature block.
+// Nothing here is inherited from PE or ELF; the layout is the one the
+// specification defines.
+//
+//   header | section table | string pool | section data | signature
+//
+// It was krn.asm, and it is here now, byte for byte the same. krn.asm is
+// its door: main calls krn_init, krn_build, krn_get_image and krn_get_size
+// there, which keep every register but rax and call kw_* here.
+// =========================================================================
+
+extern "kronc" {
+    fn kasm_get_code() -> i64;
+    fn kasm_get_code_size() -> i64;
+    fn kasm_get_data() -> i64;
+    fn kasm_get_data_size() -> i64;
+    fn kasm_get_bss_size() -> i64;
+}
+
+const KW_MAGIC: i64 = 558781003;     // 'KRN!' little-endian, 0x214E524B
+const KW_HDR_SIZE: i64 = 128;
+const KW_SECT_ENTRY: i64 = 32;
+const KW_ARCH_X86_64: i64 = 1;
+const KW_KIND_APPLICATION: i64 = 3;
+const KW_SEC_CODE: i64 = 1;
+const KW_SEC_DATA: i64 = 2;
+const KW_SEC_BSS: i64 = 3;
+const KW_JSIG_MAGIC: i64 = 1195987786; // 'JSIG' little-endian, 0x4749534A
+const KW_JSIG_ALG_DIGEST: i64 = 1;   // integrity only, no key
+
+var kw_buf: [u8; 2097152];           // the file being assembled
+var kw_len: i64;
+var kw_kind: i64;
+var kw_ring: i64;
+var kw_caps: i64;
+var kw_strpool: [u8; 4096];
+var kw_strlen: i64;
+
+fn kw_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn kw_p16(a: i64, v: i64) -> i64 {
+    raw {
+        poke16(a, v);
+    }
+    return 0;
+}
+
+fn kw_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn kw_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn kw_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn kw_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke8(dst + i, peek8(src + i));
+            i = i + 1;
+        }
+    }
+    return dst;
+}
+
+fn kw_init() -> i64 {
+    kw_len = 0;
+    kw_kind = KW_KIND_APPLICATION;
+    kw_ring = 3;
+    kw_caps = 0;
+    kw_strlen = 1;                    // offset 0 means "no name"
+    kw_p8(&kw_strpool, 0);
+    return 0;
+}
+
+fn kw_set_kind(v: i64) -> i64 {
+    kw_kind = v;
+    return 0;
+}
+
+fn kw_set_ring(v: i64) -> i64 {
+    kw_ring = v;
+    return 0;
+}
+
+fn kw_set_caps(v: i64) -> i64 {
+    kw_caps = v;
+    return 0;
+}
+
+fn kw_get_image() -> i64 {
+    return &kw_buf;
+}
+
+fn kw_get_size() -> i64 {
+    return kw_len;
+}
+
+// a zero-ended name into the pool: its offset there
+fn kw_add_string(p: i64) -> i64 {
+    var at: i64 = kw_strlen;
+    var i: i64 = 0;
+    while 1 == 1 {
+        var c: i64 = kw_g8(p + i);
+        kw_p8(&kw_strpool + at + i, c);
+        if c == 0 {
+            kw_strlen = at + i + 1;
+            return at;
+        }
+        i = i + 1;
+    }
+    return at;
+}
+
+// the file: its total length
+fn kw_build() -> i64 {
+    var b: i64 = &kw_buf;
+    // the header, zeroed
+    var i: i64 = 0;
+    while i < KW_HDR_SIZE {
+        kw_p8(b + i, 0);
+        i = i + 1;
+    }
+    // names into the string pool
+    var ncode: i64 = kw_add_string(".code");
+    var ndata: i64 = kw_add_string(".data");
+    var nbss: i64 = kw_add_string(".bss");
+    // where each part of the file starts: three sections after the header,
+    // then the pool, then the section data aligned to 16
+    var pool: i64 = KW_HDR_SIZE + KW_SECT_ENTRY * 3;
+    var body: i64 = (pool + kw_strlen + 15) / 16 * 16;
+    // header fields
+    kw_p32(b + 0, KW_MAGIC);
+    kw_p16(b + 4, 1);                 // format version
+    kw_p16(b + 6, KW_HDR_SIZE);
+    kw_p16(b + 8, KW_ARCH_X86_64);
+    kw_p16(b + 10, kw_kind & 65535);
+    kw_p16(b + 12, kw_ring & 65535);
+    kw_p16(b + 14, 0);                // flags
+    // entry point: the code section starts at virtual address 0x1000
+    kw_p64(b + 16, 4096);
+    kw_p64(b + 24, 4194304);          // image base 0x400000
+    kw_p64(b + 40, 1048576);          // stack reservation 0x100000
+    kw_p64(b + 48, 0);                // heap: the program manages its own
+    kw_p32(b + 56, 3);                // section count
+    kw_p32(b + 60, KW_HDR_SIZE);
+    kw_p32(b + 64, 0);                // requirement count
+    kw_p32(b + 68, 0);
+    kw_p32(b + 72, 0);                // export count
+    kw_p32(b + 76, 0);
+    kw_p32(b + 80, pool);             // string pool offset
+    kw_p32(b + 84, kw_strlen);
+    kw_p64(b + 104, kw_caps);
+    // the string pool into place
+    kw_copy(b + pool, &kw_strpool, kw_strlen);
+    // section 0: code
+    var s: i64 = b + KW_HDR_SIZE;
+    var clen: i64 = kasm_get_code_size() & 4294967295;
+    kw_p32(s + 0, ncode);             // name offset
+    kw_p32(s + 4, KW_SEC_CODE);
+    kw_p64(s + 8, 4096);              // virtual address
+    kw_p32(s + 16, body);             // file offset
+    kw_p32(s + 20, clen);             // size in the file
+    kw_p32(s + 24, clen);             // size in memory
+    kw_p32(s + 28, 5);                // read | execute
+    // section 1: data, right after the code, aligned to 16
+    s = b + KW_HDR_SIZE + KW_SECT_ENTRY;
+    var doff: i64 = ((clen + 15) / 16 * 16) & 4294967295;   // the data within the image
+    kw_p32(s + 0, ndata);
+    kw_p32(s + 4, KW_SEC_DATA);
+    kw_p64(s + 8, (doff + 4096) & 4294967295);
+    kw_p32(s + 16, body + doff);
+    var dlen: i64 = kasm_get_data_size() & 4294967295;
+    kw_p32(s + 20, dlen);
+    kw_p32(s + 24, dlen);
+    kw_p32(s + 28, 3);                // read | write
+    // section 2: bss, reserved but not stored
+    s = b + KW_HDR_SIZE + KW_SECT_ENTRY * 2;
+    kw_p32(s + 0, nbss);
+    kw_p32(s + 4, KW_SEC_BSS);
+    kw_p64(s + 8, (((doff + dlen + 15) / 16 * 16) + 4096) & 4294967295);
+    kw_p32(s + 16, 0);                // nothing in the file
+    kw_p32(s + 20, 0);
+    kw_p32(s + 24, kasm_get_bss_size());   // size in memory only
+    kw_p32(s + 28, 3);
+    // the code body, then the data body
+    kw_copy(b + body, kasm_get_code(), kasm_get_code_size());
+    kw_copy(b + body + doff, kasm_get_data(), kasm_get_data_size());
+    // the length before the signature
+    kw_len = (body + doff + dlen + 15) / 16 * 16;
+    kw_sign();
+    return kw_len;
+}
+
+// a JSIG block holding a digest of everything before it. Algorithm 1 means
+// integrity without authenticity: the file can be checked for tampering but
+// not attributed to a signer. Key-based algorithms slot into the same block.
+fn kw_sign() -> i64 {
+    var b: i64 = &kw_buf;
+    var n: i64 = kw_len;              // how many bytes are signed
+    // where the signature sits, before it is written
+    kw_p32(b + 88, n);
+    kw_p32(b + 92, 48);               // block size
+    // FNV-1a over the signed range
+    var h: i64 = -3750763034362895579;    // offset basis 0xCBF29CE484222325
+    var i: i64 = 0;
+    while i < n {
+        h = (h ^ kw_g8(b + i)) * 1099511628211;    // prime 0x100000001B3
+        i = i + 1;
+    }
+    var d: i64 = b + n;
+    kw_p32(d + 0, KW_JSIG_MAGIC);
+    kw_p16(d + 4, KW_JSIG_ALG_DIGEST);
+    kw_p16(d + 6, 0);                 // no key identifier
+    kw_p32(d + 8, 8);                 // digest size
+    kw_p32(d + 12, 0);                // no signature bytes
+    kw_p64(d + 16, n);                // how much was signed
+    kw_p64(d + 24, h);                // the digest itself
+    kw_p64(d + 32, 0);
+    kw_p64(d + 40, 0);
+    kw_len = n + 48;
+    return 0;
+}
