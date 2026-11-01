@@ -57,6 +57,13 @@ krontools build main.kr --target=linux
 * **Web:** WebAssembly (`.wasm`), seamlessly integrated with an auto-generated HTML canvas and JS host.
 
 ## License
+# Kron
+
+![license](https://img.shields.io/github/license/Gersonsh94/Kron?style=flat-square)
+![stars](https://img.shields.io/github/stars/Gersonsh94/Kron?style=flat-square)
+
+![self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen?style=flat-square)
+![dependencies](https://img.shields.io/badge/dependencies-none-teal?style=flat-square)
 
 Kron is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
 
