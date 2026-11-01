@@ -1042,8 +1042,9 @@ numbers.
 ## The rest of the assembly goes to Kron, piece by piece (Gerson, from 26-10-2026)
 
 Gerson's order, ten pieces: 1 imports, 2 the PE writer, 3 the ELF writer,
-4 the Mach-O writer, 5 xwasm, 6 the KRN writer, 7 xarm, 8 xwasm's reader
-side, 9 karm, 10 main (the bridge goes). Each piece keeps a door in assembly
+4 the Mach-O writer, 5 wasm (what goes beside the .wasm: the page and the
+host), 6 the KRN writer, 7 xarm, 8 xwasm, 9 karm, 10 main (the bridge
+goes). Each piece keeps a door in assembly
 with the names the rest of the compiler calls, and the door saves the
 registers the old code kept; each writes the same bytes as the assembly it
 replaces, checked file by file before it is delivered.
@@ -1061,8 +1062,17 @@ replaces, checked file by file before it is delivered.
   `krn_writer.kr`, `krn.asm` its door. The same bytes for every program
   built with `--target=krn` (123). The door keeps every register but rax:
   main holds the file's length in r11 across `krn_get_image`.
-- Still in assembly: xwasm (3,990 lines), xarm (5,450), karm (5,290),
-  main (4,444), the runtime and the linker, and the doors.
+- Piece 5, wasm (01-11-2026): `web_writer.kr`, what was `web_write_host` in
+  main.asm -- NAME.html, the page that opens NAME.wasm, and kron_web.js, the
+  host, beside it. main.asm keeps `web_write_host` as its door and the
+  names, buffers and texts it reads; the host's script stays data, in
+  `include/web_host.inc` (made by `web/make_host.kr`). The same three files
+  for every program of the suite built for the web, and for output names
+  with folders, with several dots and with none. The .wasm itself is
+  written by xwasm (`xw_module`), and goes with piece 8.
+- Still in assembly: xarm (5,450 lines), xwasm (3,990), karm (5,290),
+  main (4,444 less what has left it), the runtime and the linker, and the
+  doors.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 

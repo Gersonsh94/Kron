@@ -35,6 +35,10 @@ extern xwasm_translate, xwasm_error_line, xwasm_error_text, xwasm_error_insn
 extern xarm_set_os, karm_set_align, macho_write
 extern mo_dylib, mo_platform, mo_idname
 extern xarm_set_lib
+extern ww_write_host
+global write_file, ww_out_bin_name, ww_html_name, ww_js_path, ww_page
+global ww_page_a, ww_page_b, ww_page_c, ww_html_ext, ww_js_name
+global ww_host_js, ww_host_js_size
 extern kasm_init, kasm_assemble, kasm_get_code, kasm_get_code_size, kasm_had_error
 extern kasm_get_error_line, kasm_get_error_count, kasm_get_error_line_at
 extern kasm_get_error_dst, kasm_get_error_src
@@ -2263,124 +2267,76 @@ build_asm_name:
 ; ==============================================================================
 ; web_write_host() : beside NAME.wasm (out_bin_name), NAME.html, the page that
 ; opens it, and kron_web.js, the host. Returns rax = 1 OK, 0 on error.
+; The writer is in Kron, web_writer.kr (ww_write_host); this is its door:
+; every register but rax is kept and the stack aligned. The ww_ getters give
+; it the names, buffers and texts below.
 ; ==============================================================================
 web_write_host:
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
     push r12
     push r13
     push r14
-    sub  rsp, 8
-    ; r12 = where the name begins (after the last separator), r13 = the dot
-    lea  rsi, [rel out_bin_name]
-    xor  rcx, rcx
-    xor  r12, r12
-    mov  r13, -1
-.wh_scan:
-    mov  al, [rsi + rcx]
-    test al, al
-    jz   .wh_scanned
-    cmp  al, '/'
-    je   .wh_sep
-    cmp  al, 92
-    je   .wh_sep
-    cmp  al, '.'
-    jne  .wh_next
-    mov  r13, rcx
-    jmp  .wh_next
-.wh_sep:
-    lea  r12, [rcx + 1]
-    mov  r13, -1
-.wh_next:
-    inc  rcx
-    jmp  .wh_scan
-.wh_scanned:
-    mov  r14, rcx                 ; length
-    cmp  r13, -1
-    jne  .wh_dot
-    mov  r13, r14
-.wh_dot:
-    ; NAME.html
-    lea  rdi, [rel web_html_name]
-    lea  rsi, [rel out_bin_name]
-    mov  rcx, r13
-    call wh_catn
-    lea  rsi, [rel html_ext]
-    call wh_cat
-    mov  byte [rdi], 0
-    ; DIR/kron_web.js
-    lea  rdi, [rel web_js_path]
-    lea  rsi, [rel out_bin_name]
-    mov  rcx, r12
-    call wh_catn
-    lea  rsi, [rel web_js_name]
-    call wh_cat
-    mov  byte [rdi], 0
-    ; the page
-    lea  rdi, [rel web_page]
-    lea  rsi, [rel web_page_a]
-    call wh_cat
-    lea  rsi, [rel out_bin_name]
-    add  rsi, r12
-    mov  rcx, r13
-    sub  rcx, r12
-    call wh_catn
-    lea  rsi, [rel web_page_b]
-    call wh_cat
-    lea  rsi, [rel out_bin_name]
-    add  rsi, r12
-    mov  rcx, r14
-    sub  rcx, r12
-    call wh_catn
-    lea  rsi, [rel web_page_c]
-    call wh_cat
-    lea  rax, [rel web_page]
-    mov  r8, rdi
-    sub  r8, rax
-    lea  rcx, [rel web_html_name]
-    lea  rdx, [rel web_page]
-    call write_file
-    test rax, rax
-    jz   .wh_out
-    lea  rcx, [rel web_js_path]
-    lea  rdx, [rel web_host_js]
-    mov  r8, [rel web_host_js_size]
-    call write_file
-.wh_out:
-    add  rsp, 8
+    push r15
+    sub  rsp, 40
+    call ww_write_host
+    add  rsp, 40
+    pop  r15
     pop  r14
     pop  r13
     pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
-; wh_cat: the text at rsi (to its 0) at rdi; rdi moves past it
-wh_cat:
-    mov  al, [rsi]
-    test al, al
-    jz   .done
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    jmp  wh_cat
-.done:
+ww_out_bin_name:
+    lea  rax, [rel out_bin_name]
     ret
-
-; wh_catn: rcx bytes from rsi at rdi; rdi moves past them
-wh_catn:
-    test rcx, rcx
-    jz   .done
-.l:
-    mov  al, [rsi]
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    dec  rcx
-    jnz  .l
-.done:
+ww_html_name:
+    lea  rax, [rel web_html_name]
+    ret
+ww_js_path:
+    lea  rax, [rel web_js_path]
+    ret
+ww_page:
+    lea  rax, [rel web_page]
+    ret
+ww_page_a:
+    lea  rax, [rel web_page_a]
+    ret
+ww_page_b:
+    lea  rax, [rel web_page_b]
+    ret
+ww_page_c:
+    lea  rax, [rel web_page_c]
+    ret
+ww_html_ext:
+    lea  rax, [rel html_ext]
+    ret
+ww_js_name:
+    lea  rax, [rel web_js_name]
+    ret
+ww_host_js:
+    lea  rax, [rel web_host_js]
+    ret
+ww_host_js_size:
+    mov  rax, [rel web_host_js_size]
     ret
 
 ; ==============================================================================

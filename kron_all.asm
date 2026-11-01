@@ -42,3 +42,4 @@
 %include "pe_writer_kr.asm"
 %include "elf_writer.asm"
 %include "elf_writer_kr.asm"
+%include "web_writer_kr.asm"

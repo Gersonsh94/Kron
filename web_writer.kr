@@ -1,0 +1,109 @@
+kron_program
+kron_domain web_writer;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// WEB WRITER: what goes beside NAME.wasm -- NAME.html, the page that opens
+// it, and kron_web.js, the host
+//
+// It was web_write_host in main.asm, and it is here now, byte for byte the
+// same. main.asm keeps web_write_host as its door, and the names, buffers
+// and texts it reads: the output's name, the page's three pieces, the
+// host's script (include/web_host.inc, made by web/make_host.kr).
+// =========================================================================
+
+extern "kronc" {
+    fn write_file(name: i64, buf: i64, len: i64) -> i64;
+    fn ww_out_bin_name() -> i64;
+    fn ww_html_name() -> i64;
+    fn ww_js_path() -> i64;
+    fn ww_page() -> i64;
+    fn ww_page_a() -> i64;
+    fn ww_page_b() -> i64;
+    fn ww_page_c() -> i64;
+    fn ww_html_ext() -> i64;
+    fn ww_js_name() -> i64;
+    fn ww_host_js() -> i64;
+    fn ww_host_js_size() -> i64;
+}
+
+fn ww_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn ww_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+// the text at src, to its 0, at dst: where dst ends
+fn ww_cat(dst: i64, src: i64) -> i64 {
+    var d: i64 = dst;
+    var s: i64 = src;
+    while ww_g8(s) != 0 {
+        ww_p8(d, ww_g8(s));
+        d = d + 1;
+        s = s + 1;
+    }
+    return d;
+}
+
+// n bytes from src at dst: where dst ends
+fn ww_catn(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        ww_p8(dst + i, ww_g8(src + i));
+        i = i + 1;
+    }
+    return dst + n;
+}
+
+// NAME.html and kron_web.js beside the output: 1, or 0 when a file could
+// not be written
+fn ww_write_host() -> i64 {
+    var name: i64 = ww_out_bin_name();
+    // where the name begins (after the last separator), and its dot
+    var i: i64 = 0;
+    var start: i64 = 0;
+    var dot: i64 = -1;
+    while ww_g8(name + i) != 0 {
+        var c: i64 = ww_g8(name + i);
+        if c == 47 || c == 92 {
+            start = i + 1;
+            dot = -1;
+        } else if c == 46 {
+            dot = i;
+        }
+        i = i + 1;
+    }
+    var len: i64 = i;
+    if dot == -1 {
+        dot = len;
+    }
+    // NAME.html
+    var d: i64 = ww_catn(ww_html_name(), name, dot);
+    d = ww_cat(d, ww_html_ext());
+    ww_p8(d, 0);
+    // DIR/kron_web.js
+    d = ww_catn(ww_js_path(), name, start);
+    d = ww_cat(d, ww_js_name());
+    ww_p8(d, 0);
+    // the page
+    var page: i64 = ww_page();
+    d = ww_cat(page, ww_page_a());
+    d = ww_catn(d, name + start, dot - start);
+    d = ww_cat(d, ww_page_b());
+    d = ww_catn(d, name + start, len - start);
+    d = ww_cat(d, ww_page_c());
+    if write_file(ww_html_name(), page, d - page) == 0 {
+        return 0;
+    }
+    return write_file(ww_js_path(), ww_host_js(), ww_host_js_size());
+}
