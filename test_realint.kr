@@ -10,6 +10,8 @@ kron_definitions
 // real global given 3 was 5e-324; x % y of reals gave x. Now, as 'return'
 // and 'as i64' always did: a real into an integer is truncated toward zero,
 // an integer into a real is converted, an untyped var takes the real.
+// Since 01-11-2026 a real given to an integer parameter is an error: 'as i64'
+// says the cut is meant (test_realarg_bad).
 // =========================================================================
 
 struct S {
@@ -63,8 +65,8 @@ fn main() -> i64 {
     var t: S = S { n: x * 12, r: 1 };
     print(t.n);                               // 30
     print(t.r);                               // 1.000000
-    print(take(x * 14));                      // 35
-    print(take7(0, 0, 0, 0, 0, 0, x * 16));   // 40
+    print(take((x * 14) as i64));             // 35
+    print(take7(0, 0, 0, 0, 0, 0, (x * 16) as i64));   // 40
     print(takef(7));                          // 7.000000
     print(takef7(0, 0, 0, 0, 0, 0, 9));       // 9.000000
     print(half(5));                           // 2.500000

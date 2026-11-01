@@ -1579,10 +1579,20 @@ fn gpu_cull(on: i64) -> i64 { gpu_cull_on = on; return on; }
 fn gpu_depth(on: i64) -> i64 { gpu_depth_on = on; return on; }
 fn gpu_blend(on: i64) -> i64 { gpu_blend_on = on; return on; }
 
+// meshes, shaders, textures and targets are made outside a frame: making
+// one uses the command buffer the frame is filling, and would break it
+fn gpu_outside_frame() -> i64 {
+    if gpu_in_frame == 1 {
+        fail "a mesh, shader, texture or target cannot be made while a frame or a target is begun" hint "make it before gpu_begin and gpu_begin_target, or after gpu_end and gpu_end_target";
+    }
+    return 0;
+}
+
 fn gpu_shader(source: i64) -> i64 {
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
     }
+    gpu_outside_frame();
     if list_len(gp_shader) >= 256 {
         fail "too many shaders" hint "256 at most";
     }
@@ -1674,6 +1684,7 @@ fn gpu_mesh(vertices: i64, nverts: i64, fpv: i64, indices: i64, nindices: i64) -
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
     }
+    gpu_outside_frame();
     if nverts <= 0 || fpv <= 0 || nindices <= 0 || nindices % 3 != 0 {
         fail "a mesh needs corners and triangles" hint "three indices a triangle";
     }
@@ -1722,6 +1733,7 @@ fn gpu_texture_bgra(pixels: i64, w: i64, h: i64) -> i64 {
     if gpu_on == 0 && gpu_kind == 0 {
         fail "the GPU is not open" hint "gpu_open first";
     }
+    gpu_outside_frame();
     var ok: i64 = 0;
     if gpu_kind == 1 {
         ok = vk_texture(pixels, w, h);
@@ -1766,6 +1778,7 @@ fn gpu_texture_bc1(img: i64) -> i64 {
     if gpu_bc_on == 0 {
         fail "this graphics card has no BC textures" hint "use gpu_texture";
     }
+    gpu_outside_frame();
     lock_take(HP_LOCK);
     var q: i64 = im_pixels(img);
     lock_give(HP_LOCK);
@@ -1854,6 +1867,7 @@ fn gpu_target(w: i64, h: i64) -> i64 {
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
     }
+    gpu_outside_frame();
     if gpu_kind != 1 {
         fail "render targets are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
     }

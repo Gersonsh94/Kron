@@ -1118,6 +1118,40 @@ called `text_free` itself.
   still alive while its function runs: a recursion 30 deep holds 31.
   Test: `test_textown`.
 
+## A real where an integer goes is an error (01-11-2026, Gerson, on Claude's advice: found in the engine)
+
+- This changes the rule of 20-10-2026 (below), which truncated a real given
+  to an integer without a word. In the engine `list_set(l, i, -1.0)` -- the
+  integer version, where `list_set_real` was meant -- put -1 into a list of
+  reals, which read back as a NaN; 2.5 went in as 2, read back as almost 0.
+  Nothing said so.
+- Now a real given to an integer parameter (of a function of the program or
+  of an `extern`), or returned from a function that returns an integer
+  (one result or several), is a compile error at the real, with a hint:
+  `x as i64` when the cut is meant, the `_real` functions for lists. An
+  integer into a real is still converted; `var n: i64 = x * 2` and the other
+  stores into an integer still truncate, as before.
+- Measured before the change: the compiler (bootstrap g1 = g2 = g3) and
+  every `std_*` module have no such case; of the 121 programs of
+  RUNTESTS.bat only `test_realint` and `test_fmix` had one, on purpose.
+  They say `as i64` now and print what they printed. Tests:
+  `test_realarg_bad`, `test_realret_bad`.
+- std_gpu: making a mesh, shader, texture or target while a frame or a
+  target is begun broke the program (on Vulkan it restarted the command
+  buffer the frame was filling). It is an error with a hint now.
+
+## std_gpu: render targets, mipmaps and BC1 (27-10-2026, Gerson)
+
+- `gpu_target(w, h)`, `gpu_begin_target` / `gpu_end_target`,
+  `gpu_target_texture`, `gpu_target_depth` (shadow maps): each target pass
+  is its own job, waited for, before the frame. `gpu_texture` makes every
+  mip level on the card (blits). `gpu_texture_bc1(img)`: BC1 encoded on the
+  CPU, its mip levels box-filtered on the CPU, on a card with BC.
+- Vulkan only, for now: Metal and WebGPU fail with a message. Verified with
+  Mesa's software Vulkan and the Khronos validation layer (no messages);
+  `gpu_target` also on Gerson's RTX 3060 (GPUTESTS.bat). Tests:
+  `gpu_target`, `gpu_mip`, `gpu_bc`.
+
 ## Fixed 20-10-2026
 
 - A comparison of reals used as a value -- `return a < b`, `f(x == 1.0)`,

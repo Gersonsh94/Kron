@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_realarg_bad;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+
+// =========================================================================
+// MUST BE REJECTED: a real given to an integer parameter. list_set takes an
+// i64; -1.0 went in cut to -1, and read back as a real it was a NaN. The
+// error points at the argument and names list_set_real; 'as i64' is how a
+// cut that is meant is written.
+// =========================================================================
+
+fn main() -> i64 {
+    var l: list<f64>;
+    list_add_real(l, 0.0);
+    list_set(l, 0, -1.0);
+    return 0;
+}

@@ -1,0 +1,18 @@
+kron_program
+kron_domain test_realret_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// MUST BE REJECTED: a real returned from a function that returns an integer.
+// It was cut to its whole part without a word; 'as i64' says it is meant.
+// =========================================================================
+
+fn half(n: i64) -> i64 {
+    return n / 2.0;
+}
+
+fn main() -> i64 {
+    print(half(5));
+    return 0;
+}

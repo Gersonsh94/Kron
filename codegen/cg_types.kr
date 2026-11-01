@@ -465,6 +465,7 @@ fn cg_emit_return_multi(r: ptr<Ast>) -> i64 {
             emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");        // the bits go on the stack as they are
         } else {
             if cg_expr_is_float(v) != 0 {
+                cg_real_int_error(v, 1);     // a real for an integer result
                 cg_emit_float(v);
                 emit_cstr("    cvttsd2si rax, xmm0\n");
             } else {

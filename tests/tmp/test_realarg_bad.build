@@ -1,0 +1,13 @@
+========================================
+  KRON 1.0
+  Memory-safe, thread-safe native code
+========================================
+[1/6] Reading file... OK
+[2/6] Lexer... OK
+[3/6] Parser... OK
+[4/6] Semantic... OK
+[5/6] Codegen...
+test_realarg_bad.kr:17:21: a real is given where the function takes an integer '1.0'
+    list_set(l, 0, -1.0);
+                    ^^^
+  hint: write 'x as i64' to cut it to its whole part; for a list of reals use list_set_real and the other _real functions

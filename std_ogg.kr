@@ -1,0 +1,129 @@
+kron_program
+kron_domain std_ogg;
+kron_imports
+acquire_domain "std_file.kr";
+acquire_domain "std_heap.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- the Ogg container.
+//
+//     var n: i64 = ogg_open("music.ogg");       // the first stream in it
+//     var i: i64 = 0;
+//     while i < ogg_count() {
+//         var p: i64 = ogg_packet(i);            // its bytes, at p
+//         var len: i64 = ogg_packet_len(i);
+//         i = i + 1;
+//     }
+//
+// ogg_open reads the whole file. Packets that run over pages are joined,
+// so each packet is whole in one place. Only the first logical stream is
+// kept: the others are skipped. ogg_granule(i) is the sample position at
+// the end of packet i (the page's position on its last packet), -1 for the
+// rest.
+//
+// This module reads the container only. Vorbis decodes the packets it gives
+// (std_vorbis.kr).
+// =========================================================================
+
+var og_buf: i64;        // the payload of the stream's pages, in order
+var og_size: i64;       // bytes in og_buf
+var og_at: list<i64>;   // where each packet starts in og_buf
+var og_len: list<i64>;  // and how long it is
+var og_gran: list<i64>; // its granule position, or -1
+var og_serial: i64;     // the stream kept, or -1 before the first page
+
+fn ogg_byte(p: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek8(p); }
+    return v;
+}
+
+// a 32-bit little-endian number at p
+fn ogg_u32(p: i64) -> i64 {
+    return ogg_byte(p) | (ogg_byte(p + 1) << 8) | (ogg_byte(p + 2) << 16) | (ogg_byte(p + 3) << 24);
+}
+
+// the container at src, n bytes: 1 when it parses, 0 when it does not
+fn ogg_parse(src: i64, n: i64) -> i64 {
+    og_at = list_new();
+    og_len = list_new();
+    og_gran = list_new();
+    og_buf = hp_alloc(n + 8);
+    if og_buf == 0 { return 0; }
+    og_size = 0;
+    og_serial = -1;
+    var at: i64 = 0;
+    var open: i64 = 0;         // 1 while a packet runs on to the next page
+    var pkt_start: i64 = 0;
+    var pkt_len: i64 = 0;
+    while at + 27 <= n {
+        if ogg_byte(src + at) != 79 || ogg_byte(src + at + 1) != 103 { return 0; }
+        if ogg_byte(src + at + 2) != 103 || ogg_byte(src + at + 3) != 83 { return 0; }
+        var serial: i64 = ogg_u32(src + at + 14);
+        var gran: i64 = ogg_u32(src + at + 6) + ogg_u32(src + at + 10) * 4294967296;
+        var nseg: i64 = ogg_byte(src + at + 26);
+        var total: i64 = 0;
+        var i: i64 = 0;
+        while i < nseg {
+            total = total + ogg_byte(src + at + 27 + i);
+            i = i + 1;
+        }
+        var data: i64 = at + 27 + nseg;
+        if data + total > n { return 0; }
+        if og_serial == -1 { og_serial = serial; }
+        if serial == og_serial {
+            hp_copy(og_buf + og_size, src + data, total);
+            var p: i64 = og_size;
+            og_size = og_size + total;
+            var before: i64 = list_len(og_at);
+            i = 0;
+            while i < nseg {
+                var sl: i64 = ogg_byte(src + at + 27 + i);
+                if open == 0 {
+                    pkt_start = p;
+                    pkt_len = 0;
+                    open = 1;
+                }
+                pkt_len = pkt_len + sl;
+                p = p + sl;
+                if sl < 255 {
+                    list_add(og_at, pkt_start);
+                    list_add(og_len, pkt_len);
+                    list_add(og_gran, -1);
+                    open = 0;
+                }
+                i = i + 1;
+            }
+            // the page's position goes on the last packet that ends on it
+            if list_len(og_at) > before {
+                list_set(og_gran, list_len(og_at) - 1, gran);
+            }
+        }
+        at = data + total;
+    }
+    if open == 1 { return 0; }
+    return 1;
+}
+
+// the first logical stream of the Ogg file at path: 1 when it reads
+fn ogg_open(path: i64) -> i64 {
+    var t: i64 = fl_read_all(path);
+    if t == 0 { return 0; }
+    var q: i64 = ob_get(t, OB_TEXT);
+    var n: i64 = 0;
+    raw { n = peek(q); }
+    var ok: i64 = ogg_parse(q + 8, n);
+    ob_drop(t);
+    hp_release(q);
+    return ok;
+}
+
+fn ogg_count() -> i64 { return list_len(og_at); }
+
+// the bytes of packet i, in memory until the next ogg_open
+fn ogg_packet(i: i64) -> i64 { return og_buf + list_get(og_at, i); }
+
+fn ogg_packet_len(i: i64) -> i64 { return list_get(og_len, i); }
+
+fn ogg_granule(i: i64) -> i64 { return list_get(og_gran, i); }

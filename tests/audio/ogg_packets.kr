@@ -1,0 +1,49 @@
+kron_program
+kron_domain ogg_packets;
+kron_imports
+acquire_domain "std_ogg.kr";
+kron_definitions
+
+// =========================================================================
+// Audio test: the Ogg container. Reads tests/audio/vorbis_sine.ogg and prints
+// each packet's length and the sum of its bytes mod 2^32, and the granule of
+// the packets that end a page. tests/expected/ogg_packets.txt is made by
+// ffprobe and an independent reader.
+// =========================================================================
+
+fn main() -> i64 {
+    say("Ogg packets test");
+    if ogg_open("tests/audio/vorbis_sine.ogg") == 0 {
+        say("  FAIL  the file does not parse");
+        return 1;
+    }
+    var n: i64 = ogg_count();
+    var line: text = text_add(text_new(), "packets ");
+    text_add_int(line, n);
+    say(line);
+    var i: i64 = 0;
+    while i < n {
+        var p: i64 = ogg_packet(i);
+        var len: i64 = ogg_packet_len(i);
+        var sum: i64 = 0;
+        var k: i64 = 0;
+        while k < len {
+            sum = sum + ogg_byte(p + k);
+            k = k + 1;
+        }
+        var t: text = text_add(text_new(), "packet ");
+        text_add_int(t, i);
+        text_add(t, " len ");
+        text_add_int(t, len);
+        text_add(t, " sum ");
+        text_add_int(t, sum & 4294967295);
+        var g: i64 = ogg_granule(i);
+        if g >= 0 {
+            text_add(t, " granule ");
+            text_add_int(t, g);
+        }
+        say(t);
+        i = i + 1;
+    }
+    return 0;
+}

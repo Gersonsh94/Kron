@@ -11,7 +11,7 @@ fn probe2(v: real64) -> real64 {
     return v - lo;
 }
 fn toint(v: real64) -> i64 {
-    return 30 + v;
+    return (30 + v) as i64;
 }
 fn main() {
     lo = 0.5;

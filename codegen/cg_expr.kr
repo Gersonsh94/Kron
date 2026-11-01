@@ -1125,6 +1125,48 @@ fn cg_real_bits_error(e: ptr<Ast>) -> i64 {
     return 0;
 }
 
+// A real where an integer goes, given to a call or returned: an error, not
+// a silent cut to its whole part. 'as i64' says the cut is meant.
+// what: 0 an argument, 1 a returned value.
+fn cg_real_int_error(e: ptr<Ast>, what: i64) -> i64 {
+    if cg_err_msg != 0 {
+        return 0;
+    }
+    cg_err_tok = cg_first_tok(e);
+    if what == 0 {
+        cg_err_msg = "a real is given where the function takes an integer ";
+        cg_err_hint = "  hint: write 'x as i64' to cut it to its whole part; for a list of reals use list_set_real and the other _real functions\r\n";
+    } else {
+        cg_err_msg = "this function returns an integer, and this is a real ";
+        cg_err_hint = "  hint: write 'x as i64' to cut it to its whole part, or declare the function -> f64\r\n";
+    }
+    cg_had_error = 1;
+    return 0;
+}
+
+// every argument of a call to a function of the program against its
+// parameter: a real given to an integer parameter is cg_real_int_error
+fn cg_check_real_args(c: ptr<Ast>, f: i64) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var fnode: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    if f == -1 {
+        return 0;
+    }
+    fnode = cg_q(&fn_nodes, f);
+    p = fnode.left;
+    while a != 0 && p != 0 {
+        if (p.col & 1) == 0 && p.type_info == 0 && cg_param_struct_id(p) == -1 {
+            if cg_arg_struct_id(a.left) == -1 && cg_expr_is_float(a.left) != 0 {
+                return cg_real_int_error(a.left, 0);
+            }
+        }
+        a = a.right;
+        p = p.right;
+    }
+    return 0;
+}
+
 // the width of a declared type, packed: what the type declares
 fn cg_type_size(ty: i64) -> i64 {
     if ty == KW_U8 || ty == KW_I8 || ty == KW_BOOL {

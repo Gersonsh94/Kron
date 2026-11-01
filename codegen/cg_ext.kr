@@ -101,6 +101,7 @@ fn cg_call_extern(c: ptr<Ast>) -> i64 {
             cg_emit_float(a.left);           // an integer is converted
             emit_cstr("    sub rsp, 8\n    movsd [rsp], xmm0\n");
         } else if cg_expr_is_float(a.left) != 0 {
+            cg_real_int_error(a.left, 0);    // a real to an integer parameter
             cg_emit_float(a.left);
             emit_cstr("    cvttsd2si rax, xmm0\n    push rax\n");
         } else {

@@ -501,8 +501,9 @@ fn cg_e_return(n: ptr<Ast>) -> i64 {
             emit_cstr("]\n");
         } else if cg_expr_is_float(r) != 0 {
             cg_emit_float(r);
-            // the maths happened in xmm0, but an i64 function returns rax
+            // a real from a function that returns an integer: an error
             if cur_ret_float == 0 {
+                cg_real_int_error(r, 1);
                 emit_cstr("    cvttsd2si rax, xmm0\n");
             }
         } else {
@@ -1178,6 +1179,7 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
         cg_e_wrap("    sub rsp, ", nf * 8, "\n");
     }
     rm = cg_arg_reals(n, f);
+    cg_check_real_args(n, f);
     cg_e_call_args(n, lit, fr, rm);
     cg_sret_pend = sv;
     emit_cstr("    sub rsp, 32\n");
