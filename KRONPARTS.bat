@@ -50,6 +50,8 @@ call :part krn_writer.kr
 if errorlevel 1 exit /b 1
 call :part web_writer.kr
 if errorlevel 1 exit /b 1
+call :part xarm.kr
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :part

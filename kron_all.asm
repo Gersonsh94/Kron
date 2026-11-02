@@ -35,6 +35,7 @@
 %include "krn_writer_kr.asm"
 %include "karm.asm"
 %include "xarm.asm"
+%include "xarm_kr.asm"
 %include "xwasm.asm"
 %include "macho.asm"
 %include "macho_writer_kr.asm"

@@ -34,11 +34,12 @@ optimization is in Kron. Parts 1 to 5:
 | Changed (01-11-2026) | a real given to an integer parameter (of a Kron function or an `extern`), or returned from a function that returns an integer, is a compile error at the real (`x as i64` when the cut is meant; `list_set_real` and the other `_real` functions for lists); stores into an integer (`var n: i64 = x`, a field, an element) still truncate, as on 20-10; a struct as one of several results (`-> (Vec4, i64)`) is an error, it arrived as its address; `var l: i64 = f(3 as f64)` stays an i64 (the cast's type was taken for the declaration's); in std_gpu, making a mesh, shader, texture or target inside a frame or a target is an error, not a broken frame |
 | Library (27-10 to 01-11-2026) | std_gpu: render targets with colour and depth (shadow maps), mipmaps made on the card, BC1 textures; Vulkan only for now. std_ogg: the Ogg container. std_vorbis: Ogg Vorbis decoded in Kron (floor 1, residues 0-2, coupling, IMDCT through an FFT, up to 8 channels), `audio_load_ogg`; checked against ffmpeg sample by sample on five files, within its print precision |
 | Library (01-11-2026, second part) | std_net: UDP and `net_wait`; std_gpu: instanced drawing (`instance` inputs in KSL, Vulkan); std_task: `task_for` over every core; std_audio: pitch, low-pass, echo, synthesis, sound in space, streams, a mixer without a device; std_vorbis: `audio_stream_ogg` |
+| xarm in Kron (01-11-2026) | `xarm.kr` lowers the x86-64 text to ARM64 text; `xarm.asm` is its door, keeps the reader xwasm shares (same names, same registers), the state xwasm reads and the system call shims; the same ARM64 text for every program of the suite (Linux ARM64, macOS, libraries) and the same web output |
 | Writers in Kron (01-11-2026) | `macho_writer.kr` (Mach-O for macOS and iOS: executables, dylibs, the code signature and its SHA-256) `krn_writer.kr` (the KRN container) and `web_writer.kr` (the page and host beside a .wasm) replace `macho.asm`, `krn.asm` and main.asm's `web_write_host`, which are their doors; the same bytes as before for every program of the suite |
 | Fixed (20-10-2026) | a comparison of reals used as a value (`return a < b`, `f(x == 1.0)`) gave the left operand, not a bool; a real given to an integer (variable, field, element, parameter) kept its bits and an integer given to a real parameter was lost: now truncated and converted, and `var x = 2.5` is a real; `%` of reals is the remainder, bit operators on a real are an error; every `std_*.kr` compiles imported alone (std_exp, std_stats, std_vec3, std_random and std_ml did not); a function named like a register (`r8`, `eax`, `xmm9`) is refused instead of being called as the register |
 
-Still in assembly, in the order they come: the writers (PE, ELF, Mach-O,
-wasm, KRN, ARM64), the translators (xarm, xwasm) and karm, main.
+Still in assembly, in the order they come: xwasm, karm, main (the
+runtime and the linker with it), and the doors.
 
 Checked: the Kron lexer gives the same tokens as the assembly one, the
 Kron parser the same tree, tables and errors, the Kron semantic pass the
@@ -75,7 +76,8 @@ WebGPU (Dawn).
 | File | Lines | Role |
 |---|---:|---|
 | `karm.asm` | 5,259 | Kron's own ARM64 assembler |
-| `xarm.asm` | 4,762 | x86-64 text -> ARM64 text, with the Linux and the macOS shims |
+| `xarm.kr` | 2,320 | x86-64 text -> ARM64 text, in Kron (since 01-11-2026) |
+| `xarm.asm` | 1,937 | The door to it, the reader xwasm shares, and the Linux and the macOS shims (data); `xarm_kr.asm` is made by `kronc --module` |
 | `main.asm` | 4,641 | Driver, CLI, pipeline, ELF writers, the web page |
 | `xwasm.asm` | 3,679 | x86-64 text -> WebAssembly module |
 | `lexer/lexer.kr` | 632 | Tokenizer, in Kron (since 19-10-2026; with `include/tokens.kr`, 198) |
@@ -185,7 +187,7 @@ kronc.exe program.kr --target=linux-arm64            # AArch64 ELF
 kronc.exe program.kr --target=linux-arm64 -S         # the ARM64 assembly
 ```
 
-`xarm.asm` lowers the x86-64 text codegen writes for Linux to ARM64 text,
+`xarm.kr` (`xarm.asm` its door) lowers the x86-64 text codegen writes for Linux to ARM64 text,
 instruction by instruction, keeping the x86-64 machine (register map, an
 8-byte stack in x28, the flags) so the code generator and the runtime need
 nothing of their own. karm assembles the result. The whole design and why

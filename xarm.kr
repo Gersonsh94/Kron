@@ -1,0 +1,2320 @@
+kron_program
+kron_domain xarm;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// XARM: lowers the x86-64 text the code generator writes to ARM64 text
+//
+// kronc has one code generator. For Linux on ARM64 it generates the same
+// program it generates for Linux on x86-64, and this pass rewrites each
+// instruction into its ARM64 equivalent, which karm then assembles. Every
+// feature of the language, the runtime included, reaches ARM64 the moment
+// it works on x86-64.
+//
+// The x86-64 machine is kept exactly, so nothing above this pass changes:
+//
+//   registers   rax rcx rdx rbx rsp rbp rsi rdi r8 r9 r10 r11 r12-r15
+//               x0  x1  x2  x19 x28 x29 x4  x5  x6 x7 x8  x9  x20-x23
+//               xmmN is vN (dN for one double)
+//   scratch     x16 x17 (inside one instruction), x10-x15 (the system call)
+//   stack       x28 is rsp: push and pop are 8 bytes, as on x86-64, so
+//               every frame offset the generator computed stays right. The
+//               ARM sp is left alone.
+//   calls       call f  ->  str x30, [x28, #-8]!   bl f   ldr x30, [x28], #8
+//               The caller keeps its own return address in the slot the x86
+//               call would have used, so [rbp+16] is still the first stack
+//               argument and ret is a plain ret.
+//   flags       cmp, test, add, sub and ucomisd set the ARM flags; the
+//               condition of each jcc and setcc is mapped by what set them.
+//   syscall     __sysx: Kron uses the Linux x86-64 numbers on every Linux;
+//               the call maps them to the ARM64 ones and moves the arguments.
+//
+// It was xarm.asm, and it is here now, line for line the same text out.
+// xarm.asm keeps the door: the old names (xarm_translate, and the reader
+// xwasm shares, xa_read_line and the rest, with their registers), the
+// state xwasm reads by name (one block, xa_get_state) and the system call
+// shims appended to every program (xa_get_tail).
+// =========================================================================
+
+extern "kronc" {
+    fn xa_get_state() -> i64;
+    fn xa_get_tail(k: i64) -> i64;
+}
+
+// the shared state, in the door: offsets in its block
+const S_OS: i64 = 0;              // 0 Linux, 1 macOS
+const S_LIB: i64 = 8;             // 1 for a library: __centry in the tail
+const S_IN: i64 = 16;
+const S_IN_END: i64 = 24;
+const S_LINE_NO: i64 = 32;
+const S_ERR: i64 = 40;
+const S_ERR_LINE: i64 = 48;
+const S_ERR_MSG: i64 = 56;
+const S_REST: i64 = 64;
+const S_NOPS: i64 = 72;
+const S_SKIPPING: i64 = 80;       // inside a routine the tail supplies
+const S_ERR_INSN: i64 = 88;       // 160 bytes
+const S_LINE: i64 = 248;          // 1024 bytes
+const S_MN: i64 = 1272;           // 32 bytes
+const S_OPT: i64 = 1304;          // three operand texts of 256 bytes
+const S_OPS: i64 = 2072;          // three operand records of 32 bytes
+
+// operand record, 32 bytes
+const OP_KIND: i64 = 0;           // 0 none, 1 reg, 2 xmm, 3 imm, 4 mem, 5 label
+const OP_REG: i64 = 1;            // x86 register 0..15
+const OP_RSIZE: i64 = 2;          // 1 2 4 8
+const OP_XMM: i64 = 3;            // xmm number
+const OP_MSIZE: i64 = 4;          // byte/word/dword/qword/oword prefix, 0 none
+const OP_SCALE: i64 = 5;
+const OP_BASE: i64 = 6;           // 255 none
+const OP_INDEX: i64 = 7;          // 255 none
+const OP_VAL: i64 = 8;            // immediate, or displacement
+const OP_REL: i64 = 16;           // label text of [rel L] / [L], 0 none
+const OP_TEXT: i64 = 24;          // the operand text
+
+const K_REG: i64 = 1;
+const K_XMM: i64 = 2;
+const K_IMM: i64 = 3;
+const K_MEM: i64 = 4;
+const K_LABEL: i64 = 5;
+
+// who set the flags
+const F_NONE: i64 = 0;
+const F_SUB: i64 = 1;
+const F_LOGIC: i64 = 2;
+const F_ADD: i64 = 3;
+const F_FP: i64 = 4;
+
+var xl_st: i64;                   // the door's state block
+var xl_ready: i64;                // the tables are filled
+var xl_out: i64;
+var xl_out_end: i64;
+var xl_fk: i64;                   // who set the flags
+var xl_fpend: i64;                // register to tst before the next condition, +1
+var xl_fpw: i64;                  // that register is a w register
+var xl_uniq: i64;
+var xl_mb: i64;                   // addr: base register
+var xl_mo: i64;                   // addr: offset
+var xl_ok: i64;                   // xl_parse_num: the whole text was a number
+var xl_rsize: i64;                // xl_find_reg: the register's size
+var xl_rn_next: i64;
+var xl_rn_bufs: [u8; 32];         // four register names (xl_regname)
+var xl_nb: [u8; 32];              // digits being written
+var xl_tb: [u8; 32];              // one term of a memory operand
+var xl_o1: i64;                   // the three operand records
+var xl_o2: i64;
+var xl_o3: i64;
+
+var xl_rmap: [i64; 16];           // x86 register -> ARM register
+var xl_rg_name: [i64; 64];        // register names, their number and size
+var xl_rg_num: [i64; 64];
+var xl_rg_size: [i64; 64];
+var xl_rg_n: i64;
+var xl_cc_x86: [i64; 96];         // conditions: x86 name and ARM name
+var xl_cc_arm: [i64; 96];
+var xl_cc_n: i64;
+var xl_cc_sub: i64;               // where each table starts and ends
+var xl_cc_sub_end: i64;
+var xl_cc_logic: i64;
+var xl_cc_logic_end: i64;
+var xl_cc_add: i64;
+var xl_cc_add_end: i64;
+var xl_cc_fp: i64;
+var xl_cc_fp_end: i64;
+
+// -------------------------------------------------------------------------
+// memory
+// -------------------------------------------------------------------------
+
+fn xl_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn xl_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn xl_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn xl_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+// the address of a piece of the door's state
+fn xl_s(off: i64) -> i64 {
+    if xl_st == 0 {
+        xl_st = xa_get_state();
+        xl_init();
+    }
+    return xl_st + off;
+}
+
+fn xl_get(off: i64) -> i64 {
+    return xl_g64(xl_s(off));
+}
+
+fn xl_set(off: i64, v: i64) -> i64 {
+    return xl_p64(xl_s(off), v);
+}
+
+// -------------------------------------------------------------------------
+// tables
+// -------------------------------------------------------------------------
+
+fn xl_reg(name: i64, num: i64, size: i64) -> i64 {
+    xl_p64(&xl_rg_name + xl_rg_n * 8, name);
+    xl_p64(&xl_rg_num + xl_rg_n * 8, num);
+    xl_p64(&xl_rg_size + xl_rg_n * 8, size);
+    xl_rg_n = xl_rg_n + 1;
+    return 0;
+}
+
+fn xl_cc(x: i64, a: i64) -> i64 {
+    xl_p64(&xl_cc_x86 + xl_cc_n * 8, x);
+    xl_p64(&xl_cc_arm + xl_cc_n * 8, a);
+    xl_cc_n = xl_cc_n + 1;
+    return 0;
+}
+
+fn xl_cc_eq() -> i64 {
+    xl_cc("e", "eq");
+    xl_cc("z", "eq");
+    xl_cc("ne", "ne");
+    xl_cc("nz", "ne");
+    return 0;
+}
+
+fn xl_init() -> i64 {
+    if xl_ready != 0 {
+        return 0;
+    }
+    xl_ready = 1;
+    xl_p64(&xl_rmap + 0 * 8, 0);
+    xl_p64(&xl_rmap + 1 * 8, 1);
+    xl_p64(&xl_rmap + 2 * 8, 2);
+    xl_p64(&xl_rmap + 3 * 8, 19);
+    xl_p64(&xl_rmap + 4 * 8, 28);
+    xl_p64(&xl_rmap + 5 * 8, 29);
+    xl_p64(&xl_rmap + 6 * 8, 4);
+    xl_p64(&xl_rmap + 7 * 8, 5);
+    xl_p64(&xl_rmap + 8 * 8, 6);
+    xl_p64(&xl_rmap + 9 * 8, 7);
+    xl_p64(&xl_rmap + 10 * 8, 8);
+    xl_p64(&xl_rmap + 11 * 8, 9);
+    xl_p64(&xl_rmap + 12 * 8, 20);
+    xl_p64(&xl_rmap + 13 * 8, 21);
+    xl_p64(&xl_rmap + 14 * 8, 22);
+    xl_p64(&xl_rmap + 15 * 8, 23);
+
+    xl_rg_n = 0;
+    xl_reg("rax", 0, 8);
+    xl_reg("rcx", 1, 8);
+    xl_reg("rdx", 2, 8);
+    xl_reg("rbx", 3, 8);
+    xl_reg("rsp", 4, 8);
+    xl_reg("rbp", 5, 8);
+    xl_reg("rsi", 6, 8);
+    xl_reg("rdi", 7, 8);
+    xl_reg("r8", 8, 8);
+    xl_reg("r9", 9, 8);
+    xl_reg("r10", 10, 8);
+    xl_reg("r11", 11, 8);
+    xl_reg("r12", 12, 8);
+    xl_reg("r13", 13, 8);
+    xl_reg("r14", 14, 8);
+    xl_reg("r15", 15, 8);
+    xl_reg("eax", 0, 4);
+    xl_reg("ecx", 1, 4);
+    xl_reg("edx", 2, 4);
+    xl_reg("ebx", 3, 4);
+    xl_reg("esp", 4, 4);
+    xl_reg("ebp", 5, 4);
+    xl_reg("esi", 6, 4);
+    xl_reg("edi", 7, 4);
+    xl_reg("r8d", 8, 4);
+    xl_reg("r9d", 9, 4);
+    xl_reg("r10d", 10, 4);
+    xl_reg("r11d", 11, 4);
+    xl_reg("r12d", 12, 4);
+    xl_reg("r13d", 13, 4);
+    xl_reg("r14d", 14, 4);
+    xl_reg("r15d", 15, 4);
+    xl_reg("ax", 0, 2);
+    xl_reg("cx", 1, 2);
+    xl_reg("dx", 2, 2);
+    xl_reg("bx", 3, 2);
+    xl_reg("si", 6, 2);
+    xl_reg("di", 7, 2);
+    xl_reg("al", 0, 1);
+    xl_reg("cl", 1, 1);
+    xl_reg("dl", 2, 1);
+    xl_reg("bl", 3, 1);
+    xl_reg("sil", 6, 1);
+    xl_reg("dil", 7, 1);
+    xl_reg("r8b", 8, 1);
+    xl_reg("r9b", 9, 1);
+    xl_reg("r10b", 10, 1);
+    xl_reg("r11b", 11, 1);
+
+    xl_cc_n = 0;
+    // after cmp, sub, neg
+    xl_cc_sub = xl_cc_n;
+    xl_cc_eq();
+    xl_cc("l", "lt");
+    xl_cc("nge", "lt");
+    xl_cc("le", "le");
+    xl_cc("ng", "le");
+    xl_cc("g", "gt");
+    xl_cc("nle", "gt");
+    xl_cc("ge", "ge");
+    xl_cc("nl", "ge");
+    xl_cc("b", "lo");
+    xl_cc("c", "lo");
+    xl_cc("nae", "lo");
+    xl_cc("be", "ls");
+    xl_cc("na", "ls");
+    xl_cc("a", "hi");
+    xl_cc("nbe", "hi");
+    xl_cc("ae", "hs");
+    xl_cc("nb", "hs");
+    xl_cc("nc", "hs");
+    xl_cc("s", "mi");
+    xl_cc("ns", "pl");
+    xl_cc_sub_end = xl_cc_n;
+    // after test, and, or, xor
+    xl_cc_logic = xl_cc_n;
+    xl_cc_eq();
+    xl_cc("s", "mi");
+    xl_cc("ns", "pl");
+    xl_cc("l", "lt");
+    xl_cc("ge", "ge");
+    xl_cc("le", "le");
+    xl_cc("g", "gt");
+    xl_cc_logic_end = xl_cc_n;
+    // after add, inc
+    xl_cc_add = xl_cc_n;
+    xl_cc_eq();
+    xl_cc("s", "mi");
+    xl_cc("ns", "pl");
+    xl_cc_add_end = xl_cc_n;
+    // after ucomisd: an unordered result (a NaN) counts as below, as on x86
+    xl_cc_fp = xl_cc_n;
+    xl_cc_eq();
+    xl_cc("a", "gt");
+    xl_cc("nbe", "gt");
+    xl_cc("ae", "ge");
+    xl_cc("nb", "ge");
+    xl_cc("nc", "ge");
+    xl_cc("b", "lt");
+    xl_cc("c", "lt");
+    xl_cc("be", "le");
+    xl_cc("na", "le");
+    xl_cc_fp_end = xl_cc_n;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// text
+// -------------------------------------------------------------------------
+
+// past the blanks
+fn xl_skipb(p: i64) -> i64 {
+    var q: i64 = p;
+    while xl_g8(q) == 32 {
+        q = q + 1;
+    }
+    return q;
+}
+
+// 1 when the two texts are equal
+fn xl_streq(a: i64, b: i64) -> i64 {
+    var i: i64 = 0;
+    while true {
+        var c: i64 = xl_g8(a + i);
+        if c != xl_g8(b + i) {
+            return 0;
+        }
+        if c == 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// 1 when the text starts with the prefix
+fn xl_prefix(t: i64, p: i64) -> i64 {
+    var i: i64 = 0;
+    while true {
+        var c: i64 = xl_g8(p + i);
+        if c == 0 {
+            return 1;
+        }
+        if c != xl_g8(t + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// input
+// -------------------------------------------------------------------------
+
+// the first error stops the translation
+fn xl_fail(msg: i64) -> i64 {
+    if xl_get(S_ERR) != 0 {
+        return 0;
+    }
+    xl_set(S_ERR, 1);
+    xl_set(S_ERR_MSG, msg);
+    xl_set(S_ERR_LINE, xl_get(S_LINE_NO));
+    var src: i64 = xl_s(S_LINE);
+    var dst: i64 = xl_s(S_ERR_INSN);
+    var i: i64 = 0;
+    while true {
+        var c: i64 = xl_g8(src + i);
+        xl_p8(dst + i, c);
+        if c == 0 {
+            return 0;
+        }
+        i = i + 1;
+        if i >= 150 {
+            xl_p8(dst + i, 0);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// 1 and the line holds the next line, its comment removed and its blanks
+// trimmed; 0 at the end of the text
+fn xl_read_line() -> i64 {
+    var p: i64 = xl_get(S_IN);
+    var end: i64 = xl_get(S_IN_END);
+    if p >= end {
+        return 0;
+    }
+    xl_set(S_LINE_NO, xl_get(S_LINE_NO) + 1);
+    var line: i64 = xl_s(S_LINE);
+    var n: i64 = 0;
+    var q: i64 = 0;                   // the open quote
+    var com: i64 = 0;                 // a comment started
+    var long: i64 = 0;                // the line did not fit
+    while p < end {
+        var c: i64 = xl_g8(p);
+        p = p + 1;
+        if c == 10 {
+            break;
+        }
+        var put: i64 = 1;
+        if c == 13 || com != 0 {
+            put = 0;
+        } else if q != 0 {
+            if c == q {
+                q = 0;
+            }
+        } else if c == 59 {
+            com = 1;
+            put = 0;
+        } else if c == 39 || c == 34 {
+            q = c;
+        } else if c == 9 {
+            c = 32;
+        }
+        if put != 0 {
+            // a line past the buffer is an error, never quietly cut short
+            if n >= 1000 {
+                long = 1;
+            } else {
+                xl_p8(line + n, c);
+                n = n + 1;
+            }
+        }
+    }
+    xl_set(S_IN, p);
+    while n > 0 && xl_g8(line + n - 1) == 32 {
+        n = n - 1;
+    }
+    xl_p8(line + n, 0);
+    if long != 0 {
+        xl_fail("line longer than 1000 characters");
+    }
+    return 1;
+}
+
+// 0 when the line just read is translated, 1 when it is dropped, 2 when it
+// is the label that starts a dropped routine: it belongs to a routine of
+// the preamble that only makes sense on x86-64 and that the tail supplies
+// in ARM64 code instead -- __ccall, which speaks the system's C convention,
+// __pt_entry, where a pthread starts, and __centry. The routine ends at the
+// next label that is not local, or at a section line.
+fn xl_native_skip() -> i64 {
+    var s: i64 = xl_skipb(xl_s(S_LINE));
+    if xl_prefix(s, "section") != 0 {
+        xl_set(S_SKIPPING, 0);
+        return 0;
+    }
+    if xl_g8(s) == 46 {
+        return xl_get(S_SKIPPING);
+    }
+    // a label: the first word ends in ':'
+    var p: i64 = s;
+    while true {
+        var c: i64 = xl_g8(p);
+        if c == 0 || c == 32 {
+            return xl_get(S_SKIPPING);
+        }
+        if c == 58 {
+            break;
+        }
+        p = p + 1;
+    }
+    if xl_prefix(s, "__ccall:") != 0 || xl_prefix(s, "__pt_entry:") != 0 || xl_prefix(s, "__centry:") != 0 {
+        xl_set(S_SKIPPING, 1);
+        return 2;
+    }
+    xl_set(S_SKIPPING, 0);
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// output
+// -------------------------------------------------------------------------
+
+fn xl_put(s: i64) -> i64 {
+    var i: i64 = 0;
+    while true {
+        var c: i64 = xl_g8(s + i);
+        if c == 0 {
+            break;
+        }
+        xl_p8(xl_out, c);
+        xl_out = xl_out + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn xl_putc(c: i64) -> i64 {
+    xl_p8(xl_out, c);
+    xl_out = xl_out + 1;
+    return 0;
+}
+
+fn xl_put_dec(v: i64) -> i64 {
+    var nb: i64 = &xl_nb;
+    var i: i64 = 31;
+    xl_p8(nb + i, 0);
+    var x: i64 = v;
+    if x < 0 {
+        xl_putc(45);
+        // digits of the negative value: -2^63 has no positive one
+        while true {
+            i = i - 1;
+            xl_p8(nb + i, 48 - x % 10);
+            x = x / 10;
+            if x == 0 {
+                break;
+            }
+        }
+    } else {
+        while true {
+            i = i - 1;
+            xl_p8(nb + i, 48 + x % 10);
+            x = x / 10;
+            if x == 0 {
+                break;
+            }
+        }
+    }
+    return xl_put(nb + i);
+}
+
+// as 0x..., the value unsigned
+fn xl_put_hex(v: i64) -> i64 {
+    xl_putc(48);
+    xl_putc(120);
+    var nb: i64 = &xl_nb;
+    var i: i64 = 31;
+    xl_p8(nb + i, 0);
+    var x: i64 = v;
+    while true {
+        var d: i64 = x & 15;
+        i = i - 1;
+        if d < 10 {
+            xl_p8(nb + i, 48 + d);
+        } else {
+            xl_p8(nb + i, 87 + d);
+        }
+        x = x >>> 4;
+        if x == 0 {
+            break;
+        }
+    }
+    return xl_put(nb + i);
+}
+
+// cls is the class letter: x0..x30 and xzr, w.., d, q, s, v
+fn xl_put_reg(cls: i64, n: i64) -> i64 {
+    if n == 31 && (cls == 120 || cls == 119) {
+        xl_putc(cls);
+        xl_putc(122);
+        xl_putc(114);
+        return 0;
+    }
+    xl_putc(cls);
+    return xl_put_dec(n);
+}
+
+// the format: %x x-register, %w w-register, %d signed, %h hex, %s text,
+// %D d-register, %Q q-register, %V v-register; the values in order
+fn xl_fmt(f: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    var i: i64 = 0;
+    var k: i64 = 0;
+    while true {
+        var c: i64 = xl_g8(f + i);
+        if c == 0 {
+            break;
+        }
+        i = i + 1;
+        if c != 37 {
+            xl_putc(c);
+        } else {
+            c = xl_g8(f + i);
+            i = i + 1;
+            var v: i64 = a0;
+            if k == 1 { v = a1; }
+            if k == 2 { v = a2; }
+            if k == 3 { v = a3; }
+            if k == 4 { v = a4; }
+            k = k + 1;
+            if c == 100 {
+                xl_put_dec(v);
+            } else if c == 104 {
+                xl_put_hex(v);
+            } else if c == 115 {
+                xl_put(v);
+            } else if c == 68 {
+                xl_put_reg(100, v);
+            } else if c == 81 {
+                xl_put_reg(113, v);
+            } else if c == 86 {
+                xl_put_reg(118, v);
+            } else {
+                xl_put_reg(c, v);
+            }
+        }
+    }
+    return 0;
+}
+
+fn xl_f0(f: i64) -> i64 {
+    return xl_fmt(f, 0, 0, 0, 0, 0);
+}
+
+fn xl_f1(f: i64, a: i64) -> i64 {
+    return xl_fmt(f, a, 0, 0, 0, 0);
+}
+
+fn xl_f2(f: i64, a: i64, b: i64) -> i64 {
+    return xl_fmt(f, a, b, 0, 0, 0);
+}
+
+fn xl_f3(f: i64, a: i64, b: i64, c: i64) -> i64 {
+    return xl_fmt(f, a, b, c, 0, 0);
+}
+
+fn xl_f4(f: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return xl_fmt(f, a, b, c, d, 0);
+}
+
+// -------------------------------------------------------------------------
+// one line
+// -------------------------------------------------------------------------
+
+fn xl_do_line() -> i64 {
+    var line: i64 = xl_s(S_LINE);
+    var s: i64 = xl_skipb(line);
+    if xl_g8(s) == 0 {
+        return 0;
+    }
+    // the first word: a label when it ends in ':'
+    var b: i64 = s;
+    var p: i64 = s;
+    while true {
+        var c: i64 = xl_g8(p);
+        if c == 0 || c == 32 {
+            break;
+        }
+        if c == 58 {
+            // a label: written on its own line, the rest of the line follows
+            xl_p8(p, 0);
+            xl_put(b);
+            xl_put(":\n");
+            xl_fk = F_NONE;
+            xl_fpend = 0;
+            if xl_streq(b, "_start") != 0 {
+                xl_put("    mov x28, sp\n");
+            }
+            p = xl_skipb(p + 1);
+            if xl_g8(p) == 0 {
+                return 0;
+            }
+            // the rest of the line to the start of the line, and again
+            var d: i64 = line;
+            while true {
+                var e: i64 = xl_g8(p);
+                xl_p8(d, e);
+                p = p + 1;
+                d = d + 1;
+                if e == 0 {
+                    break;
+                }
+            }
+            p = line;
+            b = line;
+        } else {
+            p = p + 1;
+        }
+    }
+    // the mnemonic, lowercased
+    var len: i64 = p - b;
+    if len > 30 {
+        len = 30;
+    }
+    var mn: i64 = xl_s(S_MN);
+    var i: i64 = 0;
+    while i < len {
+        var m: i64 = xl_g8(b + i);
+        if m >= 65 && m <= 90 {
+            m = m + 32;
+        }
+        xl_p8(mn + i, m);
+        i = i + 1;
+    }
+    xl_p8(mn + len, 0);
+    xl_set(S_REST, xl_skipb(p));
+    // lines that are dropped
+    if xl_streq(mn, "default") != 0 || xl_streq(mn, "bits") != 0 || xl_streq(mn, "extern") != 0 {
+        return 0;
+    }
+    // lines that pass unchanged
+    if xl_streq(mn, "section") != 0 {
+        xl_fk = F_NONE;
+        xl_fpend = 0;
+        xl_put(xl_skipb(line));
+        xl_put("\n");
+        return 0;
+    }
+    if xl_streq(mn, "global") != 0 {
+        xl_put(xl_skipb(line));
+        xl_put("\n");
+        return 0;
+    }
+    if xl_is_data(mn) != 0 {
+        xl_put("    ");
+        xl_put(xl_skipb(line));
+        xl_put("\n");
+        return 0;
+    }
+    // an instruction
+    xl_split();
+    xl_parse_ops();
+    if xl_get(S_ERR) != 0 {
+        return 0;
+    }
+    xl_o1 = xl_s(S_OPS);
+    xl_o2 = xl_o1 + 32;
+    xl_o3 = xl_o1 + 64;
+    xl_insn();
+    return 0;
+}
+
+// the lines that pass unchanged, indented
+fn xl_is_data(mn: i64) -> i64 {
+    if xl_streq(mn, "db") != 0 { return 1; }
+    if xl_streq(mn, "dw") != 0 { return 1; }
+    if xl_streq(mn, "dd") != 0 { return 1; }
+    if xl_streq(mn, "dq") != 0 { return 1; }
+    if xl_streq(mn, "resb") != 0 { return 1; }
+    if xl_streq(mn, "resw") != 0 { return 1; }
+    if xl_streq(mn, "resd") != 0 { return 1; }
+    if xl_streq(mn, "resq") != 0 { return 1; }
+    if xl_streq(mn, "times") != 0 { return 1; }
+    if xl_streq(mn, "align") != 0 { return 1; }
+    if xl_streq(mn, "equ") != 0 { return 1; }
+    return 0;
+}
+
+// the end of one operand text: trimmed and ended
+fn xl_split_fin(d: i64, n: i64) -> i64 {
+    var k: i64 = n;
+    while k > 0 && xl_g8(d + k - 1) == 32 {
+        k = k - 1;
+    }
+    xl_p8(d + k, 0);
+    return 0;
+}
+
+// the rest of the line -> up to three operand texts, trimmed
+fn xl_split() -> i64 {
+    var opt: i64 = xl_s(S_OPT);
+    xl_p8(opt, 0);
+    xl_p8(opt + 256, 0);
+    xl_p8(opt + 512, 0);
+    xl_set(S_NOPS, 0);
+    var s: i64 = xl_skipb(xl_get(S_REST));
+    if xl_g8(s) == 0 {
+        return 0;
+    }
+    var k: i64 = 0;
+    while true {
+        if k >= 3 {
+            xl_fail("no ARM64 form for this instruction");
+            return 0;
+        }
+        var d: i64 = opt + k * 256;
+        s = xl_skipb(s);
+        var n: i64 = 0;
+        var q: i64 = 0;               // the open quote
+        var br: i64 = 0;              // brackets
+        var next: i64 = 0;
+        while next == 0 {
+            var c: i64 = xl_g8(s);
+            if c == 0 {
+                xl_split_fin(d, n);
+                xl_set(S_NOPS, k + 1);
+                return 0;
+            }
+            if q != 0 {
+                if c == q {
+                    q = 0;
+                }
+            } else if c == 39 || c == 34 {
+                q = c;
+            } else if c == 91 {
+                br = br + 1;
+            } else if c == 93 {
+                br = br - 1;
+            } else if c == 44 && br == 0 {
+                next = 1;
+            }
+            if next == 0 && n < 250 {
+                xl_p8(d + n, c);
+                n = n + 1;
+            }
+            if next == 0 {
+                s = s + 1;
+            }
+        }
+        xl_split_fin(d, n);
+        s = s + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// operands
+// -------------------------------------------------------------------------
+
+// every operand text into its record
+fn xl_parse_ops() -> i64 {
+    var ops: i64 = xl_s(S_OPS);
+    var i: i64 = 0;
+    while i < 96 {
+        xl_p8(ops + i, 0);
+        i = i + 1;
+    }
+    var k: i64 = 0;
+    while k < xl_get(S_NOPS) {
+        xl_parse_op(xl_s(S_OPT) + k * 256, ops + k * 32);
+        k = k + 1;
+    }
+    return 0;
+}
+
+// the text after "word " when the text starts with the size word, or 0
+fn xl_sizeword(t: i64, w: i64) -> i64 {
+    if xl_prefix(t, w) == 0 {
+        return 0;
+    }
+    var p: i64 = t;
+    var i: i64 = 0;
+    while xl_g8(w + i) != 0 {
+        p = p + 1;
+        i = i + 1;
+    }
+    if xl_g8(p) != 32 {
+        return 0;
+    }
+    return p;
+}
+
+fn xl_parse_op(text: i64, r: i64) -> i64 {
+    var s: i64 = text;
+    xl_p64(r + OP_TEXT, s);
+    xl_p8(r + OP_BASE, 255);
+    xl_p8(r + OP_INDEX, 255);
+    xl_p8(r + OP_SCALE, 1);
+    // a size prefix
+    var size: i64 = 8;
+    var after: i64 = xl_sizeword(s, "qword");
+    if after == 0 {
+        size = 4;
+        after = xl_sizeword(s, "dword");
+    }
+    if after == 0 {
+        size = 16;
+        after = xl_sizeword(s, "oword");
+    }
+    if after == 0 {
+        size = 2;
+        after = xl_sizeword(s, "word");
+    }
+    if after == 0 {
+        size = 1;
+        after = xl_sizeword(s, "byte");
+    }
+    if after != 0 {
+        xl_p8(r + OP_MSIZE, size);
+        s = xl_skipb(after);
+    }
+    if xl_g8(s) != 91 {
+        // a register
+        var reg: i64 = xl_find_reg(s);
+        if reg != -1 {
+            xl_p8(r + OP_KIND, K_REG);
+            xl_p8(r + OP_REG, reg);
+            xl_p8(r + OP_RSIZE, xl_rsize);
+            return 0;
+        }
+        // xmmN
+        if xl_g8(s) == 120 && xl_g8(s + 1) == 109 && xl_g8(s + 2) == 109 {
+            var x: i64 = xl_parse_num(s + 3);
+            if xl_ok != 0 && x >= 0 && x <= 15 {
+                xl_p8(r + OP_KIND, K_XMM);
+                xl_p8(r + OP_XMM, x);
+                return 0;
+            }
+        }
+        var v: i64 = xl_parse_num(s);
+        if xl_ok != 0 {
+            xl_p8(r + OP_KIND, K_IMM);
+            xl_p64(r + OP_VAL, v);
+            return 0;
+        }
+        xl_p8(r + OP_KIND, K_LABEL);
+        xl_p64(r + OP_TEXT, s);
+        return 0;
+    }
+    // memory
+    xl_p8(r + OP_KIND, K_MEM);
+    s = xl_skipb(s + 1);
+    // the closing bracket cut, the end trimmed
+    var c: i64 = s;
+    while xl_g8(c) != 0 && xl_g8(c) != 93 {
+        c = c + 1;
+    }
+    if xl_g8(c) == 93 {
+        xl_p8(c, 0);
+    }
+    while c > s && xl_g8(c - 1) == 32 {
+        c = c - 1;
+        xl_p8(c, 0);
+    }
+    if xl_prefix(s, "rel ") != 0 {
+        xl_p64(r + OP_REL, xl_skipb(s + 4));
+        return 0;
+    }
+    // [ term (+|-) term ... ]: registers, reg*scale, numbers
+    var whole: i64 = s;               // the whole inside, for a plain [label]
+    var neg: i64 = 0;
+    var tb: i64 = &xl_tb;
+    while true {
+        s = xl_skipb(s);
+        var ch: i64 = xl_g8(s);
+        if ch == 0 {
+            return 0;
+        }
+        if ch == 43 {
+            s = s + 1;
+            neg = 0;
+        } else if ch == 45 {
+            s = s + 1;
+            neg = 1;
+        } else {
+            // one term up to + - or the end
+            var n: i64 = 0;
+            while true {
+                var t: i64 = xl_g8(s);
+                if t == 0 || t == 43 || t == 45 {
+                    break;
+                }
+                if t != 32 && n < 30 {
+                    xl_p8(tb + n, t);
+                    n = n + 1;
+                }
+                s = s + 1;
+            }
+            xl_p8(tb + n, 0);
+            // reg*scale ?
+            var star: i64 = tb;
+            while xl_g8(star) != 0 && xl_g8(star) != 42 {
+                star = star + 1;
+            }
+            if xl_g8(star) == 42 {
+                xl_p8(star, 0);
+                var ix: i64 = xl_find_reg(tb);
+                if ix == -1 {
+                    xl_fail("operand ARM64 cannot take here");
+                    return 0;
+                }
+                xl_p8(r + OP_INDEX, ix);
+                var sc: i64 = xl_parse_num(star + 1);
+                if xl_ok == 0 {
+                    xl_fail("operand ARM64 cannot take here");
+                    return 0;
+                }
+                xl_p8(r + OP_SCALE, sc);
+                neg = 0;
+            } else {
+                var rg: i64 = xl_find_reg(tb);
+                if rg != -1 {
+                    if xl_g8(r + OP_BASE) == 255 {
+                        xl_p8(r + OP_BASE, rg);
+                    } else {
+                        xl_p8(r + OP_INDEX, rg);
+                    }
+                    neg = 0;
+                } else {
+                    var nv: i64 = xl_parse_num(tb);
+                    if xl_ok != 0 {
+                        if neg != 0 {
+                            nv = 0 - nv;
+                        }
+                        xl_p64(r + OP_VAL, xl_g64(r + OP_VAL) + nv);
+                        neg = 0;
+                    } else {
+                        // [label] or [label+N]: like [rel ...], but only
+                        // with no register
+                        if xl_g8(r + OP_BASE) != 255 {
+                            xl_fail("a label and a register in one memory operand");
+                            return 0;
+                        }
+                        xl_p64(r + OP_REL, whole);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// the x86 register 0..15 the text names (its size in xl_rsize), or -1
+fn xl_find_reg(t: i64) -> i64 {
+    xl_init();                        // xwasm may ask before any translation
+    var k: i64 = 0;
+    while k < xl_rg_n {
+        var name: i64 = xl_g64(&xl_rg_name + k * 8);
+        var i: i64 = 0;
+        var same: i64 = 1;
+        while same == 1 {
+            var a: i64 = xl_g8(name + i);
+            var c: i64 = xl_g8(t + i);
+            // uppercase letters in the text count as lowercase
+            if c >= 65 && c <= 90 {
+                c = c + 32;
+            }
+            if a != c {
+                same = 0;
+            } else if a == 0 {
+                same = 2;
+            } else {
+                i = i + 1;
+            }
+        }
+        if same == 2 {
+            xl_rsize = xl_g64(&xl_rg_size + k * 8);
+            return xl_g64(&xl_rg_num + k * 8);
+        }
+        k = k + 1;
+    }
+    xl_rsize = 0;
+    return -1;
+}
+
+// the value; xl_ok = 1 when the whole text is a number: [-]decimal,
+// [-]0xhex, or 'c'
+fn xl_parse_num(t: i64) -> i64 {
+    var p: i64 = t;
+    xl_ok = 0;
+    if xl_g8(p) == 39 {
+        var ch: i64 = xl_g8(p + 1);
+        if xl_g8(p + 2) != 39 || xl_g8(p + 3) != 0 {
+            return 0;
+        }
+        xl_ok = 1;
+        return ch;
+    }
+    var neg: i64 = 0;
+    if xl_g8(p) == 45 {
+        neg = 1;
+        p = p + 1;
+    }
+    var c: i64 = xl_g8(p);
+    if c < 48 || c > 57 {
+        return 0;
+    }
+    var v: i64 = 0;
+    if c == 48 && (xl_g8(p + 1) == 120 || xl_g8(p + 1) == 88) {
+        p = p + 2;
+        if xl_g8(p) == 0 {
+            return 0;
+        }
+        while xl_g8(p) != 0 {
+            var h: i64 = xl_g8(p);
+            var d: i64 = 0;
+            if h < 48 {
+                return 0;
+            }
+            if h <= 57 {
+                d = h - 48;
+            } else {
+                h = h | 32;
+                if h < 97 || h > 102 {
+                    return 0;
+                }
+                d = h - 87;
+            }
+            v = (v << 4) + d;
+            p = p + 1;
+        }
+    } else {
+        while xl_g8(p) != 0 {
+            var e: i64 = xl_g8(p);
+            if e < 48 || e > 57 {
+                return 0;
+            }
+            v = v * 10 + (e - 48);
+            p = p + 1;
+        }
+    }
+    if neg != 0 {
+        v = 0 - v;
+    }
+    xl_ok = 1;
+    return v;
+}
+
+// -------------------------------------------------------------------------
+// emitting helpers
+// -------------------------------------------------------------------------
+
+fn xl_kind(r: i64) -> i64 {
+    return xl_g8(r + OP_KIND);
+}
+
+fn xl_rs(r: i64) -> i64 {
+    return xl_g8(r + OP_RSIZE);
+}
+
+fn xl_xmm(r: i64) -> i64 {
+    return xl_g8(r + OP_XMM);
+}
+
+fn xl_val(r: i64) -> i64 {
+    return xl_g64(r + OP_VAL);
+}
+
+// the ARM register of an x86 one
+fn xl_arm(x: i64) -> i64 {
+    return xl_g64(&xl_rmap + (x & 15) * 8);
+}
+
+// the ARM register of a register operand
+fn xl_opr(r: i64) -> i64 {
+    return xl_arm(xl_g8(r + OP_REG));
+}
+
+// x for an 8-byte register, w otherwise
+fn xl_xw(size: i64) -> i64 {
+    if size == 8 {
+        return 120;
+    }
+    return 119;
+}
+
+fn xl_bad() -> i64 {
+    xl_fail("no ARM64 form for this instruction");
+    return 0;
+}
+
+// mov Xn, #value
+fn xl_imm_to(reg: i64, v: i64) -> i64 {
+    return xl_f2("    mov %x, #%d\n", reg, v);
+}
+
+// a memory operand -> xl_mb = base ARM register, xl_mo = offset. x16
+// holds [rel L], [L] and an index.
+fn xl_addr(r: i64) -> i64 {
+    var rel: i64 = xl_g64(r + OP_REL);
+    if rel != 0 {
+        xl_f1("    adrl x16, %s\n", rel);
+        xl_mb = 16;
+        xl_mo = 0;
+        return 0;
+    }
+    xl_mo = xl_val(r);
+    if xl_g8(r + OP_INDEX) != 255 {
+        // the shift for the scale
+        var sc: i64 = xl_g8(r + OP_SCALE);
+        var sh: i64 = 0;
+        if sc == 2 {
+            sh = 1;
+        } else if sc == 4 {
+            sh = 2;
+        } else if sc == 8 {
+            sh = 3;
+        }
+        var ix: i64 = xl_arm(xl_g8(r + OP_INDEX));
+        if xl_g8(r + OP_BASE) == 255 {
+            xl_f2("    lsl x16, %x, #%d\n", ix, sh);
+            xl_mb = 16;
+            return 0;
+        }
+        xl_f3("    add x16, %x, %x, lsl #%d\n", xl_arm(xl_g8(r + OP_BASE)), ix, sh);
+        xl_mb = 16;
+        return 0;
+    }
+    if xl_g8(r + OP_BASE) != 255 {
+        xl_mb = xl_arm(xl_g8(r + OP_BASE));
+        return 0;
+    }
+    xl_fail("operand ARM64 cannot take here");
+    xl_mb = 16;
+    return 0;
+}
+
+// one load (store 0) or store (store 1) of size 1 2 4 8 16, the register
+// given as its text
+fn xl_mem(r: i64, store: i64, size: i64, reg: i64) -> i64 {
+    xl_addr(r);
+    var sfx: i64 = "";
+    if size == 1 {
+        sfx = "b";
+    } else if size == 2 {
+        sfx = "h";
+    }
+    var plain: i64 = 0;
+    if xl_mo == 0 {
+        plain = 1;
+    } else {
+        // scaled unsigned offset: a multiple of the size, at most 4095 of them
+        if xl_mo > 0 && xl_mo % size == 0 && xl_mo / size <= 4095 {
+            var op: i64 = "ldr";
+            if store != 0 {
+                op = "str";
+            }
+            return xl_fmt("    %s%s %s, [%x, #%d]\n", op, sfx, reg, xl_mb, xl_mo);
+        }
+        if xl_mo >= -256 && xl_mo <= 255 {
+            var uop: i64 = "ldur";
+            if store != 0 {
+                uop = "stur";
+            }
+            return xl_fmt("    %s%s %s, [%x, #%d]\n", uop, sfx, reg, xl_mb, xl_mo);
+        }
+        // the offset into a scratch register, added to the base
+        var t: i64 = 16;
+        if xl_mb == 16 {
+            t = 17;
+        }
+        xl_imm_to(t, xl_mo);
+        xl_f3("    add %x, %x, %x\n", t, xl_mb, t);
+        xl_mb = t;
+        plain = 1;
+    }
+    var pop: i64 = "ldr";
+    if store != 0 {
+        pop = "str";
+    }
+    return xl_f4("    %s%s %s, [%x]\n", pop, sfx, reg, xl_mb);
+}
+
+// the text of a register (class letter, number), in one of four rotating
+// buffers (an instruction names at most three)
+fn xl_regname(cls: i64, n: i64) -> i64 {
+    xl_rn_next = (xl_rn_next + 1) & 3;
+    var buf: i64 = &xl_rn_bufs;
+    buf = buf + xl_rn_next * 8;
+    var keep: i64 = xl_out;
+    xl_out = buf;
+    xl_put_reg(cls, n);
+    xl_p8(xl_out, 0);
+    xl_out = keep;
+    return buf;
+}
+
+// Rd = Rn + offset, s "s" (flags) or ""
+fn xl_add_imm(rd: i64, rn: i64, off: i64, s: i64) -> i64 {
+    if off == 0 && xl_g8(s) == 0 {
+        if rd != rn {
+            xl_f2("    mov %x, %x\n", rd, rn);
+        }
+        return 0;
+    }
+    if off >= 0 && off < 4096 {
+        return xl_f4("    add%s %x, %x, #%d\n", s, rd, rn, off);
+    }
+    if off < 0 && off > -4096 {
+        return xl_f4("    sub%s %x, %x, #%d\n", s, rd, rn, 0 - off);
+    }
+    var t: i64 = 16;
+    if rn == 16 {
+        t = 17;
+    }
+    xl_imm_to(t, off);
+    return xl_f4("    add%s %x, %x, %x\n", s, rd, rn, t);
+}
+
+// the x86 partial write of x86 register x (size 1 or 2) from the ARM
+// register src: the upper bits kept
+fn xl_merge_low(x: i64, src: i64, size: i64) -> i64 {
+    var d: i64 = xl_arm(x);
+    var keep: i64 = 255;
+    var clear: i64 = -256;
+    if size != 1 {
+        keep = 65535;
+        clear = -65536;
+    }
+    xl_f2("    and x17, %x, #%h\n", src, keep);
+    xl_f3("    and %x, %x, #%h\n", d, d, clear);
+    return xl_f2("    orr %x, %x, x17\n", d, d);
+}
+
+// the text of an ARM register holding the operand (size 4 or 8): the
+// register itself, or x16/w16 loaded with the immediate or the memory
+fn xl_src(r: i64, size: i64) -> i64 {
+    var k: i64 = xl_kind(r);
+    if k == K_REG {
+        var cls: i64 = 119;
+        if size > 4 {
+            cls = 120;
+        }
+        return xl_regname(cls, xl_opr(r));
+    }
+    if k == K_IMM {
+        xl_imm_to(16, xl_val(r));
+        if size > 4 {
+            return "x16";
+        }
+        return "w16";
+    }
+    if k == K_MEM {
+        var ms: i64 = xl_g8(r + OP_MSIZE);
+        if ms == 0 {
+            ms = size;
+        }
+        var t: i64 = "w16";
+        if ms > 4 {
+            t = "x16";
+        }
+        xl_mem(r, 0, ms, t);
+        return t;
+    }
+    xl_fail("operand ARM64 cannot take here");
+    return "x16";
+}
+
+// 1 when an ARM logical instruction can take the value as an immediate (a
+// rotated run of ones, repeated), for 32 or 64 bits
+fn xl_logic_ok(value: i64, bits: i64) -> i64 {
+    var m: i64 = -1;
+    if bits != 64 {
+        m = 4294967295;
+    }
+    var v: i64 = value & m;
+    if v == 0 || v == m {
+        return 0;
+    }
+    // the smallest element size whose halves repeat
+    var size: i64 = bits;
+    while size > 2 {
+        var half: i64 = size >>> 1;
+        var lm: i64 = (1 << half) - 1;
+        if (v & lm) != ((v >>> half) & lm) {
+            break;
+        }
+        size = half;
+    }
+    var em: i64 = -1;
+    if size != 64 {
+        em = (1 << size) - 1;
+    }
+    var e: i64 = v & em;
+    var rot: i64 = 0;
+    while rot < size {
+        var a: i64 = e >>> rot;
+        var b: i64 = 0;
+        if size - rot < 64 {
+            b = e << (size - rot);
+        }
+        var x: i64 = (a | b) & em;
+        if x != 0 && (x & (x + 1)) == 0 {
+            return 1;
+        }
+        rot = rot + 1;
+    }
+    return 0;
+}
+
+// the ARM condition for an x86 one, or 0 after recording the error
+fn xl_cond(cc: i64) -> i64 {
+    if xl_fk == F_NONE {
+        xl_fail("condition with nothing setting the flags before it");
+        return 0;
+    }
+    // a pending tst first: or and xor leave the ARM flags alone
+    if xl_fpend != 0 {
+        var r: i64 = xl_fpend - 1;
+        if xl_fpw == 0 {
+            xl_f2("    tst %x, %x\n", r, r);
+        } else {
+            xl_f2("    tst %w, %w\n", r, r);
+        }
+        xl_fpend = 0;
+    }
+    var k: i64 = xl_cc_fp;
+    var end: i64 = xl_cc_fp_end;
+    if xl_fk == F_SUB {
+        k = xl_cc_sub;
+        end = xl_cc_sub_end;
+    } else if xl_fk == F_LOGIC {
+        k = xl_cc_logic;
+        end = xl_cc_logic_end;
+    } else if xl_fk == F_ADD {
+        k = xl_cc_add;
+        end = xl_cc_add_end;
+    }
+    while k < end {
+        if xl_streq(cc, xl_g64(&xl_cc_x86 + k * 8)) != 0 {
+            return xl_g64(&xl_cc_arm + k * 8);
+        }
+        k = k + 1;
+    }
+    xl_fail("condition these flags cannot answer on ARM64");
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// one instruction: xl_o1 xl_o2 xl_o3 are the three operand records
+// -------------------------------------------------------------------------
+
+fn xl_insn() -> i64 {
+    var mn: i64 = xl_s(S_MN);
+    if xl_streq(mn, "mov") != 0 { return xl_i_mov(); }
+    if xl_streq(mn, "movzx") != 0 { return xl_i_movzx(); }
+    if xl_streq(mn, "lea") != 0 { return xl_i_lea(); }
+    if xl_streq(mn, "push") != 0 { return xl_i_push(); }
+    if xl_streq(mn, "pop") != 0 { return xl_i_pop(); }
+    if xl_streq(mn, "add") != 0 { return xl_arith(0); }
+    if xl_streq(mn, "sub") != 0 { return xl_arith(1); }
+    if xl_streq(mn, "and") != 0 { return xl_arith(2); }
+    if xl_streq(mn, "or") != 0 { return xl_arith(3); }
+    if xl_streq(mn, "xor") != 0 { return xl_arith(4); }
+    if xl_streq(mn, "inc") != 0 { return xl_incdec("adds", F_ADD); }
+    if xl_streq(mn, "dec") != 0 { return xl_incdec("subs", F_SUB); }
+    if xl_streq(mn, "neg") != 0 { return xl_i_neg(); }
+    if xl_streq(mn, "not") != 0 { return xl_i_not(); }
+    if xl_streq(mn, "cmp") != 0 { return xl_i_cmp(); }
+    if xl_streq(mn, "test") != 0 { return xl_i_test(); }
+    if xl_streq(mn, "imul") != 0 { return xl_i_imul(); }
+    if xl_streq(mn, "cqo") != 0 { return xl_f0("    asr x2, x0, #63\n"); }
+    if xl_streq(mn, "idiv") != 0 { return xl_divide("sdiv"); }
+    if xl_streq(mn, "div") != 0 { return xl_divide("udiv"); }
+    if xl_streq(mn, "shl") != 0 { return xl_shift("lsl", 0); }
+    if xl_streq(mn, "sal") != 0 { return xl_shift("lsl", 0); }
+    if xl_streq(mn, "shr") != 0 { return xl_shift("lsr", 0); }
+    if xl_streq(mn, "sar") != 0 { return xl_shift("asr", 0); }
+    if xl_streq(mn, "rol") != 0 { return xl_shift("ror", 1); }
+    if xl_streq(mn, "ror") != 0 { return xl_shift("ror", 0); }
+    if xl_streq(mn, "xchg") != 0 { return xl_i_xchg(); }
+    if xl_streq(mn, "jmp") != 0 { return xl_i_jmp(); }
+    if xl_streq(mn, "call") != 0 { return xl_i_call(); }
+    if xl_streq(mn, "ret") != 0 { return xl_f0("    ret\n"); }
+    if xl_streq(mn, "syscall") != 0 {
+        xl_f0("    mov x17, x30\n    bl __sysx\n    mov x30, x17\n");
+        xl_fk = F_NONE;
+        return 0;
+    }
+    if xl_streq(mn, "movsd") != 0 { return xl_i_movsd(); }
+    if xl_streq(mn, "movss") != 0 { return xl_i_movss(); }
+    if xl_streq(mn, "cvtss2sd") != 0 { return xl_fcvt_sd("    fcvt %D, s%d\n"); }
+    if xl_streq(mn, "cvtsd2ss") != 0 { return xl_fcvt_sd("    fcvt s%d, %D\n"); }
+    if xl_streq(mn, "movq") != 0 { return xl_i_movsd(); }
+    if xl_streq(mn, "movups") != 0 { return xl_i_movups(); }
+    if xl_streq(mn, "movupd") != 0 { return xl_i_movups(); }
+    if xl_streq(mn, "movaps") != 0 { return xl_i_movups(); }
+    if xl_streq(mn, "movapd") != 0 { return xl_i_movups(); }
+    if xl_streq(mn, "addsd") != 0 { return xl_fscalar("fadd", 0); }
+    if xl_streq(mn, "subsd") != 0 { return xl_fscalar("fsub", 0); }
+    if xl_streq(mn, "mulsd") != 0 { return xl_fscalar("fmul", 0); }
+    if xl_streq(mn, "divsd") != 0 { return xl_fscalar("fdiv", 0); }
+    if xl_streq(mn, "sqrtsd") != 0 { return xl_fscalar("fsqrt", 1); }
+    if xl_streq(mn, "addpd") != 0 { return xl_fpacked("fadd", "    %s %V.2d, %V.2d, %V.2d\n"); }
+    if xl_streq(mn, "subpd") != 0 { return xl_fpacked("fsub", "    %s %V.2d, %V.2d, %V.2d\n"); }
+    if xl_streq(mn, "mulpd") != 0 { return xl_fpacked("fmul", "    %s %V.2d, %V.2d, %V.2d\n"); }
+    if xl_streq(mn, "divpd") != 0 { return xl_fpacked("fdiv", "    %s %V.2d, %V.2d, %V.2d\n"); }
+    if xl_streq(mn, "addps") != 0 { return xl_fpacked("fadd", "    %s %V.4s, %V.4s, %V.4s\n"); }
+    if xl_streq(mn, "subps") != 0 { return xl_fpacked("fsub", "    %s %V.4s, %V.4s, %V.4s\n"); }
+    if xl_streq(mn, "mulps") != 0 { return xl_fpacked("fmul", "    %s %V.4s, %V.4s, %V.4s\n"); }
+    if xl_streq(mn, "divps") != 0 { return xl_fpacked("fdiv", "    %s %V.4s, %V.4s, %V.4s\n"); }
+    if xl_streq(mn, "xorps") != 0 { return xl_fpacked("eor", "    %s %V.16b, %V.16b, %V.16b\n"); }
+    if xl_streq(mn, "xorpd") != 0 { return xl_fpacked("eor", "    %s %V.16b, %V.16b, %V.16b\n"); }
+    if xl_streq(mn, "andps") != 0 { return xl_fpacked("and", "    %s %V.16b, %V.16b, %V.16b\n"); }
+    if xl_streq(mn, "andpd") != 0 { return xl_fpacked("and", "    %s %V.16b, %V.16b, %V.16b\n"); }
+    if xl_streq(mn, "orpd") != 0 { return xl_fpacked("orr", "    %s %V.16b, %V.16b, %V.16b\n"); }
+    if xl_streq(mn, "ucomisd") != 0 { return xl_i_ucomisd(); }
+    if xl_streq(mn, "comisd") != 0 { return xl_i_ucomisd(); }
+    if xl_streq(mn, "cvtsi2sd") != 0 { return xl_i_cvtsi2sd(); }
+    if xl_streq(mn, "cvttsd2si") != 0 { return xl_tofix("fcvtzs"); }
+    // to the nearest, ties to even: the x86-64 default rounding
+    if xl_streq(mn, "cvtsd2si") != 0 { return xl_tofix("fcvtns"); }
+    if xl_streq(mn, "prefetcht0") != 0 { return xl_cacheop("    prfm pldl1keep, [%x]\n"); }
+    if xl_streq(mn, "clflush") != 0 { return xl_cacheop("    dc civac, %x\n"); }
+    if xl_streq(mn, "nop") != 0 { return xl_f0("    nop\n"); }
+    if xl_streq(mn, "pause") != 0 { return xl_f0("    nop\n"); }
+    if xl_streq(mn, "mfence") != 0 { return xl_f0("    dmb ish\n"); }
+    // jcc and setcc
+    if xl_g8(mn) == 106 { return xl_i_jcc(); }
+    if xl_prefix(mn, "set") != 0 { return xl_i_setcc(); }
+    return xl_bad();
+}
+
+// ---- mov ----------------------------------------------------------------
+fn xl_i_mov() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    var kb: i64 = xl_kind(b);
+    if ka == K_REG {
+        var sz: i64 = xl_rs(a);
+        var d: i64 = xl_opr(a);
+        if kb == K_REG {
+            var s: i64 = xl_opr(b);
+            if sz == 8 {
+                if d != s {
+                    xl_f2("    mov %x, %x\n", d, s);
+                }
+                return 0;
+            }
+            if sz == 4 {
+                return xl_f2("    mov %w, %w\n", d, s);
+            }
+            return xl_merge_low(xl_g8(a + OP_REG), s, sz);
+        }
+        if kb == K_IMM {
+            if sz == 8 {
+                return xl_imm_to(d, xl_val(b));
+            }
+            if sz == 4 {
+                // the low 32 bits, zero-extended
+                return xl_f2("    mov %w, #%d\n", d, xl_val(b) & 4294967295);
+            }
+            xl_imm_to(16, xl_val(b));
+            return xl_merge_low(xl_g8(a + OP_REG), 16, sz);
+        }
+        if kb == K_MEM {
+            if sz < 4 {
+                // a partial load: into w16, then merged
+                xl_mem(b, 0, sz, "w16");
+                return xl_merge_low(xl_g8(a + OP_REG), 16, sz);
+            }
+            return xl_mem(b, 0, sz, xl_regname(xl_xw(sz), d));
+        }
+        return xl_bad();
+    }
+    if ka != K_MEM {
+        return xl_bad();
+    }
+    if kb == K_REG {
+        var rsz: i64 = xl_rs(b);
+        return xl_mem(a, 1, rsz, xl_regname(xl_xw(rsz), xl_opr(b)));
+    }
+    if kb == K_IMM {
+        var msz: i64 = xl_g8(a + OP_MSIZE);
+        if msz == 0 {
+            msz = 8;
+        }
+        var v: i64 = xl_val(b);
+        var t: i64 = 0;
+        if v == 0 {
+            t = "wzr";
+            if msz > 4 {
+                t = "xzr";
+            }
+        } else {
+            xl_imm_to(17, v);
+            t = "w17";
+            if msz > 4 {
+                t = "x17";
+            }
+        }
+        return xl_mem(a, 1, msz, t);
+    }
+    return xl_bad();
+}
+
+// ---- movzx --------------------------------------------------------------
+fn xl_i_movzx() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var d: i64 = xl_opr(a);
+    var kb: i64 = xl_kind(b);
+    if kb == K_REG {
+        var k: i64 = 65535;
+        if xl_rs(b) == 1 {
+            k = 255;
+        }
+        return xl_f3("    and %x, %x, #%h\n", d, xl_opr(b), k);
+    }
+    if kb != K_MEM {
+        return xl_bad();
+    }
+    // zero-extending load: ldrb / ldrh into the w register
+    var ms: i64 = xl_g8(b + OP_MSIZE);
+    if ms == 0 {
+        return xl_bad();
+    }
+    return xl_mem(b, 0, ms, xl_regname(119, d));
+}
+
+// ---- lea ----------------------------------------------------------------
+fn xl_i_lea() -> i64 {
+    var d: i64 = xl_opr(xl_o1);
+    var rel: i64 = xl_g64(xl_o2 + OP_REL);
+    if rel != 0 {
+        return xl_f2("    adrl %x, %s\n", d, rel);
+    }
+    xl_addr(xl_o2);
+    return xl_add_imm(d, xl_mb, xl_mo, "");
+}
+
+// ---- push / pop ---------------------------------------------------------
+fn xl_i_push() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) == K_REG {
+        return xl_f1("    str %x, [x28, #-8]!\n", xl_opr(a));
+    }
+    if xl_kind(a) != K_IMM {
+        return xl_bad();
+    }
+    xl_imm_to(16, xl_val(a));
+    return xl_f1("    str %x, [x28, #-8]!\n", 16);
+}
+
+fn xl_i_pop() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    // pop rsp: a load into the base with writeback is unpredictable on
+    // ARM64, and the popped value is the new stack anyway
+    if xl_g8(a + OP_REG) == 4 {
+        return xl_f0("    ldr x28, [x28]\n");
+    }
+    return xl_f1("    ldr %x, [x28], #8\n", xl_opr(a));
+}
+
+// ---- add sub and or xor -------------------------------------------------
+// which: 0 add, 1 sub, 2 and, 3 or, 4 xor
+
+// the flag-setting ARM name
+fn xl_ar_name(which: i64) -> i64 {
+    if which == 0 { return "adds"; }
+    if which == 1 { return "subs"; }
+    if which == 2 { return "ands"; }
+    if which == 3 { return "orr"; }
+    return "eor";
+}
+
+fn xl_ar_plain(which: i64) -> i64 {
+    if which == 0 { return "add"; }
+    if which == 1 { return "sub"; }
+    if which == 2 { return "and"; }
+    if which == 3 { return "orr"; }
+    return "eor";
+}
+
+// who sets the flags
+fn xl_ar_fk(which: i64) -> i64 {
+    if which == 0 { return F_ADD; }
+    if which == 1 { return F_SUB; }
+    return F_LOGIC;
+}
+
+fn xl_arith(which: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    if ka == K_MEM {
+        return xl_arith_mem(which);
+    }
+    if ka != K_REG {
+        return xl_bad();
+    }
+    var sz: i64 = xl_rs(a);
+    if sz < 4 {
+        return xl_arith_partial(which);
+    }
+    var d: i64 = xl_opr(a);
+    if which >= 2 {
+        return xl_arith_logic(which, sz, d);
+    }
+    // add / sub: the flags as x86 sets them (adds / subs)
+    if xl_kind(b) == K_IMM && sz != 4 {
+        var v: i64 = xl_val(b);
+        var done: i64 = 0;
+        if which == 1 {
+            // sub of 0..4095 stays a subs, so the carry means what x86
+            // means by it
+            if v >= 0 && v < 4096 {
+                xl_f4("    sub%s %x, %x, #%d\n", "s", d, d, v);
+                done = 1;
+            } else {
+                v = 0 - v;
+            }
+        }
+        if done == 0 {
+            xl_add_imm(d, d, v, "s");
+        }
+    } else {
+        var t: i64 = xl_src(b, sz);
+        var rd: i64 = xl_regname(xl_xw(sz), d);
+        xl_f4("    %s %s, %s, %s\n", xl_ar_name(which), rd, rd, t);
+    }
+    xl_fk = xl_ar_fk(which);
+    xl_fpend = 0;
+    return 0;
+}
+
+fn xl_arith_logic(which: i64, sz: i64, d: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var done: i64 = 0;
+    // xor r, r is zero
+    if which == 4 && xl_kind(b) == K_REG && xl_g8(b + OP_REG) == xl_g8(a + OP_REG) {
+        xl_imm_to(d, 0);
+        done = 1;
+    }
+    if done == 0 {
+        // and sets flags (ands); orr and eor do not, so a tst is owed
+        var nm: i64 = xl_ar_name(which);
+        var rd: i64 = xl_regname(xl_xw(sz), d);
+        if xl_kind(b) == K_IMM {
+            var v: i64 = xl_val(b);
+            var bits: i64 = 64;
+            if sz != 8 {
+                bits = 32;
+                v = v & 4294967295;
+            }
+            if xl_logic_ok(v, bits) != 0 {
+                xl_f4("    %s %s, %s, #%h\n", nm, rd, rd, v);
+                done = 1;
+            }
+        }
+        if done == 0 {
+            var t: i64 = xl_src(b, sz);
+            xl_f4("    %s %s, %s, %s\n", nm, rd, rd, t);
+        }
+    }
+    xl_fk = F_LOGIC;
+    xl_fpend = 0;
+    if which != 2 {
+        xl_fpend = d + 1;
+        xl_fpw = 1;
+        if sz == 8 {
+            xl_fpw = 0;
+        }
+    }
+    return 0;
+}
+
+// 8 or 16 bits: computed in w16, the low part merged back
+fn xl_arith_partial(which: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var sz: i64 = xl_rs(a);
+    var d: i64 = xl_opr(a);
+    var t: i64 = 0;
+    if xl_kind(b) == K_IMM {
+        xl_f1("    mov w17, #%d\n", xl_val(b) & 65535);
+        t = "w17";
+    } else {
+        t = xl_src(b, 4);
+    }
+    xl_f4("    %s %s, %s, %s\n", xl_ar_plain(which), "w16", xl_regname(119, d), t);
+    xl_merge_low(xl_g8(a + OP_REG), 16, sz);
+    xl_fk = F_NONE;
+    xl_fpend = 0;
+    return 0;
+}
+
+// read, operate, write back
+fn xl_arith_mem(which: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var sz: i64 = xl_g8(a + OP_MSIZE);
+    if sz == 0 {
+        sz = 8;
+        if xl_kind(b) == K_REG {
+            sz = xl_rs(b);
+        }
+    }
+    var t: i64 = "w17";
+    if sz > 4 {
+        t = "x17";
+    }
+    xl_mem(a, 0, sz, t);
+    var ss: i64 = sz;
+    if ss < 4 {
+        ss = 4;
+    }
+    var s: i64 = xl_src(b, ss);
+    xl_f4("    %s %s, %s, %s\n", xl_ar_name(which), t, t, s);
+    xl_mem(a, 1, sz, t);
+    xl_fk = xl_ar_fk(which);
+    xl_fpend = 0;
+    if which >= 3 {
+        // orr / eor on memory: the tst is on x17
+        xl_fpend = 18;
+        xl_fpw = 1;
+        if sz > 4 {
+            xl_fpw = 0;
+        }
+    }
+    return 0;
+}
+
+// ---- inc dec neg not ----------------------------------------------------
+fn xl_incdec(op: i64, fk: i64) -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var cls: i64 = 120;
+    if xl_rs(a) != 8 {
+        cls = 119;
+        if xl_rs(a) != 4 {
+            return xl_bad();
+        }
+    }
+    var r: i64 = xl_regname(cls, xl_opr(a));
+    xl_f3("    %s %s, %s, #1\n", op, r, r);
+    xl_fk = fk;
+    xl_fpend = 0;
+    return 0;
+}
+
+fn xl_i_neg() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var d: i64 = xl_opr(a);
+    xl_f2("    subs %x, xzr, %x\n", d, d);
+    xl_fk = F_SUB;
+    xl_fpend = 0;
+    return 0;
+}
+
+fn xl_i_not() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var d: i64 = xl_opr(a);
+    return xl_f2("    mvn %x, %x\n", d, d);
+}
+
+// ---- cmp test -----------------------------------------------------------
+fn xl_i_cmp() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    var sz: i64 = 0;
+    var lhs: i64 = 0;
+    if ka == K_MEM {
+        sz = xl_g8(a + OP_MSIZE);
+        if sz == 0 {
+            sz = 8;
+        }
+        lhs = "w17";
+        if sz > 4 {
+            lhs = "x17";
+        }
+        xl_mem(a, 0, sz, lhs);
+    } else if ka == K_REG {
+        sz = xl_rs(a);
+        lhs = xl_regname(xl_xw(sz), xl_opr(a));
+    } else {
+        return xl_bad();
+    }
+    var done: i64 = 0;
+    if xl_kind(b) == K_IMM {
+        var v: i64 = xl_val(b);
+        if v >= 0 && v < 4096 {
+            xl_f2("    cmp %s, #%d\n", lhs, v);
+            done = 1;
+        }
+    }
+    if done == 0 {
+        var ss: i64 = sz;
+        if ss < 4 {
+            ss = 4;
+        }
+        var t: i64 = xl_src(b, ss);
+        xl_f2("    cmp %s, %s\n", lhs, t);
+    }
+    xl_fk = F_SUB;
+    xl_fpend = 0;
+    return 0;
+}
+
+fn xl_i_test() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var sz: i64 = xl_rs(a);
+    if sz < 4 {
+        return xl_bad();
+    }
+    var lhs: i64 = xl_regname(xl_xw(sz), xl_opr(a));
+    var done: i64 = 0;
+    if xl_kind(b) == K_IMM {
+        var v: i64 = xl_val(b);
+        var bits: i64 = 64;
+        if sz != 8 {
+            bits = 32;
+            v = v & 4294967295;
+        }
+        if xl_logic_ok(v, bits) != 0 {
+            xl_f2("    tst %s, #%h\n", lhs, v);
+            done = 1;
+        }
+    }
+    if done == 0 {
+        var t: i64 = xl_src(b, sz);
+        xl_f2("    tst %s, %s\n", lhs, t);
+    }
+    xl_fk = F_LOGIC;
+    xl_fpend = 0;
+    return 0;
+}
+
+// ---- imul idiv div ------------------------------------------------------
+fn xl_i_imul() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var c: i64 = xl_o3;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var nops: i64 = xl_get(S_NOPS);
+    if nops == 3 {
+        if xl_kind(c) != K_IMM {
+            return xl_bad();
+        }
+        xl_imm_to(16, xl_val(c));
+        xl_f3("    mul %x, %x, %x\n", xl_opr(a), xl_opr(b), 16);
+        xl_fk = F_NONE;
+        return 0;
+    }
+    if nops != 2 {
+        return xl_bad();
+    }
+    var d: i64 = xl_opr(a);
+    var s: i64 = 16;
+    if xl_kind(b) == K_REG {
+        s = xl_opr(b);
+    } else {
+        xl_src(b, 8);
+    }
+    xl_f3("    mul %x, %x, %x\n", d, d, s);
+    xl_fk = F_NONE;
+    return 0;
+}
+
+// rdx:rax / r -> rax quotient, rdx remainder (rdx holds only the sign
+// extension or zero, which is all the generator ever puts there)
+fn xl_divide(op: i64) -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var s: i64 = xl_opr(a);
+    xl_f2("    %s x16, x0, %x\n", op, s);
+    xl_f1("    msub x2, x16, %x, x0\n", s);
+    xl_f0("    mov x0, x16\n");
+    xl_fk = F_NONE;
+    return 0;
+}
+
+// ---- shifts -------------------------------------------------------------
+// rol: ror by the opposite amount
+fn xl_shift(op: i64, rol: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    if xl_rs(a) != 8 {
+        return xl_bad();
+    }
+    var d: i64 = xl_opr(a);
+    xl_fk = F_NONE;
+    xl_fpend = 0;
+    if xl_kind(b) == K_IMM {
+        var v: i64 = xl_val(b) & 63;
+        if rol != 0 {
+            // rol #c is ror #(64 - c)
+            v = (0 - v) & 63;
+        }
+        return xl_f4("    %s %x, %x, #%d\n", op, d, d, v);
+    }
+    // by cl
+    if rol != 0 {
+        return xl_f2("    sub x16, xzr, x1\n    ror %x, %x, x16\n", d, d);
+    }
+    return xl_f3("    %s %x, %x, x1\n", op, d, d);
+}
+
+// ---- xchg [mem], reg: the atomic swap the locks are built on -------------
+fn xl_i_xchg() -> i64 {
+    var m: i64 = xl_o1;
+    var r: i64 = xl_o2;
+    if xl_kind(m) != K_MEM {
+        m = xl_o2;
+        r = xl_o1;
+        if xl_kind(m) != K_MEM {
+            return xl_bad();
+        }
+    }
+    if xl_kind(r) != K_REG {
+        return xl_bad();
+    }
+    xl_addr(m);
+    if xl_mo != 0 {
+        xl_add_imm(16, xl_mb, xl_mo, "");
+        xl_mb = 16;
+    }
+    xl_uniq = xl_uniq + 1;
+    xl_f1(".xa%d:\n", xl_uniq);
+    var rr: i64 = xl_opr(r);
+    var base: i64 = xl_mb;
+    if xl_rs(r) == 8 {
+        xl_fmt("    ldaxr x15, [%x]\n    stlxr w14, %x, [%x]\n    cbnz w14, .xa%d\n    mov %x, x15\n", base, rr, base, xl_uniq, rr);
+    } else if xl_rs(r) == 4 {
+        xl_fmt("    ldaxr w15, [%x]\n    stlxr w14, %w, [%x]\n    cbnz w14, .xa%d\n    mov %w, w15\n", base, rr, base, xl_uniq, rr);
+    } else {
+        return xl_bad();
+    }
+    xl_fk = F_NONE;
+    return 0;
+}
+
+// ---- jumps and calls ----------------------------------------------------
+fn xl_i_jmp() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) == K_REG {
+        return xl_f1("    br %x\n", xl_opr(a));
+    }
+    if xl_kind(a) != K_LABEL {
+        return xl_bad();
+    }
+    return xl_f1("    b %s\n", xl_g64(a + OP_TEXT));
+}
+
+fn xl_i_call() -> i64 {
+    var a: i64 = xl_o1;
+    xl_fk = F_NONE;
+    xl_fpend = 0;
+    if xl_kind(a) == K_REG {
+        return xl_f1("    str x30, [x28, #-8]!\n    blr %x\n    ldr x30, [x28], #8\n", xl_opr(a));
+    }
+    if xl_kind(a) != K_LABEL {
+        return xl_bad();
+    }
+    return xl_f1("    str x30, [x28, #-8]!\n    bl %s\n    ldr x30, [x28], #8\n", xl_g64(a + OP_TEXT));
+}
+
+fn xl_i_jcc() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_LABEL {
+        return xl_bad();
+    }
+    var c: i64 = xl_cond(xl_s(S_MN) + 1);
+    if c != 0 {
+        xl_f2("    b.%s %s\n", c, xl_g64(a + OP_TEXT));
+    }
+    return 0;
+}
+
+// setcc al writes the whole register on ARM: the generator always follows
+// it with movzx, so nothing is lost
+fn xl_i_setcc() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_REG {
+        return xl_bad();
+    }
+    var c: i64 = xl_cond(xl_s(S_MN) + 3);
+    if c != 0 {
+        xl_f2("    cset %x, %s\n", xl_opr(a), c);
+    }
+    return 0;
+}
+
+// ---- floating point -----------------------------------------------------
+fn xl_i_movsd() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    var kb: i64 = xl_kind(b);
+    if ka == K_XMM {
+        if kb == K_XMM {
+            return xl_f2("    fmov %D, %D\n", xl_xmm(a), xl_xmm(b));
+        }
+        if kb == K_MEM {
+            return xl_mem(b, 0, 8, xl_regname(100, xl_xmm(a)));
+        }
+        if kb == K_REG {
+            return xl_f2("    fmov %D, %x\n", xl_xmm(a), xl_opr(b));
+        }
+        return xl_bad();
+    }
+    if kb != K_XMM {
+        return xl_bad();
+    }
+    if ka == K_MEM {
+        return xl_mem(a, 1, 8, xl_regname(100, xl_xmm(b)));
+    }
+    if ka != K_REG {
+        return xl_bad();
+    }
+    return xl_f2("    fmov %x, %D\n", xl_opr(a), xl_xmm(b));
+}
+
+// movss: four bytes through an s register, for [f32; N]
+fn xl_i_movss() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    var kb: i64 = xl_kind(b);
+    if ka == K_XMM {
+        if kb != K_MEM {
+            return xl_bad();
+        }
+        return xl_mem(b, 0, 4, xl_regname(115, xl_xmm(a)));
+    }
+    if ka != K_MEM || kb != K_XMM {
+        return xl_bad();
+    }
+    return xl_mem(a, 1, 4, xl_regname(115, xl_xmm(b)));
+}
+
+// cvtss2sd / cvtsd2ss xmm, xmm: fcvt between the s and d views
+fn xl_fcvt_sd(f: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_XMM || xl_kind(b) != K_XMM {
+        return xl_bad();
+    }
+    return xl_f2(f, xl_xmm(a), xl_xmm(b));
+}
+
+fn xl_i_movups() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    var ka: i64 = xl_kind(a);
+    var kb: i64 = xl_kind(b);
+    if ka == K_XMM {
+        if kb == K_XMM {
+            return xl_f2("    mov %V.16b, %V.16b\n", xl_xmm(a), xl_xmm(b));
+        }
+        if kb != K_MEM {
+            return xl_bad();
+        }
+        return xl_mem(b, 0, 16, xl_regname(113, xl_xmm(a)));
+    }
+    if ka != K_MEM || kb != K_XMM {
+        return xl_bad();
+    }
+    return xl_mem(a, 1, 16, xl_regname(113, xl_xmm(b)));
+}
+
+// the number of the d register holding the second operand (d16 loaded
+// from memory when it is memory)
+fn xl_fsrc() -> i64 {
+    var b: i64 = xl_o2;
+    if xl_kind(b) == K_XMM {
+        return xl_xmm(b);
+    }
+    if xl_kind(b) == K_MEM {
+        xl_mem(b, 0, 8, "d16");
+        return 16;
+    }
+    xl_fail("operand ARM64 cannot take here");
+    return 0;
+}
+
+// scalar arithmetic; sqrt takes one operand
+fn xl_fscalar(op: i64, one: i64) -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_XMM {
+        return xl_bad();
+    }
+    var s: i64 = xl_fsrc();
+    var d: i64 = xl_xmm(a);
+    if one != 0 {
+        return xl_f3("    %s %D, %D\n", op, d, s);
+    }
+    return xl_f4("    %s %D, %D, %D\n", op, d, d, s);
+}
+
+// packed and bitwise, on whole registers
+fn xl_fpacked(op: i64, f: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_XMM || xl_kind(b) != K_XMM {
+        return xl_bad();
+    }
+    var d: i64 = xl_xmm(a);
+    return xl_f4(f, op, d, d, xl_xmm(b));
+}
+
+fn xl_i_ucomisd() -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_XMM {
+        return xl_bad();
+    }
+    var s: i64 = xl_fsrc();
+    xl_f2("    fcmp %D, %D\n", xl_xmm(a), s);
+    xl_fk = F_FP;
+    xl_fpend = 0;
+    return 0;
+}
+
+fn xl_i_cvtsi2sd() -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_XMM || xl_kind(b) != K_REG {
+        return xl_bad();
+    }
+    var t: i64 = xl_regname(xl_xw(xl_rs(b)), xl_opr(b));
+    return xl_f2("    scvtf %D, %s\n", xl_xmm(a), t);
+}
+
+fn xl_tofix(op: i64) -> i64 {
+    var a: i64 = xl_o1;
+    var b: i64 = xl_o2;
+    if xl_kind(a) != K_REG || xl_kind(b) != K_XMM {
+        return xl_bad();
+    }
+    var t: i64 = xl_regname(xl_xw(xl_rs(a)), xl_opr(a));
+    return xl_f3("    %s %s, %D\n", op, t, xl_xmm(b));
+}
+
+// ---- cache and ordering -------------------------------------------------
+fn xl_cacheop(f: i64) -> i64 {
+    var a: i64 = xl_o1;
+    if xl_kind(a) != K_MEM {
+        return xl_bad();
+    }
+    xl_addr(a);
+    if xl_mo != 0 {
+        xl_add_imm(16, xl_mb, xl_mo, "");
+        xl_mb = 16;
+    }
+    return xl_f1(f, xl_mb);
+}
+
+// -------------------------------------------------------------------------
+// the door
+// -------------------------------------------------------------------------
+
+// the x86 text (inp, len) as ARM64 text at out (room for cap bytes): its
+// length, or -1 on an error
+fn xl_translate(inp: i64, len: i64, out: i64, cap: i64) -> i64 {
+    xl_init();
+    xl_set(S_IN, inp);
+    xl_set(S_IN_END, inp + len);
+    xl_out = out;
+    xl_out_end = out + cap - 65536;     // room for the last line and the tail
+    xl_set(S_LINE_NO, 0);
+    xl_set(S_ERR, 0);
+    xl_set(S_ERR_LINE, 0);
+    xl_fk = F_NONE;
+    xl_fpend = 0;
+    xl_uniq = 0;
+    xl_set(S_SKIPPING, 0);
+    xl_set(S_ERR_MSG, "no ARM64 form for this instruction");
+    xl_p8(xl_s(S_ERR_INSN), 0);
+    while true {
+        if xl_get(S_ERR) != 0 {
+            return -1;
+        }
+        if xl_out >= xl_out_end {
+            xl_set(S_ERR_MSG, "output buffer full");
+            xl_set(S_ERR_LINE, xl_get(S_LINE_NO));
+            return -1;
+        }
+        if xl_read_line() == 0 {
+            break;
+        }
+        if xl_native_skip() == 0 {
+            xl_do_line();
+        }
+    }
+    // the system call shim and its table; a library: where C comes in
+    var mac: i64 = 0;
+    if xl_get(S_OS) == 1 {
+        mac = 1;
+    }
+    xl_put(xa_get_tail(mac));
+    if xl_get(S_LIB) != 0 {
+        xl_put(xa_get_tail(2 + mac));
+    }
+    return xl_out - out;
+}
+
+// for the door's xa_parse_num and xa_find_reg: what they say beside
+fn xl_last_ok() -> i64 {
+    return xl_ok;
+}
+
+fn xl_last_size() -> i64 {
+    return xl_rsize;
+}

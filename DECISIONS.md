@@ -1070,9 +1070,21 @@ replaces, checked file by file before it is delivered.
   for every program of the suite built for the web, and for output names
   with folders, with several dots and with none. The .wasm itself is
   written by xwasm (`xw_module`), and goes with piece 8.
-- Still in assembly: xarm (5,450 lines), xwasm (3,990), karm (5,290),
-  main (4,444 less what has left it), the runtime and the linker, and the
-  doors.
+- Piece 7, xarm (01-11-2026): `xarm.kr`, the pass that lowers the x86-64
+  text to ARM64 text, in Kron: the reader of lines and operands, the
+  register map, the flags and the conditions they answer, every
+  instruction's ARM64 form. `xarm.asm` keeps the door: `xarm_translate`
+  and the setters and error getters main calls; the reader xwasm shares
+  (`xa_read_line`, `xa_split`, `xa_parse_ops`, `xa_find_reg`,
+  `xa_parse_num` and the rest), each with the registers it always took and
+  gave; the state xwasm reads by name (`xa_line`, `xa_ops`, `xa_err` and
+  the rest), one block the Kron code reaches through `xa_get_state`; and
+  the system call shims appended to every program, data the Kron code
+  takes through `xa_get_tail`. The same ARM64 text (`-S`) for every program
+  of the suite for Linux ARM64 and for macOS, libraries included, and the
+  same .wasm, page and host for the web, xwasm reading through the door.
+- Still in assembly: xwasm (3,990 lines), karm (5,290), main (4,444 less
+  what has left it), the runtime and the linker, and the doors.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 
