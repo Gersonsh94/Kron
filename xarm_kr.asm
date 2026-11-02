@@ -13926,13 +13926,3 @@ xl_last_ok:
     mov rsp, rbp
     pop rbp
     ret
-xl_last_size:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    mov rax, [rel __g_xarm_xl_rsize]
-    jmp .__ret_1440
-.__ret_1440:
-    mov rsp, rbp
-    pop rbp
-    ret

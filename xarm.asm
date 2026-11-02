@@ -17,17 +17,15 @@
 ;   xarm_error_text()  -> rax = what was wrong (zero-terminated)
 ;   xarm_error_insn()  -> rax = the instruction itself (zero-terminated)
 ;
-;   the reader of x86 text that xwasm shares, with the registers it always
-;   took and gave: xa_read_line, xa_native_skip, xa_split, xa_parse_ops,
-;   xa_streq, xa_prefix, xa_skipb, xa_parse_num, xa_find_reg, xa_fail, and
-;   the state they share, one block (xa_get_state gives it to xarm.kr):
+;   the state the reader of x86 text keeps -- xarm.kr's, which xwasm.kr
+;   reads with too -- one block, xa_get_state gives it to both:
 ;   xa_in xa_in_end xa_line_no xa_err xa_err_line xa_err_msg xa_err_insn
 ;   xa_line xa_mn xa_rest xa_nops xa_opt xa_ops xa_skipping
 ;
 ;   the system call shims appended to every program (xa_get_tail).
 ;
-; Every door keeps every register but the ones it answers in, and aligns
-; the stack for the Kron function it calls.
+; xarm_translate keeps every register but rax and aligns the stack for the
+; Kron function it calls.
 ; ==============================================================================
 
 bits 64
@@ -40,18 +38,13 @@ global xarm_error_insn
 global xarm_set_os
 global xarm_set_lib
 global xa_get_state, xa_get_tail
-; the reader of x86 text, shared with xwasm
-global xa_read_line, xa_split, xa_parse_ops, xa_streq, xa_prefix, xa_skipb
-global xa_native_skip, xa_skipping
-global xa_parse_num, xa_find_reg, xa_fail
-global xa_in, xa_in_end, xa_line_no, xa_err, xa_err_line, xa_err_msg
-global xa_err_insn, xa_line, xa_mn, xa_rest, xa_nops, xa_opt, xa_ops
+; the error, which xwasm's door reports too
+global xa_err_line, xa_err_msg, xa_err_insn
 
-extern xl_translate, xl_read_line, xl_native_skip, xl_split, xl_parse_ops
-extern xl_streq, xl_prefix, xl_skipb, xl_parse_num, xl_find_reg, xl_fail
-extern xl_last_ok, xl_last_size
+extern xl_translate
 
-; the state, one block; xarm.kr knows each piece by its offset (S_ there)
+; the state, one block; xarm.kr and xwasm.kr know each piece by its offset
+; (S_ there)
 section .bss
     xa_os        resq 1         ; +0     0 Linux, 1 macOS
     xa_lib       resq 1         ; +8     1 for a library: __centry in the tail
@@ -107,10 +100,6 @@ section .bss
     pop  rbx
 %endmacro
 
-; where XA_IN saved rdx and rsi: a door that answers in them writes there
-%define XA_SAVED_RDX 128
-%define XA_SAVED_RSI 120
-
 section .text
 
 ; ==============================================================================
@@ -161,103 +150,6 @@ xa_get_tail:
     jne  .t4
     lea  rax, [rel xa_tail_lib_mac]
 .t4:
-    ret
-
-; ==============================================================================
-; THE READER, FOR XWASM
-; ==============================================================================
-
-; xa_read_line() -> eax = 1 and xa_line holds the next line, its comment
-; removed and its blanks trimmed; eax = 0 at the end of the text
-xa_read_line:
-    XA_IN
-    call xl_read_line
-    XA_OUT
-    ret
-
-; xa_native_skip() -> eax = 0 when the line just read is translated, 1 when
-; it is dropped, 2 when it is the label that starts a dropped routine
-xa_native_skip:
-    XA_IN
-    call xl_native_skip
-    XA_OUT
-    ret
-
-; xa_split(): xa_rest -> up to three operand texts, trimmed, in xa_opt
-xa_split:
-    XA_IN
-    call xl_split
-    XA_OUT
-    ret
-
-; xa_parse_ops(): every operand text into its record
-xa_parse_ops:
-    XA_IN
-    call xl_parse_ops
-    XA_OUT
-    ret
-
-; xa_streq(rcx, rdx) -> eax = 1 when the two strings are equal
-xa_streq:
-    XA_IN
-    call xl_streq
-    XA_OUT
-    ret
-
-; xa_prefix(rcx = text, rdx = prefix) -> eax = 1 when text starts with it
-xa_prefix:
-    XA_IN
-    call xl_prefix
-    XA_OUT
-    ret
-
-; xa_skipb(rsi) -> rsi past blanks
-xa_skipb:
-    push rax
-    XA_IN
-    sub  rsp, 8
-    mov  rcx, rsi
-    call xl_skipb
-    mov  [rsp + 8 + XA_SAVED_RSI], rax
-    add  rsp, 8
-    XA_OUT
-    pop  rax
-    ret
-
-; xa_parse_num(rcx = text) -> rax = value, edx = 1 when the whole text is a
-; number: [-]decimal, [-]0xhex, or 'c'
-xa_parse_num:
-    XA_IN
-    call xl_parse_num
-    push rax
-    sub  rsp, 8
-    call xl_last_ok
-    add  rsp, 8
-    mov  [rsp + 8 + XA_SAVED_RDX], rax
-    pop  rax
-    XA_OUT
-    ret
-
-; xa_find_reg(rcx = text) -> eax = x86 register 0..15 and edx = size, or
-; eax = -1 when the text is no register name
-xa_find_reg:
-    XA_IN
-    call xl_find_reg
-    push rax
-    sub  rsp, 8
-    call xl_last_size
-    add  rsp, 8
-    mov  [rsp + 8 + XA_SAVED_RDX], rax
-    pop  rax
-    mov  eax, eax
-    XA_OUT
-    ret
-
-; xa_fail(rcx = message): the first error stops the translation
-xa_fail:
-    XA_IN
-    call xl_fail
-    XA_OUT
     ret
 
 ; ==============================================================================

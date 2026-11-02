@@ -34,12 +34,13 @@ optimization is in Kron. Parts 1 to 5:
 | Changed (01-11-2026) | a real given to an integer parameter (of a Kron function or an `extern`), or returned from a function that returns an integer, is a compile error at the real (`x as i64` when the cut is meant; `list_set_real` and the other `_real` functions for lists); stores into an integer (`var n: i64 = x`, a field, an element) still truncate, as on 20-10; a struct as one of several results (`-> (Vec4, i64)`) is an error, it arrived as its address; `var l: i64 = f(3 as f64)` stays an i64 (the cast's type was taken for the declaration's); in std_gpu, making a mesh, shader, texture or target inside a frame or a target is an error, not a broken frame |
 | Library (27-10 to 01-11-2026) | std_gpu: render targets with colour and depth (shadow maps), mipmaps made on the card, BC1 textures; Vulkan only for now. std_ogg: the Ogg container. std_vorbis: Ogg Vorbis decoded in Kron (floor 1, residues 0-2, coupling, IMDCT through an FFT, up to 8 channels), `audio_load_ogg`; checked against ffmpeg sample by sample on five files, within its print precision |
 | Library (01-11-2026, second part) | std_net: UDP and `net_wait`; std_gpu: instanced drawing (`instance` inputs in KSL, Vulkan); std_task: `task_for` over every core; std_audio: pitch, low-pass, echo, synthesis, sound in space, streams, a mixer without a device; std_vorbis: `audio_stream_ogg` |
-| xarm in Kron (01-11-2026) | `xarm.kr` lowers the x86-64 text to ARM64 text; `xarm.asm` is its door, keeps the reader xwasm shares (same names, same registers), the state xwasm reads and the system call shims; the same ARM64 text for every program of the suite (Linux ARM64, macOS, libraries) and the same web output |
+| xwasm in Kron (02-11-2026) | `xwasm.kr` lowers the x86-64 text to the WebAssembly module, reading it with xarm.kr's reader; `xwasm.asm` is its door; the same .wasm, page and host for every program of the suite |
+| xarm in Kron (01-11-2026) | `xarm.kr` lowers the x86-64 text to ARM64 text; `xarm.asm` is its door, keeps the state its reader keeps and the system call shims; the same ARM64 text for every program of the suite (Linux ARM64, macOS, libraries) and the same web output |
 | Writers in Kron (01-11-2026) | `macho_writer.kr` (Mach-O for macOS and iOS: executables, dylibs, the code signature and its SHA-256) `krn_writer.kr` (the KRN container) and `web_writer.kr` (the page and host beside a .wasm) replace `macho.asm`, `krn.asm` and main.asm's `web_write_host`, which are their doors; the same bytes as before for every program of the suite |
 | Fixed (20-10-2026) | a comparison of reals used as a value (`return a < b`, `f(x == 1.0)`) gave the left operand, not a bool; a real given to an integer (variable, field, element, parameter) kept its bits and an integer given to a real parameter was lost: now truncated and converted, and `var x = 2.5` is a real; `%` of reals is the remainder, bit operators on a real are an error; every `std_*.kr` compiles imported alone (std_exp, std_stats, std_vec3, std_random and std_ml did not); a function named like a register (`r8`, `eax`, `xmm9`) is refused instead of being called as the register |
 
-Still in assembly, in the order they come: xwasm, karm, main (the
-runtime and the linker with it), and the doors.
+Still in assembly, in the order they come: karm, main (the runtime and
+the linker with it), and the doors.
 
 Checked: the Kron lexer gives the same tokens as the assembly one, the
 Kron parser the same tree, tables and errors, the Kron semantic pass the
@@ -76,10 +77,11 @@ WebGPU (Dawn).
 | File | Lines | Role |
 |---|---:|---|
 | `karm.asm` | 5,259 | Kron's own ARM64 assembler |
-| `xarm.kr` | 2,320 | x86-64 text -> ARM64 text, in Kron (since 01-11-2026) |
-| `xarm.asm` | 1,937 | The door to it, the reader xwasm shares, and the Linux and the macOS shims (data); `xarm_kr.asm` is made by `kronc --module` |
+| `xarm.kr` | 2,317 | x86-64 text -> ARM64 text, in Kron (since 01-11-2026) |
+| `xarm.asm` | 1,829 | The door to it, the state its reader keeps (xwasm reads with it too), and the Linux and the macOS shims (data); `xarm_kr.asm` is made by `kronc --module` |
 | `main.asm` | 4,641 | Driver, CLI, pipeline, ELF writers, the web page |
-| `xwasm.asm` | 3,679 | x86-64 text -> WebAssembly module |
+| `xwasm.kr` | 2,576 | x86-64 text -> WebAssembly module, in Kron (since 02-11-2026) |
+| `xwasm.asm` | 72 | The door to it; `xwasm_kr.asm` is made by `kronc --module` |
 | `lexer/lexer.kr` | 632 | Tokenizer, in Kron (since 19-10-2026; with `include/tokens.kr`, 198) |
 | `lexer/lexer.asm` | 101 | The door to it, by hand; `lexer/lexer_kr.asm` is made by `kronc --module` |
 | `parser/*.kr` | 6,343 | Recursive-descent parser, AST construction, in Kron (since 19-10-2026; with `include/ast.kr`, 160) |
@@ -206,7 +208,7 @@ kronc.exe program.kr --target=web          # program.wasm, program.html, kron_we
 kronc.exe program.kr --target=web -S       # the x86-64 text xwasm reads
 ```
 
-`xwasm.asm` lowers the same Linux x86-64 text to a WebAssembly module, as
+`xwasm.kr` (`xwasm.asm` its door) lowers the same Linux x86-64 text to a WebAssembly module, as
 xarm does for ARM64. The x86-64 machine is kept: its sixteen registers are
 wasm globals (i64), the xmm registers v128 globals, the stack is in linear
 memory, a code address is the index of its instruction and a slot of the

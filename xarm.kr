@@ -31,10 +31,11 @@ kron_definitions
 //               the call maps them to the ARM64 ones and moves the arguments.
 //
 // It was xarm.asm, and it is here now, line for line the same text out.
-// xarm.asm keeps the door: the old names (xarm_translate, and the reader
-// xwasm shares, xa_read_line and the rest, with their registers), the
-// state xwasm reads by name (one block, xa_get_state) and the system call
-// shims appended to every program (xa_get_tail).
+// The reader of lines and operands is xwasm's too (xwasm.kr calls the xl_
+// functions). xarm.asm keeps the door: the old names main calls
+// (xarm_translate, the setters, the error getters), the state the reader
+// keeps, one block (xa_get_state), and the system call shims appended to
+// every program (xa_get_tail).
 // =========================================================================
 
 extern "kronc" {
@@ -2310,11 +2311,7 @@ fn xl_translate(inp: i64, len: i64, out: i64, cap: i64) -> i64 {
     return xl_out - out;
 }
 
-// for the door's xa_parse_num and xa_find_reg: what they say beside
+// for xwasm.kr: whether the last xl_parse_num read a whole number
 fn xl_last_ok() -> i64 {
     return xl_ok;
-}
-
-fn xl_last_size() -> i64 {
-    return xl_rsize;
 }

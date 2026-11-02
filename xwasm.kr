@@ -1,0 +1,2576 @@
+kron_program
+kron_domain xwasm;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// XWASM: lowers the x86-64 text the code generator writes to WebAssembly
+//
+// For the web, kronc generates the same Linux program it generates for
+// Linux on x86-64, and this pass turns it into a .wasm module: every
+// feature of the language, the runtime and the library included, reaches
+// the browser the moment it works on Linux. It is the sibling of xarm, and
+// reads the x86 text with xarm's reader (xarm.kr).
+//
+// The x86-64 machine is kept exactly, so nothing above this pass changes:
+//
+//   registers   rax .. r15 are wasm globals 0..15 (i64); xmm0 .. xmm15 are
+//               globals 16..31 (v128). A double is lane 0 of its v128.
+//               Inside a function each register it names is a local of
+//               its own (locals 10..41), which the engine can keep in a
+//               machine register. The globals carry them across calls:
+//               the integer registers and xmm0-xmm5 go out to the globals
+//               before a call, a syscall or a ret, and come back after a
+//               call and at a function's start (the runtime hands some of
+//               its helpers a value in rbx). xmm6-xmm15, which every
+//               function keeps and none takes as an argument, never leave
+//               the function's locals.
+//   memory      one linear memory. .data starts at 0x10000, .bss after it,
+//               then an 8 MB stack; the host maps everything past that.
+//   stack       rsp is an ordinary register: push and pop are 8 bytes in
+//               memory, so every frame offset the generator computed holds.
+//   addresses   code has addresses too: an instruction's address is its
+//               number in the text. A call pushes the address after it, so
+//               [rbp+8] is a return address as on x86, the failure trace
+//               walks the same chain, and a function's address is the
+//               number its table slot has: call rax is call_indirect
+//               through it.
+//   functions   a label that is not local (no leading dot) in .text starts
+//               a wasm function. Inside, the labels jumped to are the
+//               blocks of a dispatch loop: loop, one block per label,
+//               br_table on the block number in a local.
+//   flags       cmp, test and the arithmetic keep what they compared in
+//               locals; the jcc or setcc after them asks the question
+//               directly. A condition always follows its flags in the text
+//               the generator writes.
+//   syscall     a call to the host's env.syscall(rax, rdi, rsi, rdx, r10,
+//               r8, r9): the host answers as Linux would, and 1000 and up
+//               are the browser's (the window, the canvas).
+//
+// It was xwasm.asm, and it is here now, byte for byte the same module out.
+// xwasm.asm keeps the door: xwasm_translate and the error getters main
+// calls.
+// =========================================================================
+
+extern "kronc" {
+    fn xa_get_state() -> i64;
+    fn cg_float_bits(text: i64, single: i64) -> i64;
+    // xarm's reader
+    fn xl_read_line() -> i64;
+    fn xl_native_skip() -> i64;
+    fn xl_split() -> i64;
+    fn xl_parse_ops() -> i64;
+    fn xl_streq(a: i64, b: i64) -> i64;
+    fn xl_prefix(t: i64, p: i64) -> i64;
+    fn xl_skipb(p: i64) -> i64;
+    fn xl_parse_num(t: i64) -> i64;
+    fn xl_last_ok() -> i64;
+    fn xl_fail(msg: i64) -> i64;
+}
+
+// the shared state, in xarm's door: offsets in its block
+const S_IN: i64 = 16;
+const S_IN_END: i64 = 24;
+const S_LINE_NO: i64 = 32;
+const S_ERR: i64 = 40;
+const S_ERR_LINE: i64 = 48;
+const S_ERR_MSG: i64 = 56;
+const S_REST: i64 = 64;
+const S_SKIPPING: i64 = 80;
+const S_ERR_INSN: i64 = 88;
+const S_LINE: i64 = 248;
+const S_MN: i64 = 1272;
+const S_OPS: i64 = 2072;
+
+// operand record, as xarm writes it (32 bytes)
+const OP_KIND: i64 = 0;
+const OP_REG: i64 = 1;
+const OP_RSIZE: i64 = 2;
+const OP_XMM: i64 = 3;
+const OP_MSIZE: i64 = 4;
+const OP_SCALE: i64 = 5;
+const OP_BASE: i64 = 6;
+const OP_INDEX: i64 = 7;
+const OP_VAL: i64 = 8;
+const OP_REL: i64 = 16;
+const OP_TEXT: i64 = 24;
+
+const K_REG: i64 = 1;
+const K_XMM: i64 = 2;
+const K_IMM: i64 = 3;
+const K_MEM: i64 = 4;
+const K_LABEL: i64 = 5;
+
+// who set the flags
+const FK_NONE: i64 = 0;
+const FK_SUB: i64 = 1;            // cmp, sub: fa - fb
+const FK_RES: i64 = 2;            // and or xor test inc dec neg: fr
+const FK_ADD: i64 = 3;            // add: fr = fa + fb
+const FK_FP: i64 = 4;             // ucomisd, comisd: fx ? fy
+
+// the locals of every function
+const L_PC: i64 = 0;              // i32: the block to run
+const L_FA: i64 = 2;              // i64 x 6
+const L_FB: i64 = 3;
+const L_FR: i64 = 4;
+const L_T0: i64 = 5;
+const L_T1: i64 = 6;
+const L_T2: i64 = 7;
+const L_FX: i64 = 8;              // f64 x 2
+const L_FY: i64 = 9;
+const L_R0: i64 = 10;             // i64 x 16: rax .. r15, then v128 x 16
+const XW_SYNC: i64 = 4194303;     // 0x3FFFFF: the registers that cross calls
+
+// label kinds
+const LK_CODE: i64 = 1;
+const LK_DATA: i64 = 2;
+const LK_BSS: i64 = 3;
+
+const XW_DATA_BASE: i64 = 65536;
+const XW_STACK: i64 = 8388608;    // 8 MB, as getrlimit says
+const XW_MAXLBL: i64 = 262144;
+const XW_HASH: i64 = 65536;
+const XW_NAMES: i64 = 8388608;
+const XW_MAXFN: i64 = 65536;
+const XW_BODY_MAX: i64 = 8388608;
+const XW_CODE_MAX: i64 = 33554432;
+const XW_DATA_MAX: i64 = 8388608;
+
+// the buffers built beside the output: their counts in xv_cnt
+const B_CODE: i64 = 0;
+const B_SECT: i64 = 1;
+const B_TMP: i64 = 2;
+const B_TB: i64 = 3;
+
+var xv_st: i64;                   // xarm's state block
+var xv_out: i64;
+var xv_out_cap: i64;
+var xv_on: i64;
+var xv_pass: i64;                 // 1 jump targets, 2 layout, 3 emit
+var xv_sec: i64;                  // 0 text, 1 data, 2 bss
+var xv_addr: i64;                 // instruction counter: a code address
+var xv_dsize: i64;                // bytes of .data so far
+var xv_bsize: i64;                // bytes of .bss so far
+var xv_bss_base: i64;
+var xv_heap_base: i64;
+var xv_fn: i64;                   // current function, -1 none
+var xv_blk: i64;                  // current block in it
+var xv_nfn: i64;                  // functions found
+var xv_fk: i64;                   // who set the flags, while emitting
+var xv_term: i64;                 // the last instruction was jmp or ret
+var xv_iff: i64;                  // 1 inside an if: one more level to br out
+var xv_start_fn: i64;             // function of _start
+var xv_lmode: i64;                // registers are the function's locals now
+var xv_regs: i64;                 // and which of them it has
+var xv_nfn_total: i64;            // functions, as pass 2 counted them
+var xv_addr_total: i64;           // instructions: the table's size
+var xv_qn: i64;                   // xv_qual: the name with its scope
+var xv_ql: i64;
+var xv_add: i64;                  // xv_label_ref: +N or -N after the name
+var xv_glob: [u8; 256];           // innermost non-local label, for scoping
+var xv_qbuf: [u8; 512];
+var xv_tok: [u8; 64];             // one item of a data directive
+var xv_cnt: [i64; 4];
+// labels
+var xv_names: [u8; 8388608];
+var xv_names_n: i64;
+var xv_l_off: [u8; 1048576];      // u32 each
+var xv_l_len: [u8; 1048576];      // u32
+var xv_l_kind: [u8; 262144];
+var xv_l_tgt: [u8; 262144];       // jumped to inside its function
+var xv_l_fn: [u8; 1048576];       // u32
+var xv_l_blk: [u8; 1048576];      // u32
+var xv_l_val: [i64; 262144];
+var xv_l_next: [u8; 1048576];     // u32
+var xv_l_n: i64;
+var xv_hash: [u8; 262144];        // u32 each: the first label + 1
+// functions
+var xv_f_addr: [i64; 65536];      // its code address: its table slot
+var xv_f_nblk: [u8; 262144];      // u32
+var xv_f_regs: [u8; 262144];      // u32: the registers it names
+// output pieces
+var xv_body: [u8; 8388608];
+var xv_body_n: i64;
+var xv_code: [u8; 33554432];
+var xv_data: [u8; 8388608];
+var xv_sect: [u8; 4194304];
+var xv_tmp: [u8; 64];
+var xv_tb: [u8; 256];
+
+// -------------------------------------------------------------------------
+// memory
+// -------------------------------------------------------------------------
+
+fn xv_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn xv_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn xv_g32(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek32(a);
+    }
+    return r & 4294967295;
+}
+
+fn xv_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn xv_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn xv_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+// a u32 as the signed value it holds
+fn xv_s32(v: i64) -> i64 {
+    if v >= 2147483648 {
+        return v - 4294967296;
+    }
+    return v;
+}
+
+fn xv_s(off: i64) -> i64 {
+    if xv_st == 0 {
+        xv_st = xa_get_state();
+    }
+    return xv_st + off;
+}
+
+fn xv_get(off: i64) -> i64 {
+    return xv_g64(xv_s(off));
+}
+
+fn xv_set(off: i64, v: i64) -> i64 {
+    return xv_p64(xv_s(off), v);
+}
+
+fn xv_err() -> i64 {
+    return xv_get(S_ERR);
+}
+
+// the operand records
+fn xv_op(k: i64) -> i64 {
+    return xv_s(S_OPS) + k * 32;
+}
+
+fn xv_kind(r: i64) -> i64 {
+    return xv_g8(r + OP_KIND);
+}
+
+fn xv_reg(r: i64) -> i64 {
+    return xv_g8(r + OP_REG);
+}
+
+fn xv_rs(r: i64) -> i64 {
+    return xv_g8(r + OP_RSIZE);
+}
+
+fn xv_val(r: i64) -> i64 {
+    return xv_g64(r + OP_VAL);
+}
+
+// -------------------------------------------------------------------------
+// output helpers
+// -------------------------------------------------------------------------
+
+// one byte of the function body
+fn xv_wb(b: i64) -> i64 {
+    if xv_body_n >= XW_BODY_MAX - 16 {
+        xl_fail("output buffer full");
+        return 0;
+    }
+    xv_p8(&xv_body + xv_body_n, b);
+    xv_body_n = xv_body_n + 1;
+    return 0;
+}
+
+// unsigned LEB128 into the body
+fn xv_wuleb(value: i64) -> i64 {
+    var v: i64 = value;
+    while (v >>> 7) != 0 {
+        xv_wb((v & 127) | 128);
+        v = v >>> 7;
+    }
+    return xv_wb(v & 127);
+}
+
+// signed LEB128 into the body
+fn xv_wsleb(value: i64) -> i64 {
+    var v: i64 = value;
+    while true {
+        var low: i64 = v & 127;
+        v = v >> 7;
+        // done when the rest is all sign: 0 with bit 6 clear, -1 with it set
+        var sign: i64 = low & 64;
+        if (v == 0 && sign == 0) || (v == -1 && sign != 0) {
+            return xv_wb(low);
+        }
+        xv_wb(low | 128);
+    }
+    return 0;
+}
+
+fn xv_i64const(v: i64) -> i64 {
+    xv_wb(66);
+    return xv_wsleb(v);
+}
+
+fn xv_i32const(v: i64) -> i64 {
+    xv_wb(65);
+    return xv_wsleb(v);
+}
+
+fn xv_lget(l: i64) -> i64 {
+    xv_wb(32);
+    return xv_wuleb(l);
+}
+
+fn xv_lset(l: i64) -> i64 {
+    xv_wb(33);
+    return xv_wuleb(l);
+}
+
+fn xv_ltee(l: i64) -> i64 {
+    xv_wb(34);
+    return xv_wuleb(l);
+}
+
+fn xv_gget_raw(g: i64) -> i64 {
+    xv_wb(35);
+    return xv_wuleb(g);
+}
+
+fn xv_gset_raw(g: i64) -> i64 {
+    xv_wb(36);
+    return xv_wuleb(g);
+}
+
+// a register is the function's local while xv_lmode is on
+fn xv_gget(g: i64) -> i64 {
+    if g < 32 && xv_lmode != 0 {
+        return xv_lget(g + L_R0);
+    }
+    return xv_gget_raw(g);
+}
+
+fn xv_gset(g: i64) -> i64 {
+    if g < 32 && xv_lmode != 0 {
+        return xv_lset(g + L_R0);
+    }
+    return xv_gset_raw(g);
+}
+
+// the registers of the function that cross calls, from the globals into
+// its locals / back out
+fn xv_sync_in() -> i64 {
+    if xv_lmode == 0 {
+        return 0;
+    }
+    var m: i64 = xv_regs & XW_SYNC;
+    var c: i64 = 0;
+    while c < 32 {
+        if ((m >>> c) & 1) != 0 {
+            xv_gget_raw(c);
+            xv_lset(c + L_R0);
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+fn xv_sync_out() -> i64 {
+    if xv_lmode == 0 {
+        return 0;
+    }
+    var m: i64 = xv_regs & XW_SYNC;
+    var c: i64 = 0;
+    while c < 32 {
+        if ((m >>> c) & 1) != 0 {
+            xv_lget(c + L_R0);
+            xv_gset_raw(c);
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+// a load or store with memarg align 0, offset 0
+fn xv_mem(op: i64) -> i64 {
+    xv_wb(op);
+    xv_wb(0);
+    return xv_wb(0);
+}
+
+// 0xFD then the SIMD opcode as LEB
+fn xv_simd(op: i64) -> i64 {
+    xv_wb(253);
+    return xv_wuleb(op);
+}
+
+fn xv_simd_mem(op: i64) -> i64 {
+    xv_simd(op);
+    xv_wb(0);
+    return xv_wb(0);
+}
+
+// ---- bytes into the other buffers (B_CODE B_SECT B_TMP B_TB) ------------
+
+fn xv_base(k: i64) -> i64 {
+    if k == B_CODE {
+        return &xv_code;
+    }
+    if k == B_SECT {
+        return &xv_sect;
+    }
+    if k == B_TMP {
+        return &xv_tmp;
+    }
+    return &xv_tb;
+}
+
+fn xv_n(k: i64) -> i64 {
+    return xv_g64(&xv_cnt + k * 8);
+}
+
+fn xv_set_n(k: i64, n: i64) -> i64 {
+    return xv_p64(&xv_cnt + k * 8, n);
+}
+
+fn xv_ob(k: i64, b: i64) -> i64 {
+    var n: i64 = xv_n(k);
+    xv_p8(xv_base(k) + n, b);
+    return xv_set_n(k, n + 1);
+}
+
+fn xv_obuleb(k: i64, value: i64) -> i64 {
+    var v: i64 = value;
+    while (v >>> 7) != 0 {
+        xv_ob(k, (v & 127) | 128);
+        v = v >>> 7;
+    }
+    return xv_ob(k, v & 127);
+}
+
+fn xv_obsleb(k: i64, value: i64) -> i64 {
+    var v: i64 = value;
+    while true {
+        var low: i64 = v & 127;
+        v = v >> 7;
+        var sign: i64 = low & 64;
+        if (v == 0 && sign == 0) || (v == -1 && sign != 0) {
+            return xv_ob(k, low);
+        }
+        xv_ob(k, low | 128);
+    }
+    return 0;
+}
+
+// a zero-ended name: its length, then its bytes
+fn xv_obstr(k: i64, s: i64) -> i64 {
+    var n: i64 = 0;
+    while xv_g8(s + n) != 0 {
+        n = n + 1;
+    }
+    xv_obuleb(k, n);
+    var i: i64 = 0;
+    while i < n {
+        xv_ob(k, xv_g8(s + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// labels
+// -------------------------------------------------------------------------
+
+fn xv_hash_of(name: i64, len: i64) -> i64 {
+    var h: i64 = 0;
+    var i: i64 = 0;
+    while i < len {
+        h = (h << 5) - h + xv_g8(name + i);
+        i = i + 1;
+    }
+    h = h ^ (h >>> 16);
+    return h & (XW_HASH - 1);
+}
+
+// the label of that name, or -1
+fn xv_lfind(name: i64, len: i64) -> i64 {
+    var b: i64 = xv_g32(&xv_hash + xv_hash_of(name, len) * 4);
+    while b != 0 {
+        b = b - 1;
+        if xv_g32(&xv_l_len + b * 4) == len {
+            var p: i64 = &xv_names + xv_g32(&xv_l_off + b * 4);
+            var i: i64 = 0;
+            while i < len && xv_g8(p + i) == xv_g8(name + i) {
+                i = i + 1;
+            }
+            if i >= len {
+                return b;
+            }
+        }
+        b = xv_g32(&xv_l_next + b * 4);
+    }
+    return -1;
+}
+
+// the label of that name, made when it is new
+fn xv_label_get(name: i64, len: i64) -> i64 {
+    var f: i64 = xv_lfind(name, len);
+    if f != -1 {
+        return f;
+    }
+    var n: i64 = xv_l_n;
+    if n >= XW_MAXLBL || xv_names_n + len >= XW_NAMES {
+        xl_fail("too many labels or functions");
+        return 0;
+    }
+    xv_p32(&xv_l_off + n * 4, xv_names_n);
+    xv_p32(&xv_l_len + n * 4, len);
+    var i: i64 = 0;
+    while i < len {
+        xv_p8(&xv_names + xv_names_n + i, xv_g8(name + i));
+        i = i + 1;
+    }
+    xv_names_n = xv_names_n + len;
+    xv_p8(&xv_l_kind + n, 0);
+    xv_p8(&xv_l_tgt + n, 0);
+    xv_p64(&xv_l_val + n * 8, 0);
+    xv_p32(&xv_l_fn + n * 4, -1);
+    xv_p32(&xv_l_blk + n * 4, -1);
+    var h: i64 = xv_hash_of(name, len);
+    xv_p32(&xv_l_next + n * 4, xv_g32(&xv_hash + h * 4));
+    xv_p32(&xv_hash + h * 4, n + 1);
+    xv_l_n = xv_l_n + 1;
+    return n;
+}
+
+// the name with its scope (xv_qn, xv_ql): a name starting with '.' belongs
+// to the last label that does not
+fn xv_qual(name: i64, len: i64) -> i64 {
+    if xv_g8(name) != 46 {
+        xv_qn = name;
+        xv_ql = len;
+        return 0;
+    }
+    var q: i64 = &xv_qbuf;
+    var g: i64 = &xv_glob;
+    var c: i64 = 0;
+    while xv_g8(g + c) != 0 && c < 250 {
+        xv_p8(q + c, xv_g8(g + c));
+        c = c + 1;
+    }
+    var k: i64 = 0;
+    while k < len && c < 500 {
+        xv_p8(q + c, xv_g8(name + k));
+        c = c + 1;
+        k = k + 1;
+    }
+    xv_qn = q;
+    xv_ql = c;
+    return 0;
+}
+
+// the length of the name at the text's start: up to a blank, ',', '+',
+// '-', ']', ':' or the end
+fn xv_name_len(t: i64) -> i64 {
+    var n: i64 = 0;
+    while true {
+        var c: i64 = xv_g8(t + n);
+        if c == 0 || c == 32 || c == 44 || c == 43 || c == 45 || c == 93 || c == 58 {
+            return n;
+        }
+        n = n + 1;
+    }
+    return n;
+}
+
+// the label the text names (made if new); xv_add = anything after the
+// name: +N or -N, 0 otherwise
+fn xv_label_ref(t: i64) -> i64 {
+    var n: i64 = xv_name_len(t);
+    xv_qual(t, n);
+    var lab: i64 = xv_label_get(xv_qn, xv_ql);
+    xv_add = 0;
+    var p: i64 = xl_skipb(t + n);
+    if xv_g8(p) == 43 {
+        xv_add = xl_parse_num(xl_skipb(p + 1));
+    } else if xv_g8(p) == 45 {
+        xv_add = 0 - xl_parse_num(xl_skipb(p + 1));
+    }
+    return lab;
+}
+
+// a label's value; a label never defined fails
+fn xv_lval(lab: i64) -> i64 {
+    var k: i64 = xv_g8(&xv_l_kind + lab);
+    if k == 0 {
+        xl_fail("label not defined");
+        return 0;
+    }
+    var v: i64 = xv_g64(&xv_l_val + lab * 8);
+    if k == LK_BSS {
+        v = v + xv_bss_base;
+    }
+    return v;
+}
+
+// the value of the label the text names, with its +N
+fn xv_ref_value(t: i64) -> i64 {
+    var lab: i64 = xv_label_ref(t);
+    var add: i64 = xv_add;
+    return xv_lval(lab) + add;
+}
+
+// -------------------------------------------------------------------------
+// the three passes
+//   1  which local labels are jumped to: those become blocks
+//   2  where everything goes: code addresses, functions, blocks, data
+//   3  the module: function bodies and the data image
+// -------------------------------------------------------------------------
+
+fn xv_translate(inp: i64, len: i64, out: i64, cap: i64) -> i64 {
+    xv_out = out;
+    xv_out_cap = cap;
+    xv_set(S_IN, inp);
+    xv_set(S_IN_END, inp + len);
+    xv_set(S_ERR, 0);
+    xv_set(S_ERR_LINE, 0);
+    xv_p8(xv_s(S_ERR_INSN), 0);
+    xv_set(S_ERR_MSG, "no WebAssembly form for this instruction");
+    xv_l_n = 0;
+    xv_names_n = 0;
+    xv_start_fn = -1;
+    var i: i64 = 0;
+    while i < XW_HASH {
+        xv_p32(&xv_hash + i * 4, 0);
+        i = i + 1;
+    }
+    var pass: i64 = 1;
+    while pass <= 3 {
+        xv_pass = pass;
+        xv_set(S_IN, inp);
+        xv_set(S_IN_END, inp + len);
+        xv_run_pass();
+        if xv_err() != 0 {
+            return -1;
+        }
+        if pass == 2 {
+            xv_layout();                // where .bss, the stack and the heap go
+            xv_nfn_total = xv_nfn;
+            xv_addr_total = xv_addr;
+        }
+        pass = pass + 1;
+    }
+    var r: i64 = xv_module();
+    if xv_err() != 0 {
+        return -1;
+    }
+    return r;
+}
+
+// every line once
+fn xv_run_pass() -> i64 {
+    xv_set(S_LINE_NO, 0);
+    xv_sec = 0;
+    xv_addr = 0;
+    xv_dsize = 0;
+    xv_bsize = 0;
+    xv_nfn = 0;
+    xv_set_n(B_CODE, 0);
+    xv_p8(&xv_glob, 0);
+    xv_fn = -1;
+    xv_fk = FK_NONE;
+    xv_set(S_SKIPPING, 0);
+    while true {
+        if xv_err() != 0 {
+            return 0;
+        }
+        if xl_read_line() == 0 {
+            break;
+        }
+        // __lib_ready and __lib_enter: how C enters an export; on the web
+        // C never does, so they are stubs and their bodies are left out
+        if xv_lib_skip() == 0 {
+            // __ccall and __pt_entry speak a system's C convention: the web
+            // has none, so a stub stands in for each
+            var k: i64 = xl_native_skip();
+            if k == 0 {
+                xv_line();
+            } else if k == 2 {
+                xv_native_stub();
+            }
+        }
+    }
+    if xv_pass == 3 {
+        xv_fn_close();                  // the last function
+    }
+    return 0;
+}
+
+// 1 when the line is __lib_ready: or __lib_enter: -- its stub is fed
+// instead and the lines up to the next label are skipped
+fn xv_lib_skip() -> i64 {
+    var line: i64 = xv_s(S_LINE);
+    if xl_prefix(line, "__lib_enter:") != 0 {
+        xv_feed("__lib_enter:\nret\n");
+        xv_set(S_SKIPPING, 1);
+        return 1;
+    }
+    if xl_prefix(line, "__lib_ready:") != 0 {
+        xv_feed("__lib_ready:\nret\n");
+        xv_set(S_SKIPPING, 1);
+        return 1;
+    }
+    return 0;
+}
+
+// lines, each ending in 10, each through xv_line
+fn xv_feed(s: i64) -> i64 {
+    var p: i64 = s;
+    var line: i64 = xv_s(S_LINE);
+    while xv_g8(p) != 0 {
+        var n: i64 = 0;
+        while true {
+            var c: i64 = xv_g8(p);
+            p = p + 1;
+            if c == 10 {
+                break;
+            }
+            xv_p8(line + n, c);
+            n = n + 1;
+        }
+        xv_p8(line + n, 0);
+        xv_line();
+    }
+    return 0;
+}
+
+// the line starts __ccall, __pt_entry or __centry: its stub. __ccall on
+// the web: the extern function is looked for -- and not found, there being
+// no library to load -- so the failure is the one any system gives for a
+// missing library; the result is 0. __centry: where C would enter an
+// export -- nothing calls it on the web.
+fn xv_native_stub() -> i64 {
+    var line: i64 = xv_s(S_LINE);
+    if xl_prefix(line, "__ccall:") != 0 {
+        return xv_feed("__ccall:\nmov rcx, r11\ncall __ext_resolve\nxor eax, eax\nxorps xmm0, xmm0\nret\n");
+    }
+    if xl_prefix(line, "__centry:") != 0 {
+        return xv_feed("__centry:\nret\n");
+    }
+    return xv_feed("__pt_entry:\nret\n");
+}
+
+// after pass 2. .bss after .data, the stack after .bss, the heap after the
+// stack; the name the program gets as argv[0] at the end of .data.
+fn xv_layout() -> i64 {
+    xv_dsize = xv_dsize + 16;           // room for "kron" and its 0
+    var a: i64 = (XW_DATA_BASE + xv_dsize + 15) & -16;
+    xv_bss_base = a;
+    a = (a + xv_bsize + 65535) & -65536;
+    xv_heap_base = a + XW_STACK;        // also the top of the stack
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// one line
+// -------------------------------------------------------------------------
+
+fn xv_line() -> i64 {
+    var p: i64 = xl_skipb(xv_s(S_LINE));
+    if xv_g8(p) == 0 {
+        return 0;
+    }
+    var b: i64 = p;
+    while true {
+        b = p;
+        var c: i64 = xv_g8(p);
+        while c != 0 && c != 32 && c != 58 {
+            p = p + 1;
+            c = xv_g8(p);
+        }
+        if c != 58 {
+            break;
+        }
+        xv_label(b, p - b);
+        p = xl_skipb(p + 1);
+        if xv_g8(p) == 0 {
+            return 0;
+        }
+    }
+    // the mnemonic, lowercased
+    var len: i64 = p - b;
+    if len > 30 {
+        len = 30;
+    }
+    var mn: i64 = xv_s(S_MN);
+    var i: i64 = 0;
+    while i < len {
+        var m: i64 = xv_g8(b + i);
+        if m >= 65 && m <= 90 {
+            m = m + 32;
+        }
+        xv_p8(mn + i, m);
+        i = i + 1;
+    }
+    xv_p8(mn + len, 0);
+    var rest: i64 = xl_skipb(p);
+    xv_set(S_REST, rest);
+    if xl_streq(mn, "default") != 0 || xl_streq(mn, "bits") != 0 || xl_streq(mn, "extern") != 0 || xl_streq(mn, "global") != 0 {
+        return 0;
+    }
+    if xl_streq(mn, "section") != 0 {
+        xv_sec = 0;
+        if xl_streq(rest, ".data") != 0 {
+            xv_sec = 1;
+        } else if xl_streq(rest, ".bss") != 0 {
+            xv_sec = 2;
+        }
+        return 0;
+    }
+    if xl_streq(mn, "db") != 0 { return xv_items(1); }
+    if xl_streq(mn, "dw") != 0 { return xv_items(2); }
+    if xl_streq(mn, "dd") != 0 { return xv_items(4); }
+    if xl_streq(mn, "dq") != 0 { return xv_items(8); }
+    if xl_streq(mn, "resb") != 0 { return xv_res(1); }
+    if xl_streq(mn, "resw") != 0 { return xv_res(2); }
+    if xl_streq(mn, "resd") != 0 { return xv_res(4); }
+    if xl_streq(mn, "resq") != 0 { return xv_res(8); }
+    // an instruction
+    if xv_sec != 0 {
+        return 0;                       // no code outside .text
+    }
+    xl_split();
+    xl_parse_ops();
+    if xv_err() != 0 {
+        return 0;
+    }
+    if xv_pass == 1 {
+        xv_targets();
+    } else if xv_pass == 2 {
+        xv_regscan();
+    } else if xv_pass == 3 {
+        xv_insn();
+    }
+    xv_addr = xv_addr + 1;
+    return 0;
+}
+
+// resb resw resd resq: zeros in .data, room in .bss
+fn xv_res(size: i64) -> i64 {
+    var n: i64 = xl_parse_num(xv_get(S_REST));
+    if xl_last_ok() == 0 {
+        xl_fail("data directive not understood");
+        return 0;
+    }
+    var bytes: i64 = n * size;
+    if xv_sec == 2 {
+        xv_bsize = xv_bsize + bytes;
+    } else {
+        xv_dsize = xv_dsize + bytes;
+    }
+    return 0;
+}
+
+fn xv_label(name: i64, len: i64) -> i64 {
+    if xv_g8(name) != 46 {
+        // a label that is not local opens a new scope
+        var g: i64 = &xv_glob;
+        var c: i64 = 0;
+        while c < len && c < 250 {
+            xv_p8(g + c, xv_g8(name + c));
+            c = c + 1;
+        }
+        xv_p8(g + c, 0);
+    }
+    xv_qual(name, len);
+    var lab: i64 = xv_label_get(xv_qn, xv_ql);
+    if xv_pass == 2 {
+        return xv_define(lab, name, len);
+    }
+    if xv_pass != 3 {
+        return 0;
+    }
+    if xv_sec != 0 {
+        return 0;
+    }
+    if xv_g8(name) != 46 {
+        // a new function: the one before it ends here
+        xv_fn_close();
+        xv_fn_open();
+        return 0;
+    }
+    var b: i64 = xv_s32(xv_g32(&xv_l_blk + lab * 4));
+    if b < 1 {
+        return 0;                       // not jumped to: no new block
+    }
+    // the next block: the end of the block whose code comes now
+    xv_blk = b;
+    xv_wb(11);
+    xv_fk = FK_NONE;
+    xv_term = 0;
+    return 0;
+}
+
+// pass 2: where the label is
+fn xv_define(lab: i64, name: i64, len: i64) -> i64 {
+    if xv_sec == 1 {
+        xv_p8(&xv_l_kind + lab, LK_DATA);
+        xv_p64(&xv_l_val + lab * 8, xv_dsize + XW_DATA_BASE);
+        return 0;
+    }
+    if xv_sec == 2 {
+        xv_p8(&xv_l_kind + lab, LK_BSS);
+        xv_p64(&xv_l_val + lab * 8, xv_bsize);
+        return 0;
+    }
+    // code
+    xv_p8(&xv_l_kind + lab, LK_CODE);
+    xv_p64(&xv_l_val + lab * 8, xv_addr);
+    if xv_g8(name) == 46 {
+        if xv_fn == -1 {
+            return 0;
+        }
+        xv_p32(&xv_l_fn + lab * 4, xv_fn);
+        if xv_g8(&xv_l_tgt + lab) == 0 {
+            return 0;
+        }
+        // jumped to: a block of its own
+        var nb: i64 = xv_g32(&xv_f_nblk + xv_fn * 4);
+        xv_p32(&xv_l_blk + lab * 4, nb);
+        xv_p32(&xv_f_nblk + xv_fn * 4, nb + 1);
+        return 0;
+    }
+    // a function
+    var f: i64 = xv_nfn;
+    if f >= XW_MAXFN {
+        xl_fail("too many labels or functions");
+        return 0;
+    }
+    xv_fn = f;
+    xv_p64(&xv_f_addr + f * 8, xv_addr);
+    xv_p32(&xv_f_nblk + f * 4, 1);
+    xv_p32(&xv_f_regs + f * 4, 23);   // rax rcx rdx rsp: cqo, div, push, call
+    xv_p32(&xv_l_fn + lab * 4, f);
+    xv_p32(&xv_l_blk + lab * 4, 0);
+    xv_nfn = xv_nfn + 1;
+    // _start: where the module starts
+    if len == 6 && xl_prefix(name, "_start") != 0 {
+        xv_start_fn = f;
+    }
+    return 0;
+}
+
+// pass 1: a jump to a local label marks it
+fn xv_targets() -> i64 {
+    if xv_g8(xv_s(S_MN)) != 106 {
+        return 0;
+    }
+    var r: i64 = xv_op(0);
+    if xv_kind(r) != K_LABEL {
+        return 0;
+    }
+    var t: i64 = xv_g64(r + OP_TEXT);
+    if xv_g8(t) != 46 {
+        return 0;
+    }
+    xv_qual(t, xv_name_len(t));
+    var lab: i64 = xv_label_get(xv_qn, xv_ql);
+    xv_p8(&xv_l_tgt + lab, 1);
+    return 0;
+}
+
+// pass 2, one instruction: the registers it names go into its function's
+// mask. syscall reads and writes seven at once: all of them.
+fn xv_regscan() -> i64 {
+    var f: i64 = xv_fn;
+    if f == -1 {
+        return 0;
+    }
+    var m: i64 = 0;
+    var k: i64 = 0;
+    while k < 3 {
+        var r: i64 = xv_op(k);
+        var kind: i64 = xv_kind(r);
+        if kind == K_REG {
+            m = m | (1 << (xv_reg(r) & 15));
+        } else if kind == K_XMM {
+            m = m | (1 << ((xv_g8(r + OP_XMM) & 15) + 16));
+        } else if kind == K_MEM {
+            if xv_g8(r + OP_BASE) < 16 {
+                m = m | (1 << xv_g8(r + OP_BASE));
+            }
+            if xv_g8(r + OP_INDEX) < 16 {
+                m = m | (1 << xv_g8(r + OP_INDEX));
+            }
+        }
+        k = k + 1;
+    }
+    if xl_streq(xv_s(S_MN), "syscall") != 0 {
+        m = m | 65535;
+    }
+    var a: i64 = &xv_f_regs + f * 4;
+    xv_p32(a, xv_g32(a) | m);
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// functions
+// -------------------------------------------------------------------------
+
+// pass 3, at a label that is not local in .text
+fn xv_fn_open() -> i64 {
+    xv_fn = xv_nfn;
+    xv_nfn = xv_nfn + 1;
+    xv_body_n = 0;
+    xv_blk = 0;
+    xv_term = 0;
+    xv_iff = 0;
+    xv_fk = FK_NONE;
+    // locals: pc and an address (i32), six i64, two f64, then the
+    // registers: sixteen i64 and sixteen v128
+    xv_wb(5);
+    xv_wb(2);
+    xv_wb(127);
+    xv_wb(6);
+    xv_wb(126);
+    xv_wb(2);
+    xv_wb(124);
+    xv_wb(16);
+    xv_wb(126);
+    xv_wb(16);
+    xv_wb(123);
+    xv_regs = xv_g32(&xv_f_regs + xv_fn * 4);
+    xv_lmode = 1;
+    xv_sync_in();
+    var n: i64 = xv_g32(&xv_f_nblk + xv_fn * 4);
+    if n < 2 {
+        return 0;
+    }
+    // loop, a block per label, br_table on pc
+    xv_wb(3);
+    xv_wb(64);
+    var i: i64 = 0;
+    while i < n {
+        xv_wb(2);
+        xv_wb(64);
+        i = i + 1;
+    }
+    xv_lget(L_PC);
+    xv_wb(14);
+    xv_wuleb(n);
+    i = 0;
+    while i < n {
+        xv_wuleb(i);
+        i = i + 1;
+    }
+    xv_wuleb(0);                        // default: block 0
+    xv_wb(11);                          // the end of block 0: its code follows
+    return 0;
+}
+
+// pass 3. Falling off the end goes on into the next function, as on x86;
+// then the loop and the function end.
+fn xv_fn_close() -> i64 {
+    var f: i64 = xv_fn;
+    if f == -1 {
+        return 0;
+    }
+    if xv_term == 0 {
+        if f + 1 < xv_nfn_total {
+            xv_sync_out();
+            xv_wb(16);                  // call the next one
+            xv_wuleb(f + 3);            // +1 next, +2 past syscall and the start
+            xv_wb(15);
+        } else {
+            xv_wb(0);                   // unreachable
+        }
+    }
+    if xv_g32(&xv_f_nblk + f * 4) >= 2 {
+        xv_wb(11);                      // the loop
+    }
+    xv_wb(11);                          // the function
+    // size, then the body, into the code section
+    xv_obuleb(B_CODE, xv_body_n);
+    var at: i64 = xv_n(B_CODE);
+    if at + xv_body_n >= XW_CODE_MAX - 64 {
+        xl_fail("output buffer full");
+        return 0;
+    }
+    var i: i64 = 0;
+    while i < xv_body_n {
+        xv_p8(&xv_code + at + i, xv_g8(&xv_body + i));
+        i = i + 1;
+    }
+    xv_set_n(B_CODE, at + xv_body_n);
+    xv_fn = -1;
+    xv_lmode = 0;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// data
+// -------------------------------------------------------------------------
+
+// db / dw / dd / dq, size bytes an item. Pass 2 counts, pass 3 writes the
+// bytes, labels resolved.
+fn xv_items(size: i64) -> i64 {
+    var p: i64 = xv_get(S_REST);
+    var tok: i64 = &xv_tok;
+    while true {
+        p = xl_skipb(p);
+        var c: i64 = xv_g8(p);
+        if c == 0 {
+            return 0;
+        }
+        if c == 44 {
+            p = p + 1;
+        } else if c == 39 || c == 34 {
+            // a text: each byte an item
+            var q: i64 = c;
+            p = p + 1;
+            var more: i64 = 1;
+            while more == 1 {
+                var s: i64 = xv_g8(p);
+                if s == 0 {
+                    return 0;
+                }
+                p = p + 1;
+                if s == q {
+                    more = 0;
+                } else {
+                    xv_put_value(s, size);
+                }
+            }
+        } else {
+            // a token up to the next ',', trimmed
+            var n: i64 = 0;
+            while xv_g8(p) != 0 && xv_g8(p) != 44 {
+                if n < 60 {
+                    xv_p8(tok + n, xv_g8(p));
+                    n = n + 1;
+                }
+                p = p + 1;
+            }
+            while n > 0 && xv_g8(tok + n - 1) == 32 {
+                n = n - 1;
+            }
+            xv_p8(tok + n, 0);
+            var v: i64 = 0;
+            var real: i64 = 0;
+            // a real: dq with a '.' in a token that starts like a number
+            var t0: i64 = xv_g8(tok);
+            if size == 8 && (t0 == 45 || (t0 >= 48 && t0 <= 57)) {
+                var k: i64 = 0;
+                while xv_g8(tok + k) != 0 {
+                    if xv_g8(tok + k) == 46 {
+                        real = 1;
+                    }
+                    k = k + 1;
+                }
+            }
+            if real != 0 {
+                v = cg_float_bits(tok, 0);
+            } else {
+                v = xl_parse_num(tok);
+                if xl_last_ok() == 0 {
+                    // a label, perhaps with +N
+                    v = 0;
+                    if xv_pass == 3 {
+                        v = xv_ref_value(tok);
+                    }
+                }
+            }
+            xv_put_value(v, size);
+        }
+    }
+    return 0;
+}
+
+// a value of size bytes at the end of .data (pass 3 writes, both count).
+// Nothing outside .data.
+fn xv_put_value(value: i64, size: i64) -> i64 {
+    if xv_sec == 2 {
+        xv_bsize = xv_bsize + size;
+        return 0;
+    }
+    if xv_sec != 1 {
+        return 0;
+    }
+    var d: i64 = xv_dsize;
+    if xv_pass == 3 {
+        var v: i64 = value;
+        var i: i64 = 0;
+        while i < size {
+            xv_p8(&xv_data + d + i, v & 255);
+            v = v >>> 8;
+            i = i + 1;
+        }
+    }
+    d = d + size;
+    if d >= XW_DATA_MAX - 64 {
+        xl_fail("output buffer full");
+        return 0;
+    }
+    xv_dsize = d;
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// operands into wasm
+// -------------------------------------------------------------------------
+
+// the load opcode for size bytes, sign-extended or not
+fn xv_ld_op(size: i64, sx: i64) -> i64 {
+    if size == 8 {
+        return 41;
+    }
+    if sx == 0 {
+        if size == 4 { return 53; }
+        if size == 2 { return 51; }
+        return 49;
+    }
+    if size == 4 { return 52; }
+    if size == 2 { return 50; }
+    return 48;
+}
+
+// [i32 address, i64 value] are on the stack
+fn xv_store(size: i64) -> i64 {
+    if size == 8 { return xv_mem(55); }
+    if size == 4 { return xv_mem(62); }
+    if size == 2 { return xv_mem(61); }
+    return xv_mem(60);
+}
+
+// i64.and to the low bytes, nothing for 8
+fn xv_mask(size: i64) -> i64 {
+    if size >= 8 {
+        return 0;
+    }
+    var k: i64 = 4294967295;
+    if size == 1 {
+        k = 255;
+    } else if size == 2 {
+        k = 65535;
+    }
+    xv_i64const(k);
+    return xv_wb(131);
+}
+
+// a memory operand's address, as an i64
+fn xv_addr64(r: i64) -> i64 {
+    var rel: i64 = xv_g64(r + OP_REL);
+    if rel != 0 {
+        return xv_i64const(xv_ref_value(rel) + xv_val(r));
+    }
+    var have: i64 = 0;                  // something on the stack yet
+    if xv_g8(r + OP_BASE) != 255 {
+        xv_gget(xv_g8(r + OP_BASE));
+        have = 1;
+    }
+    if xv_g8(r + OP_INDEX) != 255 {
+        xv_gget(xv_g8(r + OP_INDEX));
+        var sc: i64 = xv_g8(r + OP_SCALE);
+        if sc > 1 {
+            xv_i64const(sc);
+            xv_wb(126);                 // i64.mul
+        }
+        if have != 0 {
+            xv_wb(124);                 // i64.add
+        }
+        have = 1;
+    }
+    var v: i64 = xv_val(r);
+    if have == 0 {
+        return xv_i64const(v);
+    }
+    if v != 0 {
+        xv_i64const(v);
+        xv_wb(124);
+    }
+    return 0;
+}
+
+// a memory operand's address as the i32 memory takes
+fn xv_addr32(r: i64) -> i64 {
+    var rel: i64 = xv_g64(r + OP_REL);
+    if rel != 0 {
+        // a label: a constant
+        return xv_i32const(xv_ref_value(rel) + xv_val(r));
+    }
+    xv_addr64(r);
+    return xv_wb(167);                  // i32.wrap_i64
+}
+
+// an operand's value of size bytes, an i64 (sx = 1 to sign-extend)
+fn xv_rd(r: i64, size: i64, sx: i64) -> i64 {
+    var k: i64 = xv_kind(r);
+    if k == K_REG {
+        xv_gget(xv_reg(r));
+        if sx == 0 {
+            return xv_mask(size);
+        }
+        // sign-extend the low bytes: shift up, then arithmetically down
+        if size < 8 {
+            var sh: i64 = 64 - size * 8;
+            xv_i64const(sh);
+            xv_wb(134);                 // i64.shl
+            xv_i64const(sh);
+            xv_wb(135);                 // i64.shr_s
+        }
+        return 0;
+    }
+    if k == K_IMM {
+        return xv_i64const(xv_val(r));
+    }
+    if k == K_MEM {
+        xv_addr32(r);
+        return xv_mem(xv_ld_op(size, sx));
+    }
+    if k == K_LABEL {
+        return xv_i64const(xv_ref_value(xv_g64(r + OP_TEXT)));
+    }
+    xl_fail("operand WebAssembly cannot take here");
+    return 0;
+}
+
+// the i64 on the stack into the register, as x86 writes: 8 and 4 bytes
+// replace (4 clears the top half), 1 and 2 merge
+fn xv_wreg(reg: i64, size: i64) -> i64 {
+    if size >= 4 {
+        xv_mask(size);
+        return xv_gset(reg);
+    }
+    xv_mask(size);
+    xv_lset(L_T2);
+    xv_gget(reg);
+    if size == 1 {
+        xv_i64const(-256);
+    } else {
+        xv_i64const(-65536);
+    }
+    xv_wb(131);                         // and
+    xv_lget(L_T2);
+    xv_wb(132);                         // or
+    return xv_gset(reg);
+}
+
+// an operand's size in bytes, or def
+fn xv_opsize(r: i64, def: i64) -> i64 {
+    if xv_kind(r) == K_REG {
+        return xv_rs(r);
+    }
+    var m: i64 = xv_g8(r + OP_MSIZE);
+    if m != 0 {
+        return m;
+    }
+    return def;
+}
+
+// rsp -= 8, then [rsp] = local T0
+fn xv_push_t0() -> i64 {
+    xv_gget(4);
+    xv_i64const(8);
+    xv_wb(125);                         // sub
+    xv_ltee(L_T1);
+    xv_gset(4);
+    xv_lget(L_T1);
+    xv_wb(167);
+    xv_lget(L_T0);
+    return xv_mem(55);
+}
+
+// a call's return address: the instruction after it
+fn xv_push_ret() -> i64 {
+    xv_i64const(xv_addr + 1);
+    xv_lset(L_T0);
+    return xv_push_t0();
+}
+
+// -------------------------------------------------------------------------
+// one instruction
+// -------------------------------------------------------------------------
+
+fn xv_bad() -> i64 {
+    return xl_fail("no WebAssembly form for this instruction");
+}
+
+fn xv_badop() -> i64 {
+    return xl_fail("operand WebAssembly cannot take here");
+}
+
+fn xv_insn() -> i64 {
+    xv_term = 0;
+    var mn: i64 = xv_s(S_MN);
+    if xl_streq(mn, "mov") != 0 { return xv_i_mov(); }
+    if xl_streq(mn, "push") != 0 { return xv_i_push(); }
+    if xl_streq(mn, "pop") != 0 { return xv_i_pop(); }
+    if xl_streq(mn, "add") != 0 { return xv_arith(124, FK_ADD); }
+    if xl_streq(mn, "sub") != 0 { return xv_arith(125, FK_SUB); }
+    if xl_streq(mn, "cmp") != 0 { return xv_i_cmp(); }
+    if xl_streq(mn, "jmp") != 0 { return xv_i_jmp(); }
+    if xl_streq(mn, "call") != 0 { return xv_i_call(); }
+    if xl_streq(mn, "lea") != 0 { return xv_i_lea(); }
+    if xl_streq(mn, "test") != 0 { return xv_i_test(); }
+    if xl_streq(mn, "ret") != 0 { return xv_i_ret(); }
+    if xl_streq(mn, "xor") != 0 { return xv_arith(133, FK_RES); }
+    if xl_streq(mn, "and") != 0 { return xv_arith(131, FK_RES); }
+    if xl_streq(mn, "or") != 0 { return xv_arith(132, FK_RES); }
+    if xl_streq(mn, "movzx") != 0 { return xv_mov_ext(0); }
+    if xl_streq(mn, "movsx") != 0 { return xv_mov_ext(1); }
+    if xl_streq(mn, "movsxd") != 0 { return xv_mov_ext(1); }
+    if xl_streq(mn, "imul") != 0 { return xv_i_imul(); }
+    if xl_streq(mn, "inc") != 0 { return xv_incdec(124); }
+    if xl_streq(mn, "dec") != 0 { return xv_incdec(125); }
+    if xl_streq(mn, "neg") != 0 { return xv_i_neg(); }
+    if xl_streq(mn, "not") != 0 { return xv_i_not(); }
+    if xl_streq(mn, "cqo") != 0 { return xv_i_cqo(); }
+    if xl_streq(mn, "idiv") != 0 { return xv_divide(127); }     // div_s, rem_s = +2
+    if xl_streq(mn, "div") != 0 { return xv_divide(128); }      // div_u, rem_u = +2
+    if xl_streq(mn, "shl") != 0 { return xv_shift(134); }
+    if xl_streq(mn, "sal") != 0 { return xv_shift(134); }
+    if xl_streq(mn, "shr") != 0 { return xv_shift(136); }
+    if xl_streq(mn, "sar") != 0 { return xv_shift(135); }
+    if xl_streq(mn, "rol") != 0 { return xv_shift(137); }
+    if xl_streq(mn, "ror") != 0 { return xv_shift(138); }
+    if xl_streq(mn, "xchg") != 0 { return xv_i_xchg(); }
+    if xl_streq(mn, "syscall") != 0 { return xv_i_syscall(); }
+    if xl_streq(mn, "nop") != 0 { return 0; }
+    if xl_streq(mn, "pause") != 0 { return 0; }
+    if xl_streq(mn, "mfence") != 0 { return 0; }
+    if xl_streq(mn, "prefetcht0") != 0 { return 0; }
+    if xl_streq(mn, "clflush") != 0 { return 0; }
+    if xl_streq(mn, "movsd") != 0 { return xv_i_movsx_x(0); }
+    if xl_streq(mn, "movss") != 0 { return xv_i_movsx_x(1); }
+    if xl_streq(mn, "movq") != 0 { return xv_i_movq(); }
+    if xl_streq(mn, "movaps") != 0 { return xv_i_movaps(); }
+    if xl_streq(mn, "movups") != 0 { return xv_i_movaps(); }
+    if xl_streq(mn, "movapd") != 0 { return xv_i_movaps(); }
+    if xl_streq(mn, "movupd") != 0 { return xv_i_movaps(); }
+    if xl_streq(mn, "addsd") != 0 { return xv_fscalar(160); }
+    if xl_streq(mn, "subsd") != 0 { return xv_fscalar(161); }
+    if xl_streq(mn, "mulsd") != 0 { return xv_fscalar(162); }
+    if xl_streq(mn, "divsd") != 0 { return xv_fscalar(163); }
+    if xl_streq(mn, "sqrtsd") != 0 { return xv_i_sqrtsd(); }
+    if xl_streq(mn, "addpd") != 0 { return xv_packed(240); }
+    if xl_streq(mn, "subpd") != 0 { return xv_packed(241); }
+    if xl_streq(mn, "mulpd") != 0 { return xv_packed(242); }
+    if xl_streq(mn, "divpd") != 0 { return xv_packed(243); }
+    if xl_streq(mn, "addps") != 0 { return xv_packed(228); }
+    if xl_streq(mn, "subps") != 0 { return xv_packed(229); }
+    if xl_streq(mn, "mulps") != 0 { return xv_packed(230); }
+    if xl_streq(mn, "divps") != 0 { return xv_packed(231); }
+    if xl_streq(mn, "xorps") != 0 { return xv_packed(81); }
+    if xl_streq(mn, "xorpd") != 0 { return xv_packed(81); }
+    if xl_streq(mn, "andps") != 0 { return xv_packed(78); }
+    if xl_streq(mn, "andpd") != 0 { return xv_packed(78); }
+    if xl_streq(mn, "orpd") != 0 { return xv_packed(80); }
+    if xl_streq(mn, "orps") != 0 { return xv_packed(80); }
+    if xl_streq(mn, "ucomisd") != 0 { return xv_i_ucomisd(); }
+    if xl_streq(mn, "comisd") != 0 { return xv_i_ucomisd(); }
+    if xl_streq(mn, "cvtsi2sd") != 0 { return xv_i_cvtsi2sd(); }
+    if xl_streq(mn, "cvttsd2si") != 0 { return xv_cvt_int(0); }
+    if xl_streq(mn, "cvtsd2si") != 0 { return xv_cvt_int(1); }
+    if xl_streq(mn, "cvtss2sd") != 0 { return xv_i_cvtss2sd(); }
+    if xl_streq(mn, "cvtsd2ss") != 0 { return xv_i_cvtsd2ss(); }
+    // jcc and setcc
+    if xv_g8(mn) == 106 { return xv_i_jcc(); }
+    if xl_prefix(mn, "set") != 0 { return xv_i_setcc(); }
+    return xv_bad();
+}
+
+// ---- moves --------------------------------------------------------------
+fn xv_i_mov() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var ka: i64 = xv_kind(a);
+    if ka == K_REG {
+        if xv_kind(b) == K_XMM {
+            return xv_badop();
+        }
+        var sz: i64 = xv_rs(a);
+        xv_rd(b, sz, 0);
+        return xv_wreg(xv_reg(a), sz);
+    }
+    if ka != K_MEM {
+        return xv_badop();
+    }
+    // to memory: the width is the prefix's, or the source register's
+    var msz: i64 = xv_opsize(a, 8);
+    if xv_g8(a + OP_MSIZE) == 0 && xv_kind(b) == K_REG {
+        msz = xv_rs(b);
+    }
+    xv_addr32(a);
+    xv_rd(b, msz, 0);
+    return xv_store(msz);
+}
+
+fn xv_mov_ext(sx: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    xv_rd(b, xv_opsize(b, 1), sx);
+    // a 32-bit destination: the value is already below 2^32 when it was
+    // zero-extended; sign-extended it is cut to 32 bits by the write
+    return xv_wreg(xv_reg(a), xv_rs(a));
+}
+
+fn xv_i_lea() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_REG || xv_kind(b) != K_MEM {
+        return xv_badop();
+    }
+    xv_addr64(b);
+    return xv_wreg(xv_reg(a), 8);
+}
+
+fn xv_i_push() -> i64 {
+    xv_rd(xv_op(0), 8, 0);
+    xv_lset(L_T0);
+    return xv_push_t0();
+}
+
+fn xv_i_pop() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    xv_gget(4);
+    xv_wb(167);
+    xv_mem(41);
+    xv_lset(L_T0);
+    xv_gget(4);
+    xv_i64const(8);
+    xv_wb(124);
+    xv_gset(4);
+    xv_lget(L_T0);
+    return xv_wreg(xv_reg(a), 8);
+}
+
+fn xv_i_xchg() -> i64 {
+    var m: i64 = xv_op(0);
+    var r: i64 = xv_op(1);
+    if xv_kind(m) != K_MEM {
+        if xv_kind(r) != K_MEM {
+            // two registers
+            var sz: i64 = xv_rs(m);
+            xv_rd(m, sz, 0);
+            xv_lset(L_T0);
+            xv_rd(r, sz, 0);
+            xv_wreg(xv_reg(m), sz);
+            xv_lget(L_T0);
+            return xv_wreg(xv_reg(r), sz);
+        }
+        m = xv_op(1);
+        r = xv_op(0);
+    }
+    // the swap with memory is the lock of x86, and threads share the
+    // memory: an atomic exchange
+    var size: i64 = xv_rs(r);
+    xv_addr32(m);
+    xv_rd(r, size, 0);
+    xv_wb(254);
+    var op: i64 = 69;                   // i64.atomic.rmw8.xchg_u
+    var align: i64 = 0;
+    if size == 8 {
+        op = 66;                        // i64.atomic.rmw.xchg
+        align = 3;
+    } else if size == 4 {
+        op = 71;                        // i64.atomic.rmw32.xchg_u
+        align = 2;
+    } else if size == 2 {
+        op = 70;                        // rmw16
+        align = 1;
+    }
+    xv_wb(op);
+    xv_wuleb(align);                    // the alignment atomics require
+    xv_wuleb(0);
+    return xv_wreg(xv_reg(r), size);
+}
+
+// ---- arithmetic ---------------------------------------------------------
+// op = the wasm op, fk = who sets the flags
+fn xv_arith(op: i64, fk: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    xv_rd(a, sz, 0);
+    if fk != FK_RES {
+        xv_ltee(L_FA);
+    }
+    xv_rd(b, sz, 0);
+    if fk != FK_RES {
+        xv_ltee(L_FB);
+    }
+    xv_wb(op);
+    xv_ltee(L_FR);
+    xv_wreg(xv_reg(a), sz);
+    xv_fk = fk;
+    return 0;
+}
+
+fn xv_i_cmp() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var sz: i64 = xv_opsize(a, 8);
+    if xv_kind(a) == K_MEM && xv_kind(b) == K_REG {
+        sz = xv_rs(b);
+    }
+    xv_rd(a, sz, 0);
+    xv_lset(L_FA);
+    xv_rd(b, sz, 0);
+    xv_lset(L_FB);
+    xv_fk = FK_SUB;
+    return 0;
+}
+
+fn xv_i_test() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var sz: i64 = xv_opsize(a, 8);
+    xv_rd(a, sz, 0);
+    xv_rd(b, sz, 0);
+    xv_wb(131);
+    xv_lset(L_FR);
+    xv_fk = FK_RES;
+    return 0;
+}
+
+fn xv_incdec(op: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    xv_rd(a, sz, 0);
+    xv_i64const(1);
+    xv_wb(op);
+    xv_ltee(L_FR);
+    xv_wreg(xv_reg(a), sz);
+    xv_fk = FK_RES;
+    return 0;
+}
+
+fn xv_i_neg() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    xv_i64const(0);
+    xv_rd(a, sz, 0);
+    xv_wb(125);
+    xv_ltee(L_FR);
+    xv_wreg(xv_reg(a), sz);
+    xv_fk = FK_RES;
+    return 0;
+}
+
+fn xv_i_not() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    xv_rd(a, sz, 0);
+    xv_i64const(-1);
+    xv_wb(133);
+    return xv_wreg(xv_reg(a), sz);
+}
+
+fn xv_i_imul() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var c: i64 = xv_op(2);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    if xv_kind(c) != 0 {
+        xv_rd(b, sz, 0);
+        xv_rd(c, sz, 0);
+    } else {
+        xv_rd(a, sz, 0);
+        xv_rd(b, sz, 0);
+    }
+    xv_wb(126);
+    xv_wreg(xv_reg(a), sz);
+    xv_fk = FK_NONE;
+    return 0;
+}
+
+fn xv_i_cqo() -> i64 {
+    xv_gget(0);
+    xv_i64const(63);
+    xv_wb(135);
+    return xv_gset(2);
+}
+
+// idiv / div src: rax = rax / src, rdx = rax % src. The generator always
+// extends rax into rdx first (cqo, or rdx zeroed), so the 128-bit dividend
+// is rax's value.
+fn xv_divide(op: i64) -> i64 {
+    xv_rd(xv_op(0), 8, 0);
+    xv_lset(L_T1);
+    xv_gget(0);
+    xv_lset(L_T0);
+    xv_lget(L_T0);
+    xv_lget(L_T1);
+    xv_wb(op);
+    xv_gset(0);
+    xv_lget(L_T0);
+    xv_lget(L_T1);
+    xv_wb(op + 2);
+    xv_gset(2);
+    xv_fk = FK_NONE;
+    return 0;
+}
+
+fn xv_shift(op: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    var sz: i64 = xv_rs(a);
+    xv_rd(a, sz, 0);
+    xv_rd(b, 8, 0);                     // an immediate, or cl as all of rcx
+    if xv_kind(b) == K_REG {
+        xv_i64const(63);
+        xv_wb(131);
+    }
+    xv_wb(op);
+    xv_wreg(xv_reg(a), sz);
+    xv_fk = FK_NONE;
+    return 0;
+}
+
+// ---- control ------------------------------------------------------------
+fn xv_i_ret() -> i64 {
+    xv_gget(4);
+    xv_i64const(8);
+    xv_wb(124);
+    xv_gset(4);
+    xv_sync_out();
+    xv_wb(15);
+    xv_term = 1;
+    return 0;
+}
+
+fn xv_i_syscall() -> i64 {
+    xv_sync_out();                      // the host may look at any of them
+    xv_gget(0);                         // rax rdi rsi rdx r10 r8 r9
+    xv_gget(7);
+    xv_gget(6);
+    xv_gget(2);
+    xv_gget(10);
+    xv_gget(8);
+    xv_gget(9);
+    xv_wb(16);
+    xv_wuleb(0);                        // function 0: env.syscall
+    xv_gset_raw(0);
+    xv_sync_in();
+    xv_fk = FK_NONE;
+    return 0;
+}
+
+fn xv_i_call() -> i64 {
+    var a: i64 = xv_op(0);
+    var k: i64 = xv_kind(a);
+    if k == K_REG {
+        xv_push_ret();
+        xv_gget(xv_reg(a));
+        xv_wb(167);
+        xv_sync_out();
+        xv_wb(17);
+        xv_wuleb(0);                    // type 0
+        xv_wuleb(0);                    // table 0
+        xv_sync_in();
+    } else if k == K_LABEL {
+        var f: i64 = xv_fn_of(xv_g64(a + OP_TEXT));
+        if f != -1 {
+            xv_push_ret();
+            xv_sync_out();
+            xv_wb(16);
+            xv_wuleb(f);
+            xv_sync_in();
+        }
+    } else {
+        return xv_badop();
+    }
+    xv_fk = FK_NONE;
+    return 0;
+}
+
+fn xv_i_jmp() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_LABEL {
+        return xv_badop();
+    }
+    xv_goto(xv_g64(a + OP_TEXT));
+    xv_term = 1;
+    return 0;
+}
+
+fn xv_i_jcc() -> i64 {
+    var c: i64 = xv_condcode(xv_s(S_MN) + 1);
+    if c == -1 {
+        return xv_bad();
+    }
+    xv_cond(c);
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_LABEL {
+        return xv_badop();
+    }
+    xv_wb(4);
+    xv_wb(64);
+    xv_iff = 1;
+    xv_goto(xv_g64(a + OP_TEXT));
+    xv_iff = 0;
+    return xv_wb(11);
+}
+
+fn xv_i_setcc() -> i64 {
+    var c: i64 = xv_condcode(xv_s(S_MN) + 3);
+    if c == -1 {
+        return xv_bad();
+    }
+    xv_cond(c);
+    xv_wb(173);                         // i64.extend_i32_u
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    return xv_wreg(xv_reg(a), 1);
+}
+
+// the wasm function the label text starts, or -1 after a failure
+fn xv_fn_of(t: i64) -> i64 {
+    var lab: i64 = xv_label_ref(t);
+    if xv_g8(&xv_l_kind + lab) != LK_CODE {
+        xl_fail("label not defined");
+        return -1;
+    }
+    if xv_g32(&xv_l_blk + lab * 4) != 0 {
+        xl_fail("jump to a label of another function");
+        return -1;
+    }
+    return (xv_g32(&xv_l_fn + lab * 4) + 2) & 4294967295;
+}
+
+// a jump. To a block of this function: pc, then back to the dispatch; to
+// another function: call it, then return.
+fn xv_goto(t: i64) -> i64 {
+    if xv_g8(t) != 46 {
+        var f: i64 = xv_fn_of(t);
+        if f == -1 {
+            return 0;
+        }
+        xv_sync_out();                  // a jump into another function
+        xv_wb(16);
+        xv_wuleb(f);
+        return xv_wb(15);
+    }
+    var lab: i64 = xv_label_ref(t);
+    if xv_g32(&xv_l_fn + lab * 4) != xv_fn {
+        return xl_fail("jump to a label of another function");
+    }
+    var b: i64 = xv_s32(xv_g32(&xv_l_blk + lab * 4));
+    if b < 0 {
+        return xl_fail("jump to a label of another function");
+    }
+    xv_i32const(b);
+    xv_lset(L_PC);
+    // depth: the blocks still open after this one, then the loop
+    var nb: i64 = (xv_g32(&xv_f_nblk + xv_fn * 4) - 1) & 4294967295;
+    xv_wb(12);
+    return xv_wuleb(nb - xv_blk + xv_iff);
+}
+
+// a condition's code, -1 when unknown:
+//   0 e  1 ne  2 l  3 ge  4 le  5 g  6 b  7 ae  8 be  9 a  10 s  11 ns
+fn xv_condcode(s: i64) -> i64 {
+    if xl_streq(s, "e") != 0 || xl_streq(s, "z") != 0 { return 0; }
+    if xl_streq(s, "ne") != 0 || xl_streq(s, "nz") != 0 { return 1; }
+    if xl_streq(s, "l") != 0 || xl_streq(s, "nge") != 0 { return 2; }
+    if xl_streq(s, "ge") != 0 || xl_streq(s, "nl") != 0 { return 3; }
+    if xl_streq(s, "le") != 0 || xl_streq(s, "ng") != 0 { return 4; }
+    if xl_streq(s, "g") != 0 || xl_streq(s, "nle") != 0 { return 5; }
+    if xl_streq(s, "b") != 0 || xl_streq(s, "c") != 0 || xl_streq(s, "nae") != 0 { return 6; }
+    if xl_streq(s, "ae") != 0 || xl_streq(s, "nb") != 0 || xl_streq(s, "nc") != 0 { return 7; }
+    if xl_streq(s, "be") != 0 || xl_streq(s, "na") != 0 { return 8; }
+    if xl_streq(s, "a") != 0 || xl_streq(s, "nbe") != 0 { return 9; }
+    if xl_streq(s, "s") != 0 { return 10; }
+    if xl_streq(s, "ns") != 0 { return 11; }
+    return -1;
+}
+
+// after a subtraction: e ne l ge le g b ae be a
+fn xv_subop(c: i64) -> i64 {
+    if c == 0 { return 81; }
+    if c == 1 { return 82; }
+    if c == 2 { return 83; }
+    if c == 3 { return 89; }
+    if c == 4 { return 87; }
+    if c == 5 { return 85; }
+    if c == 6 { return 84; }
+    if c == 7 { return 90; }
+    if c == 8 { return 88; }
+    return 86;
+}
+
+// a result against zero, by code: e ne l ge le g b ae be a s ns
+fn xv_resop(c: i64) -> i64 {
+    if c == 0 { return 81; }
+    if c == 1 { return 82; }
+    if c == 2 { return 83; }
+    if c == 3 { return 89; }
+    if c == 4 { return 87; }
+    if c == 5 { return 85; }
+    if c == 8 { return 81; }
+    if c == 9 { return 82; }
+    if c == 10 { return 83; }
+    if c == 11 { return 89; }
+    return 0;
+}
+
+// e ne l ge le g . . be a s ns, on the result on the stack against zero
+fn xv_byres(c: i64) -> i64 {
+    if c == 0 || c == 8 {
+        return xv_wb(80);
+    }
+    xv_i64const(0);
+    return xv_wb(xv_resop(c));
+}
+
+// an i32, 1 when the flags say the condition holds
+fn xv_cond(c: i64) -> i64 {
+    var fk: i64 = xv_fk;
+    if fk == FK_SUB {
+        xv_lget(L_FA);
+        xv_lget(L_FB);
+        if c < 10 {
+            return xv_wb(xv_subop(c));
+        }
+        xv_wb(125);
+        xv_i64const(0);
+        if c == 10 {
+            return xv_wb(83);           // lt_s
+        }
+        return xv_wb(89);               // ge_s
+    }
+    if fk == FK_RES {
+        if c == 6 {
+            return xv_i32const(0);
+        }
+        if c == 7 {
+            return xv_i32const(1);
+        }
+        xv_lget(L_FR);
+        return xv_byres(c);
+    }
+    if fk == FK_ADD {
+        if c < 6 || c > 9 {
+            xv_lget(L_FR);
+            return xv_byres(c);
+        }
+        // carry: the sum came out below the first operand
+        xv_lget(L_FR);
+        xv_lget(L_FA);
+        xv_wb(84);                      // lt_u: carry
+        if c == 6 {
+            return 0;
+        }
+        if c == 7 {
+            return xv_wb(69);
+        }
+        // be: carry or zero; a: neither
+        xv_lget(L_FR);
+        xv_wb(80);
+        xv_wb(114);                     // i32.or
+        if c == 8 {
+            return 0;
+        }
+        return xv_wb(69);
+    }
+    if fk == FK_FP {
+        // x86 after ucomisd: an unordered pair sets ZF, PF and CF together
+        var op: i64 = 0;
+        if c == 0 || c == 1 {
+            op = 97;                    // f64.eq
+        } else if c == 6 || c == 7 {
+            op = 99;                    // f64.lt
+        } else if c == 8 || c == 9 {
+            op = 101;                   // f64.le
+        } else {
+            return xl_fail("condition with nothing setting the flags before it");
+        }
+        xv_lget(L_FX);
+        xv_lget(L_FY);
+        xv_wb(op);
+        // or unordered
+        xv_lget(L_FX);
+        xv_lget(L_FX);
+        xv_wb(98);
+        xv_lget(L_FY);
+        xv_lget(L_FY);
+        xv_wb(98);
+        xv_wb(114);
+        xv_wb(114);
+        // ne, ae, a are the opposite
+        if c == 1 || c == 7 || c == 9 {
+            return xv_wb(69);           // i32.eqz
+        }
+        return 0;
+    }
+    return xl_fail("condition with nothing setting the flags before it");
+}
+
+// ---- reals --------------------------------------------------------------
+
+// an xmm register's v128
+fn xv_xget(r: i64) -> i64 {
+    return xv_gget(xv_g8(r + OP_XMM) + 16);
+}
+
+fn xv_xset(r: i64) -> i64 {
+    return xv_gset(xv_g8(r + OP_XMM) + 16);
+}
+
+// lane 0: an f64 (single = 0) or an f32 (single = 1)
+fn xv_lane0_get(single: i64) -> i64 {
+    if single != 0 {
+        xv_simd(31);                    // f32x4.extract_lane
+    } else {
+        xv_simd(33);                    // f64x2.extract_lane
+    }
+    return xv_wb(0);
+}
+
+fn xv_lane0_set(single: i64) -> i64 {
+    if single != 0 {
+        xv_simd(32);                    // f32x4.replace_lane
+    } else {
+        xv_simd(34);                    // f64x2.replace_lane
+    }
+    return xv_wb(0);
+}
+
+// movsd (single = 0) / movss (single = 1)
+fn xv_i_movsx_x(single: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var ka: i64 = xv_kind(a);
+    if ka == K_MEM {
+        if xv_kind(b) != K_XMM {
+            return xv_badop();
+        }
+        xv_addr32(a);
+        xv_xget(b);
+        if single != 0 {
+            xv_simd_mem(90);            // v128.store32_lane
+        } else {
+            xv_simd_mem(91);            // v128.store64_lane
+        }
+        return xv_wb(0);                // lane 0
+    }
+    if ka != K_XMM {
+        return xv_badop();
+    }
+    var kb: i64 = xv_kind(b);
+    if kb == K_MEM {
+        xv_addr32(b);
+        if single != 0 {
+            xv_simd_mem(92);            // v128.load32_zero
+        } else {
+            xv_simd_mem(93);            // v128.load64_zero
+        }
+        return xv_xset(a);
+    }
+    if kb != K_XMM {
+        return xv_badop();
+    }
+    // register to register: lane 0 only, the rest of the destination kept
+    xv_xget(a);
+    xv_xget(b);
+    xv_lane0_get(single);
+    xv_lane0_set(single);
+    return xv_xset(a);
+}
+
+fn xv_i_movaps() -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    var ka: i64 = xv_kind(a);
+    if ka == K_MEM {
+        xv_addr32(a);
+        xv_xget(b);
+        return xv_simd_mem(11);         // v128.store
+    }
+    if ka != K_XMM {
+        return xv_badop();
+    }
+    var kb: i64 = xv_kind(b);
+    if kb == K_MEM {
+        xv_addr32(b);
+        xv_simd_mem(0);                 // v128.load
+        return xv_xset(a);
+    }
+    if kb != K_XMM {
+        return xv_badop();
+    }
+    xv_xget(b);
+    return xv_xset(a);
+}
+
+fn xv_i_movq() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_XMM {
+        return xv_badop();
+    }
+    // the 64 bits into lane 0, the upper lane cleared
+    xv_v128_zero();
+    xv_rd(xv_op(1), 8, 0);
+    xv_simd(30);                        // i64x2.replace_lane
+    xv_wb(0);
+    return xv_xset(a);
+}
+
+// v128.const of sixteen zero bytes
+fn xv_v128_zero() -> i64 {
+    xv_simd(12);
+    var i: i64 = 0;
+    while i < 16 {
+        xv_wb(0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// scalar double arithmetic: op = the f64 op
+fn xv_fscalar(op: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_XMM || xv_kind(b) != K_XMM {
+        return xv_badop();
+    }
+    xv_xget(a);
+    xv_xget(a);
+    xv_lane0_get(0);
+    xv_xget(b);
+    xv_lane0_get(0);
+    xv_wb(op);
+    xv_lane0_set(0);
+    return xv_xset(a);
+}
+
+fn xv_i_sqrtsd() -> i64 {
+    var a: i64 = xv_op(0);
+    xv_xget(a);
+    xv_xget(xv_op(1));
+    xv_lane0_get(0);
+    xv_wb(159);
+    xv_lane0_set(0);
+    return xv_xset(a);
+}
+
+// packed: op = the SIMD op
+fn xv_packed(op: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    var b: i64 = xv_op(1);
+    if xv_kind(a) != K_XMM || xv_kind(b) != K_XMM {
+        return xv_badop();
+    }
+    xv_xget(a);
+    xv_xget(b);
+    xv_simd(op);
+    return xv_xset(a);
+}
+
+fn xv_i_ucomisd() -> i64 {
+    xv_xget(xv_op(0));
+    xv_lane0_get(0);
+    xv_lset(L_FX);
+    xv_xget(xv_op(1));
+    xv_lane0_get(0);
+    xv_lset(L_FY);
+    xv_fk = FK_FP;
+    return 0;
+}
+
+fn xv_i_cvtsi2sd() -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_XMM {
+        return xv_badop();
+    }
+    xv_xget(a);
+    xv_rd(xv_op(1), 8, 0);
+    xv_wb(185);                         // f64.convert_i64_s
+    xv_lane0_set(0);
+    return xv_xset(a);
+}
+
+// cvttsd2si (nearest = 0) / cvtsd2si (nearest = 1)
+fn xv_cvt_int(nearest: i64) -> i64 {
+    var a: i64 = xv_op(0);
+    if xv_kind(a) != K_REG {
+        return xv_badop();
+    }
+    xv_xget(xv_op(1));
+    xv_lane0_get(0);
+    if nearest != 0 {
+        xv_wb(158);                     // f64.nearest: x86 rounds to even
+    }
+    xv_wb(252);
+    xv_wb(6);                           // i64.trunc_sat_f64_s
+    return xv_wreg(xv_reg(a), 8);
+}
+
+fn xv_i_cvtss2sd() -> i64 {
+    var a: i64 = xv_op(0);
+    xv_xget(a);
+    xv_xget(xv_op(1));
+    xv_lane0_get(1);                    // the single
+    xv_wb(187);                         // f64.promote_f32
+    xv_lane0_set(0);
+    return xv_xset(a);
+}
+
+fn xv_i_cvtsd2ss() -> i64 {
+    var a: i64 = xv_op(0);
+    xv_xget(a);
+    xv_xget(xv_op(1));
+    xv_lane0_get(0);                    // the double
+    xv_wb(182);                         // f32.demote_f64
+    xv_lane0_set(1);
+    return xv_xset(a);
+}
+
+// -------------------------------------------------------------------------
+// the module
+// -------------------------------------------------------------------------
+
+fn xv_sb(b: i64) -> i64 {
+    return xv_ob(B_SECT, b);
+}
+
+fn xv_suleb(v: i64) -> i64 {
+    return xv_obuleb(B_SECT, v);
+}
+
+fn xv_ssleb(v: i64) -> i64 {
+    return xv_obsleb(B_SECT, v);
+}
+
+fn xv_sstr(s: i64) -> i64 {
+    return xv_obstr(B_SECT, s);
+}
+
+// bytes into the output
+fn xv_obytes(src: i64, n: i64) -> i64 {
+    if xv_on + n >= xv_out_cap {
+        return xl_fail("output buffer full");
+    }
+    var i: i64 = 0;
+    while i < n {
+        xv_p8(xv_out + xv_on + i, xv_g8(src + i));
+        i = i + 1;
+    }
+    xv_on = xv_on + n;
+    return 0;
+}
+
+// a section's id and the size as LEB, into the output
+fn xv_head(id: i64, size: i64) -> i64 {
+    xv_set_n(B_TMP, 0);
+    xv_ob(B_TMP, id);
+    xv_obytes(&xv_tmp, 1);
+    xv_set_n(B_TMP, 0);
+    xv_obuleb(B_TMP, size);
+    return xv_obytes(&xv_tmp, xv_n(B_TMP));
+}
+
+// the section built in xv_sect, with its size
+fn xv_flush(id: i64) -> i64 {
+    xv_head(id, xv_n(B_SECT));
+    xv_obytes(&xv_sect, xv_n(B_SECT));
+    return xv_set_n(B_SECT, 0);
+}
+
+fn xv_module() -> i64 {
+    xv_on = 0;
+    xv_set_n(B_SECT, 0);
+    if xv_start_fn == -1 {
+        return xl_fail("label not defined");
+    }
+    // magic and version
+    xv_set_n(B_TMP, 0);
+    xv_ob(B_TMP, 0);
+    xv_ob(B_TMP, 97);
+    xv_ob(B_TMP, 115);
+    xv_ob(B_TMP, 109);
+    xv_ob(B_TMP, 1);
+    xv_ob(B_TMP, 0);
+    xv_ob(B_TMP, 0);
+    xv_ob(B_TMP, 0);
+    xv_obytes(&xv_tmp, 8);
+    // types: 0 () -> (), 1 (i64 x 7) -> i64, 2 (i64) -> ()
+    xv_suleb(3);
+    xv_sb(96);
+    xv_sb(0);
+    xv_sb(0);
+    xv_sb(96);
+    xv_sb(7);
+    var i: i64 = 0;
+    while i < 7 {
+        xv_sb(126);
+        i = i + 1;
+    }
+    xv_sb(1);
+    xv_sb(126);
+    xv_sb(96);
+    xv_sb(1);
+    xv_sb(126);
+    xv_sb(0);
+    xv_flush(1);
+    // imports: env.syscall, and env.memory: shared, so that the threads of
+    // the program, each an instance of the module in a worker, see one
+    // memory. From the heap's start up to 4 GB; the host may give less,
+    // and where there is no shared memory it clears the flag before
+    // compiling.
+    xv_suleb(2);
+    xv_sstr("env");
+    xv_sstr("syscall");
+    xv_sb(0);
+    xv_suleb(1);
+    xv_sstr("env");
+    xv_sstr("memory");
+    xv_sb(2);
+    xv_sb(3);                           // shared, with a maximum
+    xv_suleb((xv_heap_base >>> 16) + 16);
+    xv_suleb(65536);
+    xv_flush(2);
+    // functions: the start, one per function found, the thread entry
+    xv_suleb(xv_nfn_total + 2);
+    i = 0;
+    while i < xv_nfn_total + 1 {
+        xv_suleb(0);
+        i = i + 1;
+    }
+    xv_suleb(2);
+    xv_flush(3);
+    // the table: a slot per code address
+    xv_suleb(1);
+    xv_sb(112);
+    xv_sb(1);
+    xv_suleb(xv_addr_total + 1);
+    xv_suleb(xv_addr_total + 1);
+    xv_flush(4);
+    // globals: 16 integer registers, 16 xmm, the heap's start
+    xv_suleb(33);
+    i = 0;
+    while i < 16 {
+        xv_sb(126);
+        xv_sb(1);
+        xv_sb(66);
+        xv_sb(0);
+        xv_sb(11);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 16 {
+        xv_sb(123);
+        xv_sb(1);
+        xv_sb(253);
+        xv_sb(12);
+        var z: i64 = 0;
+        while z < 16 {
+            xv_sb(0);
+            z = z + 1;
+        }
+        xv_sb(11);
+        i = i + 1;
+    }
+    xv_sb(126);
+    xv_sb(0);
+    xv_sb(66);
+    xv_ssleb(xv_heap_base);
+    xv_sb(11);
+    xv_flush(6);
+    // exports
+    xv_suleb(3);
+    xv_sstr("kron_thread");
+    xv_sb(0);
+    xv_suleb(xv_nfn_total + 2);
+    xv_sstr("kron_start");
+    xv_sb(0);
+    xv_suleb(1);
+    xv_sstr("kron_heap");
+    xv_sb(3);
+    xv_suleb(32);
+    xv_flush(7);
+    // elements: each function in the slot of its address
+    xv_suleb(xv_nfn_total);
+    i = 0;
+    while i < xv_nfn_total {
+        xv_sb(0);
+        xv_sb(65);
+        xv_ssleb(xv_g64(&xv_f_addr + i * 8));
+        xv_sb(11);
+        xv_suleb(1);
+        xv_suleb(i + 2);
+        i = i + 1;
+    }
+    xv_flush(9);
+    // data count: one segment, passive, which kron_start copies in; the
+    // threads' instances leave memory as they find it
+    xv_suleb(1);
+    xv_flush(12);
+    // the thread entry's body, kept aside: it goes after the others
+    xv_thread_body();
+    // code: the start, the bodies pass 3 made, the thread entry
+    xv_suleb(xv_nfn_total + 2);
+    xv_start_body();
+    xv_suleb(xv_body_n);
+    i = 0;
+    while i < xv_body_n {
+        xv_sb(xv_g8(&xv_body + i));
+        i = i + 1;
+    }
+    // the rest is long: the section's size, then the three parts
+    xv_head(10, xv_n(B_SECT) + xv_n(B_CODE) + xv_n(B_TB));
+    xv_obytes(&xv_sect, xv_n(B_SECT));
+    xv_obytes(&xv_code, xv_n(B_CODE));
+    xv_obytes(&xv_tb, xv_n(B_TB));
+    xv_set_n(B_SECT, 0);
+    // data: one passive segment; argv[0] in 16 bytes after it (pass 3
+    // counted .data without them; the layout made room)
+    var d: i64 = &xv_data + xv_dsize;
+    xv_p8(d, 107);
+    xv_p8(d + 1, 114);
+    xv_p8(d + 2, 111);
+    xv_p8(d + 3, 110);
+    i = 4;
+    while i < 16 {
+        xv_p8(d + i, 0);
+        i = i + 1;
+    }
+    var size: i64 = xv_dsize + 16;
+    xv_suleb(1);
+    xv_sb(1);                           // passive
+    xv_suleb(size);
+    xv_head(11, xv_n(B_SECT) + size);
+    xv_obytes(&xv_sect, xv_n(B_SECT));
+    xv_obytes(&xv_data, size);
+    return xv_on;
+}
+
+// kron_start. The stack as Linux hands it to _start -- argc 1, argv[0]
+// "kron", no environment -- then _start, entered as a jump (no return
+// address: it never returns).
+fn xv_start_body() -> i64 {
+    xv_body_n = 0;
+    xv_wb(0);                           // no locals
+    // .data into place: memory.init 0, then data.drop 0
+    xv_i32const(XW_DATA_BASE);
+    xv_i32const(0);
+    xv_i32const(xv_dsize + 16);
+    xv_wb(252);
+    xv_wb(8);
+    xv_wb(0);
+    xv_wb(0);
+    xv_wb(252);
+    xv_wb(9);
+    xv_wb(0);
+    xv_i64const(xv_heap_base - 64);
+    xv_gset(4);
+    xv_i32const(xv_heap_base - 64);
+    xv_i64const(1);
+    xv_mem(55);
+    xv_i32const(xv_heap_base - 56);
+    xv_i64const(xv_dsize + XW_DATA_BASE);
+    xv_mem(55);
+    xv_wb(16);
+    xv_wuleb(xv_start_fn + 2);
+    return xv_wb(11);
+}
+
+// kron_thread(stack), into xv_tb with its size before it. What the child
+// of clone does in __thread_start: its stack holds the function and the
+// argument; pop both, make the room a call leaves, call. When the function
+// returns, so does kron_thread, and the host ends the thread as Linux
+// would: the thread id word cleared, its waiters woken.
+fn xv_thread_body() -> i64 {
+    xv_body_n = 0;
+    xv_wb(0);                           // no locals but the parameter
+    xv_wb(32);                          // rsp = stack - 24
+    xv_wuleb(0);
+    xv_i64const(24);
+    xv_wb(125);
+    xv_gset(4);
+    xv_gget(4);                         // rax = [stack]
+    xv_i64const(24);
+    xv_wb(124);
+    xv_wb(167);
+    xv_mem(41);
+    xv_gset(0);
+    xv_gget(4);                         // rcx = [stack + 8]
+    xv_i64const(32);
+    xv_wb(124);
+    xv_wb(167);
+    xv_mem(41);
+    xv_gset(1);
+    xv_gget(4);                         // the return address: none
+    xv_wb(167);
+    xv_i64const(0);
+    xv_mem(55);
+    xv_gget(0);                         // call rax
+    xv_wb(167);
+    xv_wb(17);
+    xv_wuleb(0);
+    xv_wuleb(0);
+    xv_wb(11);
+    // size, then the body
+    xv_set_n(B_TB, 0);
+    xv_obuleb(B_TB, xv_body_n);
+    var i: i64 = 0;
+    while i < xv_body_n {
+        xv_ob(B_TB, xv_g8(&xv_body + i));
+        i = i + 1;
+    }
+    return 0;
+}
