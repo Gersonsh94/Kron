@@ -9,11 +9,11 @@ REM
 REM   Three generations, because the seed may be an older
 REM   compiler: stage1 is assembled by the seed's kasm, stage2
 REM   by the kasm just built.  The parts of the compiler written
-REM   in Kron (KRONPARTS.bat) go in as they are for stage1, and
-REM   are made again by stage1 for stage2 and by stage2 for
-REM   stage3.  Those two may legitimately
-REM   differ.  stage2 and stage3 may not -- that is the fixpoint,
-REM   and stage3 is what gets installed.
+REM   in Kron (KRONPARTS.bat) are made by the seed for stage1, by
+REM   stage1 for stage2 and by stage2 for stage3: no assembly made
+REM   from them is kept between builds.  stage1 and stage2 may
+REM   legitimately differ.  stage2 and stage3 may not -- that is
+REM   the fixpoint, and stage3 is what gets installed.
 REM
 REM   If you have no seed yet, SEED.bat kronc promotes the kronc.exe
 REM   you have.
@@ -37,7 +37,9 @@ echo.
 
 del /q stage1.exe stage2.exe stage3.exe kron_all.exe 2>nul
 
-echo [stage 1] seed --^> stage1.exe
+echo [stage 1] the seed makes the parts in Kron, then --^> stage1.exe
+call KRONPARTS.bat seed\kronc.exe
+if errorlevel 1 goto :noparts
 seed\kronc.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nostage1
 copy /y kron_all.exe stage1.exe >nul

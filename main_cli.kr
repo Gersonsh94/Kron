@@ -17,9 +17,9 @@ kron_definitions
 //   mc_module_tag()             a module's name for its labels
 //
 // They were in main.asm, and they are here now, the same names and flags
-// for every command line. main.asm keeps their doors, the buffers and flags
-// the rest of main reads (reached through mn_addr), and the call into
-// Windows that gives the command line (os_cmdline).
+// for every command line. main.asm keeps the buffers and flags (reached
+// through mn_addr), and the call into Windows that gives the command line
+// (os_cmdline).
 // =========================================================================
 
 extern "kronc" {
@@ -442,8 +442,8 @@ fn mc_build_bin_name() -> i64 {
     return mc_name(mn_addr(A_BIN_NAME), ext);
 }
 
-// out_asm_name: ".asm" -- "_kr.asm" for a module, so that lexer.kr does
-// not overwrite the lexer.asm beside it
+// out_asm_name: ".asm" -- "_kr.asm" for a module, the name kron_all.asm
+// includes
 fn mc_build_asm_name() -> i64 {
     var ext: i64 = mn_addr(A_ASM_EXT);
     if mc_g8(mn_addr(A_FLAG_MODULE)) != 0 {

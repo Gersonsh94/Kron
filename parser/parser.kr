@@ -16,10 +16,10 @@ kron_definitions
 // The second part of the compiler written in Kron. It reads the tokens
 // the lexer made and builds the tree (include/ast.kr) the semantic pass
 // and the code generator walk. kronc --module turns it, with the files it
-// imports, into parser_kr.asm; parser.asm beside it is the hand-written
-// door the rest of the compiler calls through.
+// imports, into parser_kr.asm; the driver calls the prs_ functions
+// directly.
 //
-//   parser.kr          the program, declarations, the door
+//   parser.kr          the program, declarations, what the driver calls
 //   parser_state.kr    the state: every global, before what uses it
 //   parser_stmt.kr     statements and blocks, functions, structs, types
 //   parser_expr.kr     expressions
@@ -71,6 +71,28 @@ fn bset(p: i64, v: i64) -> i64 {
         poke8(p, v);
     }
     return 0;
+}
+
+// the parser's tables of ptr<S> and list<S> declarations, for the code
+// generator: 1 ps_n  2 ps_decl[i]  3 ps_type[i]  4 ls_n  5 ls_decl[i]
+// 6 ls_type[i]
+fn cg_parser_q(which: i64, i: i64) -> i64 {
+    if which == 1 {
+        return par_ps_n;
+    }
+    if which == 2 {
+        return tget(&par_ps_decl, i);
+    }
+    if which == 3 {
+        return tget(&par_ps_type, i);
+    }
+    if which == 4 {
+        return par_ls_n;
+    }
+    if which == 5 {
+        return tget(&par_ls_decl, i);
+    }
+    return tget(&par_ls_type, i);
 }
 
 // the n bytes at a and at b are the same
@@ -632,7 +654,7 @@ fn prs_top_level() -> ptr<Ast> {
 }
 
 // =========================================================================
-// the door: what main reads after the parse
+// what the driver reads after the parse
 // =========================================================================
 
 fn prs_ast_root() -> i64 {

@@ -13,8 +13,8 @@ kron_definitions
 // stops a program that uses a name nobody declared, reaches memory by
 // address outside raw { }, gives a function a smaller array than it
 // declares, or lays out two arenas on the same memory. kronc --module
-// turns it into semantic_kr.asm; semantic.asm beside it is the small
-// hand-written door the rest of the compiler calls through.
+// turns it into semantic_kr.asm; the driver calls the sem_ functions
+// directly.
 //
 //     sem_init(buf, size)     start, with the memory for the symbols
 //     sem_run(root)           0 when the program is right, -1 if not
@@ -883,7 +883,7 @@ fn sem_node(n: ptr<Ast>) -> i64 {
 }
 
 // =========================================================================
-// the door: what semantic.asm calls
+// what the driver calls
 // =========================================================================
 
 fn sem_init(buf: i64, size: i64) -> i64 {

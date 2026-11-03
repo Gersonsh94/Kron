@@ -18,7 +18,7 @@ kron_definitions
 // a general assembler, and deliberately so: it has to understand exactly the
 // forms its own compiler writes, and its own source.
 //
-//   kasm.kr         the door's side in Kron, and the helpers every file uses
+//   kasm.kr         the entry points, and the helpers every file uses
 //   ks_state.kr     the state: every global, before what uses it
 //   ks_core.kr      bytes, REX/ModRM/SIB, labels, externs, fixups,
 //                   operands, numbers, expressions, the line tokeniser
@@ -26,9 +26,8 @@ kron_definitions
 //   ks_encode.kr    the instructions
 //   ks_enc_mov.kr   mov and xchg
 //
-// kronc --module turns it into kasm_kr.asm; kasm.asm beside it is the small
-// hand-written door the rest of the compiler calls through, under the names
-// and with the registers it always had.
+// kronc --module turns it into kasm_kr.asm; the driver and the writers call
+// its ks_ and ksk_ functions directly.
 // =========================================================================
 
 // =========================================================================
@@ -101,7 +100,7 @@ fn ks_memeq(a: i64, b: i64, n: i64) -> i64 {
 }
 
 // =========================================================================
-// the door's side: what kasm.asm calls
+// what the driver and the writers call
 // =========================================================================
 
 fn ksk_code() -> i64 {

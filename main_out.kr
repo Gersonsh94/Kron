@@ -1,0 +1,661 @@
+kron_program
+kron_domain main_out;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE DRIVER'S OUTPUTS: what kronc writes once the program is compiled,
+// and the assembler mode
+//
+//   mx_main()       the banner, then main_drv.kr's md_start and md_phases,
+//                   then the output: the exit code
+//   mx_output()     [6/6] the file for the target: an .exe or a .dll, a
+//                   Linux executable or .so, an ARM64 one, a macOS one or
+//                   a .dylib, a .wasm with its page, or the .asm (-S)
+//   mx_assemble()   --assemble: an assembly file through kasm (or karm
+//                   for ARM64) into a .kbin, an .exe (--pe) or a .krn
+//   expand_imports(src, len, out)   the import pass, and its results
+//                   where the parser, the code generator and the messages
+//                   read them
+//   ew_set_layout() where the image of an ELF file goes: 128 bytes of
+//                   headers, 1024 when it calls the system's libraries
+//
+// They were main in main.asm (10d-2), byte for byte the same: the same
+// messages, the same files, the same exit codes. Every part is called
+// directly. main.asm keeps the entry (the console's handle), the buffers
+// (mn_addr) and the calls into Windows.
+//
+// Exit codes: 0 done, 1 an assembler or lowering error, 2 the file could
+// not be read, 6 the output could not be written.
+// =========================================================================
+
+extern "kronc" {
+    fn mn_addr(k: i64) -> i64;
+    fn print_string(s: i64) -> i64;
+    fn read_file(name: i64, buf: i64, cap: i64) -> i64;
+    fn write_file(name: i64, buf: i64, len: i64) -> i64;
+    // main_drv.kr, main_cli.kr, main_io.kr, main_pp.kr
+    fn md_start() -> i64;
+    fn md_phases() -> i64;
+    fn mc_scan_flag(k: i64) -> i64;
+    fn mc_build_bin_name() -> i64;
+    fn mc_build_asm_name() -> i64;
+    fn mi_print_u64(v: i64) -> i64;
+    fn mp_preprocess(src: i64, len: i64, out: i64) -> i64;
+    // the code generator
+    fn cgk_code() -> i64;
+    fn cgk_code_size() -> i64;
+    fn cgk_has_exports() -> i64;
+    // kasm
+    fn ks_init() -> i64;
+    fn ks_assemble(src: i64, len: i64) -> i64;
+    fn ks_build_image() -> i64;
+    fn ksk_code() -> i64;
+    fn ksk_error_count() -> i64;
+    fn ksk_error_line_at(i: i64) -> i64;
+    fn ksk_error_mnem(i: i64) -> i64;
+    fn ksk_error_dst(i: i64) -> i64;
+    fn ksk_error_src(i: i64) -> i64;
+    // karm
+    fn kc_init() -> i64;
+    fn kc_set_base(b: i64) -> i64;
+    fn kc_set_align(a: i64) -> i64;
+    fn kc_assemble(text: i64, len: i64) -> i64;
+    fn kc_get_entry() -> i64;
+    fn kc_get_error_count() -> i64;
+    fn kc_get_error_line_at(i: i64) -> i64;
+    fn kc_get_error_mnem(i: i64) -> i64;
+    fn kc_get_error_text(i: i64) -> i64;
+    // xarm and xwasm (they share xarm's state, and its error)
+    fn xarm_set_os(os: i64) -> i64;
+    fn xarm_set_lib(lib: i64) -> i64;
+    fn xl_translate(src: i64, len: i64, out: i64, cap: i64) -> i64;
+    fn xv_translate(src: i64, len: i64, out: i64, cap: i64) -> i64;
+    fn xarm_error_line() -> i64;
+    fn xarm_error_text() -> i64;
+    fn xarm_error_insn() -> i64;
+    // the writers
+    fn pe_write(buf: i64) -> i64;
+    fn el_write(out: i64) -> i64;
+    fn el_write_so(out: i64, arm: i64) -> i64;
+    fn el_write_arm(out: i64) -> i64;
+    fn el_prepare() -> i64;
+    fn ew_get_base() -> i64;
+    fn ew_put_hb(hsize: i64, base: i64) -> i64;
+    fn mw_write(out: i64, name: i64) -> i64;
+    fn mw_set_flags(dylib: i64, platform: i64, idname: i64) -> i64;
+    fn pw_set_flags(gui: i64, dll: i64, file: i64) -> i64;
+    fn kw_init() -> i64;
+    fn kw_build() -> i64;
+    fn kw_get_image() -> i64;
+    fn ww_write_host() -> i64;
+    // the import pass (imports.kr) and the line map main keeps
+    fn mi_reset_pool() -> i64;
+    fn mn_lmap(k: i64) -> i64;
+    fn ip_debug_set(v: i64) -> i64;
+    fn ip_expand(prog: i64, src: i64, n: i64, out: i64, cap: i64) -> i64;
+    fn ip_err_get() -> i64;
+    fn ip_errname_addr() -> i64;
+    fn ip_lm_count_get() -> i64;
+    fn ip_lm_addr(which: i64) -> i64;
+}
+
+// what mn_addr gives (main_cli.kr and main_drv.kr have 0..36)
+const A_INPUT: i64 = 0;
+const A_FLAG_S: i64 = 2;
+const A_FLAG_DEBUG: i64 = 4;
+const A_FLAG_WINDOW: i64 = 5;
+const A_FLAG_LIB: i64 = 6;
+const A_IOS: i64 = 9;
+const A_OUT_BIN_NAME: i64 = 10;
+const A_OUT_ASM_NAME: i64 = 11;
+const A_BIN_EXT_PTR: i64 = 12;        // a qword: the extension of the output
+const A_OUT_TARGET: i64 = 17;         // a byte
+const A_SRC_BUFFER: i64 = 18;
+const A_SRC_SIZE: i64 = 19;           // a qword
+const A_EXP_BUFFER: i64 = 20;
+const A_CODE_BUFFER: i64 = 25;
+const A_OUT_DYNAMIC: i64 = 29;        // a byte
+const A_IMP_ERR: i64 = 30;            // a dword
+const A_IMP_ERRNAME: i64 = 31;        // 260 bytes
+const A_LMAP_COUNT: i64 = 32;         // a qword
+
+const T_PE: i64 = 0;
+const T_ELF: i64 = 1;
+const T_ARM64: i64 = 4;
+const T_WEB: i64 = 5;
+const T_MACOS: i64 = 6;
+
+const SRC_BUFFER_SIZE: i64 = 16777216;
+const CODE_BUFFER_SIZE: i64 = 16777216;
+
+var mx_idbuf: [u8; 520];              // a framework dylib's install name
+
+fn mx_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn mx_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn mx_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn mx_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn mx_flag(k: i64) -> i64 {
+    return mx_g8(mn_addr(k));
+}
+
+fn mx_say(s: i64) -> i64 {
+    return print_string(s);
+}
+
+// the extension build_bin_name puts on the output's name
+fn mx_ext(e: i64) -> i64 {
+    return mx_p64(mn_addr(A_BIN_EXT_PTR), e);
+}
+
+// a name's file, without its folder: what follows its last / or \
+fn mx_basename(name: i64) -> i64 {
+    var p: i64 = name;
+    var base: i64 = name;
+    while true {
+        var c: i64 = mx_g8(p);
+        if c == 0 {
+            return base;
+        }
+        p = p + 1;
+        if c == 47 || c == 92 {
+            base = p;
+        }
+    }
+    return base;
+}
+
+// ---- main ---------------------------------------------------------------
+
+fn mx_main() -> i64 {
+    mx_say("========================================\r\n  KRON 1.0\r\n  Memory-safe, thread-safe native code\r\n========================================\r\n");
+    // the command line, then the phases: -1 to go on, -2 for --assemble
+    var r: i64 = md_start();
+    if r == -2 {
+        return mx_assemble();
+    }
+    if r != -1 {
+        return r;
+    }
+    r = md_phases();
+    if r != -1 {
+        return r;
+    }
+    return mx_output();
+}
+
+// the image of an ELF file: after 128 bytes of headers, or 1024 when the
+// program calls the system's libraries (the loader's name and its table)
+fn ew_set_layout() -> i64 {
+    var hs: i64 = 128;
+    if mx_flag(A_OUT_DYNAMIC) != 0 {
+        hs = 1024;
+    }
+    return ew_put_hb(hs, hs + 4194304);
+}
+
+// n bytes from src to dst
+fn mx_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        mx_p8(dst + i, mx_g8(src + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the import pass: imports.kr's ip_expand resolves the imports in
+// dependency order and splices them in where the first acquire_domain is.
+// The length of the expanded text, or -1 with imp_err and imp_errname;
+// either way the line map is copied to where the parser, the code
+// generator and the messages read it (lmap_count, lmap_out, lmap_file,
+// lmap_src).
+fn expand_imports(src: i64, len: i64, out: i64) -> i64 {
+    mi_reset_pool();                      // a new pass: the modules' pool empty
+    ip_debug_set(mx_flag(A_FLAG_DEBUG));
+    var r: i64 = ip_expand(mn_addr(A_INPUT), src, len, out, SRC_BUFFER_SIZE);
+    mx_p32(mn_addr(A_IMP_ERR), ip_err_get());
+    var en: i64 = mn_addr(A_IMP_ERRNAME);
+    mx_copy(en, ip_errname_addr(), 256);
+    mx_p8(en + 256, 0);
+    var n: i64 = ip_lm_count_get();
+    mx_p64(mn_addr(A_LMAP_COUNT), n);
+    var k: i64 = 0;
+    while k < 3 {
+        // the output lines, the files' names, the lines in the files
+        mx_copy(mn_lmap(k), ip_lm_addr(k), n * 8);
+        k = k + 1;
+    }
+    return r;
+}
+
+// ---- the messages of a file written ---------------------------------------
+
+fn mx_wrote(name: i64, tail: i64) -> i64 {
+    mx_say(" OK\r\n");
+    mx_say("Written: ");
+    mx_say(name);
+    mx_say(tail);
+    mx_say("\r\nCompilation successful!\r\n");
+    return 0;
+}
+
+fn mx_write_error() -> i64 {
+    mx_say("ERROR: could not write the output file.\r\n  hint: is the program still running, or the file open elsewhere?\r\n");
+    return 6;
+}
+
+// the file named for the program, with the extension set: the bytes at
+// code_buffer
+fn mx_direct_name(len: i64) -> i64 {
+    mc_build_bin_name();
+    var name: i64 = mn_addr(A_OUT_BIN_NAME);
+    if write_file(name, mn_addr(A_CODE_BUFFER), len) == 0 {
+        return mx_write_error();
+    }
+    return mx_wrote(name, "\r\n");
+}
+
+// ---- [6/6] the output -------------------------------------------------------
+
+// A Windows executable goes straight from the generated assembly to the
+// .exe, in memory, as a C compiler does: no .asm is left behind. -S asks
+// for the .asm instead; bare metal has no kasm path and always gets it.
+fn mx_output() -> i64 {
+    mx_say("[6/6] Linking...");
+    var t: i64 = mx_flag(A_OUT_TARGET);
+    if t == T_ARM64 || t == T_MACOS {
+        return mx_arm_out(t);
+    }
+    var s: i64 = mx_flag(A_FLAG_S);
+    if t == T_WEB && s == 0 {
+        return mx_web_out();
+    }
+    if s == 0 && (t == T_PE || t == T_ELF) {
+        return mx_direct_exe(t);
+    }
+    return mx_write_asm();
+}
+
+// the generated text itself, as NAME.asm
+fn mx_write_asm() -> i64 {
+    mc_build_asm_name();
+    var name: i64 = mn_addr(A_OUT_ASM_NAME);
+    if write_file(name, cgk_code(), cgk_code_size()) == 0 {
+        return mx_write_error();
+    }
+    return mx_wrote(name, "\r\n");
+}
+
+// the generated text through the preprocessor into exp_buffer: its length
+fn mx_expand_code() -> i64 {
+    var size: i64 = cgk_code_size();
+    var n: i64 = mp_preprocess(cgk_code(), size, mn_addr(A_EXP_BUFFER));
+    mx_p64(mn_addr(A_SRC_SIZE), n);
+    return n;
+}
+
+// the line of the generated text, what was wrong and the instruction
+fn mx_lower_error(head: i64, line: i64, text: i64, insn: i64) -> i64 {
+    mx_say(head);
+    mx_say("  at line ");
+    mi_print_u64(line);
+    mx_say("  -- ");
+    mx_say(text);
+    mx_say("\r\n");
+    mx_say("  instruction: ");
+    mx_say(insn);
+    mx_say("\r\n");
+    return 1;
+}
+
+// ARM64: the generated text -> preprocessor -> xarm -> karm -> ELF. With -S
+// the ARM64 text is what gets written. macOS runs the same program, with
+// the shim that answers its Linux calls from XNU.
+fn mx_arm_out(t: i64) -> i64 {
+    var n: i64 = mx_expand_code();
+    var mac: i64 = 0;
+    if t == T_MACOS {
+        mac = 1;
+    }
+    xarm_set_os(mac);
+    xarm_set_lib(cgk_has_exports());
+    var code: i64 = mn_addr(A_CODE_BUFFER);
+    var r: i64 = xl_translate(mn_addr(A_EXP_BUFFER), n, code, CODE_BUFFER_SIZE);
+    if r == -1 {
+        return mx_lower_error("ERROR: the program could not be lowered to ARM64.\r\n",
+            xarm_error_line(), xarm_error_text(), xarm_error_insn());
+    }
+    mx_p64(mn_addr(A_SRC_SIZE), r);
+    if mx_flag(A_FLAG_S) != 0 {
+        mc_build_asm_name();
+        var name: i64 = mn_addr(A_OUT_ASM_NAME);
+        if write_file(name, code, r) == 0 {
+            return mx_write_error();
+        }
+        return mx_wrote(name, "\r\n");
+    }
+    if mac != 0 {
+        return mx_mac_image(r);
+    }
+    kc_init();
+    if mx_flag(A_FLAG_LIB) != 0 {
+        // a shared object for ARM64 Linux (and Android): the image 512 bytes
+        // in, .data on a 64 KB page of its own, so that code and data get
+        // segments of their own -- read and run, read and write
+        kc_set_base(512);
+        kc_set_align(65536);
+        if kc_assemble(code, r) == 0 {
+            return mx_karm_error();
+        }
+        el_prepare();
+        var so: i64 = el_write_so(code, 1);
+        mx_ext(".so");
+        return mx_direct_name(so);
+    }
+    kc_set_base(ew_get_base());
+    if kc_assemble(code, r) == 0 {
+        return mx_karm_error();
+    }
+    var len: i64 = el_write_arm(code);
+    mx_ext("");
+    return mx_direct_name(len);
+}
+
+// macOS: the code at 0x100004000, after the page of the header, and each
+// section on a 16 KB page of its own; then the Mach-O file around it. A
+// dylib starts at 0, dyld sliding it wherever it goes.
+fn mx_mac_image(r: i64) -> i64 {
+    var lib: i64 = mx_flag(A_FLAG_LIB);
+    var plat: i64 = 1;
+    if mx_flag(A_IOS) != 0 {
+        plat = 2;                         // PLATFORM_IOS
+    }
+    kc_init();
+    if lib != 0 {
+        kc_set_base(16384);
+    } else {
+        kc_set_base(0x100004000);
+    }
+    kc_set_align(16384);
+    var code: i64 = mn_addr(A_CODE_BUFFER);
+    if kc_assemble(code, r) == 0 {
+        return mx_karm_error();
+    }
+    if lib != 0 {
+        mx_ext(".dylib");
+    } else {
+        mx_ext("");
+    }
+    mc_build_bin_name();
+    // the name in the signature: the file's, without its folder
+    var name: i64 = mn_addr(A_OUT_BIN_NAME);
+    var base: i64 = mx_basename(name);
+    mw_set_flags(lib, plat, mx_mac_idname(name, base));
+    var len: i64 = mw_write(code, base);
+    if len == 0 {
+        mx_say("\r\nERROR: the macOS executable could not be made: the program keeps an\r\n       address in a dq of its code, or the shim is missing.\r\n");
+        return 1;
+    }
+    return mx_direct_name(len);
+}
+
+// a dylib's install name: @rpath/ and its file's name -- or, inside
+// Name.framework/, "Name.framework/" before it, as Xcode embeds one
+fn mx_mac_idname(name: i64, base: i64) -> i64 {
+    if base - name < 12 {
+        return base;
+    }
+    var sep: i64 = base - 1;              // the separator before the name
+    var dir: i64 = sep;                   // the folder: back to the one before
+    while dir != name {
+        var c: i64 = mx_g8(dir - 1);
+        if c == 47 || c == 92 {
+            break;
+        }
+        dir = dir - 1;
+    }
+    // does the folder end in ".framework"?
+    if sep - dir < 10 {
+        return base;
+    }
+    var fw: i64 = ".framework";
+    var i: i64 = 0;
+    while i < 10 {
+        if mx_g8(sep - 10 + i) != mx_g8(fw + i) {
+            return base;
+        }
+        i = i + 1;
+    }
+    // "Name.framework/name", with / for a Windows separator
+    var d: i64 = &mx_idbuf;
+    var k: i64 = 0;
+    while true {
+        var ch: i64 = mx_g8(dir + k);
+        if ch == 92 {
+            ch = 47;
+        }
+        mx_p8(d + k, ch);
+        if ch == 0 {
+            return d;
+        }
+        k = k + 1;
+    }
+    return d;
+}
+
+// the web: the generated text -> preprocessor -> xwasm -> NAME.wasm, with
+// NAME.html to open it and kron_web.js, the host, next to it. -S writes
+// the x86 text xwasm reads.
+fn mx_web_out() -> i64 {
+    var n: i64 = mx_expand_code();
+    var code: i64 = mn_addr(A_CODE_BUFFER);
+    var r: i64 = xv_translate(mn_addr(A_EXP_BUFFER), n, code, CODE_BUFFER_SIZE);
+    if r == -1 {
+        return mx_lower_error("\r\nERROR: xwasm could not lower the generated code to WebAssembly\r\n",
+            xarm_error_line(), xarm_error_text(), xarm_error_insn());
+    }
+    mx_ext(".wasm");
+    mc_build_bin_name();
+    var name: i64 = mn_addr(A_OUT_BIN_NAME);
+    if write_file(name, code, r) == 0 {
+        return mx_write_error();
+    }
+    if ww_write_host() == 0 {
+        return mx_write_error();
+    }
+    return mx_wrote(name, "\r\n  with its page (.html) and kron_web.js beside it\r\n");
+}
+
+// Windows and Linux: the generated text -> preprocessor -> kasm ->
+// pe_writer (.exe, .dll) or the ELF writer (an executable, a .so)
+fn mx_direct_exe(t: i64) -> i64 {
+    var n: i64 = mx_expand_code();
+    ks_init();
+    if ks_assemble(mn_addr(A_EXP_BUFFER), n) == 0 {
+        return mx_kasm_error();
+    }
+    var code: i64 = mn_addr(A_CODE_BUFFER);
+    var lib: i64 = mx_flag(A_FLAG_LIB);
+    if t == T_ELF {
+        // Linux: the same image, in an ELF file with no extension
+        if lib != 0 {
+            el_prepare();
+            var so: i64 = el_write_so(code, 0);
+            mx_ext(".so");
+            return mx_direct_name(so);
+        }
+        var len: i64 = el_write(code);
+        mx_ext("");
+        return mx_direct_name(len);
+    }
+    // --window: no console; --lib: a DLL, which needs its own name,
+    // without its folder
+    var file: i64 = 0;
+    if lib != 0 {
+        mx_ext(".dll");
+        mc_build_bin_name();
+        file = mx_basename(mn_addr(A_OUT_BIN_NAME));
+    }
+    pw_set_flags(mx_flag(A_FLAG_WINDOW), lib, file);
+    var pe: i64 = pe_write(code);
+    if lib != 0 {
+        mx_ext(".dll");
+    } else {
+        mx_ext(".exe");
+    }
+    return mx_direct_name(pe);
+}
+
+// ---- the assemblers' errors -----------------------------------------------
+
+// every line karm refused, with what was wrong
+fn mx_karm_error() -> i64 {
+    mx_say("ERROR: karm failed to assemble.\r\n");
+    var n: i64 = kc_get_error_count();
+    var i: i64 = 0;
+    while i < n {
+        mx_say("  at line ");
+        mi_print_u64(kc_get_error_line_at(i));
+        mx_say("   ");
+        mx_say(kc_get_error_mnem(i));
+        mx_say("  -- ");
+        mx_say(kc_get_error_text(i));
+        mx_say("\r\n");
+        i = i + 1;
+    }
+    return 1;
+}
+
+// every line kasm could not assemble, not just the first: the mnemonic,
+// because the line number counts lines of kasm's own preprocessed text,
+// then the operand kinds, so a misclassified operand is visible at once
+fn mx_kasm_error() -> i64 {
+    mx_say("ERROR: kasm failed to assemble.\r\n");
+    var n: i64 = ksk_error_count();
+    var i: i64 = 0;
+    while i < n {
+        mx_say("  at line ");
+        mi_print_u64(ksk_error_line_at(i));
+        mx_say("   ");
+        mx_say(ksk_error_mnem(i));
+        var dst: i64 = ksk_error_dst(i);
+        if dst == 99 {
+            mx_say("  -- a label defined nowhere: a misspelt name, or an extern not declared");
+        } else if dst == 98 {
+            mx_say("  -- a label defined twice: two files of the build give the same name");
+        } else {
+            mx_say("   dst=");
+            mi_print_u64(dst);
+            mx_say(" src=");
+            mi_print_u64(ksk_error_src(i));
+        }
+        mx_say("\r\n");
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---- --assemble -------------------------------------------------------------
+
+// an assembly file, through kasm into the bytes it assembles to (a .kbin),
+// an .exe (--pe) or the Kron container (--krn); for ARM64, through karm
+// into an AArch64 ELF
+fn mx_assemble() -> i64 {
+    var t: i64 = mx_flag(A_OUT_TARGET);
+    if t == T_ARM64 {
+        mx_say("Assembler mode (karm, ARM64)\r\n");
+    } else {
+        mx_say("Assembler mode (kasm)\r\n");
+    }
+    var src: i64 = mn_addr(A_SRC_BUFFER);
+    var size: i64 = read_file(mn_addr(A_INPUT), src, SRC_BUFFER_SIZE);
+    mx_p64(mn_addr(A_SRC_SIZE), size);
+    if size == 0 {
+        mx_say("ERROR: cannot read the file.\r\n");
+        return 2;
+    }
+    // expand %include, %define and %macro before assembling
+    var exp: i64 = mn_addr(A_EXP_BUFFER);
+    var n: i64 = mp_preprocess(src, size, exp);
+    mx_p64(mn_addr(A_SRC_SIZE), n);
+    // with -S, leave the expanded source on disk too: when something goes
+    // wrong it is far quicker to read it than to reason about the expansion
+    if mx_flag(A_FLAG_S) != 0 {
+        write_file("preproc.asm", exp, n);
+    }
+    var code: i64 = mn_addr(A_CODE_BUFFER);
+    var img: i64 = code;
+    var len: i64 = 0;
+    if t == T_ARM64 {
+        // karm instead of kasm, and an AArch64 ELF around the image. The
+        // image sits at 0x400080, after the 0x80 bytes of headers, as on
+        // x86-64.
+        mx_p8(mn_addr(A_OUT_DYNAMIC), 0);
+        ew_set_layout();
+        kc_init();
+        kc_set_base(0x400080);
+        if kc_assemble(exp, n) == 0 {
+            return mx_karm_error();
+        }
+        if kc_get_entry() == 0 {
+            mx_say("ERROR: no _start label\r\n  hint: an ARM64 Linux program starts at _start\r\n");
+            return 1;
+        }
+        len = el_write_arm(code);
+        mx_ext("");
+    } else {
+        ks_init();
+        if ks_assemble(exp, n) == 0 {
+            return mx_kasm_error();
+        }
+        if mc_scan_flag(2) != 0 {
+            // --pe: the assembled bytes in a PE32+ executable
+            len = pe_write(code);
+            mx_ext(".exe");
+        } else if mc_scan_flag(3) != 0 {
+            // --krn: the assembled bytes in the Kron container
+            kw_init();
+            len = kw_build();
+            img = kw_get_image();
+            mx_ext(".krn");
+        } else {
+            len = ks_build_image();
+            img = ksk_code();
+        }
+    }
+    mc_build_bin_name();
+    var name: i64 = mn_addr(A_OUT_BIN_NAME);
+    if write_file(name, img, len) == 0 {
+        return mx_write_error();
+    }
+    mx_say("Bytes written: ");
+    mx_say(name);
+    mx_say("\r\n");
+    return 0;
+}

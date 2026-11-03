@@ -14,10 +14,10 @@ kron_definitions
 // main.asm, and it is here now, byte for byte the same: every offset, every
 // value and every order of writing is the one the assembly had.
 //
-// The assembled program comes from kasm and karm, which are still in
-// assembly: they are called directly, or through the door in elf_writer.asm,
-// which also holds the static tables (the loader's names, the section names)
-// and the flags main sets (out_dynamic, out_android, the output's name).
+// The assembled program comes from kasm and karm, the exports from the code
+// generator, the flags (out_dynamic, out_android, the output's name) from
+// main's buffers; the static tables (the loader's names, the section names)
+// are texts here.
 //
 // Numbers in the file are written at fixed offsets with el_p8/16/32/64; the
 // reads of the assembled image go through el_g8/el_g32/el_g64. Everything
@@ -25,45 +25,126 @@ kron_definitions
 // =========================================================================
 
 extern "kronc" {
-    fn kasm_build_image() -> i64;
-    fn kasm_get_code() -> i64;
-    fn kasm_get_code_size() -> i64;
-    fn kasm_get_data_size() -> i64;
-    fn kasm_get_bss_size() -> i64;
-    fn kasm_get_fixup_count() -> i64;
-    fn kasm_get_fixup_kind(i: i64) -> i64;
-    fn kasm_get_fixup_label(i: i64) -> i64;
-    fn kasm_get_fixup_at(i: i64) -> i64;
-    fn kasm_get_label_section(i: i64) -> i64;
-    fn kasm_find_label(name: i64, len: i64) -> i64;
-    fn karm_build_image() -> i64;
-    fn karm_get_code() -> i64;
-    fn karm_get_code_len() -> i64;
-    fn karm_get_data_off() -> i64;
-    fn karm_get_data_len() -> i64;
-    fn karm_get_bss_size() -> i64;
-    fn karm_get_entry() -> i64;
-    fn karm_label(name: i64) -> i64;
-    fn karm_reloc_count() -> i64;
-    fn karm_reloc_at(i: i64) -> i64;
-    fn codegen_export_count() -> i64;
-    fn ew_label_addr(idx: i64) -> i64;
-    fn ew_export_name(i: i64) -> i64;
-    fn ew_export_len(i: i64) -> i64;
-    fn ew_get_hsize() -> i64;
-    fn ew_get_base() -> i64;
-    fn ew_put_hb(hsize: i64, base: i64) -> i64;
-    fn ew_out_dynamic() -> i64;
-    fn ew_out_android() -> i64;
-    fn ew_prepare_name() -> i64;
-    fn ew_addr_interp_x86() -> i64;
-    fn ew_addr_interp_arm() -> i64;
-    fn ew_addr_strtab() -> i64;
-    fn ew_addr_strtab_and() -> i64;
-    fn ew_addr_got_names() -> i64;
-    fn ew_addr_shnames() -> i64;
-    fn ew_addr_start() -> i64;
-    fn ew_len_strtab() -> i64;
+    fn ks_build_image() -> i64;
+    fn ksk_code() -> i64;
+    fn ksk_code_size() -> i64;
+    fn ksk_data_size() -> i64;
+    fn ksk_bss_size() -> i64;
+    fn ksk_fixup_count() -> i64;
+    fn ksk_fixup_kind(i: i64) -> i64;
+    fn ksk_fixup_label(i: i64) -> i64;
+    fn ksk_fixup_at(i: i64) -> i64;
+    fn ksk_label_section(i: i64) -> i64;
+    fn ks_find_label(name: i64, len: i64) -> i64;
+    fn kc_build_image() -> i64;
+    fn kc_get_code() -> i64;
+    fn kc_get_code_len() -> i64;
+    fn kc_get_data_off() -> i64;
+    fn kc_get_data_len() -> i64;
+    fn kc_get_bss_size() -> i64;
+    fn kc_get_entry() -> i64;
+    fn kc_label(name: i64) -> i64;
+    fn kc_reloc_count() -> i64;
+    fn kc_reloc_at(i: i64) -> i64;
+    fn cgk_export_count() -> i64;
+    fn ksk_label_addr(idx: i64) -> i64;
+    fn cgk_export_name(i: i64) -> i64;
+    fn cgk_export_nlen(i: i64) -> i64;
+    // main.asm's buffers and flags, main_cli.kr's name of the output
+    fn mn_addr(k: i64) -> i64;
+    fn mc_build_bin_name() -> i64;
+}
+
+const A_ANDROID: i64 = 8;             // mn_addr: a byte
+const A_OUT_BIN_NAME: i64 = 10;
+const A_BIN_EXT_PTR: i64 = 12;        // a qword
+const A_OUT_DYNAMIC: i64 = 29;        // a byte
+
+var ew_hsize: i64;                    // bytes of headers before the image: 128, 1024 with externs
+var ew_base: i64;                     // where the image is in memory: 0x400000 + ew_hsize
+
+fn ew_get_hsize() -> i64 {
+    return ew_hsize;
+}
+
+fn ew_get_base() -> i64 {
+    return ew_base;
+}
+
+// both at once: main_out.kr's ew_set_layout, and a shared object
+fn ew_put_hb(hsize: i64, base: i64) -> i64 {
+    ew_hsize = hsize;
+    ew_base = base;
+    return 0;
+}
+
+fn ew_flag(k: i64) -> i64 {
+    var r: i64 = 0;
+    var a: i64 = mn_addr(k);
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+// 1 when the program calls the system's libraries
+fn ew_out_dynamic() -> i64 {
+    return ew_flag(A_OUT_DYNAMIC);
+}
+
+// 1 for --target=android
+fn ew_out_android() -> i64 {
+    return ew_flag(A_ANDROID);
+}
+
+// the output's name, with .so for a library
+fn ew_prepare_name() -> i64 {
+    var e: i64 = mn_addr(A_BIN_EXT_PTR);
+    var so: i64 = ".so";
+    raw {
+        poke(e, so);
+    }
+    mc_build_bin_name();
+    return mn_addr(A_OUT_BIN_NAME);
+}
+
+// ---- the static tables of the file ---------------------------------------
+
+fn ew_addr_interp_x86() -> i64 {
+    return "/lib64/ld-linux-x86-64.so.2";
+}
+
+fn ew_addr_interp_arm() -> i64 {
+    return "/lib/ld-linux-aarch64.so.1";
+}
+
+// what a program that calls the system's libraries has in its header area
+// besides the headers: the libraries' names, then the five functions the
+// loader fills in before _start runs (ew_len_strtab bytes)
+fn ew_addr_strtab() -> i64 {
+    return "\0libc.so.6\0libdl.so.2\0libpthread.so.0\0dlopen\0dlsym\0pthread_create\0pthread_detach\0exit\0";
+}
+
+// the same for Android: libc.so and libdl.so, the five names where the
+// others have them
+fn ew_addr_strtab_and() -> i64 {
+    return "\0libc.so\0libdl.so\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0dlopen\0dlsym\0pthread_create\0pthread_detach\0exit\0";
+}
+
+fn ew_len_strtab() -> i64 {
+    return 86;
+}
+
+fn ew_addr_got_names() -> i64 {
+    return "__got_dlopen\0__got_dlsym\0__got_ptc\0__got_ptd\0__got_exit\0";
+}
+
+fn ew_addr_shnames() -> i64 {
+    return "\0.dynsym\0.dynstr\0.dynamic\0.shstrtab\0";
+}
+
+fn ew_addr_start() -> i64 {
+    return "_start";
 }
 
 // what the writer keeps between its steps
@@ -236,12 +317,12 @@ fn el_elf_hash(p: i64, n: i64) -> i64 {
 // the address of a label of the image kasm or karm built, 0 when there is
 // none: data and bss are where the writer put them, in memory at the base
 fn el_va(name: i64, len: i64) -> i64 {
-    var idx: i64 = kasm_find_label(name, len);
+    var idx: i64 = ks_find_label(name, len);
     if el_neg1(idx) == 1 {
         return 0;
     }
-    var sec: i64 = kasm_get_label_section(idx);
-    var at: i64 = ew_label_addr(idx);
+    var sec: i64 = ksk_label_section(idx);
+    var at: i64 = ksk_label_addr(idx);
     if sec == 1 {
         at = at + el_dbase;
     }
@@ -271,7 +352,7 @@ fn el_fill_got_arm() -> i64 {
     var k: i64 = 0;
     while k < 5 {
         var nl: i64 = el_cstrlen(nm);
-        el_p64(&el_got + k * 8, karm_label(nm));
+        el_p64(&el_got + k * 8, kc_label(nm));
         nm = nm + nl + 1;
         k = k + 1;
     }
@@ -306,24 +387,24 @@ fn el_head_exe(out: i64, entry: i64, machine: i64, fsz: i64, memsz: i64, ph_alig
 fn el_write(out: i64) -> i64 {
     var hs: i64 = ew_get_hsize();
     var base: i64 = ew_get_base();
-    var img: i64 = kasm_build_image();
+    var img: i64 = ks_build_image();
     el_img = img;
     // the image goes after the 0x80 bytes of headers
-    el_copy(out + hs, kasm_get_code(), img);
+    el_copy(out + hs, ksk_code(), img);
     // where kasm put .data and .bss inside the image
-    var r14: i64 = (kasm_get_code_size() + 15) / 16 * 16;
-    var r15: i64 = (r14 + kasm_get_data_size() + 15) / 16 * 16;
+    var r14: i64 = (ksk_code_size() + 15) / 16 * 16;
+    var r15: i64 = (r14 + ksk_data_size() + 15) / 16 * 16;
     el_dbase = r14;
     el_bbase = r15;
     // fill every 'dq label' with its final address
-    var cnt: i64 = kasm_get_fixup_count();
+    var cnt: i64 = ksk_fixup_count();
     var k: i64 = 0;
     while k < cnt {
-        if kasm_get_fixup_kind(k) == 6 {
-            var lbl: i64 = kasm_get_fixup_label(k);
+        if ksk_fixup_kind(k) == 6 {
+            var lbl: i64 = ksk_fixup_label(k);
             if el_neg1(lbl) == 0 {
-                var sec: i64 = kasm_get_label_section(lbl);
-                var val: i64 = ew_label_addr(lbl);
+                var sec: i64 = ksk_label_section(lbl);
+                var val: i64 = ksk_label_addr(lbl);
                 if sec == 1 {
                     val = val + r14;
                 }
@@ -331,20 +412,20 @@ fn el_write(out: i64) -> i64 {
                     val = val + r15;
                 }
                 val = val + base;
-                el_p64(out + hs + r14 + kasm_get_fixup_at(k), val);
+                el_p64(out + hs + r14 + ksk_fixup_at(k), val);
             }
         }
         k = k + 1;
     }
     // the entry point: _start, from the preamble, or 0
     var entry: i64 = 0;
-    var sidx: i64 = kasm_find_label(ew_addr_start(), 6);
+    var sidx: i64 = ks_find_label(ew_addr_start(), 6);
     if el_neg1(sidx) == 0 {
-        entry = ew_label_addr(sidx);
+        entry = ksk_label_addr(sidx);
     }
     entry = entry + base;
     var fsz: i64 = img + hs;
-    var memsz: i64 = kasm_get_bss_size() + r15 + hs;
+    var memsz: i64 = ksk_bss_size() + r15 + hs;
     el_head_exe(out, entry, 0x00000001003E0002, fsz, memsz, 4096);
     if ew_out_dynamic() != 0 {
         el_fill_got_va();
@@ -356,12 +437,12 @@ fn el_write(out: i64) -> i64 {
 // The AArch64 executable. Returns its length.
 fn el_write_arm(out: i64) -> i64 {
     var hs: i64 = ew_get_hsize();
-    var img: i64 = karm_build_image();
+    var img: i64 = kc_build_image();
     el_img = img;
-    el_copy(out + hs, karm_get_code(), img);
-    var entry: i64 = karm_get_entry();
+    el_copy(out + hs, kc_get_code(), img);
+    var entry: i64 = kc_get_entry();
     var fsz: i64 = img + hs;
-    var memsz: i64 = karm_get_bss_size() + (img + 15) / 16 * 16 + hs;
+    var memsz: i64 = kc_get_bss_size() + (img + 15) / 16 * 16 + hs;
     el_head_exe(out, entry, 0x0000000100B70002, fsz, memsz, 65536);
     if ew_out_dynamic() != 0 {
         el_fill_got_arm();
@@ -531,24 +612,24 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
     ew_put_hb(512, 512);
     var code: i64 = 0;
     if arm == 0 {
-        el_img = kasm_build_image();
-        el_code = kasm_get_code_size();
+        el_img = ks_build_image();
+        el_code = ksk_code_size();
         el_doff = (el_code + 15) / 16 * 16;
         el_dbase = el_doff;
-        el_dlen = kasm_get_data_size();
+        el_dlen = ksk_data_size();
         el_boff = (el_dlen + el_doff + 15) / 16 * 16;
         el_bbase = el_boff;
-        el_blen = kasm_get_bss_size();
-        code = kasm_get_code();
+        el_blen = ksk_bss_size();
+        code = ksk_code();
         el_falign = 4096;
     } else {
-        el_img = karm_build_image();
-        el_code = karm_get_code_len();
-        el_doff = karm_get_data_off();
-        el_dlen = karm_get_data_len();
+        el_img = kc_build_image();
+        el_code = kc_get_code_len();
+        el_doff = kc_get_data_off();
+        el_dlen = kc_get_data_len();
         el_boff = (el_dlen + 65535) / 65536 * 65536 + el_doff;
-        el_blen = karm_get_bss_size();
-        code = karm_get_code();
+        el_blen = kc_get_bss_size();
+        code = kc_get_code();
         el_falign = 65536;
     }
     // the image at 512, zeros before it
@@ -562,11 +643,11 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
     el_V = (el_boff + el_blen + 512 + el_falign - 1) / el_falign * el_falign;
     // its layout: dynamic table (12 entries), strings, symbols, hash table,
     // relocations
-    el_exp = codegen_export_count();
+    el_exp = cgk_export_count();
     var strsz: i64 = ew_len_strtab();    // the strings: the loader's, then the exports'
     var k: i64 = 0;
     while k < el_exp {
-        strsz = strsz + ew_export_len(k) + 1;
+        strsz = strsz + cgk_export_nlen(k) + 1;
         k = k + 1;
     }
     // and the library's own name, DT_SONAME
@@ -601,8 +682,8 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
     var r15: i64 = ew_len_strtab();      // where the next name goes
     k = 0;
     while k < el_exp {
-        var nptr: i64 = ew_export_name(k);
-        var nlen: i64 = ew_export_len(k);
+        var nptr: i64 = cgk_export_name(k);
+        var nlen: i64 = cgk_export_nlen(k);
         el_copy(tbl + 224 + r15, nptr, nlen);
         // its entry: the address of __ce_<name>, the name cut to 300 bytes
         var n: i64 = 0;
@@ -624,7 +705,7 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
         if el_arm == 0 {
             val = el_va(&el_name, clen);
         } else {
-            val = karm_label(&el_name);
+            val = kc_label(&el_name);
         }
         // the symbol: 6 + the export's number
         var sym: i64 = tbl + el_sym + (k + 6) * 24;
@@ -669,7 +750,7 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
         if el_arm == 0 {
             roff = el_va(gn, gl);
         } else {
-            roff = karm_label(gn);
+            roff = kc_label(gn);
         }
         var info: i64 = (k + 1) << 32;
         if el_arm == 0 {
@@ -683,14 +764,14 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
     }
     // every word holding an address: RELATIVE, the address its addend
     if el_arm == 0 {
-        var fc: i64 = kasm_get_fixup_count();
+        var fc: i64 = ksk_fixup_count();
         k = 0;
         while k < fc {
-            if kasm_get_fixup_kind(k) == 6 {
-                var lb: i64 = kasm_get_fixup_label(k);
+            if ksk_fixup_kind(k) == 6 {
+                var lb: i64 = ksk_fixup_label(k);
                 if el_neg1(lb) == 0 {
-                    var sec: i64 = kasm_get_label_section(lb);
-                    var a: i64 = ew_label_addr(lb);
+                    var sec: i64 = ksk_label_section(lb);
+                    var a: i64 = ksk_label_addr(lb);
                     if sec == 1 {
                         a = a + el_doff;
                     }
@@ -698,7 +779,7 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
                         a = a + el_boff;
                     }
                     a = a + 512;
-                    var slot: i64 = kasm_get_fixup_at(k) + el_doff + 512;
+                    var slot: i64 = ksk_fixup_at(k) + el_doff + 512;
                     el_p64(out + slot, a);      // the file holds it too
                     el_rel_add(tbl, slot, 8, a);   // R_X86_64_RELATIVE
                 }
@@ -706,10 +787,10 @@ fn el_write_so(out: i64, arm: i64) -> i64 {
             k = k + 1;
         }
     } else {
-        var rc: i64 = karm_reloc_count();
+        var rc: i64 = kc_reloc_count();
         k = 0;
         while k < rc {
-            var slot2: i64 = karm_reloc_at(k) + el_doff + 512;
+            var slot2: i64 = kc_reloc_at(k) + el_doff + 512;
             el_rel_add(tbl, slot2, 1027, el_g64(out + slot2));  // R_AARCH64_RELATIVE
             k = k + 1;
         }

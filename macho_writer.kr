@@ -30,26 +30,47 @@ kron_definitions
 //
 // It was macho.asm, and it is here now, byte for byte the same: every
 // offset, every value and every order of writing is the one the assembly
-// had. macho.asm is its door: macho_write calls mw_write, and the flags
-// main sets (mo_dylib, mo_platform, mo_idname) are read through it.
+// had. main_out.kr calls mw_write, after mw_set_flags: a dylib or not, the
+// platform, a dylib's install name.
 // =========================================================================
 
 extern "kronc" {
-    fn karm_build_image() -> i64;
-    fn karm_get_code() -> i64;
-    fn karm_get_code_len() -> i64;
-    fn karm_get_data_len() -> i64;
-    fn karm_get_bss_size() -> i64;
-    fn karm_label(name: i64) -> i64;
-    fn karm_reloc_count() -> i64;
-    fn karm_reloc_at(i: i64) -> i64;
-    fn karm_reloc_text() -> i64;
-    fn codegen_export_count() -> i64;
-    fn ew_export_name(i: i64) -> i64;
-    fn ew_export_len(i: i64) -> i64;
-    fn mo_get_dylib() -> i64;
-    fn mo_get_platform() -> i64;
-    fn mo_get_idname() -> i64;
+    fn kc_build_image() -> i64;
+    fn kc_get_code() -> i64;
+    fn kc_get_code_len() -> i64;
+    fn kc_get_data_len() -> i64;
+    fn kc_get_bss_size() -> i64;
+    fn kc_label(name: i64) -> i64;
+    fn kc_reloc_count() -> i64;
+    fn kc_reloc_at(i: i64) -> i64;
+    fn kc_reloc_text() -> i64;
+    fn cgk_export_count() -> i64;
+    fn cgk_export_name(i: i64) -> i64;
+    fn cgk_export_nlen(i: i64) -> i64;
+}
+
+var mo_dylib: i64;                    // 1: a dylib (--lib)
+var mo_platform: i64;                  // 1 macOS, 2 iOS
+var mo_idname: i64;                   // what follows @rpath/ in a dylib's name
+
+// main_out.kr, before mw_write
+fn mw_set_flags(dylib: i64, platform: i64, idname: i64) -> i64 {
+    mo_dylib = dylib;
+    mo_platform = platform;
+    mo_idname = idname;
+    return 0;
+}
+
+fn mo_get_dylib() -> i64 {
+    return mo_dylib;
+}
+
+fn mo_get_platform() -> i64 {
+    return mo_platform;
+}
+
+fn mo_get_idname() -> i64 {
+    return mo_idname;
 }
 
 const MW_BASE: i64 = 4294967296;     // 0x100000000: where the image goes, 4 GB up
@@ -291,14 +312,14 @@ fn mw_write(out: i64, name: i64) -> i64 {
         mw_base = 0;                  // a dylib: from 0, dyld slides it
     }
     // an address in a dq of the code cannot move with the image
-    if karm_reloc_text() != 0 {
+    if kc_reloc_text() != 0 {
         return 0;
     }
     // the image: code, padding to a page, .data
-    karm_build_image();
-    mw_code_len = karm_get_code_len();
-    mw_data_len = karm_get_data_len();
-    mw_bss_len = karm_get_bss_size();
+    kc_build_image();
+    mw_code_len = kc_get_code_len();
+    mw_data_len = kc_get_data_len();
+    mw_bss_len = kc_get_bss_size();
     mw_text_sz = mw_page(mw_code_len) + MW_CODE;
     mw_data_fsz = mw_page(mw_data_len);
     mw_data_vsz = mw_page(mw_bss_len) + mw_data_fsz;
@@ -307,18 +328,18 @@ fn mw_write(out: i64, name: i64) -> i64 {
     var a: i64 = 0;
     var b: i64 = 0;
     if mw_dylib == 0 {
-        a = karm_label("__mac_main");
+        a = kc_label("__mac_main");
         if a == -1 {
             return 0;
         }
         mw_entry = a - mw_base;
         mw_ndef = 1;
     } else {
-        mw_ndef = codegen_export_count();
+        mw_ndef = cgk_export_count();
         b = 0;
         while b < mw_ndef {
-            var np: i64 = ew_export_name(b);
-            var nl: i64 = ew_export_len(b);
+            var np: i64 = cgk_export_name(b);
+            var nl: i64 = cgk_export_nlen(b);
             mw_p8(&mw_lbl + 0, 95);
             mw_p8(&mw_lbl + 1, 95);
             mw_p8(&mw_lbl + 2, 99);
@@ -326,7 +347,7 @@ fn mw_write(out: i64, name: i64) -> i64 {
             mw_p8(&mw_lbl + 4, 95);
             mw_copy(&mw_lbl + 5, np, nl);
             mw_p8(&mw_lbl + 5 + nl, 0);
-            a = karm_label(&mw_lbl);
+            a = kc_label(&mw_lbl);
             if a == -1 {
                 return 0;
             }
@@ -336,7 +357,7 @@ fn mw_write(out: i64, name: i64) -> i64 {
     }
     var k: i64 = 0;
     while k < MW_NSYM {
-        a = karm_label(mw_sym_label(k));
+        a = kc_label(mw_sym_label(k));
         if a == -1 {
             return 0;
         }
@@ -346,10 +367,10 @@ fn mw_write(out: i64, name: i64) -> i64 {
 
     // the header page, empty for now; the code and the data after it
     mw_fill(mw_out, MW_CODE, 0);
-    mw_copy(mw_out + MW_CODE, karm_get_code(), mw_code_len);
+    mw_copy(mw_out + MW_CODE, kc_get_code(), mw_code_len);
     mw_fill(mw_out + MW_CODE + mw_code_len, mw_text_sz - MW_CODE - mw_code_len, 0);
     // .data: karm put it after the code padded to a page, as here
-    mw_copy(mw_out + mw_text_sz, karm_get_code() + mw_page(mw_code_len), mw_data_len);
+    mw_copy(mw_out + mw_text_sz, kc_get_code() + mw_page(mw_code_len), mw_data_len);
     mw_fill(mw_out + mw_text_sz + mw_data_len, mw_data_fsz - mw_data_len, 0);
     mw_le_off = mw_text_sz + mw_data_fsz;
     mw_n = mw_le_off;
@@ -357,12 +378,12 @@ fn mw_write(out: i64, name: i64) -> i64 {
     // ---- __LINKEDIT ------------------------------------------------------
     // rebase: type pointer, then for each address its offset in __DATA
     mw_rebase_off = mw_n;
-    var nrel: i64 = karm_reloc_count();
+    var nrel: i64 = kc_reloc_count();
     if nrel != 0 {
         mw_b(17);                     // REBASE_OPCODE_SET_TYPE_IMM | POINTER
         var r: i64 = 0;
         while r < nrel {
-            var at: i64 = karm_reloc_at(r);
+            var at: i64 = kc_reloc_at(r);
             mw_b(34 - mw_dylib);      // SET_SEGMENT_AND_OFFSET_ULEB: __DATA, segment 2 (1 in a dylib)
             mw_uleb(at);
             mw_b(81);                 // DO_REBASE_IMM_TIMES 1
@@ -419,7 +440,7 @@ fn mw_write(out: i64, name: i64) -> i64 {
             mw_b(1);
             mw_w16(0);
             mw_q(mw_g64(&mw_exp_addr + b * 8) + mw_base);
-            sname = sname + ew_export_len(b) + 2;
+            sname = sname + cgk_export_nlen(b) + 2;
             b = b + 1;
         }
     } else {
@@ -448,8 +469,8 @@ fn mw_write(out: i64, name: i64) -> i64 {
         b = 0;
         while b < mw_ndef {
             mw_b(95);
-            var ep: i64 = ew_export_name(b);
-            var el: i64 = ew_export_len(b);
+            var ep: i64 = cgk_export_name(b);
+            var el: i64 = cgk_export_nlen(b);
             var c: i64 = 0;
             while c < el {
                 mw_b(mw_g8(ep + c));
@@ -734,8 +755,8 @@ fn mw_trie() -> i64 {
     var b: i64 = 0;
     while b < mw_ndef {
         mw_b(95);
-        var np: i64 = ew_export_name(b);
-        var nl: i64 = ew_export_len(b);
+        var np: i64 = cgk_export_name(b);
+        var nl: i64 = cgk_export_nlen(b);
         var c: i64 = 0;
         while c < nl {
             mw_b(mw_g8(np + c));

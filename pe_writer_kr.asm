@@ -1,6 +1,70 @@
 ; A Kron module, written by kronc --module. Edit the .kr file it comes
 ; from, not this one: the build makes it again.
 section .data
+__g_pe_writer_pw_gui: dq 0
+section .text
+section .data
+__g_pe_writer_pw_dll: dq 0
+section .text
+section .data
+__g_pe_writer_pw_dll_file: dq 0
+section .text
+pw_set_flags:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-64], rbx
+    mov [rbp-56], r12
+    mov [rbp-48], r13
+    mov r13, rcx
+    mov r12, rdx
+    mov rbx, r8
+    mov rax, r13
+    mov [rel __g_pe_writer_pw_gui], rax
+    mov rax, r12
+    mov [rel __g_pe_writer_pw_dll], rax
+    mov rax, rbx
+    mov [rel __g_pe_writer_pw_dll_file], rax
+    mov rax, 0
+    jmp .__ret_0
+.__ret_0:
+    mov rbx, [rbp-64]
+    mov r12, [rbp-56]
+    mov r13, [rbp-48]
+    mov rsp, rbp
+    pop rbp
+    ret
+pw_flag_gui:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_pe_writer_pw_gui]
+    jmp .__ret_1
+.__ret_1:
+    mov rsp, rbp
+    pop rbp
+    ret
+pw_flag_dll:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_pe_writer_pw_dll]
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+    pop rbp
+    ret
+pw_dll_file_addr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_pe_writer_pw_dll_file]
+    jmp .__ret_3
+.__ret_3:
+    mov rsp, rbp
+    pop rbp
+    ret
+section .data
 __g_pe_writer_PW_FILE_ALIGN: dq 512
 section .text
 section .data
@@ -142,8 +206,8 @@ pw_b:
     movzx rax, byte [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_0
-.__ret_0:
+    jmp .__ret_4
+.__ret_4:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -164,8 +228,8 @@ pw_sb:
     pop rdx
     mov [rdx], cl
     mov rax, 0
-    jmp .__ret_1
-.__ret_1:
+    jmp .__ret_5
+.__ret_5:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -191,8 +255,8 @@ pw_q:
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_2
-.__ret_2:
+    jmp .__ret_6
+.__ret_6:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -221,8 +285,8 @@ pw_qs:
     pop rdx
     mov [rdx], rcx
     mov rax, 0
-    jmp .__ret_3
-.__ret_3:
+    jmp .__ret_7
+.__ret_7:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -240,15 +304,15 @@ pw_neg1:
     and rax, rcx
     mov rcx, 4294967295
     cmp rax, rcx
-    jne .L5
+    jne .L9
     mov rax, 1
-    jmp .__ret_4
-    jmp .L6
-.L5:
-.L6:
+    jmp .__ret_8
+    jmp .L10
+.L9:
+.L10:
     mov rax, 0
-    jmp .__ret_4
-.__ret_4:
+    jmp .__ret_8
+.__ret_8:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -275,8 +339,8 @@ pw_put8:
     call pw_sb
     add rsp, 32
     mov rax, 0
-    jmp .__ret_7
-.__ret_7:
+    jmp .__ret_11
+.__ret_11:
     mov rbx, [rbp-48]
     mov r12, [rbp-40]
     mov rsp, rbp
@@ -316,8 +380,8 @@ pw_put16:
     call pw_sb
     add rsp, 32
     mov rax, 0
-    jmp .__ret_8
-.__ret_8:
+    jmp .__ret_12
+.__ret_12:
     mov rbx, [rbp-48]
     mov r12, [rbp-40]
     mov rsp, rbp
@@ -337,54 +401,8 @@ pw_put32:
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L10:
-    cmp rbx, 4
-    jge .L11
-    mov rax, r12
-    add rax, rbx
-    push rax
-    mov rax, rbx
-    mov rcx, 8
-    imul rax, rcx
-    mov rcx, rax
-    mov rax, r13
-    sar rax, cl
-    and rax, 255
-    push rax
-    pop rdx
-    pop rcx
-    sub rsp, 32
-    call pw_sb
-    add rsp, 32
-    add rbx, 1
-.L12:
-    jmp .L10
-.L11:
-    mov rax, 0
-    jmp .__ret_9
-.__ret_9:
-    mov rbx, [rbp-64]
-    mov r12, [rbp-56]
-    mov r13, [rbp-48]
-    mov rsp, rbp
-    pop rbp
-    ret
-pw_put64:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 96
-    mov [rbp-64], rbx
-    mov [rbp-56], r12
-    mov [rbp-48], r13
-    mov rbx, rcx
-    mov r13, rdx
-    mov rax, [rel __g_pe_writer_pw_buf]
-    add rax, rbx
-    mov r12, rax
-    mov rax, 0
-    mov rbx, rax
 .L14:
-    cmp rbx, 8
+    cmp rbx, 4
     jge .L15
     mov rax, r12
     add rax, rbx
@@ -415,6 +433,52 @@ pw_put64:
     mov rsp, rbp
     pop rbp
     ret
+pw_put64:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-64], rbx
+    mov [rbp-56], r12
+    mov [rbp-48], r13
+    mov rbx, rcx
+    mov r13, rdx
+    mov rax, [rel __g_pe_writer_pw_buf]
+    add rax, rbx
+    mov r12, rax
+    mov rax, 0
+    mov rbx, rax
+.L18:
+    cmp rbx, 8
+    jge .L19
+    mov rax, r12
+    add rax, rbx
+    push rax
+    mov rax, rbx
+    mov rcx, 8
+    imul rax, rcx
+    mov rcx, rax
+    mov rax, r13
+    sar rax, cl
+    and rax, 255
+    push rax
+    pop rdx
+    pop rcx
+    sub rsp, 32
+    call pw_sb
+    add rsp, 32
+    add rbx, 1
+.L20:
+    jmp .L18
+.L19:
+    mov rax, 0
+    jmp .__ret_17
+.__ret_17:
+    mov rbx, [rbp-64]
+    mov r12, [rbp-56]
+    mov r13, [rbp-48]
+    mov rsp, rbp
+    pop rbp
+    ret
 pw_align:
     push rbp
     mov rbp, rsp
@@ -432,8 +496,8 @@ pw_align:
     mov rcx, rax
     pop rax
     and rax, rcx
-    jmp .__ret_17
-.__ret_17:
+    jmp .__ret_21
+.__ret_21:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -450,9 +514,9 @@ pw_zero:
     mov r12, rdx
     mov rax, 0
     mov rbx, rax
-.L19:
+.L23:
     cmp rbx, r12
-    jge .L20
+    jge .L24
     mov rax, r13
     add rax, rbx
     push rax
@@ -462,12 +526,12 @@ pw_zero:
     call pw_sb
     add rsp, 32
     add rbx, 1
-.L21:
-    jmp .L19
-.L20:
+.L25:
+    jmp .L23
+.L24:
     mov rax, 0
-    jmp .__ret_18
-.__ret_18:
+    jmp .__ret_22
+.__ret_22:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -483,7 +547,7 @@ pw_cstrlen:
     mov r12, rcx
     mov rax, 0
     mov rbx, rax
-.L23:
+.L27:
     mov rax, r12
     add rax, rbx
     push rax
@@ -492,14 +556,14 @@ pw_cstrlen:
     call pw_b
     add rsp, 32
     cmp rax, 0
-    je .L24
+    je .L28
     add rbx, 1
-.L25:
-    jmp .L23
-.L24:
+.L29:
+    jmp .L27
+.L28:
     mov rax, rbx
-    jmp .__ret_22
-.__ret_22:
+    jmp .__ret_26
+.__ret_26:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -552,8 +616,8 @@ pw_set_main:
     call pw_sb
     add rsp, 32
     mov rax, 0
-    jmp .__ret_26
-.__ret_26:
+    jmp .__ret_30
+.__ret_30:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -653,8 +717,8 @@ pw_set_dllmain:
     call pw_sb
     add rsp, 32
     mov rax, 0
-    jmp .__ret_27
-.__ret_27:
+    jmp .__ret_31
+.__ret_31:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -770,8 +834,8 @@ pw_set_dllname:
     call pw_sb
     add rsp, 32
     mov rax, 0
-    jmp .__ret_28
-.__ret_28:
+    jmp .__ret_32
+.__ret_32:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -789,22 +853,22 @@ pw_name_cmp:
     mov rbx, rdx
     mov rcx, r12
     sub rsp, 32
-    call pw_export_name
+    call cgk_export_name
     add rsp, 32
     mov [rbp-24], rax
     mov rcx, r12
     sub rsp, 32
-    call pw_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov [rbp-32], rax
     mov rcx, rbx
     sub rsp, 32
-    call pw_export_name
+    call cgk_export_name
     add rsp, 32
     mov r15, rax
     mov rcx, rbx
     sub rsp, 32
-    call pw_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov r14, rax
     mov rax, 0
@@ -813,18 +877,18 @@ pw_name_cmp:
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L30:
+.L34:
     mov rax, r13
     mov rcx, [rbp-32]
     cmp rax, rcx
-    jge .L31
+    jge .L35
     cmp r13, r14
-    jl .L33
+    jl .L37
     mov rax, 1
-    jmp .__ret_29
-    jmp .L34
-.L33:
-.L34:
+    jmp .__ret_33
+    jmp .L38
+.L37:
+.L38:
     mov rax, [rbp-24]
     add rax, r13
     push rax
@@ -842,26 +906,26 @@ pw_name_cmp:
     add rsp, 32
     mov rbx, rax
     cmp r12, rbx
-    jle .L35
+    jle .L39
     mov rax, 1
-    jmp .__ret_29
-    jmp .L36
-.L35:
-.L36:
+    jmp .__ret_33
+    jmp .L40
+.L39:
+.L40:
     cmp r12, rbx
-    jge .L37
+    jge .L41
     mov rax, 0
-    jmp .__ret_29
-    jmp .L38
-.L37:
-.L38:
+    jmp .__ret_33
+    jmp .L42
+.L41:
+.L42:
     add r13, 1
-.L32:
-    jmp .L30
-.L31:
+.L36:
+    jmp .L34
+.L35:
     mov rax, 0
-    jmp .__ret_29
-.__ret_29:
+    jmp .__ret_33
+.__ret_33:
     mov rbx, [rbp-128]
     mov r12, [rbp-120]
     mov r13, [rbp-112]
@@ -885,16 +949,16 @@ pw_rel_close:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L40
+    jne .L44
     mov rax, rbx
-    jmp .__ret_39
-    jmp .L41
-.L40:
-.L41:
+    jmp .__ret_43
+    jmp .L45
+.L44:
+.L45:
     mov rax, rbx
     and rax, 2
     cmp rax, 0
-    je .L42
+    je .L46
     mov rax, [rel __g_pe_writer_pw_idata_foff]
     add rax, rbx
     push rax
@@ -904,9 +968,9 @@ pw_rel_close:
     call pw_put16
     add rsp, 32
     add rbx, 2
-    jmp .L43
-.L42:
-.L43:
+    jmp .L47
+.L46:
+.L47:
     mov rax, [rel __g_pe_writer_pw_idata_foff]
     push rax
     mov rax, [rel __g_pe_writer_pw_rel_block]
@@ -928,8 +992,8 @@ pw_rel_close:
     call pw_put32
     add rsp, 32
     mov rax, rbx
-    jmp .__ret_39
-.__ret_39:
+    jmp .__ret_43
+.__ret_43:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -984,16 +1048,16 @@ pw_dll_tables:
     mov rax, 0
     mov r12, rax
     sub rsp, 32
-    call pw_export_count
+    call cgk_export_count
     add rsp, 32
     mov r15, rax
     mov rax, r15
     mov [rel __g_pe_writer_pw_exp_n], rax
     mov rax, 0
     mov r14, rax
-.L45:
+.L49:
     cmp r14, r15
-    jge .L46
+    jge .L50
     lea rax, [rel __g_pe_writer_pw_exp_order]
     push rax
     pop rcx
@@ -1003,19 +1067,19 @@ pw_dll_tables:
     call pw_qs
     add rsp, 32
     add r14, 1
-.L47:
-    jmp .L45
-.L46:
+.L51:
+    jmp .L49
+.L50:
     mov rax, 1
     mov r14, rax
-.L48:
+.L52:
     cmp r14, r15
-    jge .L49
+    jge .L53
     mov rax, r14
     mov r12, rax
-.L51:
+.L55:
     cmp r12, 0
-    jle .L52
+    jle .L56
     lea rax, [rel __g_pe_writer_pw_exp_order]
     push rax
     mov rax, r12
@@ -1041,11 +1105,11 @@ pw_dll_tables:
     call pw_name_cmp
     add rsp, 32
     cmp rax, 0
-    jne .L54
-    jmp .L52
-    jmp .L55
-.L54:
-.L55:
+    jne .L58
+    jmp .L56
+    jmp .L59
+.L58:
+.L59:
     lea rax, [rel __g_pe_writer_pw_exp_order]
     push rax
     mov rax, r12
@@ -1085,13 +1149,13 @@ pw_dll_tables:
     call pw_qs
     add rsp, 32
     sub r12, 1
-.L53:
-    jmp .L51
-.L52:
+.L57:
+    jmp .L55
+.L56:
     add r14, 1
-.L50:
-    jmp .L48
-.L49:
+.L54:
+    jmp .L52
+.L53:
     mov rax, [rel __g_pe_writer_pw_idata_size]
     add rax, 7
     push rax
@@ -1226,9 +1290,9 @@ pw_dll_tables:
     add rsp, 32
     mov rax, 0
     mov r14, rax
-.L56:
+.L60:
     cmp r14, r15
-    jge .L57
+    jge .L61
     lea rax, [rel __g_pe_writer_pw_exp_order]
     push rax
     pop rcx
@@ -1258,19 +1322,19 @@ pw_dll_tables:
     add rsp, 32
     mov rcx, rbx
     sub rsp, 32
-    call pw_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov r12, rax
     mov rcx, rbx
     sub rsp, 32
-    call pw_export_name
+    call cgk_export_name
     add rsp, 32
     mov [rbp-80], rax
     mov rax, 0
     mov rbx, rax
-.L59:
+.L63:
     cmp rbx, r12
-    jge .L60
+    jge .L64
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -1294,9 +1358,9 @@ pw_dll_tables:
     call pw_sb
     add rsp, 32
     add rbx, 1
-.L61:
-    jmp .L59
-.L60:
+.L65:
+    jmp .L63
+.L64:
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -1353,9 +1417,9 @@ pw_dll_tables:
     add rsp, 32
     mov rax, 0
     mov rbx, rax
-.L62:
+.L66:
     cmp rbx, r12
-    jge .L63
+    jge .L67
     lea rax, [rel __g_pe_writer_pw_name]
     add rax, 5
     add rax, rbx
@@ -1374,9 +1438,9 @@ pw_dll_tables:
     call pw_sb
     add rsp, 32
     add rbx, 1
-.L64:
-    jmp .L62
-.L63:
+.L68:
+    jmp .L66
+.L67:
     lea rax, [rel __g_pe_writer_pw_name]
     add rax, 5
     add rax, r12
@@ -1414,7 +1478,7 @@ pw_dll_tables:
     pop rdx
     pop rcx
     sub rsp, 32
-    call kasm_find_label
+    call ks_find_label
     add rsp, 32
     mov rbx, rax
     mov rcx, rbx
@@ -1422,7 +1486,7 @@ pw_dll_tables:
     call pw_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L65
+    jne .L69
     mov rax, [rel __g_pe_writer_pw_idata_foff]
     mov rcx, [rbp-48]
     add rax, rcx
@@ -1438,7 +1502,7 @@ pw_dll_tables:
     push rax
     mov rcx, rbx
     sub rsp, 32
-    call pw_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -1449,13 +1513,13 @@ pw_dll_tables:
     sub rsp, 32
     call pw_put32
     add rsp, 32
-    jmp .L66
-.L65:
-.L66:
+    jmp .L70
+.L69:
+.L70:
     add r14, 1
-.L58:
-    jmp .L56
-.L57:
+.L62:
+    jmp .L60
+.L61:
     mov rax, [rel __g_pe_writer_pw_exp_dir]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -1474,10 +1538,10 @@ pw_dll_tables:
     add rsp, 32
     mov rax, 0
     mov rbx, rax
-.L67:
+.L71:
     mov rax, 1
     cmp rax, 1
-    jne .L68
+    jne .L72
     sub rsp, 32
     call pw_dll_file_addr
     add rsp, 32
@@ -1504,14 +1568,14 @@ pw_dll_tables:
     add r13, 1
     add rbx, 1
     cmp r12, 0
-    jne .L70
-    jmp .L68
+    jne .L74
+    jmp .L72
+    jmp .L75
+.L74:
+.L75:
+.L73:
     jmp .L71
-.L70:
-.L71:
-.L69:
-    jmp .L67
-.L68:
+.L72:
     mov rax, r13
     push rax
     mov rax, [rel __g_pe_writer_pw_exp_dir]
@@ -1562,25 +1626,25 @@ pw_dll_tables:
     neg rax
     mov [rel __g_pe_writer_pw_rel_block], rax
     sub rsp, 32
-    call kasm_get_fixup_count
+    call ksk_fixup_count
     add rsp, 32
     mov [rbp-120], rax
     mov rax, 0
     mov r14, rax
-.L72:
+.L76:
     mov rax, r14
     mov rcx, [rbp-120]
     cmp rax, rcx
-    jge .L73
+    jge .L77
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_kind
+    call ksk_fixup_kind
     add rsp, 32
     cmp rax, 6
-    jne .L75
+    jne .L79
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_label
+    call ksk_fixup_label
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -1588,10 +1652,10 @@ pw_dll_tables:
     call pw_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L77
+    jne .L81
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_at
+    call ksk_fixup_at
     add rsp, 32
     push rax
     mov rax, [rel __g_pe_writer_pw_data_rva]
@@ -1611,7 +1675,7 @@ pw_dll_tables:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    je .L79
+    je .L83
     mov rcx, r13
     sub rsp, 32
     call pw_rel_close
@@ -1630,9 +1694,9 @@ pw_dll_tables:
     call pw_put32
     add rsp, 32
     add r13, 8
-    jmp .L80
-.L79:
-.L80:
+    jmp .L84
+.L83:
+.L84:
     mov rax, [rel __g_pe_writer_pw_idata_foff]
     add rax, r13
     push rax
@@ -1646,16 +1710,16 @@ pw_dll_tables:
     call pw_put16
     add rsp, 32
     add r13, 2
-    jmp .L78
-.L77:
+    jmp .L82
+.L81:
+.L82:
+    jmp .L80
+.L79:
+.L80:
+    add r14, 1
 .L78:
     jmp .L76
-.L75:
-.L76:
-    add r14, 1
-.L74:
-    jmp .L72
-.L73:
+.L77:
     mov rcx, r13
     sub rsp, 32
     call pw_rel_close
@@ -1688,8 +1752,8 @@ pw_dll_tables:
     mov rax, r13
     mov [rel __g_pe_writer_pw_idata_size], rax
     mov rax, 0
-    jmp .__ret_44
-.__ret_44:
+    jmp .__ret_48
+.__ret_48:
     mov rbx, [rbp-208]
     mov r12, [rbp-200]
     mov r13, [rbp-192]
@@ -1755,31 +1819,31 @@ pe_write:
     mov rax, [rbp-8]
     mov [rel __g_pe_writer_pw_buf], rax
     sub rsp, 32
-    call kasm_get_code
+    call ksk_code
     add rsp, 32
     mov [rel __g_pe_writer_pw_code_ptr], rax
     sub rsp, 32
-    call kasm_get_code_size
+    call ksk_code_size
     add rsp, 32
     mov [rel __g_pe_writer_pw_code_len], rax
     sub rsp, 32
-    call kasm_get_data
+    call ksk_data
     add rsp, 32
     mov [rel __g_pe_writer_pw_data_ptr], rax
     sub rsp, 32
-    call kasm_get_data_size
+    call ksk_data_size
     add rsp, 32
     mov [rel __g_pe_writer_pw_data_len], rax
     sub rsp, 32
-    call kasm_get_bss_size
+    call ksk_bss_size
     add rsp, 32
     mov [rel __g_pe_writer_pw_bss_len], rax
     sub rsp, 32
-    call kasm_get_ext_count
+    call ksk_ext_count
     add rsp, 32
     mov [rel __g_pe_writer_pw_ext_count], rax
     sub rsp, 32
-    call kasm_get_extref_count
+    call ksk_extref_count
     add rsp, 32
     mov [rel __g_pe_writer_pw_xref_count], rax
     sub rsp, 32
@@ -1795,7 +1859,7 @@ pe_write:
     lea rax, [rel __g_pe_writer_pw_name]
     mov r14, rax
     cmp rbx, 0
-    je .L82
+    je .L86
     mov rax, 6442450944
     mov [rel __g_pe_writer_pw_base], rax
     mov rcx, r14
@@ -1804,19 +1868,19 @@ pe_write:
     add rsp, 32
     mov rax, 10
     mov r12, rax
-    jmp .L83
-.L82:
+    jmp .L87
+.L86:
     mov rcx, r14
     sub rsp, 32
     call pw_set_main
     add rsp, 32
     mov rax, 4
     mov r12, rax
-.L83:
+.L87:
     mov rcx, r14
     mov rdx, r12
     sub rsp, 32
-    call kasm_find_label
+    call ks_find_label
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -1824,22 +1888,22 @@ pe_write:
     call pw_neg1
     add rsp, 32
     cmp rax, 0
-    je .L84
+    je .L88
     mov rax, [rel __g_pe_writer_PW_TEXT_RVA]
     mov [rel __g_pe_writer_pw_entry_rva], rax
-    jmp .L85
-.L84:
+    jmp .L89
+.L88:
     mov rax, [rel __g_pe_writer_PW_TEXT_RVA]
     push rax
     mov rcx, r12
     sub rsp, 32
-    call pw_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rcx, rax
     pop rax
     add rax, rcx
     mov [rel __g_pe_writer_pw_entry_rva], rax
-.L85:
+.L89:
     mov rax, [rel __g_pe_writer_pw_code_len]
     push rax
     pop rcx
@@ -2024,20 +2088,20 @@ pe_write:
     call pw_put16
     add rsp, 32
     cmp rbx, 0
-    jne .L86
+    jne .L90
     mov rcx, 206
     mov rdx, 35
     sub rsp, 32
     call pw_put16
     add rsp, 32
-    jmp .L87
-.L86:
+    jmp .L91
+.L90:
     mov rcx, 206
     mov rdx, 8226
     sub rsp, 32
     call pw_put16
     add rsp, 32
-.L87:
+.L91:
     mov rcx, 208
     mov rdx, 523
     sub rsp, 32
@@ -2122,35 +2186,35 @@ pe_write:
     call pw_put32
     add rsp, 32
     cmp r13, 0
-    je .L88
+    je .L92
     mov rcx, 276
     mov rdx, 2
     sub rsp, 32
     call pw_put16
     add rsp, 32
-    jmp .L89
-.L88:
+    jmp .L93
+.L92:
     mov rcx, 276
     mov rdx, 3
     sub rsp, 32
     call pw_put16
     add rsp, 32
-.L89:
+.L93:
     cmp rbx, 0
-    jne .L90
+    jne .L94
     mov rcx, 278
     mov rdx, 0
     sub rsp, 32
     call pw_put16
     add rsp, 32
-    jmp .L91
-.L90:
+    jmp .L95
+.L94:
     mov rcx, 278
     mov rdx, 96
     sub rsp, 32
     call pw_put16
     add rsp, 32
-.L91:
+.L95:
     mov rcx, 280
     mov rdx, 8388608
     sub rsp, 32
@@ -2291,14 +2355,14 @@ pe_write:
     add rsp, 32
     mov rax, [rel __g_pe_writer_pw_data_raw]
     cmp rax, 0
-    jne .L92
+    jne .L96
     mov rcx, 508
     mov rdx, 0
     sub rsp, 32
     call pw_put32
     add rsp, 32
-    jmp .L93
-.L92:
+    jmp .L97
+.L96:
     mov rax, 508
     push rax
     mov rax, [rel __g_pe_writer_pw_data_foff]
@@ -2308,7 +2372,7 @@ pe_write:
     sub rsp, 32
     call pw_put32
     add rsp, 32
-.L93:
+.L97:
     mov rcx, 524
     mov rdx, 3221225536
     sub rsp, 32
@@ -2344,14 +2408,14 @@ pe_write:
     add rsp, 32
     mov rax, 0
     mov r14, rax
-.L94:
+.L98:
     mov rax, r14
     push rax
     mov rax, [rel __g_pe_writer_pw_code_len]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L95
+    jge .L99
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_text_foff]
@@ -2374,19 +2438,19 @@ pe_write:
     call pw_sb
     add rsp, 32
     add r14, 1
-.L96:
-    jmp .L94
-.L95:
+.L100:
+    jmp .L98
+.L99:
     mov rax, 0
     mov r14, rax
-.L97:
+.L101:
     mov rax, r14
     push rax
     mov rax, [rel __g_pe_writer_pw_data_len]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L98
+    jge .L102
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_data_foff]
@@ -2409,19 +2473,19 @@ pe_write:
     call pw_sb
     add rsp, 32
     add r14, 1
-.L99:
-    jmp .L97
-.L98:
+.L103:
+    jmp .L101
+.L102:
     mov rax, 0
     mov r15, rax
-.L100:
+.L104:
     mov rax, r15
     push rax
     mov rax, [rel __g_pe_writer_pw_ext_count]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L101
+    jge .L105
     mov rax, r15
     push rax
     mov rax, [rel __g_pe_writer_PW_THUNK]
@@ -2487,27 +2551,27 @@ pe_write:
     call pw_put32
     add rsp, 32
     add r15, 1
-.L102:
-    jmp .L100
-.L101:
+.L106:
+    jmp .L104
+.L105:
     mov rax, 0
     mov r15, rax
-.L103:
+.L107:
     mov rax, r15
     push rax
     mov rax, [rel __g_pe_writer_pw_xref_count]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L104
+    jge .L108
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_extref_at
+    call ksk_extref_at
     add rsp, 32
     mov r13, rax
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_extref_sym
+    call ksk_extref_sym
     add rsp, 32
     mov r12, rax
     mov rax, [rel __g_pe_writer_PW_TEXT_RVA]
@@ -2543,30 +2607,30 @@ pe_write:
     call pw_put32
     add rsp, 32
     add r15, 1
-.L105:
-    jmp .L103
-.L104:
+.L109:
+    jmp .L107
+.L108:
     sub rsp, 32
-    call kasm_get_fixup_count
+    call ksk_fixup_count
     add rsp, 32
     mov [rbp-136], rax
     mov rax, 0
     mov r15, rax
-.L106:
+.L110:
     mov rax, r15
     mov rcx, [rbp-136]
     cmp rax, rcx
-    jge .L107
+    jge .L111
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_kind
+    call ksk_fixup_kind
     add rsp, 32
     mov r12, rax
     cmp r12, 6
-    jne .L109
+    jne .L113
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_label
+    call ksk_fixup_label
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -2574,27 +2638,27 @@ pe_write:
     call pw_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L111
+    jne .L115
     mov rcx, r12
     sub rsp, 32
-    call kasm_get_label_section
+    call ksk_label_section
     add rsp, 32
     mov r13, rax
     mov rcx, r12
     sub rsp, 32
-    call pw_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov r12, rax
     cmp r13, 0
-    jne .L113
+    jne .L117
     mov rax, [rel __g_pe_writer_PW_TEXT_RVA]
     mov r14, rax
-    jmp .L114
-.L113:
+    jmp .L118
+.L117:
     mov rax, [rel __g_pe_writer_pw_data_rva]
     mov r14, rax
     cmp r13, 2
-    jne .L115
+    jne .L119
     mov rax, r14
     push rax
     mov rax, [rel __g_pe_writer_pw_bss_off_sec]
@@ -2602,10 +2666,10 @@ pe_write:
     pop rax
     add rax, rcx
     mov r14, rax
-    jmp .L116
-.L115:
-.L116:
-.L114:
+    jmp .L120
+.L119:
+.L120:
+.L118:
     mov rax, r14
     add rax, r12
     push rax
@@ -2616,7 +2680,7 @@ pe_write:
     mov r14, rax
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_at
+    call ksk_fixup_at
     add rsp, 32
     mov r12, rax
     mov rax, [rel __g_pe_writer_pw_data_foff]
@@ -2627,16 +2691,16 @@ pe_write:
     sub rsp, 32
     call pw_put64
     add rsp, 32
-    jmp .L112
-.L111:
-.L112:
-    jmp .L110
-.L109:
+    jmp .L116
+.L115:
+.L116:
+    jmp .L114
+.L113:
     cmp r12, 3
-    jne .L117
+    jne .L121
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_label
+    call ksk_fixup_label
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -2644,23 +2708,23 @@ pe_write:
     call pw_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L119
+    jne .L123
     mov rcx, r12
     sub rsp, 32
-    call kasm_get_label_section
+    call ksk_label_section
     add rsp, 32
     mov r13, rax
     cmp r13, 1
-    jl .L121
+    jl .L125
     mov rcx, r12
     sub rsp, 32
-    call pw_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov r12, rax
     mov rax, [rel __g_pe_writer_pw_data_rva]
     mov r14, rax
     cmp r13, 2
-    jne .L123
+    jne .L127
     mov rax, r14
     push rax
     mov rax, [rel __g_pe_writer_pw_bss_off_sec]
@@ -2668,15 +2732,15 @@ pe_write:
     pop rax
     add rax, rcx
     mov r14, rax
-    jmp .L124
-.L123:
-.L124:
+    jmp .L128
+.L127:
+.L128:
     mov rax, r14
     add rax, r12
     push rax
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_addend
+    call ksk_fixup_addend
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -2684,7 +2748,7 @@ pe_write:
     mov r14, rax
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_fixup_at
+    call ksk_fixup_at
     add rsp, 32
     mov r12, rax
     mov rax, [rel __g_pe_writer_PW_TEXT_RVA]
@@ -2702,20 +2766,20 @@ pe_write:
     sub rsp, 32
     call pw_put32
     add rsp, 32
+    jmp .L126
+.L125:
+.L126:
+    jmp .L124
+.L123:
+.L124:
     jmp .L122
 .L121:
 .L122:
-    jmp .L120
-.L119:
-.L120:
-    jmp .L118
-.L117:
-.L118:
-.L110:
+.L114:
     add r15, 1
-.L108:
-    jmp .L106
-.L107:
+.L112:
+    jmp .L110
+.L111:
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -2751,14 +2815,14 @@ pe_write:
     mov r13, rax
     mov rax, 0
     mov r15, rax
-.L125:
+.L129:
     mov rax, r15
     push rax
     mov rax, [rel __g_pe_writer_pw_ext_count]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L126
+    jge .L130
     lea rax, [rel __g_pe_writer_pw_hint]
     push rax
     mov rax, r15
@@ -2774,7 +2838,7 @@ pe_write:
     add rsp, 32
     mov rcx, r15
     sub rsp, 32
-    call kasm_get_ext_name
+    call ksk_ext_name
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -2784,11 +2848,11 @@ pe_write:
     mov [rbp-104], rax
     mov rax, 0
     mov r14, rax
-.L128:
+.L132:
     mov rax, r14
     mov rcx, [rbp-104]
     cmp rax, rcx
-    jg .L129
+    jg .L133
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -2813,9 +2877,9 @@ pe_write:
     call pw_sb
     add rsp, 32
     add r14, 1
-.L130:
-    jmp .L128
-.L129:
+.L134:
+    jmp .L132
+.L133:
     mov rax, r13
     add rax, 2
     mov rcx, [rbp-104]
@@ -2825,15 +2889,15 @@ pe_write:
     mov rax, r13
     and rax, 1
     cmp rax, 0
-    je .L131
+    je .L135
     add r13, 1
-    jmp .L132
-.L131:
-.L132:
+    jmp .L136
+.L135:
+.L136:
     add r15, 1
-.L127:
-    jmp .L125
-.L126:
+.L131:
+    jmp .L129
+.L130:
     mov rax, [rel __g_pe_writer_pw_idata_rva]
     add rax, r13
     mov r12, rax
@@ -2845,9 +2909,9 @@ pe_write:
     add rsp, 32
     mov rax, 0
     mov r14, rax
-.L133:
+.L137:
     cmp r14, 13
-    jge .L134
+    jge .L138
     mov rax, [rel __g_pe_writer_pw_buf]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_foff]
@@ -2871,9 +2935,9 @@ pe_write:
     call pw_sb
     add rsp, 32
     add r14, 1
-.L135:
-    jmp .L133
-.L134:
+.L139:
+    jmp .L137
+.L138:
     mov rax, r13
     add rax, 12
     add rax, 1
@@ -2890,14 +2954,14 @@ pe_write:
     add rsp, 32
     mov rax, 0
     mov r15, rax
-.L136:
+.L140:
     mov rax, r15
     push rax
     mov rax, [rel __g_pe_writer_pw_ext_count]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L137
+    jge .L141
     mov rax, [rel __g_pe_writer_pw_ilt_rva]
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_rva]
@@ -2963,17 +3027,17 @@ pe_write:
     call pw_put64
     add rsp, 32
     add r15, 1
-.L138:
-    jmp .L136
-.L137:
+.L142:
+    jmp .L140
+.L141:
     cmp rbx, 0
-    je .L139
+    je .L143
     sub rsp, 32
     call pw_dll_tables
     add rsp, 32
-    jmp .L140
-.L139:
-.L140:
+    jmp .L144
+.L143:
+.L144:
     mov rax, 536
     push rax
     mov rax, [rel __g_pe_writer_pw_idata_size]
@@ -3043,8 +3107,8 @@ pe_write:
     add rax, rcx
     mov [rel __g_pe_writer_pw_total], rax
     mov rax, [rel __g_pe_writer_pw_total]
-    jmp .__ret_81
-.__ret_81:
+    jmp .__ret_85
+.__ret_85:
     mov rbx, [rbp-240]
     mov r12, [rbp-232]
     mov r13, [rbp-224]

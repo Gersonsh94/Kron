@@ -1,6 +1,70 @@
 ; A Kron module, written by kronc --module. Edit the .kr file it comes
 ; from, not this one: the build makes it again.
 section .data
+__g_macho_writer_mo_dylib: dq 0
+section .text
+section .data
+__g_macho_writer_mo_platform: dq 0
+section .text
+section .data
+__g_macho_writer_mo_idname: dq 0
+section .text
+mw_set_flags:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rbp-64], rbx
+    mov [rbp-56], r12
+    mov [rbp-48], r13
+    mov r13, rcx
+    mov r12, rdx
+    mov rbx, r8
+    mov rax, r13
+    mov [rel __g_macho_writer_mo_dylib], rax
+    mov rax, r12
+    mov [rel __g_macho_writer_mo_platform], rax
+    mov rax, rbx
+    mov [rel __g_macho_writer_mo_idname], rax
+    mov rax, 0
+    jmp .__ret_0
+.__ret_0:
+    mov rbx, [rbp-64]
+    mov r12, [rbp-56]
+    mov r13, [rbp-48]
+    mov rsp, rbp
+    pop rbp
+    ret
+mo_get_dylib:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_macho_writer_mo_dylib]
+    jmp .__ret_1
+.__ret_1:
+    mov rsp, rbp
+    pop rbp
+    ret
+mo_get_platform:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_macho_writer_mo_platform]
+    jmp .__ret_2
+.__ret_2:
+    mov rsp, rbp
+    pop rbp
+    ret
+mo_get_idname:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_macho_writer_mo_idname]
+    jmp .__ret_3
+.__ret_3:
+    mov rsp, rbp
+    pop rbp
+    ret
+section .data
 __g_macho_writer_MW_BASE: dq 4294967296
 section .text
 section .data
@@ -144,8 +208,8 @@ mw_p8:
     pop rdx
     mov [rdx], cl
     mov rax, 0
-    jmp .__ret_0
-.__ret_0:
+    jmp .__ret_4
+.__ret_4:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -166,8 +230,8 @@ mw_p16:
     pop rdx
     mov [rdx], cx
     mov rax, 0
-    jmp .__ret_1
-.__ret_1:
+    jmp .__ret_5
+.__ret_5:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -188,8 +252,8 @@ mw_p32:
     pop rdx
     mov [rdx], ecx
     mov rax, 0
-    jmp .__ret_2
-.__ret_2:
+    jmp .__ret_6
+.__ret_6:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -210,8 +274,8 @@ mw_p64:
     pop rdx
     mov [rdx], rcx
     mov rax, 0
-    jmp .__ret_3
-.__ret_3:
+    jmp .__ret_7
+.__ret_7:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -230,8 +294,8 @@ mw_g8:
     movzx rax, byte [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_4
-.__ret_4:
+    jmp .__ret_8
+.__ret_8:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -252,8 +316,8 @@ mw_g32:
     mov rax, rbx
     mov rcx, 4294967295
     and rax, rcx
-    jmp .__ret_5
-.__ret_5:
+    jmp .__ret_9
+.__ret_9:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -272,8 +336,8 @@ mw_g64:
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_6
-.__ret_6:
+    jmp .__ret_10
+.__ret_10:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -292,9 +356,9 @@ mw_copy:
     mov r12, r8
     mov rax, 0
     mov rbx, rax
-.L8:
+.L12:
     cmp rbx, r12
-    jge .L9
+    jge .L13
     mov rax, r14
     add rax, rbx
     push rax
@@ -305,12 +369,12 @@ mw_copy:
     pop rdx
     mov [rdx], cl
     add rbx, 1
-.L10:
-    jmp .L8
-.L9:
+.L14:
+    jmp .L12
+.L13:
     mov rax, r14
-    jmp .__ret_7
-.__ret_7:
+    jmp .__ret_11
+.__ret_11:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -331,9 +395,9 @@ mw_fill:
     mov r12, r8
     mov rax, 0
     mov rbx, rax
-.L12:
+.L16:
     cmp rbx, r13
-    jge .L13
+    jge .L17
     mov rax, r14
     add rax, rbx
     push rax
@@ -342,12 +406,12 @@ mw_fill:
     pop rdx
     mov [rdx], cl
     add rbx, 1
-.L14:
-    jmp .L12
-.L13:
+.L18:
+    jmp .L16
+.L17:
     mov rax, r14
-    jmp .__ret_11
-.__ret_11:
+    jmp .__ret_15
+.__ret_15:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -364,7 +428,7 @@ mw_strlen:
     mov r12, rcx
     mov rax, 0
     mov rbx, rax
-.L16:
+.L20:
     mov rax, r12
     add rax, rbx
     push rax
@@ -373,14 +437,14 @@ mw_strlen:
     call mw_g8
     add rsp, 32
     cmp rax, 0
-    je .L17
+    je .L21
     add rbx, 1
-.L18:
-    jmp .L16
-.L17:
+.L22:
+    jmp .L20
+.L21:
     mov rax, rbx
-    jmp .__ret_15
-.__ret_15:
+    jmp .__ret_19
+.__ret_19:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -399,8 +463,8 @@ mw_page:
     idiv rcx
     mov rcx, 16384
     imul rax, rcx
-    jmp .__ret_19
-.__ret_19:
+    jmp .__ret_23
+.__ret_23:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -430,8 +494,8 @@ mw_b:
     add rax, 1
     mov [rel __g_macho_writer_mw_n], rax
     mov rax, 0
-    jmp .__ret_20
-.__ret_20:
+    jmp .__ret_24
+.__ret_24:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -461,8 +525,8 @@ mw_w16:
     add rax, 2
     mov [rel __g_macho_writer_mw_n], rax
     mov rax, 0
-    jmp .__ret_21
-.__ret_21:
+    jmp .__ret_25
+.__ret_25:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -493,8 +557,8 @@ mw_d:
     add rax, 4
     mov [rel __g_macho_writer_mw_n], rax
     mov rax, 0
-    jmp .__ret_22
-.__ret_22:
+    jmp .__ret_26
+.__ret_26:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -521,8 +585,8 @@ mw_q:
     add rax, 8
     mov [rel __g_macho_writer_mw_n], rax
     mov rax, 0
-    jmp .__ret_23
-.__ret_23:
+    jmp .__ret_27
+.__ret_27:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -536,10 +600,10 @@ mw_uleb:
     mov rbx, rcx
     mov rax, rbx
     mov r12, rax
-.L25:
+.L29:
     mov rax, 1
     cmp rax, 1
-    jne .L26
+    jne .L30
     mov rax, r12
     and rax, 127
     mov rbx, rax
@@ -547,16 +611,16 @@ mw_uleb:
     shr rax, 7
     mov r12, rax
     cmp r12, 0
-    jne .L28
+    jne .L32
     mov rcx, rbx
     sub rsp, 32
     call mw_b
     add rsp, 32
     mov rax, 0
-    jmp .__ret_24
-    jmp .L29
-.L28:
-.L29:
+    jmp .__ret_28
+    jmp .L33
+.L32:
+.L33:
     mov rax, rbx
     or rax, 128
     push rax
@@ -564,12 +628,12 @@ mw_uleb:
     sub rsp, 32
     call mw_b
     add rsp, 32
-.L27:
-    jmp .L25
-.L26:
+.L31:
+    jmp .L29
+.L30:
     mov rax, 0
-    jmp .__ret_24
-.__ret_24:
+    jmp .__ret_28
+.__ret_28:
     mov rbx, [rbp-48]
     mov r12, [rbp-40]
     mov rsp, rbp
@@ -585,10 +649,10 @@ mw_str:
     mov r13, rcx
     mov rax, 0
     mov r12, rax
-.L31:
+.L35:
     mov rax, 1
     cmp rax, 1
-    jne .L32
+    jne .L36
     mov rax, r13
     add rax, r12
     push rax
@@ -602,19 +666,19 @@ mw_str:
     call mw_b
     add rsp, 32
     cmp rbx, 0
-    jne .L34
+    jne .L38
     mov rax, 0
-    jmp .__ret_30
-    jmp .L35
-.L34:
-.L35:
+    jmp .__ret_34
+    jmp .L39
+.L38:
+.L39:
     add r12, 1
-.L33:
-    jmp .L31
-.L32:
+.L37:
+    jmp .L35
+.L36:
     mov rax, 0
-    jmp .__ret_30
-.__ret_30:
+    jmp .__ret_34
+.__ret_34:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -625,21 +689,21 @@ mw_align8:
     push rbp
     mov rbp, rsp
     sub rsp, 32
-.L37:
+.L41:
     mov rax, [rel __g_macho_writer_mw_n]
     and rax, 7
     cmp rax, 0
-    je .L38
+    je .L42
     mov rcx, 0
     sub rsp, 32
     call mw_b
     add rsp, 32
-.L39:
-    jmp .L37
-.L38:
+.L43:
+    jmp .L41
+.L42:
     mov rax, 0
-    jmp .__ret_36
-.__ret_36:
+    jmp .__ret_40
+.__ret_40:
     mov rsp, rbp
     pop rbp
     ret
@@ -650,51 +714,51 @@ mw_sym_name:
     mov [rbp-32], rbx
     mov rbx, rcx
     cmp rbx, 0
-    jne .L41
+    jne .L45
 section .data
-.str43: db 95,112,116,104,114,101,97,100,95,99,114,101,97,116,101,0
+.str47: db 95,112,116,104,114,101,97,100,95,99,114,101,97,116,101,0
 section .text
-    lea rax, [rel .str43]
-    jmp .__ret_40
-    jmp .L42
-.L41:
-.L42:
-    cmp rbx, 1
-    jne .L44
-section .data
-.str46: db 95,112,116,104,114,101,97,100,95,100,101,116,97,99,104,0
-section .text
-    lea rax, [rel .str46]
-    jmp .__ret_40
-    jmp .L45
-.L44:
+    lea rax, [rel .str47]
+    jmp .__ret_44
+    jmp .L46
 .L45:
-    cmp rbx, 2
-    jne .L47
+.L46:
+    cmp rbx, 1
+    jne .L48
 section .data
-.str49: db 95,100,108,111,112,101,110,0
+.str50: db 95,112,116,104,114,101,97,100,95,100,101,116,97,99,104,0
 section .text
-    lea rax, [rel .str49]
-    jmp .__ret_40
-    jmp .L48
-.L47:
+    lea rax, [rel .str50]
+    jmp .__ret_44
+    jmp .L49
 .L48:
-    cmp rbx, 3
-    jne .L50
+.L49:
+    cmp rbx, 2
+    jne .L51
 section .data
-.str52: db 95,100,108,115,121,109,0
-section .text
-    lea rax, [rel .str52]
-    jmp .__ret_40
-    jmp .L51
-.L50:
-.L51:
-section .data
-.str53: db 95,101,120,105,116,0
+.str53: db 95,100,108,111,112,101,110,0
 section .text
     lea rax, [rel .str53]
-    jmp .__ret_40
-.__ret_40:
+    jmp .__ret_44
+    jmp .L52
+.L51:
+.L52:
+    cmp rbx, 3
+    jne .L54
+section .data
+.str56: db 95,100,108,115,121,109,0
+section .text
+    lea rax, [rel .str56]
+    jmp .__ret_44
+    jmp .L55
+.L54:
+.L55:
+section .data
+.str57: db 95,101,120,105,116,0
+section .text
+    lea rax, [rel .str57]
+    jmp .__ret_44
+.__ret_44:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -706,51 +770,51 @@ mw_sym_label:
     mov [rbp-32], rbx
     mov rbx, rcx
     cmp rbx, 0
-    jne .L55
+    jne .L59
 section .data
-.str57: db 95,95,109,97,99,95,103,111,116,95,99,114,101,97,116,101,0
+.str61: db 95,95,109,97,99,95,103,111,116,95,99,114,101,97,116,101,0
 section .text
-    lea rax, [rel .str57]
-    jmp .__ret_54
-    jmp .L56
-.L55:
-.L56:
-    cmp rbx, 1
-    jne .L58
-section .data
-.str60: db 95,95,109,97,99,95,103,111,116,95,100,101,116,97,99,104,0
-section .text
-    lea rax, [rel .str60]
-    jmp .__ret_54
-    jmp .L59
-.L58:
+    lea rax, [rel .str61]
+    jmp .__ret_58
+    jmp .L60
 .L59:
-    cmp rbx, 2
-    jne .L61
+.L60:
+    cmp rbx, 1
+    jne .L62
 section .data
-.str63: db 95,95,103,111,116,95,100,108,111,112,101,110,0
+.str64: db 95,95,109,97,99,95,103,111,116,95,100,101,116,97,99,104,0
 section .text
-    lea rax, [rel .str63]
-    jmp .__ret_54
-    jmp .L62
-.L61:
+    lea rax, [rel .str64]
+    jmp .__ret_58
+    jmp .L63
 .L62:
-    cmp rbx, 3
-    jne .L64
+.L63:
+    cmp rbx, 2
+    jne .L65
 section .data
-.str66: db 95,95,103,111,116,95,100,108,115,121,109,0
-section .text
-    lea rax, [rel .str66]
-    jmp .__ret_54
-    jmp .L65
-.L64:
-.L65:
-section .data
-.str67: db 95,95,103,111,116,95,101,120,105,116,0
+.str67: db 95,95,103,111,116,95,100,108,111,112,101,110,0
 section .text
     lea rax, [rel .str67]
-    jmp .__ret_54
-.__ret_54:
+    jmp .__ret_58
+    jmp .L66
+.L65:
+.L66:
+    cmp rbx, 3
+    jne .L68
+section .data
+.str70: db 95,95,103,111,116,95,100,108,115,121,109,0
+section .text
+    lea rax, [rel .str70]
+    jmp .__ret_58
+    jmp .L69
+.L68:
+.L69:
+section .data
+.str71: db 95,95,103,111,116,95,101,120,105,116,0
+section .text
+    lea rax, [rel .str71]
+    jmp .__ret_58
+.__ret_58:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -781,35 +845,35 @@ mw_write:
     mov [rel __g_macho_writer_mw_base], rax
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    je .L69
+    je .L73
     mov rax, 0
     mov [rel __g_macho_writer_mw_base], rax
-    jmp .L70
-.L69:
-.L70:
+    jmp .L74
+.L73:
+.L74:
     sub rsp, 32
-    call karm_reloc_text
+    call kc_reloc_text
     add rsp, 32
     cmp rax, 0
-    je .L71
+    je .L75
     mov rax, 0
-    jmp .__ret_68
-    jmp .L72
-.L71:
-.L72:
+    jmp .__ret_72
+    jmp .L76
+.L75:
+.L76:
     sub rsp, 32
-    call karm_build_image
+    call kc_build_image
     add rsp, 32
     sub rsp, 32
-    call karm_get_code_len
+    call kc_get_code_len
     add rsp, 32
     mov [rel __g_macho_writer_mw_code_len], rax
     sub rsp, 32
-    call karm_get_data_len
+    call kc_get_data_len
     add rsp, 32
     mov [rel __g_macho_writer_mw_data_len], rax
     sub rsp, 32
-    call karm_get_bss_size
+    call kc_get_bss_size
     add rsp, 32
     mov [rel __g_macho_writer_mw_bss_len], rax
     mov rax, [rel __g_macho_writer_mw_code_len]
@@ -849,15 +913,15 @@ mw_write:
     mov r14, rax
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    jne .L73
+    jne .L77
 section .data
-.str75: db 95,95,109,97,99,95,109,97,105,110,0
+.str79: db 95,95,109,97,99,95,109,97,105,110,0
 section .text
-    lea rax, [rel .str75]
+    lea rax, [rel .str79]
     push rax
     pop rcx
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
@@ -867,12 +931,12 @@ section .text
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L76
+    jne .L80
     mov rax, 0
-    jmp .__ret_68
-    jmp .L77
-.L76:
-.L77:
+    jmp .__ret_72
+    jmp .L81
+.L80:
+.L81:
     mov rax, rbx
     push rax
     mov rax, [rel __g_macho_writer_mw_base]
@@ -882,30 +946,30 @@ section .text
     mov [rel __g_macho_writer_mw_entry], rax
     mov rax, 1
     mov [rel __g_macho_writer_mw_ndef], rax
-    jmp .L74
-.L73:
+    jmp .L78
+.L77:
     sub rsp, 32
-    call codegen_export_count
+    call cgk_export_count
     add rsp, 32
     mov [rel __g_macho_writer_mw_ndef], rax
     mov rax, 0
     mov r14, rax
-.L78:
+.L82:
     mov rax, r14
     push rax
     mov rax, [rel __g_macho_writer_mw_ndef]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L79
+    jge .L83
     mov rcx, r14
     sub rsp, 32
-    call ew_export_name
+    call cgk_export_name
     add rsp, 32
     mov r12, rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov rbx, rax
     lea rax, [rel __g_macho_writer_mw_lbl]
@@ -970,7 +1034,7 @@ section .text
     push rax
     pop rcx
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
@@ -980,12 +1044,12 @@ section .text
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L81
+    jne .L85
     mov rax, 0
-    jmp .__ret_68
-    jmp .L82
-.L81:
-.L82:
+    jmp .__ret_72
+    jmp .L86
+.L85:
+.L86:
     lea rax, [rel __g_macho_writer_mw_exp_addr]
     push rax
     mov rax, r14
@@ -1008,20 +1072,20 @@ section .text
     call mw_p64
     add rsp, 32
     add r14, 1
-.L80:
-    jmp .L78
-.L79:
-.L74:
+.L84:
+    jmp .L82
+.L83:
+.L78:
     mov rax, 0
     mov r12, rax
-.L83:
+.L87:
     mov rax, r12
     push rax
     mov rax, [rel __g_macho_writer_MW_NSYM]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L84
+    jge .L88
     mov rcx, r12
     sub rsp, 32
     call mw_sym_label
@@ -1029,7 +1093,7 @@ section .text
     push rax
     pop rcx
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
@@ -1039,12 +1103,12 @@ section .text
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L86
+    jne .L90
     mov rax, 0
-    jmp .__ret_68
-    jmp .L87
-.L86:
-.L87:
+    jmp .__ret_72
+    jmp .L91
+.L90:
+.L91:
     lea rax, [rel __g_macho_writer_mw_got]
     push rax
     mov rax, r12
@@ -1072,9 +1136,9 @@ section .text
     call mw_p64
     add rsp, 32
     add r12, 1
-.L85:
-    jmp .L83
-.L84:
+.L89:
+    jmp .L87
+.L88:
     mov rax, [rel __g_macho_writer_mw_out]
     push rax
     mov rax, [rel __g_macho_writer_MW_CODE]
@@ -1093,7 +1157,7 @@ section .text
     add rax, rcx
     push rax
     sub rsp, 32
-    call karm_get_code
+    call kc_get_code
     add rsp, 32
     push rax
     mov rax, [rel __g_macho_writer_mw_code_len]
@@ -1142,7 +1206,7 @@ section .text
     add rax, rcx
     push rax
     sub rsp, 32
-    call karm_get_code
+    call kc_get_code
     add rsp, 32
     push rax
     mov rax, [rel __g_macho_writer_mw_code_len]
@@ -1200,23 +1264,23 @@ section .text
     mov rax, [rel __g_macho_writer_mw_n]
     mov [rel __g_macho_writer_mw_rebase_off], rax
     sub rsp, 32
-    call karm_reloc_count
+    call kc_reloc_count
     add rsp, 32
     mov r13, rax
     cmp r13, 0
-    je .L88
+    je .L92
     mov rcx, 17
     sub rsp, 32
     call mw_b
     add rsp, 32
     mov rax, 0
     mov r12, rax
-.L90:
+.L94:
     cmp r12, r13
-    jge .L91
+    jge .L95
     mov rcx, r12
     sub rsp, 32
-    call karm_reloc_at
+    call kc_reloc_at
     add rsp, 32
     mov rbx, rax
     mov rax, 34
@@ -1239,16 +1303,16 @@ section .text
     call mw_b
     add rsp, 32
     add r12, 1
-.L92:
-    jmp .L90
-.L91:
+.L96:
+    jmp .L94
+.L95:
     mov rcx, 0
     sub rsp, 32
     call mw_b
     add rsp, 32
-    jmp .L89
-.L88:
-.L89:
+    jmp .L93
+.L92:
+.L93:
     sub rsp, 32
     call mw_align8
     add rsp, 32
@@ -1271,14 +1335,14 @@ section .text
     add rsp, 32
     mov rax, 0
     mov r12, rax
-.L93:
+.L97:
     mov rax, r12
     push rax
     mov rax, [rel __g_macho_writer_MW_NSYM]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L94
+    jge .L98
     mov rcx, 64
     sub rsp, 32
     call mw_b
@@ -1326,9 +1390,9 @@ section .text
     call mw_b
     add rsp, 32
     add r12, 1
-.L95:
-    jmp .L93
-.L94:
+.L99:
+    jmp .L97
+.L98:
     mov rcx, 0
     sub rsp, 32
     call mw_b
@@ -1347,12 +1411,12 @@ section .text
     mov [rel __g_macho_writer_mw_export_off], rax
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    je .L96
+    je .L100
     sub rsp, 32
     call mw_trie
     add rsp, 32
-    jmp .L97
-.L96:
+    jmp .L101
+.L100:
     mov rcx, 0
     sub rsp, 32
     call mw_b
@@ -1362,9 +1426,9 @@ section .text
     call mw_b
     add rsp, 32
 section .data
-.str98: db 95,95,109,104,95,101,120,101,99,117,116,101,95,104,101,97,100,101,114,0
+.str102: db 95,95,109,104,95,101,120,101,99,117,116,101,95,104,101,97,100,101,114,0
 section .text
-    lea rax, [rel .str98]
+    lea rax, [rel .str102]
     push rax
     pop rcx
     sub rsp, 32
@@ -1390,7 +1454,7 @@ section .text
     sub rsp, 32
     call mw_b
     add rsp, 32
-.L97:
+.L101:
     sub rsp, 32
     call mw_align8
     add rsp, 32
@@ -1407,19 +1471,19 @@ section .text
     mov rbx, rax
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    je .L99
+    je .L103
     mov rax, 2
     mov rbx, rax
     mov rax, 0
     mov r14, rax
-.L101:
+.L105:
     mov rax, r14
     push rax
     mov rax, [rel __g_macho_writer_mw_ndef]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L102
+    jge .L106
     mov rcx, rbx
     sub rsp, 32
     call mw_d
@@ -1463,7 +1527,7 @@ section .text
     push rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -1471,11 +1535,11 @@ section .text
     add rax, 2
     mov rbx, rax
     add r14, 1
+.L107:
+    jmp .L105
+.L106:
+    jmp .L104
 .L103:
-    jmp .L101
-.L102:
-    jmp .L100
-.L99:
     mov rcx, 2
     sub rsp, 32
     call mw_d
@@ -1500,17 +1564,17 @@ section .text
     add rsp, 32
     mov rax, 22
     mov rbx, rax
-.L100:
+.L104:
     mov rax, 0
     mov r12, rax
-.L104:
+.L108:
     mov rax, r12
     push rax
     mov rax, [rel __g_macho_writer_MW_NSYM]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L105
+    jge .L109
     mov rcx, rbx
     sub rsp, 32
     call mw_d
@@ -1548,9 +1612,9 @@ section .text
     add rax, 1
     mov rbx, rax
     add r12, 1
-.L106:
-    jmp .L104
-.L105:
+.L110:
+    jmp .L108
+.L109:
     mov rax, [rel __g_macho_writer_mw_n]
     mov [rel __g_macho_writer_mw_stroff], rax
     mov rcx, 32
@@ -1563,36 +1627,36 @@ section .text
     add rsp, 32
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    je .L107
+    je .L111
     mov rax, 0
     mov r14, rax
-.L109:
+.L113:
     mov rax, r14
     push rax
     mov rax, [rel __g_macho_writer_mw_ndef]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L110
+    jge .L114
     mov rcx, 95
     sub rsp, 32
     call mw_b
     add rsp, 32
     mov rcx, r14
     sub rsp, 32
-    call ew_export_name
+    call cgk_export_name
     add rsp, 32
     mov r13, rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L112:
+.L116:
     cmp rbx, r12
-    jge .L113
+    jge .L117
     mov rax, r13
     add rax, rbx
     push rax
@@ -1606,39 +1670,39 @@ section .text
     call mw_b
     add rsp, 32
     add rbx, 1
-.L114:
-    jmp .L112
-.L113:
+.L118:
+    jmp .L116
+.L117:
     mov rcx, 0
     sub rsp, 32
     call mw_b
     add rsp, 32
     add r14, 1
+.L115:
+    jmp .L113
+.L114:
+    jmp .L112
 .L111:
-    jmp .L109
-.L110:
-    jmp .L108
-.L107:
 section .data
-.str115: db 95,95,109,104,95,101,120,101,99,117,116,101,95,104,101,97,100,101,114,0
+.str119: db 95,95,109,104,95,101,120,101,99,117,116,101,95,104,101,97,100,101,114,0
 section .text
-    lea rax, [rel .str115]
+    lea rax, [rel .str119]
     push rax
     pop rcx
     sub rsp, 32
     call mw_str
     add rsp, 32
-.L108:
+.L112:
     mov rax, 0
     mov r12, rax
-.L116:
+.L120:
     mov rax, r12
     push rax
     mov rax, [rel __g_macho_writer_MW_NSYM]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L117
+    jge .L121
     mov rcx, r12
     sub rsp, 32
     call mw_sym_name
@@ -1649,9 +1713,9 @@ section .text
     call mw_str
     add rsp, 32
     add r12, 1
-.L118:
-    jmp .L116
-.L117:
+.L122:
+    jmp .L120
+.L121:
     sub rsp, 32
     call mw_align8
     add rsp, 32
@@ -1731,8 +1795,8 @@ section .text
     call mw_signature
     add rsp, 32
     mov rax, [rel __g_macho_writer_mw_n]
-    jmp .__ret_68
-.__ret_68:
+    jmp .__ret_72
+.__ret_72:
     mov rbx, [rbp-160]
     mov r12, [rbp-152]
     mov r13, [rbp-144]
@@ -1761,8 +1825,8 @@ mw_lc_d:
     add rax, 4
     mov [rel __g_macho_writer_mw_lc], rax
     mov rax, 0
-    jmp .__ret_119
-.__ret_119:
+    jmp .__ret_123
+.__ret_123:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -1784,8 +1848,8 @@ mw_lc_q:
     add rax, 8
     mov [rel __g_macho_writer_mw_lc], rax
     mov rax, 0
-    jmp .__ret_120
-.__ret_120:
+    jmp .__ret_124
+.__ret_124:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -1804,9 +1868,9 @@ mw_lc_str:
     mov r13, rax
     mov rax, rbx
     mov r12, rax
-.L122:
+.L126:
     cmp r13, r14
-    jge .L123
+    jge .L127
     mov rcx, r12
     sub rsp, 32
     call mw_g8
@@ -1821,21 +1885,21 @@ mw_lc_str:
     call mw_p8
     add rsp, 32
     cmp rbx, 0
-    je .L125
+    je .L129
     add r12, 1
-    jmp .L126
-.L125:
-.L126:
+    jmp .L130
+.L129:
+.L130:
     add r13, 1
-.L124:
-    jmp .L122
-.L123:
+.L128:
+    jmp .L126
+.L127:
     mov rax, [rel __g_macho_writer_mw_lc]
     add rax, r14
     mov [rel __g_macho_writer_mw_lc], rax
     mov rax, 0
-    jmp .__ret_121
-.__ret_121:
+    jmp .__ret_125
+.__ret_125:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov r13, [rbp-64]
@@ -1854,8 +1918,8 @@ mw_lc_name:
     sub rsp, 32
     call mw_lc_str
     add rsp, 32
-    jmp .__ret_127
-.__ret_127:
+    jmp .__ret_131
+.__ret_131:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -1880,8 +1944,8 @@ mw_cmd:
     call mw_lc_d
     add rsp, 32
     mov rax, 0
-    jmp .__ret_128
-.__ret_128:
+    jmp .__ret_132
+.__ret_132:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -1899,16 +1963,16 @@ mw_commands:
     mov [rel __g_macho_writer_mw_ncmds], rax
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    jne .L130
+    jne .L134
     mov rcx, 25
     mov rdx, 72
     sub rsp, 32
     call mw_cmd
     add rsp, 32
 section .data
-.str132: db 95,95,80,65,71,69,90,69,82,79,0
+.str136: db 95,95,80,65,71,69,90,69,82,79,0
 section .text
-    lea rax, [rel .str132]
+    lea rax, [rel .str136]
     push rax
     pop rcx
     sub rsp, 32
@@ -1948,18 +2012,18 @@ section .text
     sub rsp, 32
     call mw_lc_d
     add rsp, 32
-    jmp .L131
-.L130:
-.L131:
+    jmp .L135
+.L134:
+.L135:
     mov rcx, 25
     mov rdx, 152
     sub rsp, 32
     call mw_cmd
     add rsp, 32
 section .data
-.str133: db 95,95,84,69,88,84,0
+.str137: db 95,95,84,69,88,84,0
 section .text
-    lea rax, [rel .str133]
+    lea rax, [rel .str137]
     push rax
     pop rcx
     sub rsp, 32
@@ -2004,18 +2068,18 @@ section .text
     call mw_lc_d
     add rsp, 32
 section .data
-.str134: db 95,95,116,101,120,116,0
+.str138: db 95,95,116,101,120,116,0
 section .text
-    lea rax, [rel .str134]
+    lea rax, [rel .str138]
     push rax
     pop rcx
     sub rsp, 32
     call mw_lc_name
     add rsp, 32
 section .data
-.str135: db 95,95,84,69,88,84,0
+.str139: db 95,95,84,69,88,84,0
 section .text
-    lea rax, [rel .str135]
+    lea rax, [rel .str139]
     push rax
     pop rcx
     sub rsp, 32
@@ -2078,9 +2142,9 @@ section .text
     call mw_cmd
     add rsp, 32
 section .data
-.str136: db 95,95,68,65,84,65,0
+.str140: db 95,95,68,65,84,65,0
 section .text
-    lea rax, [rel .str136]
+    lea rax, [rel .str140]
     push rax
     pop rcx
     sub rsp, 32
@@ -2132,18 +2196,18 @@ section .text
     call mw_lc_d
     add rsp, 32
 section .data
-.str137: db 95,95,100,97,116,97,0
+.str141: db 95,95,100,97,116,97,0
 section .text
-    lea rax, [rel .str137]
+    lea rax, [rel .str141]
     push rax
     pop rcx
     sub rsp, 32
     call mw_lc_name
     add rsp, 32
 section .data
-.str138: db 95,95,68,65,84,65,0
+.str142: db 95,95,68,65,84,65,0
 section .text
-    lea rax, [rel .str138]
+    lea rax, [rel .str142]
     push rax
     pop rcx
     sub rsp, 32
@@ -2201,18 +2265,18 @@ section .text
     call mw_lc_d
     add rsp, 32
 section .data
-.str139: db 95,95,98,115,115,0
+.str143: db 95,95,98,115,115,0
 section .text
-    lea rax, [rel .str139]
+    lea rax, [rel .str143]
     push rax
     pop rcx
     sub rsp, 32
     call mw_lc_name
     add rsp, 32
 section .data
-.str140: db 95,95,68,65,84,65,0
+.str144: db 95,95,68,65,84,65,0
 section .text
-    lea rax, [rel .str140]
+    lea rax, [rel .str144]
     push rax
     pop rcx
     sub rsp, 32
@@ -2278,9 +2342,9 @@ section .text
     call mw_cmd
     add rsp, 32
 section .data
-.str141: db 95,95,76,73,78,75,69,68,73,84,0
+.str145: db 95,95,76,73,78,75,69,68,73,84,0
 section .text
-    lea rax, [rel .str141]
+    lea rax, [rel .str145]
     push rax
     pop rcx
     sub rsp, 32
@@ -2477,20 +2541,20 @@ section .text
     add rsp, 32
     mov rax, 0
     mov rbx, rax
-.L142:
+.L146:
     cmp rbx, 12
-    jge .L143
+    jge .L147
     mov rcx, 0
     sub rsp, 32
     call mw_lc_d
     add rsp, 32
     add rbx, 1
-.L144:
-    jmp .L142
-.L143:
+.L148:
+    jmp .L146
+.L147:
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    jne .L145
+    jne .L149
     mov rcx, 14
     mov rdx, 32
     sub rsp, 32
@@ -2501,21 +2565,21 @@ section .text
     call mw_lc_d
     add rsp, 32
 section .data
-.str147: db 47,117,115,114,47,108,105,98,47,100,121,108,100,0
+.str151: db 47,117,115,114,47,108,105,98,47,100,121,108,100,0
 section .text
-    lea rax, [rel .str147]
+    lea rax, [rel .str151]
     push rax
     pop rcx
     mov rdx, 20
     sub rsp, 32
     call mw_lc_str
     add rsp, 32
-    jmp .L146
-.L145:
+    jmp .L150
+.L149:
     sub rsp, 32
     call mw_id_dylib
     add rsp, 32
-.L146:
+.L150:
     mov rcx, 27
     mov rdx, 24
     sub rsp, 32
@@ -2571,12 +2635,12 @@ section .text
     mov rbx, rax
     mov rax, [rel __g_macho_writer_mw_platform]
     cmp rax, 2
-    jne .L148
+    jne .L152
     mov rax, 917504
     mov rbx, rax
-    jmp .L149
-.L148:
-.L149:
+    jmp .L153
+.L152:
+.L153:
     mov rcx, rbx
     sub rsp, 32
     call mw_lc_d
@@ -2591,7 +2655,7 @@ section .text
     add rsp, 32
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    jne .L150
+    jne .L154
     mov rcx, 2147483688
     mov rdx, 24
     sub rsp, 32
@@ -2607,9 +2671,9 @@ section .text
     sub rsp, 32
     call mw_lc_q
     add rsp, 32
-    jmp .L151
-.L150:
-.L151:
+    jmp .L155
+.L154:
+.L155:
     mov rcx, 12
     mov rdx, 56
     sub rsp, 32
@@ -2632,9 +2696,9 @@ section .text
     call mw_lc_d
     add rsp, 32
 section .data
-.str152: db 47,117,115,114,47,108,105,98,47,108,105,98,83,121,115,116,101,109,46,66,46,100,121,108,105,98,0
+.str156: db 47,117,115,114,47,108,105,98,47,108,105,98,83,121,115,116,101,109,46,66,46,100,121,108,105,98,0
 section .text
-    lea rax, [rel .str152]
+    lea rax, [rel .str156]
     push rax
     pop rcx
     mov rdx, 32
@@ -2725,7 +2789,7 @@ section .text
     add rsp, 32
     mov rax, [rel __g_macho_writer_mw_dylib]
     cmp rax, 0
-    je .L153
+    je .L157
     mov rax, [rel __g_macho_writer_mw_out]
     add rax, 12
     push rax
@@ -2742,9 +2806,9 @@ section .text
     sub rsp, 32
     call mw_p32
     add rsp, 32
-    jmp .L154
-.L153:
-.L154:
+    jmp .L158
+.L157:
+.L158:
     mov rax, [rel __g_macho_writer_mw_out]
     add rax, 28
     push rax
@@ -2754,8 +2818,8 @@ section .text
     call mw_p32
     add rsp, 32
     mov rax, 0
-    jmp .__ret_129
-.__ret_129:
+    jmp .__ret_133
+.__ret_133:
     mov rbx, [rbp-48]
     mov rsp, rbp
     pop rbp
@@ -2821,9 +2885,9 @@ mw_id_dylib:
     mov rax, [rel __g_macho_writer_mw_lc]
     push rax
 section .data
-.str156: db 64,114,112,97,116,104,47,0
+.str160: db 64,114,112,97,116,104,47,0
 section .text
-    lea rax, [rel .str156]
+    lea rax, [rel .str160]
     push rax
     pop rdx
     pop rcx
@@ -2845,8 +2909,8 @@ section .text
     sub rax, 24
     mov [rel __g_macho_writer_mw_lc], rax
     mov rax, 0
-    jmp .__ret_155
-.__ret_155:
+    jmp .__ret_159
+.__ret_159:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -2874,33 +2938,33 @@ mw_trie:
     add rsp, 32
     mov rax, 0
     mov r14, rax
-.L158:
+.L162:
     mov rax, r14
     push rax
     mov rax, [rel __g_macho_writer_mw_ndef]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L159
+    jge .L163
     mov rcx, 95
     sub rsp, 32
     call mw_b
     add rsp, 32
     mov rcx, r14
     sub rsp, 32
-    call ew_export_name
+    call cgk_export_name
     add rsp, 32
     mov r13, rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L161:
+.L165:
     cmp rbx, r12
-    jge .L162
+    jge .L166
     mov rax, r13
     add rax, rbx
     push rax
@@ -2914,9 +2978,9 @@ mw_trie:
     call mw_b
     add rsp, 32
     add rbx, 1
-.L163:
-    jmp .L161
-.L162:
+.L167:
+    jmp .L165
+.L166:
     mov rcx, 0
     sub rsp, 32
     call mw_b
@@ -2968,19 +3032,19 @@ mw_trie:
     call mw_b
     add rsp, 32
     add r14, 1
-.L160:
-    jmp .L158
-.L159:
+.L164:
+    jmp .L162
+.L163:
     mov rax, 0
     mov r14, rax
-.L164:
+.L168:
     mov rax, r14
     push rax
     mov rax, [rel __g_macho_writer_mw_ndef]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L165
+    jge .L169
     mov rax, [rel __g_macho_writer_mw_n]
     push rax
     mov rax, [rel __g_macho_writer_mw_export_off]
@@ -3071,16 +3135,16 @@ mw_trie:
     mov rax, rbx
     shr rax, 7
     mov rbx, rax
-.L167:
+.L171:
     cmp rbx, 0
-    je .L168
+    je .L172
     add r12, 1
     mov rax, rbx
     shr rax, 7
     mov rbx, rax
-.L169:
-    jmp .L167
-.L168:
+.L173:
+    jmp .L171
+.L172:
     mov rax, r12
     add rax, 1
     push rax
@@ -3101,12 +3165,12 @@ mw_trie:
     call mw_b
     add rsp, 32
     add r14, 1
-.L166:
-    jmp .L164
-.L165:
+.L170:
+    jmp .L168
+.L169:
     mov rax, 0
-    jmp .__ret_157
-.__ret_157:
+    jmp .__ret_161
+.__ret_161:
     mov rbx, [rbp-144]
     mov r12, [rbp-136]
     mov r13, [rbp-128]
@@ -3171,8 +3235,8 @@ mw_be32:
     add rax, 4
     mov [rel __g_macho_writer_mw_sp], rax
     mov rax, 0
-    jmp .__ret_170
-.__ret_170:
+    jmp .__ret_174
+.__ret_174:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -3351,14 +3415,14 @@ mw_signature:
     mov r13, rax
     mov rax, [rel __g_macho_writer_mw_name]
     mov r12, rax
-.L172:
+.L176:
     mov rax, r13
     push rax
     mov rax, [rel __g_macho_writer_mw_identlen]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L173
+    jge .L177
     mov rcx, r12
     sub rsp, 32
     call mw_g8
@@ -3373,15 +3437,15 @@ mw_signature:
     call mw_p8
     add rsp, 32
     cmp rbx, 0
-    je .L175
+    je .L179
     add r12, 1
-    jmp .L176
-.L175:
-.L176:
+    jmp .L180
+.L179:
+.L180:
     add r13, 1
-.L174:
-    jmp .L172
-.L173:
+.L178:
+    jmp .L176
+.L177:
     mov rax, [rel __g_macho_writer_mw_sp]
     push rax
     mov rax, [rel __g_macho_writer_mw_identlen]
@@ -3391,14 +3455,14 @@ mw_signature:
     mov [rel __g_macho_writer_mw_sp], rax
     mov rax, 0
     mov r12, rax
-.L177:
+.L181:
     mov rax, r12
     push rax
     mov rax, [rel __g_macho_writer_mw_ncode]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L178
+    jge .L182
     mov rax, r12
     mov rcx, 4096
     imul rax, rcx
@@ -3407,12 +3471,12 @@ mw_signature:
     sub rax, rcx
     mov rbx, rax
     cmp rbx, 4096
-    jle .L180
+    jle .L184
     mov rax, 4096
     mov rbx, rax
-    jmp .L181
-.L180:
-.L181:
+    jmp .L185
+.L184:
+.L185:
     mov rax, r12
     mov rcx, 4096
     imul rax, rcx
@@ -3439,9 +3503,9 @@ mw_signature:
     add rax, 32
     mov [rel __g_macho_writer_mw_sp], rax
     add r12, 1
-.L179:
-    jmp .L177
-.L178:
+.L183:
+    jmp .L181
+.L182:
     mov rax, [rel __g_macho_writer_mw_sig_off]
     push rax
     mov rax, [rel __g_macho_writer_mw_sig_size]
@@ -3450,8 +3514,8 @@ mw_signature:
     add rax, rcx
     mov [rel __g_macho_writer_mw_n], rax
     mov rax, 0
-    jmp .__ret_171
-.__ret_171:
+    jmp .__ret_175
+.__ret_175:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov r13, [rbp-64]
@@ -3980,8 +4044,8 @@ mw_k_init:
     mov rax, 1
     mov [rel __g_macho_writer_mw_kready], rax
     mov rax, 0
-    jmp .__ret_182
-.__ret_182:
+    jmp .__ret_186
+.__ret_186:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -4008,8 +4072,8 @@ mw_ror:
     or rax, rcx
     mov rcx, 4294967295
     and rax, rcx
-    jmp .__ret_183
-.__ret_183:
+    jmp .__ret_187
+.__ret_187:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -4029,9 +4093,9 @@ mw_sha_block:
     mov r15, rax
     mov rax, 0
     mov r14, rax
-.L185:
+.L189:
     cmp r14, 16
-    jge .L186
+    jge .L190
     mov rax, r14
     mov rcx, 4
     imul rax, rcx
@@ -4108,12 +4172,12 @@ mw_sha_block:
     call mw_p32
     add rsp, 32
     add r14, 1
-.L187:
-    jmp .L185
-.L186:
-.L188:
+.L191:
+    jmp .L189
+.L190:
+.L192:
     cmp r14, 64
-    jge .L189
+    jge .L193
     mov rax, r14
     sub rax, 15
     mov rcx, 4
@@ -4228,9 +4292,9 @@ mw_sha_block:
     call mw_p32
     add rsp, 32
     add r14, 1
-.L190:
-    jmp .L188
-.L189:
+.L194:
+    jmp .L192
+.L193:
     lea rax, [rel __g_macho_writer_mw_h]
     mov r13, rax
     mov rcx, r13
@@ -4296,9 +4360,9 @@ mw_sha_block:
     mov [rbp-136], rax
     mov rax, 0
     mov r14, rax
-.L191:
+.L195:
     cmp r14, 64
-    jge .L192
+    jge .L196
     mov rcx, rbx
     mov rdx, 6
     sub rsp, 32
@@ -4449,9 +4513,9 @@ mw_sha_block:
     and rax, rcx
     mov r12, rax
     add r14, 1
-.L193:
-    jmp .L191
-.L192:
+.L197:
+    jmp .L195
+.L196:
     mov rax, r13
     push rax
     mov rcx, r13
@@ -4607,8 +4671,8 @@ mw_sha_block:
     call mw_p32
     add rsp, 32
     mov rax, 0
-    jmp .__ret_184
-.__ret_184:
+    jmp .__ret_188
+.__ret_188:
     mov rbx, [rbp-240]
     mov r12, [rbp-232]
     mov r13, [rbp-224]
@@ -4630,13 +4694,13 @@ mw_sha256:
     mov r12, rdx
     mov rax, [rel __g_macho_writer_mw_kready]
     cmp rax, 0
-    jne .L195
+    jne .L199
     sub rsp, 32
     call mw_k_init
     add rsp, 32
-    jmp .L196
-.L195:
-.L196:
+    jmp .L200
+.L199:
+.L200:
     lea rax, [rel __g_macho_writer_mw_h]
     mov r14, rax
     mov rcx, r14
@@ -4704,18 +4768,18 @@ mw_sha256:
     mov r13, rax
     mov rax, r12
     mov rbx, rax
-.L197:
+.L201:
     cmp rbx, 64
-    jl .L198
+    jl .L202
     mov rcx, r13
     sub rsp, 32
     call mw_sha_block
     add rsp, 32
     add r13, 64
     sub rbx, 64
-.L199:
-    jmp .L197
-.L198:
+.L203:
+    jmp .L201
+.L202:
     lea rax, [rel __g_macho_writer_mw_blk]
     mov r15, rax
     mov rcx, r15
@@ -4741,21 +4805,21 @@ mw_sha256:
     mov rax, 64
     mov r13, rax
     cmp rbx, 56
-    jl .L200
+    jl .L204
     mov rax, 128
     mov r13, rax
-    jmp .L201
-.L200:
-.L201:
+    jmp .L205
+.L204:
+.L205:
     mov rax, r12
     mov rcx, 8
     imul rax, rcx
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L202:
+.L206:
     cmp rbx, 8
-    jge .L203
+    jge .L207
     mov rax, r15
     add rax, r13
     sub rax, 1
@@ -4773,15 +4837,15 @@ mw_sha256:
     shr rax, 8
     mov r12, rax
     add rbx, 1
-.L204:
-    jmp .L202
-.L203:
+.L208:
+    jmp .L206
+.L207:
     mov rcx, r15
     sub rsp, 32
     call mw_sha_block
     add rsp, 32
     cmp r13, 128
-    jne .L205
+    jne .L209
     mov rax, r15
     add rax, 64
     push rax
@@ -4789,16 +4853,16 @@ mw_sha256:
     sub rsp, 32
     call mw_sha_block
     add rsp, 32
-    jmp .L206
-.L205:
-.L206:
+    jmp .L210
+.L209:
+.L210:
     lea rax, [rel __g_macho_writer_mw_digest]
     mov r13, rax
     mov rax, 0
     mov r12, rax
-.L207:
+.L211:
     cmp r12, 8
-    jge .L208
+    jge .L212
     mov rax, r12
     mov rcx, 4
     imul rax, rcx
@@ -4878,12 +4942,12 @@ mw_sha256:
     call mw_p8
     add rsp, 32
     add r12, 1
-.L209:
-    jmp .L207
-.L208:
+.L213:
+    jmp .L211
+.L212:
     mov rax, 0
-    jmp .__ret_194
-.__ret_194:
+    jmp .__ret_198
+.__ret_198:
     mov rbx, [rbp-144]
     mov r12, [rbp-136]
     mov r13, [rbp-128]

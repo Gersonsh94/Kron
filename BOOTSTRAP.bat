@@ -3,8 +3,8 @@ setlocal enabledelayedexpansion
 echo ============================================================
 echo   KRON - BOOTSTRAP FIXPOINT
 echo   Three self-compiled generations, compared byte for byte
-echo   (gen 1 assembles the parts in Kron as they are; gens 2 and 3
-echo   make them again with the compiler before)
+echo   (each generation makes the parts in Kron with the compiler
+echo   before it: gen 1 with the installed kronc.exe)
 echo ============================================================
 echo.
 
@@ -19,7 +19,9 @@ if not exist kron_all.asm (
 
 del /q kron_all.exe boot1.exe boot2.exe boot3.exe 2>nul
 
-echo [gen 1] kronc.exe (the installed compiler) --^> boot1.exe
+echo [gen 1] kronc.exe (the installed compiler) makes the parts in Kron, then --^> boot1.exe
+call KRONPARTS.bat kronc.exe
+if errorlevel 1 goto :noparts
 kronc.exe kron_all.asm --assemble --pe >nul
 if not exist kron_all.exe goto :nogen1
 copy /y kron_all.exe boot1.exe >nul

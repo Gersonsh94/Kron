@@ -631,7 +631,7 @@ section .text
     add rax, rcx
     mov r13, rax
     sub rsp, 32
-    call kasm_get_code_size
+    call ksk_code_size
     add rsp, 32
     mov rcx, 4294967295
     and rax, rcx
@@ -759,7 +759,7 @@ section .text
     call kw_p32
     add rsp, 32
     sub rsp, 32
-    call kasm_get_data_size
+    call ksk_data_size
     add rsp, 32
     mov rcx, 4294967295
     and rax, rcx
@@ -860,7 +860,7 @@ section .text
     add rax, 24
     push rax
     sub rsp, 32
-    call kasm_get_bss_size
+    call ksk_bss_size
     add rsp, 32
     push rax
     pop rdx
@@ -880,11 +880,11 @@ section .text
     add rax, r14
     push rax
     sub rsp, 32
-    call kasm_get_code
+    call ksk_code
     add rsp, 32
     push rax
     sub rsp, 32
-    call kasm_get_code_size
+    call ksk_code_size
     add rsp, 32
     push rax
     pop r8
@@ -898,11 +898,11 @@ section .text
     add rax, r12
     push rax
     sub rsp, 32
-    call kasm_get_data
+    call ksk_data
     add rsp, 32
     push rax
     sub rsp, 32
-    call kasm_get_data_size
+    call ksk_data_size
     add rsp, 32
     push rax
     pop r8

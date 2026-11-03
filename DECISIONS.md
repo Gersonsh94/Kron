@@ -1159,8 +1159,66 @@ replaces, checked file by file before it is delivered.
   lines, for every program of the suite on every target, for the 44
   programs that must be refused and for errors of the lexer, the parser,
   the imports, the library checks and the code generator made on purpose.
-- Still in assembly: the rest of main (2,177 lines: the outputs and
-  --assemble), the runtime and the linker, and the doors.
+- 10d-2 (03-11-2026): `main_out.kr` has the rest of main -- `mx_main`
+  (the banner, md_start, md_phases, the output), every output (an .exe or
+  a .dll, a Linux executable or .so, ARM64 through xarm and karm, macOS and
+  iOS through the Mach-O writer, with a framework's install name, a .wasm
+  with its page, the .asm with -S), --assemble (kasm into a .kbin, an .exe
+  with --pe, a .krn with --krn; karm for ARM64), the errors of kasm, karm,
+  xarm, xwasm and the Mach-O writer, the import pass's door
+  (`expand_imports`) and `ew_set_layout`. It calls the Kron functions
+  behind the doors directly (kasm, karm, the writers, the code generator,
+  the preprocessor); only xarm and xwasm are called through their doors,
+  which hold xarm's state. main.asm is down to 533 lines: main's entry
+  (the console's handle, then mx_main), the buffers and flags (`mn_addr`),
+  the texts the ELF and web writers read, two doors called from assembly
+  (`lmap_lookup`, `build_bin_name`) and the calls into Windows. The copy of
+  the resolved imports main kept (imp_names, imp_count) is gone: nothing
+  read it since main_io.kr reads imports.kr's list. The line map is copied
+  without the zero byte the old copy wrote past the end of each table (with
+  128 runs, the last fell on lmap_count). The same output, files and exit
+  codes as before for every program of the suite on every target, the 49
+  command lines, 36 more (--assemble with --pe, --krn, -S and ARM64,
+  kasm's and karm's errors, no _start, a file missing, an output that
+  cannot be written, -S for ARM64, macOS and the web, libraries for every
+  system, frameworks for macOS and iOS), and the programs that must be
+  refused.
+- The `_kr.asm` files are no longer kept (03-11-2026, Gerson: "why do we
+  keep adding .asm if the goal is to remove assembly"). They are not
+  sources: `kronc --module` makes each from its `.kr`, as an object file is
+  made. BUILD.bat and BOOTSTRAP.bat now make them first with the compiler
+  they start from (the seed, the installed kronc.exe), then again with each
+  compiler they build, so the repository holds the parts in Kron and the
+  assembly still written by hand, nothing made from them. A seed must
+  therefore compile the current `.kr` files; one that cannot is replaced
+  by SEED.bat from a compiler that can, as before.
+- Piece 11, the doors go (03-11-2026). With main in Kron nothing written
+  by hand called the parts any more, so the bridge went, as piece 10 was
+  meant to end:
+  - `runtime/runtime.asm` and `linker/linker.asm` were dead code: nothing
+    called them (the runtime a program gets is written by the code
+    generator, and the writers are the linker). They were never ported;
+    they are gone.
+  - The doors of the lexer, the parser, the semantic pass, the code
+    generator, kasm, karm, xarm, xwasm and the KRN, PE, ELF and Mach-O
+    writers are gone. Each Kron part calls the others by their own names
+    (ksk_code, kc_label, cgk_export_name...), not through the old ones.
+  - What the doors held moved into Kron: the PE writer's three flags and
+    the Mach-O writer's three (`pw_set_flags`, `mw_set_flags`, which
+    main_out.kr calls), the ELF writer's header size and base, its tables
+    (the loader's names, the section names) as texts, xarm's state block
+    (`xa_state`), the shims as `xarm_tails.kr` (the same bytes, one text
+    each), the page beside a .wasm, `cg_lmap` and `cg_float_bits` in
+    codegen.kr (an f64 stored into an f32 field rounds it as cvtsd2ss
+    did), the parser's tables for the code generator (`cg_parser_q` in
+    parser.kr). The code generator's switches (cg_debug, cg_as_module,
+    cg_mod_tag, dbg_which) are main.asm's buffers now.
+  - main.asm, 380 lines, is the only assembly written by hand: main's
+    entry, the buffers and flags (`mn_addr`), the host's script beside a
+    .wasm (`include/web_host.inc`) and the calls into Windows.
+  - The compiler is 10 KB smaller; it writes the same files, messages and
+    exit codes as before for every program of the suite on every target,
+    the command lines and the assembler's own tests.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 

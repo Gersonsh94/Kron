@@ -15,11 +15,10 @@ kron_definitions
 // map). It is here now, with the same answers, the same limits and the same
 // error codes, and it reads the same text the same way.
 //
-// Reading a file is the one thing it does not do: the door asks the system
-// for it. imp_read(name, len_out) returns the address of the file's bytes
-// and its length through len_out; 0 when there is no such file, -1 when
-// the reading buffer is full. The door is in main.asm, and it goes when
-// main does.
+// Reading a file is the one thing it does not do: main_io.kr asks the
+// system for it. imp_read(name, len_out) returns the address of the file's
+// bytes and its length through len_out; 0 when there is no such file, -1
+// when the reading buffer is full.
 //
 // Error codes, in ip_err:
 //   1 a module cannot be opened        2 imports nest too deep
@@ -553,7 +552,8 @@ fn ip_expand(prog: i64, src: i64, n: i64, out: i64, cap: i64) -> i64 {
 }
 
 // -------------------------------------------------------------------------
-// the door's view: the results, by address, and the --debug switch
+// the driver's view (main_out.kr's expand_imports): the results, by
+// address, and the --debug switch
 // -------------------------------------------------------------------------
 
 // sets the --debug switch before ip_expand: 1 when the build is a debug one

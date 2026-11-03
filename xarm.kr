@@ -32,18 +32,17 @@ kron_definitions
 //
 // It was xarm.asm, and it is here now, line for line the same text out.
 // The reader of lines and operands is xwasm's too (xwasm.kr calls the xl_
-// functions). xarm.asm keeps the door: the old names main calls
-// (xarm_translate, the setters, the error getters), the state the reader
-// keeps, one block (xa_get_state), and the system call shims appended to
-// every program (xa_get_tail).
+// functions), and so is the state it keeps, one block (xa_get_state). The
+// system call shims appended to every program are in xarm_tails.kr
+// (xa_get_tail). main_out.kr calls xl_translate, the setters and the error
+// getters below.
 // =========================================================================
 
 extern "kronc" {
-    fn xa_get_state() -> i64;
     fn xa_get_tail(k: i64) -> i64;
 }
 
-// the shared state, in the door: offsets in its block
+// the shared state, one block (xwasm.kr reads it too): offsets in it
 const S_OS: i64 = 0;              // 0 Linux, 1 macOS
 const S_LIB: i64 = 8;             // 1 for a library: __centry in the tail
 const S_IN: i64 = 16;
@@ -87,7 +86,7 @@ const F_LOGIC: i64 = 2;
 const F_ADD: i64 = 3;
 const F_FP: i64 = 4;
 
-var xl_st: i64;                   // the door's state block
+var xl_st: i64;                   // the state block (xa_state)
 var xl_ready: i64;                // the tables are filled
 var xl_out: i64;
 var xl_out_end: i64;
@@ -158,7 +157,38 @@ fn xl_p64(a: i64, v: i64) -> i64 {
     return 0;
 }
 
-// the address of a piece of the door's state
+var xa_state: [u8; 2168];             // S_OS .. S_OPS + 96
+
+fn xa_get_state() -> i64 {
+    return &xa_state;
+}
+
+// which shim the program gets: 0 Linux, 1 macOS (which runs the same Linux
+// program, its shim answering the Linux calls from XNU)
+fn xarm_set_os(os: i64) -> i64 {
+    return xl_set(S_OS, os);
+}
+
+// 1 for a library (--lib): __centry in the tail
+fn xarm_set_lib(lib: i64) -> i64 {
+    return xl_set(S_LIB, lib);
+}
+
+// the error, xarm's or xwasm's: the line of the x86 text, what was wrong,
+// the instruction
+fn xarm_error_line() -> i64 {
+    return xl_get(S_ERR_LINE);
+}
+
+fn xarm_error_text() -> i64 {
+    return xl_get(S_ERR_MSG);
+}
+
+fn xarm_error_insn() -> i64 {
+    return xl_s(S_ERR_INSN);
+}
+
+// the address of a piece of the state
 fn xl_s(off: i64) -> i64 {
     if xl_st == 0 {
         xl_st = xa_get_state();
@@ -2263,7 +2293,7 @@ fn xl_cacheop(f: i64) -> i64 {
 }
 
 // -------------------------------------------------------------------------
-// the door
+// what the driver calls
 // -------------------------------------------------------------------------
 
 // the x86 text (inp, len) as ARM64 text at out (room for cap bytes): its

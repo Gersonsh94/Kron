@@ -29,7 +29,7 @@ kron_definitions
 // bytes: this one (lines, labels, expressions, operands, emission,
 // directives, the wide immediates), karm_alu.kr (mov, arithmetic, logic,
 // shifts, selects) and karm_mem.kr (loads and stores, branches, reals).
-// karm.asm keeps the door: the karm_ names the rest of the compiler calls.
+// The driver and the ELF and Mach-O writers call its kc_ functions directly.
 // =========================================================================
 
 extern "kronc" {
@@ -205,7 +205,7 @@ fn kc_put(arr: i64, i: i64, v: i64) -> i64 {
 }
 
 // -------------------------------------------------------------------------
-// the door: the karm_ functions
+// what the driver and the writers call
 // -------------------------------------------------------------------------
 
 fn kc_init() -> i64 {

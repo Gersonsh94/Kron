@@ -8,24 +8,35 @@ kron_definitions
 // it, and kron_web.js, the host
 //
 // It was web_write_host in main.asm, and it is here now, byte for byte the
-// same. main.asm keeps web_write_host as its door, and the names, buffers
-// and texts it reads: the output's name, the page's three pieces, the
-// host's script (include/web_host.inc, made by web/make_host.kr).
+// same; main_out.kr calls it directly. The page and the names are here;
+// main.asm keeps the output's name (mn_addr) and the host's script
+// (include/web_host.inc, made by web/make_host.kr).
 // =========================================================================
 
 extern "kronc" {
     fn write_file(name: i64, buf: i64, len: i64) -> i64;
-    fn ww_out_bin_name() -> i64;
-    fn ww_html_name() -> i64;
-    fn ww_js_path() -> i64;
-    fn ww_page() -> i64;
-    fn ww_page_a() -> i64;
-    fn ww_page_b() -> i64;
-    fn ww_page_c() -> i64;
-    fn ww_html_ext() -> i64;
-    fn ww_js_name() -> i64;
+    fn mn_addr(k: i64) -> i64;
     fn ww_host_js() -> i64;
     fn ww_host_js_size() -> i64;
+}
+
+const A_OUT_BIN_NAME: i64 = 10;       // mn_addr: the output's name
+
+var ww_html: [u8; 512];               // NAME.html
+var ww_js: [u8; 512];                 // DIR/kron_web.js
+var ww_pg: [u8; 4096];                // the page
+
+// the page, in three pieces: the title, then the module's name, between
+fn ww_page_a() -> i64 {
+    return "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>";
+}
+
+fn ww_page_b() -> i64 {
+    return "</title>\n<style>\nbody { margin: 0; background: #1e1e1e; color: #d4d4d4; font: 14px monospace; }\ncanvas { display: none; outline: none; margin: 8px; }\npre { margin: 8px; white-space: pre-wrap; }\n</style>\n</head>\n<body>\n<canvas id=\"kron\"></canvas>\n<pre id=\"out\"></pre>\n<script src=\"kron_web.js\"></script>\n<script>KronWeb.start({ wasm: \"";
+}
+
+fn ww_page_c() -> i64 {
+    return "\", canvas: \"#kron\", console: \"#out\" });</script>\n</body>\n</html>\n";
 }
 
 fn ww_g8(a: i64) -> i64 {
@@ -68,7 +79,7 @@ fn ww_catn(dst: i64, src: i64, n: i64) -> i64 {
 // NAME.html and kron_web.js beside the output: 1, or 0 when a file could
 // not be written
 fn ww_write_host() -> i64 {
-    var name: i64 = ww_out_bin_name();
+    var name: i64 = mn_addr(A_OUT_BIN_NAME);
     // where the name begins (after the last separator), and its dot
     var i: i64 = 0;
     var start: i64 = 0;
@@ -88,22 +99,22 @@ fn ww_write_host() -> i64 {
         dot = len;
     }
     // NAME.html
-    var d: i64 = ww_catn(ww_html_name(), name, dot);
-    d = ww_cat(d, ww_html_ext());
+    var d: i64 = ww_catn(&ww_html, name, dot);
+    d = ww_cat(d, ".html");
     ww_p8(d, 0);
     // DIR/kron_web.js
-    d = ww_catn(ww_js_path(), name, start);
-    d = ww_cat(d, ww_js_name());
+    d = ww_catn(&ww_js, name, start);
+    d = ww_cat(d, "kron_web.js");
     ww_p8(d, 0);
     // the page
-    var page: i64 = ww_page();
+    var page: i64 = &ww_pg;
     d = ww_cat(page, ww_page_a());
     d = ww_catn(d, name + start, dot - start);
     d = ww_cat(d, ww_page_b());
     d = ww_catn(d, name + start, len - start);
     d = ww_cat(d, ww_page_c());
-    if write_file(ww_html_name(), page, d - page) == 0 {
+    if write_file(&ww_html, page, d - page) == 0 {
         return 0;
     }
-    return write_file(ww_js_path(), ww_host_js(), ww_host_js_size());
+    return write_file(&ww_js, ww_host_js(), ww_host_js_size());
 }

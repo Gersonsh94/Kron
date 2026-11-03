@@ -12,10 +12,10 @@ kron_definitions
 // relocations). It was pe_writer.asm, and it is here now, byte for byte the
 // same: every offset and every order of writing is the one the assembly had.
 //
-// The assembled program comes from kasm, which is still in assembly for the
-// time being: kasm_get_code, kasm_get_fixup_*, kasm_find_label and the rest
-// are called through the door in pe_writer.asm, which also holds the three
-// flags main sets (--window, --lib and the DLL's file name).
+// The assembled program comes from kasm (ksk_code, ksk_fixup_*,
+// ks_find_label and the rest), the exports from the code generator, and
+// the three flags from main_out.kr (pw_set_flags: --window, --lib and the
+// DLL's file name).
 //
 // kasm resolves [rel data] assuming a flat layout, with the data right after
 // the code. This writer puts .data in its own section, so every disp32 of a
@@ -24,30 +24,51 @@ kron_definitions
 // =========================================================================
 
 extern "kronc" {
-    fn kasm_get_code() -> i64;
-    fn kasm_get_code_size() -> i64;
-    fn kasm_get_data() -> i64;
-    fn kasm_get_data_size() -> i64;
-    fn kasm_get_bss_size() -> i64;
-    fn kasm_get_ext_count() -> i64;
-    fn kasm_get_ext_name(i: i64) -> i64;
-    fn kasm_get_extref_count() -> i64;
-    fn kasm_get_extref_at(i: i64) -> i64;
-    fn kasm_get_extref_sym(i: i64) -> i64;
-    fn kasm_find_label(name: i64, len: i64) -> i64;
-    fn kasm_get_fixup_count() -> i64;
-    fn kasm_get_fixup_at(i: i64) -> i64;
-    fn kasm_get_fixup_label(i: i64) -> i64;
-    fn kasm_get_fixup_addend(i: i64) -> i64;
-    fn kasm_get_fixup_kind(i: i64) -> i64;
-    fn kasm_get_label_section(i: i64) -> i64;
-    fn pw_label_addr(idx: i64) -> i64;
-    fn pw_export_count() -> i64;
-    fn pw_export_name(i: i64) -> i64;
-    fn pw_export_len(i: i64) -> i64;
-    fn pw_flag_gui() -> i64;
-    fn pw_flag_dll() -> i64;
-    fn pw_dll_file_addr() -> i64;
+    fn ksk_code() -> i64;
+    fn ksk_code_size() -> i64;
+    fn ksk_data() -> i64;
+    fn ksk_data_size() -> i64;
+    fn ksk_bss_size() -> i64;
+    fn ksk_ext_count() -> i64;
+    fn ksk_ext_name(i: i64) -> i64;
+    fn ksk_extref_count() -> i64;
+    fn ksk_extref_at(i: i64) -> i64;
+    fn ksk_extref_sym(i: i64) -> i64;
+    fn ks_find_label(name: i64, len: i64) -> i64;
+    fn ksk_fixup_count() -> i64;
+    fn ksk_fixup_at(i: i64) -> i64;
+    fn ksk_fixup_label(i: i64) -> i64;
+    fn ksk_fixup_addend(i: i64) -> i64;
+    fn ksk_fixup_kind(i: i64) -> i64;
+    fn ksk_label_section(i: i64) -> i64;
+    fn ksk_label_addr(idx: i64) -> i64;
+    fn cgk_export_count() -> i64;
+    fn cgk_export_name(i: i64) -> i64;
+    fn cgk_export_nlen(i: i64) -> i64;
+}
+
+var pw_gui: i64;                      // 1: the GUI subsystem (--window)
+var pw_dll: i64;                      // 1: a DLL (--lib)
+var pw_dll_file: i64;                 // the DLL's own name, without its folder
+
+// main_out.kr, before pe_write
+fn pw_set_flags(gui: i64, dll: i64, file: i64) -> i64 {
+    pw_gui = gui;
+    pw_dll = dll;
+    pw_dll_file = file;
+    return 0;
+}
+
+fn pw_flag_gui() -> i64 {
+    return pw_gui;
+}
+
+fn pw_flag_dll() -> i64 {
+    return pw_dll;
+}
+
+fn pw_dll_file_addr() -> i64 {
+    return pw_dll_file;
 }
 
 const PW_FILE_ALIGN: i64 = 512;      // 0x200
@@ -247,10 +268,10 @@ fn pw_set_dllname(dst: i64) -> i64 {
 
 // 1 when the export numbered a sorts after the one numbered b, by name
 fn pw_name_cmp(a: i64, b: i64) -> i64 {
-    var sa: i64 = pw_export_name(a);
-    var la: i64 = pw_export_len(a);
-    var sb: i64 = pw_export_name(b);
-    var lb: i64 = pw_export_len(b);
+    var sa: i64 = cgk_export_name(a);
+    var la: i64 = cgk_export_nlen(a);
+    var sb: i64 = cgk_export_name(b);
+    var lb: i64 = cgk_export_nlen(b);
     var i: i64 = 0;
     var ca: i64 = 0;
     var cb: i64 = 0;
@@ -309,7 +330,7 @@ fn pw_dll_tables() -> i64 {
     var page: i64 = 0;
     var rel_dir: i64 = 0;
     var rel_size: i64 = 0;
-    n = pw_export_count();
+    n = cgk_export_count();
     pw_exp_n = n;
     // the order of the names: a sort of their numbers, by insertion
     i = 0;
@@ -357,8 +378,8 @@ fn pw_dll_tables() -> i64 {
     while i < n {
         num = pw_q(&pw_exp_order, i);
         pw_put32(pw_idata_foff + names + i * 4, pw_idata_rva + r14);
-        nlen = pw_export_len(num);
-        nptr = pw_export_name(num);
+        nlen = cgk_export_nlen(num);
+        nptr = cgk_export_name(num);
         k = 0;
         while k < nlen {
             pw_sb(pw_buf + pw_idata_foff + r14 + k, pw_b(nptr + k));
@@ -381,9 +402,9 @@ fn pw_dll_tables() -> i64 {
         // its number in the ordinal table, which is the sorted position
         pw_put16(pw_idata_foff + nums + i * 2, i);
         // the function: the entry's RVA
-        lab = kasm_find_label(&pw_name, 5 + nlen);
+        lab = ks_find_label(&pw_name, 5 + nlen);
         if pw_neg1(lab) == 0 {
-            pw_put32(pw_idata_foff + funcs + i * 4, PW_TEXT_RVA + pw_label_addr(lab));
+            pw_put32(pw_idata_foff + funcs + i * 4, PW_TEXT_RVA + ksk_label_addr(lab));
         }
         i += 1;
     }
@@ -409,13 +430,13 @@ fn pw_dll_tables() -> i64 {
     rel_dir = r14;
     pw_rel_page = -1;
     pw_rel_block = -1;
-    fixn = kasm_get_fixup_count();
+    fixn = ksk_fixup_count();
     i = 0;
     while i < fixn {
-        if kasm_get_fixup_kind(i) == 6 {
-            lbl = kasm_get_fixup_label(i);
+        if ksk_fixup_kind(i) == 6 {
+            lbl = ksk_fixup_label(i);
             if pw_neg1(lbl) == 0 {
-                rva = kasm_get_fixup_at(i) + pw_data_rva;
+                rva = ksk_fixup_at(i) + pw_data_rva;
                 page = rva & (0 - 4096);
                 if page != pw_rel_page {
                     r14 = pw_rel_close(r14);
@@ -469,13 +490,13 @@ fn pe_write(buf: i64) -> i64 {
     var mlen: i64 = 0;
     var src: i64 = 0;
     pw_buf = buf;
-    pw_code_ptr = kasm_get_code();
-    pw_code_len = kasm_get_code_size();
-    pw_data_ptr = kasm_get_data();
-    pw_data_len = kasm_get_data_size();
-    pw_bss_len = kasm_get_bss_size();
-    pw_ext_count = kasm_get_ext_count();
-    pw_xref_count = kasm_get_extref_count();
+    pw_code_ptr = ksk_code();
+    pw_code_len = ksk_code_size();
+    pw_data_ptr = ksk_data();
+    pw_data_len = ksk_data_size();
+    pw_bss_len = ksk_bss_size();
+    pw_ext_count = ksk_ext_count();
+    pw_xref_count = ksk_extref_count();
     dllflag = pw_flag_dll();
     guiflag = pw_flag_gui();
     // ---- EntryPoint = TEXT_RVA + offset(main), or of __dll_main ----
@@ -489,11 +510,11 @@ fn pe_write(buf: i64) -> i64 {
         pw_set_main(mname);
         mlen = 4;
     }
-    lbl = kasm_find_label(mname, mlen);
+    lbl = ks_find_label(mname, mlen);
     if pw_neg1(lbl) != 0 {
         pw_entry_rva = PW_TEXT_RVA;
     } else {
-        pw_entry_rva = PW_TEXT_RVA + pw_label_addr(lbl);
+        pw_entry_rva = PW_TEXT_RVA + ksk_label_addr(lbl);
     }
     // ---- layout .text: [code][thunks] ----
     pw_thunks_off = pw_align(pw_code_len, 16);
@@ -615,24 +636,24 @@ fn pe_write(buf: i64) -> i64 {
     // ---- PATCH external call sites (E8 rel32 -> thunk) ----
     i = 0;
     while i < pw_xref_count {
-        r14 = kasm_get_extref_at(i);
-        r15 = kasm_get_extref_sym(i);
+        r14 = ksk_extref_at(i);
+        r15 = ksk_extref_sym(i);
         target = PW_TEXT_RVA + pw_thunks_off + r15 * PW_THUNK;
         disp = target - (PW_TEXT_RVA + r14 + 4);
         pw_put32(pw_text_foff + r14, disp);
         i += 1;
     }
     // ---- RE-PATCH [rel data/bss] against the real RVA of .data ----
-    fixn = kasm_get_fixup_count();
+    fixn = ksk_fixup_count();
     i = 0;
     while i < fixn {
-        kind = kasm_get_fixup_kind(i);
+        kind = ksk_fixup_kind(i);
         if kind == 6 {
             // a 'dq label' inside .data: the final virtual address
-            lbl = kasm_get_fixup_label(i);
+            lbl = ksk_fixup_label(i);
             if pw_neg1(lbl) == 0 {
-                sec = kasm_get_label_section(lbl);
-                off = pw_label_addr(lbl);
+                sec = ksk_label_section(lbl);
+                off = ksk_label_addr(lbl);
                 if sec == 0 {
                     target = PW_TEXT_RVA;
                 } else {
@@ -642,23 +663,23 @@ fn pe_write(buf: i64) -> i64 {
                     }
                 }
                 target = target + off + pw_base;
-                fix_at = kasm_get_fixup_at(i);
+                fix_at = ksk_fixup_at(i);
                 pw_put64(pw_data_foff + fix_at, target);
             }
         } else {
             if kind == 3 {
                 // RIP to a data or bss label; text labels are left alone
-                lbl = kasm_get_fixup_label(i);
+                lbl = ksk_fixup_label(i);
                 if pw_neg1(lbl) == 0 {
-                    sec = kasm_get_label_section(lbl);
+                    sec = ksk_label_section(lbl);
                     if sec >= 1 {
-                        off = pw_label_addr(lbl);
+                        off = ksk_label_addr(lbl);
                         target = pw_data_rva;
                         if sec == 2 {
                             target += pw_bss_off_sec;
                         }
-                        target = target + off + kasm_get_fixup_addend(i);
-                        fix_at = kasm_get_fixup_at(i);
+                        target = target + off + ksk_fixup_addend(i);
+                        fix_at = ksk_fixup_at(i);
                         disp = target - (PW_TEXT_RVA + fix_at + 4);
                         pw_put32(pw_text_foff + fix_at, disp);
                     }
@@ -675,7 +696,7 @@ fn pe_write(buf: i64) -> i64 {
     i = 0;
     while i < pw_ext_count {
         pw_qs(&pw_hint, i, pw_idata_rva + r14);
-        nptr = kasm_get_ext_name(i);
+        nptr = ksk_ext_name(i);
         nlen = pw_cstrlen(nptr);
         k = 0;
         while k <= nlen {

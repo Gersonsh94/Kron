@@ -24,10 +24,10 @@ kron_definitions
 // The fourth part of the compiler written in Kron. It walks the tree the
 // parser built and the semantic pass checked, and writes the program as
 // x86-64 assembly text, which kasm assembles. kronc --module turns it, with
-// the files it imports, into codegen_kr.asm; codegen.asm beside it is the
-// small hand-written door the rest of the compiler calls through.
+// the files it imports, into codegen_kr.asm; the driver (main_drv.kr,
+// main_out.kr) calls its cgk_ functions directly.
 //
-//   codegen.kr      the door's side in Kron, and the helpers every file uses
+//   codegen.kr      the entry points, and the helpers every file uses
 //   cg_state.kr     the state: every global, before what uses it
 //   cg_ir.kr        the output, a function's records, register allocation
 //   cg_hdr.kr       the preambles: Windows, Linux, bare metal, a library
@@ -50,13 +50,50 @@ kron_definitions
 // byte for byte; what it does better since is in DECISIONS.md.
 // =========================================================================
 
-// the door's helpers, in codegen.asm: the line map of main.asm, a real
-// literal's bits through kasm's parse_float, and the parser's tables of
-// ptr<S> and list<S> declarations
+// what the code generator reads from the other parts: the line map
+// (main_io.kr), a real literal's bits (kasm's own reading, so both agree),
+// and the parser's tables of ptr<S> and list<S> declarations
 extern "kronc" {
-    fn cg_lmap(line: i64) -> i64;
-    fn cg_float_bits(text: i64, single: i64) -> i64;
+    fn mi_lmap_lookup(line: i64) -> i64;
+    fn mi_lmap_line() -> i64;
+    fn ks_parse_float(text: i64) -> i64;
     fn cg_parser_q(which: i64, i: i64) -> i64;
+}
+
+// the file an expanded line comes from; its line there goes to
+// cg_lmap_line
+fn cg_lmap(line: i64) -> i64 {
+    var f: i64 = mi_lmap_lookup(line);
+    cg_lmap_line = mi_lmap_line();
+    return f;
+}
+
+// the bits of a real literal: the double's, or with single != 0 the four
+// bytes of the f32 it rounds to (karm and xwasm read reals through this too).
+// The double goes into an f32 field, which rounds it as the code a program
+// is compiled to does (cvtsd2ss).
+struct CgF64 { v: f64; }
+struct CgF32 { v: f32; }
+
+var cg_fbuf: [u8; 16];
+
+fn cg_float_bits(text: i64, single: i64) -> i64 {
+    var bits: i64 = ks_parse_float(text);
+    if single == 0 {
+        return bits;
+    }
+    var a: i64 = &cg_fbuf;
+    raw {
+        poke(a, bits);
+    }
+    var pd: ptr<CgF64> = a;
+    var ps: ptr<CgF32> = a + 8;
+    ps.v = pd.v;
+    var r: i64 = 0;
+    raw {
+        r = peek32(a + 8);
+    }
+    return r & 0xFFFFFFFF;
 }
 
 // =========================================================================
@@ -193,7 +230,7 @@ fn cg_tok_init() -> i64 {
 }
 
 // =========================================================================
-// the door's side: what codegen.asm calls
+// what the driver and the writers call
 // =========================================================================
 
 // the output buffer and its size; struct 0 is always 'stream', the pair

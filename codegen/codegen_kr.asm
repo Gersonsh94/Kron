@@ -85606,6 +85606,85 @@ section .text
     mov rsp, rbp
     pop rbp
     ret
+cg_lmap:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov rbx, rcx
+    mov rcx, rbx
+    sub rsp, 32
+    call mi_lmap_lookup
+    add rsp, 32
+    mov rbx, rax
+    sub rsp, 32
+    call mi_lmap_line
+    add rsp, 32
+    mov [rel __g_codegen_cg_lmap_line], rax
+    mov rax, rbx
+    jmp .__ret_8990
+.__ret_8990:
+    mov rbx, [rbp-32]
+    mov rsp, rbp
+    pop rbp
+    ret
+section .bss
+__g_codegen_cg_fbuf: resq 2
+section .text
+cg_float_bits:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rbp-80], rbx
+    mov [rbp-72], r12
+    mov rbx, rcx
+    mov r12, rdx
+    mov rcx, rbx
+    sub rsp, 32
+    call ks_parse_float
+    add rsp, 32
+    mov rbx, rax
+    cmp r12, 0
+    jne .L8992
+    mov rax, rbx
+    jmp .__ret_8991
+    jmp .L8993
+.L8992:
+.L8993:
+    lea rax, [rel __g_codegen_cg_fbuf]
+    mov r12, rax
+    mov rax, r12
+    push rax
+    mov rax, rbx
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    mov rax, r12
+    mov [rbp-40], rax
+    mov rax, r12
+    add rax, 8
+    mov [rbp-48], rax
+    mov rdx, [rbp-40]
+    movsd xmm0, [rdx]
+    mov rdx, [rbp-48]
+    cvtsd2ss xmm0, xmm0
+    movss [rdx], xmm0
+    mov rax, 0
+    mov rbx, rax
+    mov rax, r12
+    add rax, 8
+    mov eax, dword [rax]
+    mov rbx, rax
+    mov rax, rbx
+    mov rcx, 0xFFFFFFFF
+    and rax, rcx
+    jmp .__ret_8991
+.__ret_8991:
+    mov rbx, [rbp-80]
+    mov r12, [rbp-72]
+    mov rsp, rbp
+    pop rbp
+    ret
 cg_q:
     push rbp
     mov rbp, rsp
@@ -85626,8 +85705,8 @@ cg_q:
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_8990
-.__ret_8990:
+    jmp .__ret_8994
+.__ret_8994:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -85656,8 +85735,8 @@ cg_qs:
     pop rdx
     mov [rdx], rcx
     mov rax, 0
-    jmp .__ret_8991
-.__ret_8991:
+    jmp .__ret_8995
+.__ret_8995:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -85677,8 +85756,8 @@ cg_b:
     movzx rax, byte [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_8992
-.__ret_8992:
+    jmp .__ret_8996
+.__ret_8996:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -85699,8 +85778,8 @@ cg_bs:
     pop rdx
     mov [rdx], cl
     mov rax, 0
-    jmp .__ret_8993
-.__ret_8993:
+    jmp .__ret_8997
+.__ret_8997:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -85715,8 +85794,8 @@ cg_u32:
     mov rax, rbx
     mov rcx, 0xFFFFFFFF
     and rax, rcx
-    jmp .__ret_8994
-.__ret_8994:
+    jmp .__ret_8998
+.__ret_8998:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -85734,17 +85813,17 @@ cg_i32:
     mov rax, rbx
     mov rcx, 0x80000000
     cmp rax, rcx
-    jl .L8996
+    jl .L9000
     mov rax, rbx
     mov rcx, 0x100000000
     sub rax, rcx
     mov rbx, rax
-    jmp .L8997
-.L8996:
-.L8997:
+    jmp .L9001
+.L9000:
+.L9001:
     mov rax, rbx
-    jmp .__ret_8995
-.__ret_8995:
+    jmp .__ret_8999
+.__ret_8999:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -85771,15 +85850,15 @@ cg_ult:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L8999
+    jge .L9003
     mov rax, 1
-    jmp .__ret_8998
-    jmp .L9000
-.L8999:
-.L9000:
+    jmp .__ret_9002
+    jmp .L9004
+.L9003:
+.L9004:
     mov rax, 0
-    jmp .__ret_8998
-.__ret_8998:
+    jmp .__ret_9002
+.__ret_9002:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -85799,9 +85878,9 @@ cg_memeq:
     mov r12, r8
     mov rax, 0
     mov rbx, rax
-.L9002:
+.L9006:
     cmp rbx, r12
-    jge .L9003
+    jge .L9007
     mov rax, r14
     add rax, rbx
     push rax
@@ -85820,19 +85899,19 @@ cg_memeq:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    je .L9005
+    je .L9009
     mov rax, 0
-    jmp .__ret_9001
-    jmp .L9006
-.L9005:
-.L9006:
+    jmp .__ret_9005
+    jmp .L9010
+.L9009:
+.L9010:
     add rbx, 1
-.L9004:
-    jmp .L9002
-.L9003:
+.L9008:
+    jmp .L9006
+.L9007:
     mov rax, 1
-    jmp .__ret_9001
-.__ret_9001:
+    jmp .__ret_9005
+.__ret_9005:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -85854,8 +85933,8 @@ cg_tok:
     mov rcx, rax
     pop rax
     add rax, rcx
-    jmp .__ret_9007
-.__ret_9007:
+    jmp .__ret_9011
+.__ret_9011:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -85897,8 +85976,8 @@ cg_tok_set:
     add rdx, 22
     mov [rdx], ax
     mov rax, 0
-    jmp .__ret_9008
-.__ret_9008:
+    jmp .__ret_9012
+.__ret_9012:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov r13, [rbp-64]
@@ -85915,9 +85994,9 @@ cg_tok_init:
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9010: db 32,36,116,0
+.str9014: db 32,36,116,0
 section .text
-    lea rax, [rel .str9010]
+    lea rax, [rel .str9014]
     push rax
     pop r8
     pop rdx
@@ -85931,9 +86010,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9011: db 108,105,115,116,95,103,101,116,95,110,0
+.str9015: db 108,105,115,116,95,103,101,116,95,110,0
 section .text
-    lea rax, [rel .str9011]
+    lea rax, [rel .str9015]
     push rax
     pop r8
     pop rdx
@@ -85947,9 +86026,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9012: db 108,105,115,116,95,115,101,116,95,110,0
+.str9016: db 108,105,115,116,95,115,101,116,95,110,0
 section .text
-    lea rax, [rel .str9012]
+    lea rax, [rel .str9016]
     push rax
     pop r8
     pop rdx
@@ -85963,9 +86042,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9013: db 108,105,115,116,95,97,100,100,95,110,0
+.str9017: db 108,105,115,116,95,97,100,100,95,110,0
 section .text
-    lea rax, [rel .str9013]
+    lea rax, [rel .str9017]
     push rax
     pop r8
     pop rdx
@@ -85979,9 +86058,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9014: db 108,105,115,116,95,105,110,115,101,114,116,95,110,0
+.str9018: db 108,105,115,116,95,105,110,115,101,114,116,95,110,0
 section .text
-    lea rax, [rel .str9014]
+    lea rax, [rel .str9018]
     push rax
     pop r8
     pop rdx
@@ -85995,9 +86074,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9015: db 108,105,115,116,95,114,101,109,111,118,101,95,110,0
+.str9019: db 108,105,115,116,95,114,101,109,111,118,101,95,110,0
 section .text
-    lea rax, [rel .str9015]
+    lea rax, [rel .str9019]
     push rax
     pop r8
     pop rdx
@@ -86011,9 +86090,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9016: db 108,105,115,116,95,112,111,112,95,110,0
+.str9020: db 108,105,115,116,95,112,111,112,95,110,0
 section .text
-    lea rax, [rel .str9016]
+    lea rax, [rel .str9020]
     push rax
     pop r8
     pop rdx
@@ -86027,9 +86106,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9017: db 108,105,115,116,95,108,97,115,116,95,110,0
+.str9021: db 108,105,115,116,95,108,97,115,116,95,110,0
 section .text
-    lea rax, [rel .str9017]
+    lea rax, [rel .str9021]
     push rax
     pop r8
     pop rdx
@@ -86043,9 +86122,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9018: db 108,105,115,116,95,108,101,110,95,110,0
+.str9022: db 108,105,115,116,95,108,101,110,95,110,0
 section .text
-    lea rax, [rel .str9018]
+    lea rax, [rel .str9022]
     push rax
     pop r8
     pop rdx
@@ -86059,9 +86138,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9019: db 108,105,115,116,95,114,101,118,101,114,115,101,95,110,0
+.str9023: db 108,105,115,116,95,114,101,118,101,114,115,101,95,110,0
 section .text
-    lea rax, [rel .str9019]
+    lea rax, [rel .str9023]
     push rax
     pop r8
     pop rdx
@@ -86075,9 +86154,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9020: db 116,101,120,116,0
+.str9024: db 116,101,120,116,0
 section .text
-    lea rax, [rel .str9020]
+    lea rax, [rel .str9024]
     push rax
     pop r8
     pop rdx
@@ -86091,9 +86170,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9021: db 116,101,120,116,95,97,100,100,0
+.str9025: db 116,101,120,116,95,97,100,100,0
 section .text
-    lea rax, [rel .str9021]
+    lea rax, [rel .str9025]
     push rax
     pop r8
     pop rdx
@@ -86107,9 +86186,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9022: db 116,101,120,116,95,97,100,100,95,105,110,116,0
+.str9026: db 116,101,120,116,95,97,100,100,95,105,110,116,0
 section .text
-    lea rax, [rel .str9022]
+    lea rax, [rel .str9026]
     push rax
     pop r8
     pop rdx
@@ -86123,9 +86202,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9023: db 116,101,120,116,95,97,100,100,95,114,101,97,108,0
+.str9027: db 116,101,120,116,95,97,100,100,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str9023]
+    lea rax, [rel .str9027]
     push rax
     pop r8
     pop rdx
@@ -86139,9 +86218,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9024: db 116,101,120,116,95,115,97,109,101,0
+.str9028: db 116,101,120,116,95,115,97,109,101,0
 section .text
-    lea rax, [rel .str9024]
+    lea rax, [rel .str9028]
     push rax
     pop r8
     pop rdx
@@ -86155,9 +86234,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9025: db 115,97,121,0
+.str9029: db 115,97,121,0
 section .text
-    lea rax, [rel .str9025]
+    lea rax, [rel .str9029]
     push rax
     pop r8
     pop rdx
@@ -86171,9 +86250,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9026: db 108,105,115,116,95,110,101,119,0
+.str9030: db 108,105,115,116,95,110,101,119,0
 section .text
-    lea rax, [rel .str9026]
+    lea rax, [rel .str9030]
     push rax
     pop r8
     pop rdx
@@ -86187,9 +86266,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9027: db 109,97,112,95,110,101,119,0
+.str9031: db 109,97,112,95,110,101,119,0
 section .text
-    lea rax, [rel .str9027]
+    lea rax, [rel .str9031]
     push rax
     pop r8
     pop rdx
@@ -86203,9 +86282,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9028: db 108,105,115,116,95,97,100,100,0
+.str9032: db 108,105,115,116,95,97,100,100,0
 section .text
-    lea rax, [rel .str9028]
+    lea rax, [rel .str9032]
     push rax
     pop r8
     pop rdx
@@ -86219,9 +86298,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9029: db 108,105,115,116,95,97,100,100,95,114,101,97,108,0
+.str9033: db 108,105,115,116,95,97,100,100,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str9029]
+    lea rax, [rel .str9033]
     push rax
     pop r8
     pop rdx
@@ -86235,9 +86314,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9030: db 108,105,115,116,95,115,104,111,119,0
+.str9034: db 108,105,115,116,95,115,104,111,119,0
 section .text
-    lea rax, [rel .str9030]
+    lea rax, [rel .str9034]
     push rax
     pop r8
     pop rdx
@@ -86251,9 +86330,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9031: db 109,97,112,95,115,104,111,119,0
+.str9035: db 109,97,112,95,115,104,111,119,0
 section .text
-    lea rax, [rel .str9031]
+    lea rax, [rel .str9035]
     push rax
     pop r8
     pop rdx
@@ -86267,9 +86346,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9032: db 118,101,99,52,95,108,111,97,100,0
+.str9036: db 118,101,99,52,95,108,111,97,100,0
 section .text
-    lea rax, [rel .str9032]
+    lea rax, [rel .str9036]
     push rax
     pop r8
     pop rdx
@@ -86283,9 +86362,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9033: db 118,101,99,52,95,115,116,111,114,101,0
+.str9037: db 118,101,99,52,95,115,116,111,114,101,0
 section .text
-    lea rax, [rel .str9033]
+    lea rax, [rel .str9037]
     push rax
     pop r8
     pop rdx
@@ -86299,9 +86378,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9034: db 118,101,99,52,95,97,100,100,0
+.str9038: db 118,101,99,52,95,97,100,100,0
 section .text
-    lea rax, [rel .str9034]
+    lea rax, [rel .str9038]
     push rax
     pop r8
     pop rdx
@@ -86315,9 +86394,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9035: db 118,101,99,52,95,115,117,98,0
+.str9039: db 118,101,99,52,95,115,117,98,0
 section .text
-    lea rax, [rel .str9035]
+    lea rax, [rel .str9039]
     push rax
     pop r8
     pop rdx
@@ -86331,9 +86410,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9036: db 118,101,99,52,95,109,117,108,0
+.str9040: db 118,101,99,52,95,109,117,108,0
 section .text
-    lea rax, [rel .str9036]
+    lea rax, [rel .str9040]
     push rax
     pop r8
     pop rdx
@@ -86347,9 +86426,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9037: db 118,101,99,52,95,100,105,118,0
+.str9041: db 118,101,99,52,95,100,105,118,0
 section .text
-    lea rax, [rel .str9037]
+    lea rax, [rel .str9041]
     push rax
     pop r8
     pop rdx
@@ -86363,9 +86442,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9038: db 118,101,99,52,95,115,117,109,0
+.str9042: db 118,101,99,52,95,115,117,109,0
 section .text
-    lea rax, [rel .str9038]
+    lea rax, [rel .str9042]
     push rax
     pop r8
     pop rdx
@@ -86379,9 +86458,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9039: db 118,101,99,52,95,102,105,108,108,0
+.str9043: db 118,101,99,52,95,102,105,108,108,0
 section .text
-    lea rax, [rel .str9039]
+    lea rax, [rel .str9043]
     push rax
     pop r8
     pop rdx
@@ -86395,9 +86474,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9040: db 118,101,99,50,95,100,105,118,0
+.str9044: db 118,101,99,50,95,100,105,118,0
 section .text
-    lea rax, [rel .str9040]
+    lea rax, [rel .str9044]
     push rax
     pop r8
     pop rdx
@@ -86411,9 +86490,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9041: db 95,95,107,114,111,110,95,108,105,98,95,105,110,105,116,0
+.str9045: db 95,95,107,114,111,110,95,108,105,98,95,105,110,105,116,0
 section .text
-    lea rax, [rel .str9041]
+    lea rax, [rel .str9045]
     push rax
     pop r8
     pop rdx
@@ -86427,9 +86506,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9042: db 108,105,98,95,105,110,105,116,0
+.str9046: db 108,105,98,95,105,110,105,116,0
 section .text
-    lea rax, [rel .str9042]
+    lea rax, [rel .str9046]
     push rax
     pop r8
     pop rdx
@@ -86443,9 +86522,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9043: db 109,97,105,110,0
+.str9047: db 109,97,105,110,0
 section .text
-    lea rax, [rel .str9043]
+    lea rax, [rel .str9047]
     push rax
     pop r8
     pop rdx
@@ -86459,9 +86538,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9044: db 95,95,101,110,118,0
+.str9048: db 95,95,101,110,118,0
 section .text
-    lea rax, [rel .str9044]
+    lea rax, [rel .str9048]
     push rax
     pop r8
     pop rdx
@@ -86475,9 +86554,9 @@ section .text
     mov rax, 0
     push rax
 section .data
-.str9045: db 115,116,114,101,97,109,0
+.str9049: db 115,116,114,101,97,109,0
 section .text
-    lea rax, [rel .str9045]
+    lea rax, [rel .str9049]
     push rax
     pop r8
     pop rdx
@@ -86491,9 +86570,9 @@ section .text
     mov rax, 0
     push rax
 section .data
-.str9046: db 98,121,116,101,115,0
+.str9050: db 98,121,116,101,115,0
 section .text
-    lea rax, [rel .str9046]
+    lea rax, [rel .str9050]
     push rax
     pop r8
     pop rdx
@@ -86507,9 +86586,9 @@ section .text
     mov rax, 0
     push rax
 section .data
-.str9047: db 108,101,110,0
+.str9051: db 108,101,110,0
 section .text
-    lea rax, [rel .str9047]
+    lea rax, [rel .str9051]
     push rax
     pop r8
     pop rdx
@@ -86523,9 +86602,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9048: db 116,101,120,116,95,102,114,101,101,0
+.str9052: db 116,101,120,116,95,102,114,101,101,0
 section .text
-    lea rax, [rel .str9048]
+    lea rax, [rel .str9052]
     push rax
     pop r8
     pop rdx
@@ -86539,9 +86618,9 @@ section .text
     mov rax, [rel __g_codegen_TOK_IDENT]
     push rax
 section .data
-.str9049: db 116,101,120,116,95,100,114,111,112,0
+.str9053: db 116,101,120,116,95,100,114,111,112,0
 section .text
-    lea rax, [rel .str9049]
+    lea rax, [rel .str9053]
     push rax
     pop r8
     pop rdx
@@ -86551,8 +86630,8 @@ section .text
     call cg_tok_set
     add rsp, 32
     mov rax, 0
-    jmp .__ret_9009
-.__ret_9009:
+    jmp .__ret_9013
+.__ret_9013:
     mov rsp, rbp
     pop rbp
     ret
@@ -86760,8 +86839,8 @@ cgk_init:
     mov rax, 0
     mov [rel __g_codegen_stream_struct_id], rax
     mov rax, 0
-    jmp .__ret_9050
-.__ret_9050:
+    jmp .__ret_9054
+.__ret_9054:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -86780,8 +86859,8 @@ cgk_flags:
     mov rax, rbx
     mov [rel __g_codegen_cg_as_module], rax
     lea rax, [rel __g_codegen_cg_mod_tag]
-    jmp .__ret_9051
-.__ret_9051:
+    jmp .__ret_9055
+.__ret_9055:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -86804,7 +86883,7 @@ cgk_set_target:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L9055
+    jnz .L9059
     mov rax, rbx
     push rax
     mov rax, [rel __g_codegen_TARGET_KRN]
@@ -86814,24 +86893,24 @@ cgk_set_target:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L9055
+    jnz .L9059
     mov rax, 0
-    jmp .L9056
-.L9055:
+    jmp .L9060
+.L9059:
     mov rax, 1
-.L9056:
+.L9060:
     test rax, rax
-    jz .L9053
+    jz .L9057
     mov rax, 1
     mov [rel __g_codegen_cg_bare], rax
-    jmp .L9054
-.L9053:
+    jmp .L9058
+.L9057:
     mov rax, 0
     mov [rel __g_codegen_cg_bare], rax
-.L9054:
+.L9058:
     mov rax, 0
-    jmp .__ret_9052
-.__ret_9052:
+    jmp .__ret_9056
+.__ret_9056:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -86845,8 +86924,8 @@ cgk_set_lib:
     mov rax, rbx
     mov [rel __g_codegen_cg_lib], rax
     mov rax, 0
-    jmp .__ret_9057
-.__ret_9057:
+    jmp .__ret_9061
+.__ret_9061:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -86861,8 +86940,8 @@ cgk_run:
     sub rsp, 32
     call cg_run
     add rsp, 32
-    jmp .__ret_9058
-.__ret_9058:
+    jmp .__ret_9062
+.__ret_9062:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -86872,8 +86951,8 @@ cgk_code:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_codegen_cg_out]
-    jmp .__ret_9059
-.__ret_9059:
+    jmp .__ret_9063
+.__ret_9063:
     mov rsp, rbp
     pop rbp
     ret
@@ -86887,8 +86966,8 @@ cgk_code_size:
     mov rcx, rax
     pop rax
     sub rax, rcx
-    jmp .__ret_9060
-.__ret_9060:
+    jmp .__ret_9064
+.__ret_9064:
     mov rsp, rbp
     pop rbp
     ret
@@ -86902,8 +86981,8 @@ cgk_uses_extern:
     sub rsp, 32
     call cg_u32
     add rsp, 32
-    jmp .__ret_9061
-.__ret_9061:
+    jmp .__ret_9065
+.__ret_9065:
     mov rsp, rbp
     pop rbp
     ret
@@ -86923,8 +87002,8 @@ cgk_has_exports:
     mov rcx, rax
     pop rax
     or rax, rcx
-    jmp .__ret_9062
-.__ret_9062:
+    jmp .__ret_9066
+.__ret_9066:
     mov rsp, rbp
     pop rbp
     ret
@@ -86938,8 +87017,8 @@ cgk_export_count:
     sub rsp, 32
     call cg_u32
     add rsp, 32
-    jmp .__ret_9063
-.__ret_9063:
+    jmp .__ret_9067
+.__ret_9067:
     mov rsp, rbp
     pop rbp
     ret
@@ -86956,8 +87035,8 @@ cgk_export_name:
     sub rsp, 32
     call cg_q
     add rsp, 32
-    jmp .__ret_9064
-.__ret_9064:
+    jmp .__ret_9068
+.__ret_9068:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -86980,8 +87059,8 @@ cgk_export_nlen:
     sub rsp, 32
     call cg_u32
     add rsp, 32
-    jmp .__ret_9065
-.__ret_9065:
+    jmp .__ret_9069
+.__ret_9069:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -86991,8 +87070,8 @@ cgk_thread_tok:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_codegen_cg_thread_tok]
-    jmp .__ret_9066
-.__ret_9066:
+    jmp .__ret_9070
+.__ret_9070:
     mov rsp, rbp
     pop rbp
     ret
@@ -87001,8 +87080,8 @@ cgk_err_msg:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_codegen_cg_err_msg]
-    jmp .__ret_9067
-.__ret_9067:
+    jmp .__ret_9071
+.__ret_9071:
     mov rsp, rbp
     pop rbp
     ret
@@ -87011,8 +87090,8 @@ cgk_err_tok:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_codegen_cg_err_tok]
-    jmp .__ret_9068
-.__ret_9068:
+    jmp .__ret_9072
+.__ret_9072:
     mov rsp, rbp
     pop rbp
     ret
@@ -87021,8 +87100,8 @@ cgk_err_hint:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_codegen_cg_err_hint]
-    jmp .__ret_9069
-.__ret_9069:
+    jmp .__ret_9073
+.__ret_9073:
     mov rsp, rbp
     pop rbp
     ret
@@ -87032,8 +87111,8 @@ cgk_dbg_which:
     sub rsp, 32
     mov rax, [rel __g_codegen_dbg_which]
     and rax, 255
-    jmp .__ret_9070
-.__ret_9070:
+    jmp .__ret_9074
+.__ret_9074:
     mov rsp, rbp
     pop rbp
     ret

@@ -25193,6 +25193,81 @@ bset:
     mov rsp, rbp
     pop rbp
     ret
+cg_parser_q:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov [rbp-24], r12
+    mov r12, rcx
+    mov rbx, rdx
+    cmp r12, 1
+    jne .L2644
+    mov rax, [rel __g_parser_par_ps_n]
+    jmp .__ret_2643
+    jmp .L2645
+.L2644:
+.L2645:
+    cmp r12, 2
+    jne .L2646
+    lea rax, [rel __g_parser_par_ps_decl]
+    push rax
+    pop rcx
+    mov rdx, rbx
+    sub rsp, 32
+    call tget
+    add rsp, 32
+    jmp .__ret_2643
+    jmp .L2647
+.L2646:
+.L2647:
+    cmp r12, 3
+    jne .L2648
+    lea rax, [rel __g_parser_par_ps_type]
+    push rax
+    pop rcx
+    mov rdx, rbx
+    sub rsp, 32
+    call tget
+    add rsp, 32
+    jmp .__ret_2643
+    jmp .L2649
+.L2648:
+.L2649:
+    cmp r12, 4
+    jne .L2650
+    mov rax, [rel __g_parser_par_ls_n]
+    jmp .__ret_2643
+    jmp .L2651
+.L2650:
+.L2651:
+    cmp r12, 5
+    jne .L2652
+    lea rax, [rel __g_parser_par_ls_decl]
+    push rax
+    pop rcx
+    mov rdx, rbx
+    sub rsp, 32
+    call tget
+    add rsp, 32
+    jmp .__ret_2643
+    jmp .L2653
+.L2652:
+.L2653:
+    lea rax, [rel __g_parser_par_ls_type]
+    push rax
+    pop rcx
+    mov rdx, rbx
+    sub rsp, 32
+    call tget
+    add rsp, 32
+    jmp .__ret_2643
+.__ret_2643:
+    mov rbx, [rbp-32]
+    mov r12, [rbp-24]
+    mov rsp, rbp
+    pop rbp
+    ret
 prs_memeq:
     push rbp
     mov rbp, rsp
@@ -25206,9 +25281,9 @@ prs_memeq:
     mov r12, r8
     mov rax, 0
     mov rbx, rax
-.L2644:
+.L2655:
     cmp rbx, r12
-    jge .L2645
+    jge .L2656
     mov rax, r14
     add rax, rbx
     push rax
@@ -25227,19 +25302,19 @@ prs_memeq:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    je .L2647
+    je .L2658
     mov rax, 0
-    jmp .__ret_2643
-    jmp .L2648
-.L2647:
-.L2648:
+    jmp .__ret_2654
+    jmp .L2659
+.L2658:
+.L2659:
     add rbx, 1
-.L2646:
-    jmp .L2644
-.L2645:
+.L2657:
+    jmp .L2655
+.L2656:
     mov rax, 1
-    jmp .__ret_2643
-.__ret_2643:
+    jmp .__ret_2654
+.__ret_2654:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -25263,12 +25338,12 @@ prs_tok_same:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    je .L2650
+    je .L2661
     mov rax, 0
-    jmp .__ret_2649
-    jmp .L2651
-.L2650:
-.L2651:
+    jmp .__ret_2660
+    jmp .L2662
+.L2661:
+.L2662:
     mov rdx, [rbp-8]
     add rdx, 8
     mov rax, [rdx]
@@ -25287,8 +25362,8 @@ prs_tok_same:
     sub rsp, 32
     call prs_memeq
     add rsp, 32
-    jmp .__ret_2649
-.__ret_2649:
+    jmp .__ret_2660
+.__ret_2660:
     mov rsp, rbp
     pop rbp
     ret
@@ -25305,12 +25380,12 @@ prs_tok_is:
     add rdx, 16
     mov eax, dword [rdx]
     cmp rax, rbx
-    je .L2653
+    je .L2664
     mov rax, 0
-    jmp .__ret_2652
-    jmp .L2654
-.L2653:
-.L2654:
+    jmp .__ret_2663
+    jmp .L2665
+.L2664:
+.L2665:
     mov rdx, [rbp-8]
     add rdx, 8
     mov rax, [rdx]
@@ -25321,8 +25396,8 @@ prs_tok_is:
     sub rsp, 32
     call prs_memeq
     add rsp, 32
-    jmp .__ret_2652
-.__ret_2652:
+    jmp .__ret_2663
+.__ret_2663:
     mov rbx, [rbp-48]
     mov r12, [rbp-40]
     mov rsp, rbp
@@ -25350,7 +25425,7 @@ prs_put_name:
     mov [rbp-24], rax
     mov rax, 0
     mov rbx, rax
-.L2656:
+.L2667:
     mov rax, r12
     add rax, rbx
     push rax
@@ -25359,11 +25434,11 @@ prs_put_name:
     call bget
     add rsp, 32
     cmp rax, 0
-    je .L2657
+    je .L2668
     add rbx, 1
-.L2658:
-    jmp .L2656
-.L2657:
+.L2669:
+    jmp .L2667
+.L2668:
     mov rax, [rel __g_parser_TOK_IDENTIFIER]
     mov rdx, [rbp-24]
     mov [rdx], rax
@@ -25384,8 +25459,8 @@ prs_put_name:
     add rdx, 22
     mov [rdx], ax
     mov rax, 0
-    jmp .__ret_2655
-.__ret_2655:
+    jmp .__ret_2666
+.__ret_2666:
     mov rbx, [rbp-48]
     mov r12, [rbp-40]
     mov rsp, rbp
@@ -25400,9 +25475,9 @@ prs_names_init:
     mov rax, [rel __g_parser_PT_SLICE_GET]
     push rax
 section .data
-.str2660: db 115,108,105,99,101,95,103,101,116,0
+.str2671: db 115,108,105,99,101,95,103,101,116,0
 section .text
-    lea rax, [rel .str2660]
+    lea rax, [rel .str2671]
     push rax
     pop rdx
     pop rcx
@@ -25412,9 +25487,9 @@ section .text
     mov rax, [rel __g_parser_PT_SLICE_SET]
     push rax
 section .data
-.str2661: db 115,108,105,99,101,95,115,101,116,0
+.str2672: db 115,108,105,99,101,95,115,101,116,0
 section .text
-    lea rax, [rel .str2661]
+    lea rax, [rel .str2672]
     push rax
     pop rdx
     pop rcx
@@ -25424,9 +25499,9 @@ section .text
     mov rax, [rel __g_parser_PT_SLICER_GET]
     push rax
 section .data
-.str2662: db 115,108,105,99,101,95,103,101,116,95,114,101,97,108,0
+.str2673: db 115,108,105,99,101,95,103,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2662]
+    lea rax, [rel .str2673]
     push rax
     pop rdx
     pop rcx
@@ -25436,9 +25511,9 @@ section .text
     mov rax, [rel __g_parser_PT_SLICER_SET]
     push rax
 section .data
-.str2663: db 115,108,105,99,101,95,115,101,116,95,114,101,97,108,0
+.str2674: db 115,108,105,99,101,95,115,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2663]
+    lea rax, [rel .str2674]
     push rax
     pop rdx
     pop rcx
@@ -25448,9 +25523,9 @@ section .text
     mov rax, [rel __g_parser_PT_LIST_GET]
     push rax
 section .data
-.str2664: db 108,105,115,116,95,103,101,116,0
+.str2675: db 108,105,115,116,95,103,101,116,0
 section .text
-    lea rax, [rel .str2664]
+    lea rax, [rel .str2675]
     push rax
     pop rdx
     pop rcx
@@ -25460,9 +25535,9 @@ section .text
     mov rax, [rel __g_parser_PT_LIST_SET]
     push rax
 section .data
-.str2665: db 108,105,115,116,95,115,101,116,0
+.str2676: db 108,105,115,116,95,115,101,116,0
 section .text
-    lea rax, [rel .str2665]
+    lea rax, [rel .str2676]
     push rax
     pop rdx
     pop rcx
@@ -25472,9 +25547,9 @@ section .text
     mov rax, [rel __g_parser_PT_LISTR_GET]
     push rax
 section .data
-.str2666: db 108,105,115,116,95,103,101,116,95,114,101,97,108,0
+.str2677: db 108,105,115,116,95,103,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2666]
+    lea rax, [rel .str2677]
     push rax
     pop rdx
     pop rcx
@@ -25484,9 +25559,9 @@ section .text
     mov rax, [rel __g_parser_PT_LISTR_SET]
     push rax
 section .data
-.str2667: db 108,105,115,116,95,115,101,116,95,114,101,97,108,0
+.str2678: db 108,105,115,116,95,115,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2667]
+    lea rax, [rel .str2678]
     push rax
     pop rdx
     pop rcx
@@ -25496,9 +25571,9 @@ section .text
     mov rax, [rel __g_parser_PT_MAP_GET]
     push rax
 section .data
-.str2668: db 109,97,112,95,103,101,116,0
+.str2679: db 109,97,112,95,103,101,116,0
 section .text
-    lea rax, [rel .str2668]
+    lea rax, [rel .str2679]
     push rax
     pop rdx
     pop rcx
@@ -25508,9 +25583,9 @@ section .text
     mov rax, [rel __g_parser_PT_MAP_SET]
     push rax
 section .data
-.str2669: db 109,97,112,95,115,101,116,0
+.str2680: db 109,97,112,95,115,101,116,0
 section .text
-    lea rax, [rel .str2669]
+    lea rax, [rel .str2680]
     push rax
     pop rdx
     pop rcx
@@ -25520,9 +25595,9 @@ section .text
     mov rax, [rel __g_parser_PT_MAPR_GET]
     push rax
 section .data
-.str2670: db 109,97,112,95,103,101,116,95,114,101,97,108,0
+.str2681: db 109,97,112,95,103,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2670]
+    lea rax, [rel .str2681]
     push rax
     pop rdx
     pop rcx
@@ -25532,9 +25607,9 @@ section .text
     mov rax, [rel __g_parser_PT_MAPR_SET]
     push rax
 section .data
-.str2671: db 109,97,112,95,115,101,116,95,114,101,97,108,0
+.str2682: db 109,97,112,95,115,101,116,95,114,101,97,108,0
 section .text
-    lea rax, [rel .str2671]
+    lea rax, [rel .str2682]
     push rax
     pop rdx
     pop rcx
@@ -25544,9 +25619,9 @@ section .text
     mov rax, [rel __g_parser_PT_LISTS_GET]
     push rax
 section .data
-.str2672: db 108,105,115,116,95,115,103,101,116,0
+.str2683: db 108,105,115,116,95,115,103,101,116,0
 section .text
-    lea rax, [rel .str2672]
+    lea rax, [rel .str2683]
     push rax
     pop rdx
     pop rcx
@@ -25556,9 +25631,9 @@ section .text
     mov rax, [rel __g_parser_PT_LISTS_SET]
     push rax
 section .data
-.str2673: db 108,105,115,116,95,115,115,101,116,0
+.str2684: db 108,105,115,116,95,115,115,101,116,0
 section .text
-    lea rax, [rel .str2673]
+    lea rax, [rel .str2684]
     push rax
     pop rdx
     pop rcx
@@ -25568,9 +25643,9 @@ section .text
     mov rax, [rel __g_parser_PT_LIST_LEN]
     push rax
 section .data
-.str2674: db 108,105,115,116,95,108,101,110,0
+.str2685: db 108,105,115,116,95,108,101,110,0
 section .text
-    lea rax, [rel .str2674]
+    lea rax, [rel .str2685]
     push rax
     pop rdx
     pop rcx
@@ -25580,9 +25655,9 @@ section .text
     mov rax, [rel __g_parser_PT_ONE]
     push rax
 section .data
-.str2675: db 49,0
+.str2686: db 49,0
 section .text
-    lea rax, [rel .str2675]
+    lea rax, [rel .str2686]
     push rax
     pop rdx
     pop rcx
@@ -25592,9 +25667,9 @@ section .text
     mov rax, [rel __g_parser_PT_ZERO]
     push rax
 section .data
-.str2676: db 48,0
+.str2687: db 48,0
 section .text
-    lea rax, [rel .str2676]
+    lea rax, [rel .str2687]
     push rax
     pop rdx
     pop rcx
@@ -25632,8 +25707,8 @@ section .text
     mov rdx, [rbp-8]
     mov [rdx], rax
     mov rax, 0
-    jmp .__ret_2659
-.__ret_2659:
+    jmp .__ret_2670
+.__ret_2670:
     mov rsp, rbp
     pop rbp
     ret
@@ -25654,8 +25729,8 @@ prs_made:
     mov rcx, rax
     pop rax
     add rax, rcx
-    jmp .__ret_2677
-.__ret_2677:
+    jmp .__ret_2688
+.__ret_2688:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -25667,85 +25742,85 @@ prs_coll_get:
     mov [rbp-32], rbx
     mov rbx, rcx
     cmp rbx, 0
-    jne .L2679
+    jne .L2690
     mov rax, [rel __g_parser_PT_SLICE_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2680
-.L2679:
-.L2680:
+    jmp .__ret_2689
+    jmp .L2691
+.L2690:
+.L2691:
     cmp rbx, 1
-    jne .L2681
+    jne .L2692
     mov rax, [rel __g_parser_PT_LIST_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2682
-.L2681:
-.L2682:
+    jmp .__ret_2689
+    jmp .L2693
+.L2692:
+.L2693:
     cmp rbx, 2
-    jne .L2683
+    jne .L2694
     mov rax, [rel __g_parser_PT_LISTR_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2684
-.L2683:
-.L2684:
+    jmp .__ret_2689
+    jmp .L2695
+.L2694:
+.L2695:
     cmp rbx, 3
-    jne .L2685
+    jne .L2696
     mov rax, [rel __g_parser_PT_MAP_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2686
-.L2685:
-.L2686:
+    jmp .__ret_2689
+    jmp .L2697
+.L2696:
+.L2697:
     cmp rbx, 4
-    jne .L2687
+    jne .L2698
     mov rax, [rel __g_parser_PT_MAPR_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2688
-.L2687:
-.L2688:
+    jmp .__ret_2689
+    jmp .L2699
+.L2698:
+.L2699:
     cmp rbx, 5
-    jne .L2689
+    jne .L2700
     mov rax, [rel __g_parser_PT_SLICER_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-    jmp .L2690
-.L2689:
-.L2690:
+    jmp .__ret_2689
+    jmp .L2701
+.L2700:
+.L2701:
     mov rax, [rel __g_parser_PT_LISTS_GET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2678
-.__ret_2678:
+    jmp .__ret_2689
+.__ret_2689:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -25757,85 +25832,85 @@ prs_coll_set:
     mov [rbp-32], rbx
     mov rbx, rcx
     cmp rbx, 0
-    jne .L2692
+    jne .L2703
     mov rax, [rel __g_parser_PT_SLICE_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2693
-.L2692:
-.L2693:
+    jmp .__ret_2702
+    jmp .L2704
+.L2703:
+.L2704:
     cmp rbx, 1
-    jne .L2694
+    jne .L2705
     mov rax, [rel __g_parser_PT_LIST_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2695
-.L2694:
-.L2695:
+    jmp .__ret_2702
+    jmp .L2706
+.L2705:
+.L2706:
     cmp rbx, 2
-    jne .L2696
+    jne .L2707
     mov rax, [rel __g_parser_PT_LISTR_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2697
-.L2696:
-.L2697:
+    jmp .__ret_2702
+    jmp .L2708
+.L2707:
+.L2708:
     cmp rbx, 3
-    jne .L2698
+    jne .L2709
     mov rax, [rel __g_parser_PT_MAP_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2699
-.L2698:
-.L2699:
+    jmp .__ret_2702
+    jmp .L2710
+.L2709:
+.L2710:
     cmp rbx, 4
-    jne .L2700
+    jne .L2711
     mov rax, [rel __g_parser_PT_MAPR_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2701
-.L2700:
-.L2701:
+    jmp .__ret_2702
+    jmp .L2712
+.L2711:
+.L2712:
     cmp rbx, 5
-    jne .L2702
+    jne .L2713
     mov rax, [rel __g_parser_PT_SLICER_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-    jmp .L2703
-.L2702:
-.L2703:
+    jmp .__ret_2702
+    jmp .L2714
+.L2713:
+.L2714:
     mov rax, [rel __g_parser_PT_LISTS_SET]
     push rax
     pop rcx
     sub rsp, 32
     call prs_made
     add rsp, 32
-    jmp .__ret_2691
-.__ret_2691:
+    jmp .__ret_2702
+.__ret_2702:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -25850,7 +25925,7 @@ prs_cur:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L2705
+    jge .L2716
     mov rax, [rel __g_parser_par_pos]
     push rax
     mov rax, [rel __g_parser_PRS_TOK]
@@ -25860,13 +25935,13 @@ prs_cur:
     mov rcx, rax
     mov rax, [rel __g_parser_par_tokens]
     add rax, rcx
-    jmp .__ret_2704
-    jmp .L2706
-.L2705:
-.L2706:
+    jmp .__ret_2715
+    jmp .L2717
+.L2716:
+.L2717:
     lea rax, [rel __g_parser_prs_eof]
-    jmp .__ret_2704
-.__ret_2704:
+    jmp .__ret_2715
+.__ret_2715:
     mov rsp, rbp
     pop rbp
     ret
@@ -25880,8 +25955,8 @@ prs_ct:
     mov [rbp-8], rax
     mov rdx, [rbp-8]
     mov rax, [rdx]
-    jmp .__ret_2707
-.__ret_2707:
+    jmp .__ret_2718
+.__ret_2718:
     mov rsp, rbp
     pop rbp
     ret
@@ -25898,7 +25973,7 @@ prs_peek_next:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L2709
+    jge .L2720
     mov rax, [rel __g_parser_par_pos]
     add rax, 1
     push rax
@@ -25912,13 +25987,13 @@ prs_peek_next:
     mov [rbp-8], rax
     mov rdx, [rbp-8]
     mov rax, [rdx]
-    jmp .__ret_2708
-    jmp .L2710
-.L2709:
-.L2710:
+    jmp .__ret_2719
+    jmp .L2721
+.L2720:
+.L2721:
     mov rax, [rel __g_parser_TOK_EOF]
-    jmp .__ret_2708
-.__ret_2708:
+    jmp .__ret_2719
+.__ret_2719:
     mov rsp, rbp
     pop rbp
     ret
@@ -25930,8 +26005,8 @@ prs_adv:
     add rax, 1
     mov [rel __g_parser_par_pos], rax
     mov rax, 0
-    jmp .__ret_2711
-.__ret_2711:
+    jmp .__ret_2722
+.__ret_2722:
     mov rsp, rbp
     pop rbp
     ret
@@ -25950,8 +26025,8 @@ prs_want:
     cmp rax, rcx
     sete al
     movzx rax, al
-    jmp .__ret_2712
-.__ret_2712:
+    jmp .__ret_2723
+.__ret_2723:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -25968,22 +26043,22 @@ prs_is_field_name:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2714
+    jne .L2725
     mov rax, 1
-    jmp .__ret_2713
-    jmp .L2715
-.L2714:
-.L2715:
+    jmp .__ret_2724
+    jmp .L2726
+.L2725:
+.L2726:
     cmp rbx, 100
-    jl .L2716
+    jl .L2727
     mov rax, 1
-    jmp .__ret_2713
-    jmp .L2717
-.L2716:
-.L2717:
+    jmp .__ret_2724
+    jmp .L2728
+.L2727:
+.L2728:
     mov rax, 0
-    jmp .__ret_2713
-.__ret_2713:
+    jmp .__ret_2724
+.__ret_2724:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -26009,12 +26084,12 @@ prs_new:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jle .L2719
+    jle .L2730
     mov rax, 0
-    jmp .__ret_2718
-    jmp .L2720
-.L2719:
-.L2720:
+    jmp .__ret_2729
+    jmp .L2731
+.L2730:
+.L2731:
     mov rax, [rel __g_parser_par_arena_ptr]
     push rax
     mov rax, [rel __g_parser_AST_NODE_SIZE]
@@ -26063,7 +26138,7 @@ prs_new:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L2721
+    jge .L2732
     mov rax, [rel __g_parser_par_pos]
     push rax
     mov rax, [rel __g_parser_PRS_TOK]
@@ -26080,12 +26155,12 @@ prs_new:
     mov rdx, [rbp-16]
     add rdx, 36
     mov [rdx], ax
-    jmp .L2722
-.L2721:
-.L2722:
+    jmp .L2733
+.L2732:
+.L2733:
     mov rax, [rbp-16]
-    jmp .__ret_2718
-.__ret_2718:
+    jmp .__ret_2729
+.__ret_2729:
     mov rbx, [rbp-48]
     mov rsp, rbp
     pop rbp
@@ -26103,20 +26178,20 @@ par_slice_add:
     mov [rel __g_parser_par_coll_stok], rax
     mov rax, [rel __g_parser_par_last_is_slice]
     cmp rax, 2
-    jne .L2724
+    jne .L2735
     mov rax, 5
     mov rbx, rax
-    jmp .L2725
-.L2724:
-.L2725:
+    jmp .L2736
+.L2735:
+.L2736:
     mov rcx, r12
     mov rdx, rbx
     sub rsp, 32
     call par_coll_add
     add rsp, 32
     mov rax, 0
-    jmp .__ret_2723
-.__ret_2723:
+    jmp .__ret_2734
+.__ret_2734:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -26135,16 +26210,16 @@ par_coll_add:
     mov rbx, rax
     mov rax, [rel __g_parser_par_in_fn]
     cmp rax, 0
-    jne .L2727
+    jne .L2738
     mov rax, [rel __g_parser_par_gcoll_n]
     mov rbx, rax
     cmp rbx, 256
-    jl .L2729
+    jl .L2740
     mov rax, 0
-    jmp .__ret_2726
-    jmp .L2730
-.L2729:
-.L2730:
+    jmp .__ret_2737
+    jmp .L2741
+.L2740:
+.L2741:
     lea rax, [rel __g_parser_par_gcoll_toks]
     push rax
     pop rcx
@@ -26177,19 +26252,19 @@ par_coll_add:
     add rax, 1
     mov [rel __g_parser_par_gcoll_n], rax
     mov rax, 0
-    jmp .__ret_2726
-    jmp .L2728
-.L2727:
-.L2728:
+    jmp .__ret_2737
+    jmp .L2739
+.L2738:
+.L2739:
     mov rax, [rel __g_parser_par_slice_n]
     mov rbx, rax
     cmp rbx, 64
-    jl .L2731
+    jl .L2742
     mov rax, 0
-    jmp .__ret_2726
-    jmp .L2732
-.L2731:
-.L2732:
+    jmp .__ret_2737
+    jmp .L2743
+.L2742:
+.L2743:
     lea rax, [rel __g_parser_par_slice_toks]
     push rax
     pop rcx
@@ -26222,8 +26297,8 @@ par_coll_add:
     add rax, 1
     mov [rel __g_parser_par_slice_n], rax
     mov rax, 0
-    jmp .__ret_2726
-.__ret_2726:
+    jmp .__ret_2737
+.__ret_2737:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -26247,21 +26322,21 @@ par_coll_of_vtag:
     mov rax, 0
     mov rbx, rax
     cmp r12, 2
-    jne .L2734
+    jne .L2745
     mov rax, 1
     mov r12, rax
-    jmp .L2735
-.L2734:
+    jmp .L2746
+.L2745:
     cmp r12, 3
-    jne .L2736
+    jne .L2747
     mov rax, 3
     mov r12, rax
-    jmp .L2737
-.L2736:
+    jmp .L2748
+.L2747:
     mov rax, 0
-    jmp .__ret_2733
-.L2737:
-.L2735:
+    jmp .__ret_2744
+.L2748:
+.L2746:
     mov rax, 0
     mov [rel __g_parser_par_coll_stok], rax
     mov rax, r13
@@ -26271,21 +26346,21 @@ par_coll_of_vtag:
     mov rbx, rax
     and rbx, 15
     cmp rbx, 2
-    jne .L2738
+    jne .L2749
     add r12, 1
-    jmp .L2739
-.L2738:
+    jmp .L2750
+.L2749:
     cmp rbx, 3
-    jne .L2740
+    jne .L2751
     cmp r12, 1
-    jne .L2742
+    jne .L2753
     mov rax, 6
     mov r12, rax
     mov rax, [rel __g_parser_par_last_coll_stok]
     mov [rel __g_parser_par_coll_stok], rax
     mov rax, [rel __g_parser_par_ls_n]
     cmp rax, 8192
-    jge .L2744
+    jge .L2755
     lea rax, [rel __g_parser_par_ls_decl]
     push rax
     mov rax, [rel __g_parser_par_ls_n]
@@ -26311,30 +26386,30 @@ par_coll_of_vtag:
     mov rax, [rel __g_parser_par_ls_n]
     add rax, 1
     mov [rel __g_parser_par_ls_n], rax
-    jmp .L2745
-.L2744:
-.L2745:
-    jmp .L2743
-.L2742:
-.L2743:
-    jmp .L2741
-.L2740:
+    jmp .L2756
+.L2755:
+.L2756:
+    jmp .L2754
+.L2753:
+.L2754:
+    jmp .L2752
+.L2751:
     mov rax, rbx
     shl rax, 8
     mov rcx, rax
     mov rax, r12
     or rax, rcx
     mov r12, rax
-.L2741:
-.L2739:
+.L2752:
+.L2750:
     mov rcx, r14
     mov rdx, r12
     sub rsp, 32
     call par_coll_add
     add rsp, 32
     mov rax, 0
-    jmp .__ret_2733
-.__ret_2733:
+    jmp .__ret_2744
+.__ret_2744:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -26354,14 +26429,14 @@ par_is_slice:
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L2747:
+.L2758:
     mov rax, r12
     push rax
     mov rax, [rel __g_parser_par_slice_n]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L2748
+    jge .L2759
     lea rax, [rel __g_parser_par_slice_toks]
     push rax
     pop rcx
@@ -26376,7 +26451,7 @@ par_is_slice:
     call prs_tok_same
     add rsp, 32
     cmp rax, 1
-    jne .L2750
+    jne .L2761
     lea rax, [rel __g_parser_par_slice_stok]
     push rax
     pop rcx
@@ -26402,24 +26477,24 @@ par_is_slice:
     mov rcx, rax
     pop rax
     or rax, rcx
-    jmp .__ret_2746
-    jmp .L2751
-.L2750:
-.L2751:
+    jmp .__ret_2757
+    jmp .L2762
+.L2761:
+.L2762:
     add r12, 1
-.L2749:
-    jmp .L2747
-.L2748:
+.L2760:
+    jmp .L2758
+.L2759:
     mov rax, 0
     mov r12, rax
-.L2752:
+.L2763:
     mov rax, r12
     push rax
     mov rax, [rel __g_parser_par_gcoll_n]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L2753
+    jge .L2764
     lea rax, [rel __g_parser_par_gcoll_toks]
     push rax
     pop rcx
@@ -26434,7 +26509,7 @@ par_is_slice:
     call prs_tok_same
     add rsp, 32
     cmp rax, 1
-    jne .L2755
+    jne .L2766
     lea rax, [rel __g_parser_par_gcoll_stok]
     push rax
     pop rcx
@@ -26460,17 +26535,17 @@ par_is_slice:
     mov rcx, rax
     pop rax
     or rax, rcx
-    jmp .__ret_2746
-    jmp .L2756
-.L2755:
-.L2756:
+    jmp .__ret_2757
+    jmp .L2767
+.L2766:
+.L2767:
     add r12, 1
-.L2754:
-    jmp .L2752
-.L2753:
+.L2765:
+    jmp .L2763
+.L2764:
     mov rax, 0
-    jmp .__ret_2746
-.__ret_2746:
+    jmp .__ret_2757
+.__ret_2757:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -26502,12 +26577,12 @@ par_slice_get_call:
     mov rbx, rax
     mov rax, [rbp-24]
     cmp rax, 0
-    jne .L2758
+    jne .L2769
     mov rax, 0
-    jmp .__ret_2757
-    jmp .L2759
-.L2758:
-.L2759:
+    jmp .__ret_2768
+    jmp .L2770
+.L2769:
+.L2770:
     mov rdx, [rbp-8]
     add rdx, 16
     mov rax, [rdx]
@@ -26523,12 +26598,12 @@ par_slice_get_call:
     mov [rbp-32], rax
     mov rax, [rbp-32]
     cmp rax, 0
-    jne .L2760
+    jne .L2771
     mov rax, 0
-    jmp .__ret_2757
-    jmp .L2761
-.L2760:
-.L2761:
+    jmp .__ret_2768
+    jmp .L2772
+.L2771:
+.L2772:
     mov rdx, [rbp-8]
     add rdx, 24
     mov rax, [rdx]
@@ -26544,12 +26619,12 @@ par_slice_get_call:
     mov [rbp-40], rax
     mov rax, [rbp-40]
     cmp rax, 0
-    jne .L2762
+    jne .L2773
     mov rax, 0
-    jmp .__ret_2757
-    jmp .L2763
-.L2762:
-.L2763:
+    jmp .__ret_2768
+    jmp .L2774
+.L2773:
+.L2774:
     mov rax, [rbp-32]
     mov rdx, [rbp-40]
     add rdx, 8
@@ -26567,12 +26642,12 @@ par_slice_get_call:
     mov [rbp-48], rax
     mov rax, [rbp-48]
     cmp rax, 0
-    jne .L2764
+    jne .L2775
     mov rax, 0
-    jmp .__ret_2757
-    jmp .L2765
-.L2764:
-.L2765:
+    jmp .__ret_2768
+    jmp .L2776
+.L2775:
+.L2776:
     mov rax, r12
     and rax, 255
     sub rax, 1
@@ -26604,29 +26679,29 @@ par_slice_get_call:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2768
+    jnz .L2779
     mov rax, rbx
     mov rcx, 5
     cmp rax, rcx
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2768
+    jnz .L2779
     mov rax, 0
-    jmp .L2769
-.L2768:
+    jmp .L2780
+.L2779:
     mov rax, 1
-.L2769:
+.L2780:
     test rax, rax
-    jz .L2766
+    jz .L2777
     mov rax, 1
     mov [rel __g_parser_par_used_slice], rax
-    jmp .L2767
-.L2766:
-.L2767:
+    jmp .L2778
+.L2777:
+.L2778:
     mov rax, [rbp-48]
-    jmp .__ret_2757
-.__ret_2757:
+    jmp .__ret_2768
+.__ret_2768:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov rsp, rbp
@@ -26659,7 +26734,7 @@ par_make_assign:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2771
+    jne .L2782
     mov rdx, [rbp-8]
     add rdx, 48
     mov rax, [rdx]
@@ -26675,21 +26750,21 @@ par_make_assign:
     setge al
     movzx rax, al
     test rax, rax
-    jz .L2775
+    jz .L2786
     mov rax, rbx
     mov rcx, 6
     cmp rax, rcx
     setle al
     movzx rax, al
     test rax, rax
-    jz .L2775
+    jz .L2786
     mov rax, 1
-    jmp .L2776
-.L2775:
+    jmp .L2787
+.L2786:
     mov rax, 0
-.L2776:
+.L2787:
     test rax, rax
-    jz .L2773
+    jz .L2784
     mov rax, [rel __g_parser_AST_ARG]
     push rax
     pop rcx
@@ -26699,12 +26774,12 @@ par_make_assign:
     mov [rbp-24], rax
     mov rax, [rbp-24]
     cmp rax, 0
-    jne .L2777
+    jne .L2788
     mov rax, 0
-    jmp .__ret_2770
-    jmp .L2778
-.L2777:
-.L2778:
+    jmp .__ret_2781
+    jmp .L2789
+.L2788:
+.L2789:
     mov rax, r12
     mov rdx, [rbp-24]
     add rdx, 8
@@ -26718,12 +26793,12 @@ par_make_assign:
     mov [rbp-32], rax
     mov rax, [rbp-32]
     cmp rax, 0
-    jne .L2779
+    jne .L2790
     mov rax, 0
-    jmp .__ret_2770
-    jmp .L2780
-.L2779:
-.L2780:
+    jmp .__ret_2781
+    jmp .L2791
+.L2790:
+.L2791:
     mov rdx, [rbp-8]
     add rdx, 16
     mov rax, [rdx]
@@ -26751,12 +26826,12 @@ par_make_assign:
     mov [rbp-40], rax
     mov rax, [rbp-40]
     cmp rax, 0
-    jne .L2781
+    jne .L2792
     mov rax, 0
-    jmp .__ret_2770
-    jmp .L2782
-.L2781:
-.L2782:
+    jmp .__ret_2781
+    jmp .L2793
+.L2792:
+.L2793:
     mov rdx, [rbp-8]
     add rdx, 16
     mov rax, [rdx]
@@ -26780,12 +26855,12 @@ par_make_assign:
     mov [rbp-48], rax
     mov rax, [rbp-48]
     cmp rax, 0
-    jne .L2783
+    jne .L2794
     mov rax, 0
-    jmp .__ret_2770
-    jmp .L2784
-.L2783:
-.L2784:
+    jmp .__ret_2781
+    jmp .L2795
+.L2794:
+.L2795:
     mov rax, [rbp-40]
     mov rdx, [rbp-48]
     add rdx, 16
@@ -26798,13 +26873,13 @@ par_make_assign:
     add rdx, 24
     mov [rdx], rax
     mov rax, [rbp-48]
-    jmp .__ret_2770
-    jmp .L2774
-.L2773:
-.L2774:
-    jmp .L2772
-.L2771:
-.L2772:
+    jmp .__ret_2781
+    jmp .L2785
+.L2784:
+.L2785:
+    jmp .L2783
+.L2782:
+.L2783:
     mov rax, [rel __g_parser_AST_ASSIGN]
     push rax
     pop rcx
@@ -26814,12 +26889,12 @@ par_make_assign:
     mov [rbp-48], rax
     mov rax, [rbp-48]
     cmp rax, 0
-    jne .L2785
+    jne .L2796
     mov rax, 0
-    jmp .__ret_2770
-    jmp .L2786
-.L2785:
-.L2786:
+    jmp .__ret_2781
+    jmp .L2797
+.L2796:
+.L2797:
     mov rax, [rbp-8]
     mov rdx, [rbp-48]
     add rdx, 8
@@ -26829,8 +26904,8 @@ par_make_assign:
     add rdx, 16
     mov [rdx], rax
     mov rax, [rbp-48]
-    jmp .__ret_2770
-.__ret_2770:
+    jmp .__ret_2781
+.__ret_2781:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov rsp, rbp
@@ -26850,15 +26925,15 @@ prs_init:
     mov rbx, r9
     mov rax, [rel __g_parser_prs_ready]
     cmp rax, 0
-    jne .L2788
+    jne .L2799
     sub rsp, 32
     call prs_names_init
     add rsp, 32
     mov rax, 1
     mov [rel __g_parser_prs_ready], rax
-    jmp .L2789
-.L2788:
-.L2789:
+    jmp .L2800
+.L2799:
+.L2800:
     mov rax, r14
     mov [rel __g_parser_par_tokens], rax
     mov rax, r13
@@ -26875,8 +26950,8 @@ prs_init:
     mov rax, 0
     mov [rel __g_parser_par_ast_root], rax
     mov rax, 1
-    jmp .__ret_2787
-.__ret_2787:
+    jmp .__ret_2798
+.__ret_2798:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -26909,8 +26984,8 @@ prs_env:
     mov rax, rbx
     mov [rel __g_parser_prs_lmap_count], rax
     mov rax, 0
-    jmp .__ret_2790
-.__ret_2790:
+    jmp .__ret_2801
+.__ret_2801:
     mov rbx, [rbp-96]
     mov r12, [rbp-88]
     mov r13, [rbp-80]
@@ -26950,10 +27025,10 @@ prs_run:
     add rsp, 32
     mov rbx, rax
     cmp rbx, 0
-    jne .L2792
+    jne .L2803
     mov rax, [rel __g_parser_ng_err_tok]
     cmp rax, 0
-    je .L2794
+    je .L2805
     mov rax, [rel __g_parser_par_tokens]
     mov [rbp-40], rax
     mov rax, [rel __g_parser_ng_err_tok]
@@ -26986,16 +27061,16 @@ prs_run:
     mov rdx, [rbp-40]
     add rdx, 22
     mov [rdx], ax
-    jmp .L2795
-.L2794:
-.L2795:
+    jmp .L2806
+.L2805:
+.L2806:
     mov rax, [rel __g_parser_ng_err_msg]
     mov [rel __g_parser_par_custom_msg], rax
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2793
-.L2792:
-.L2793:
+    jmp .__ret_2802
+    jmp .L2804
+.L2803:
+.L2804:
     mov rax, rbx
     mov [rel __g_parser_par_token_count], rax
     mov rax, [rel __g_parser_AST_PROGRAM]
@@ -27007,12 +27082,12 @@ prs_run:
     mov [rbp-16], rax
     mov rax, [rbp-16]
     cmp rax, 0
-    jne .L2796
+    jne .L2807
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2797
-.L2796:
-.L2797:
+    jmp .__ret_2802
+    jmp .L2808
+.L2807:
+.L2808:
     mov rax, [rbp-16]
     mov [rel __g_parser_par_ast_root], rax
     mov rax, [rel __g_parser_KW_KRON_PROGRAM]
@@ -27022,12 +27097,12 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2798
+    jne .L2809
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2799
-.L2798:
-.L2799:
+    jmp .__ret_2802
+    jmp .L2810
+.L2809:
+.L2810:
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27038,12 +27113,12 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2800
+    jne .L2811
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2801
-.L2800:
-.L2801:
+    jmp .__ret_2802
+    jmp .L2812
+.L2811:
+.L2812:
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27054,16 +27129,16 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2802
+    jne .L2813
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2803
-.L2802:
-.L2803:
+    jmp .__ret_2802
+    jmp .L2814
+.L2813:
+.L2814:
     sub rsp, 32
     call prs_adv
     add rsp, 32
-.L2804:
+.L2815:
     sub rsp, 32
     call prs_ct
     add rsp, 32
@@ -27072,7 +27147,7 @@ prs_run:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2805
+    jne .L2816
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27083,18 +27158,18 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2807
+    jne .L2818
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2808
-.L2807:
-.L2808:
+    jmp .__ret_2802
+    jmp .L2819
+.L2818:
+.L2819:
     sub rsp, 32
     call prs_adv
     add rsp, 32
-.L2806:
-    jmp .L2804
-.L2805:
+.L2817:
+    jmp .L2815
+.L2816:
     sub rsp, 32
     call prs_ct
     add rsp, 32
@@ -27103,7 +27178,7 @@ prs_run:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2809
+    jne .L2820
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27114,18 +27189,18 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2811
+    jne .L2822
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2812
-.L2811:
-.L2812:
+    jmp .__ret_2802
+    jmp .L2823
+.L2822:
+.L2823:
     sub rsp, 32
     call prs_adv
     add rsp, 32
-    jmp .L2810
-.L2809:
-.L2810:
+    jmp .L2821
+.L2820:
+.L2821:
     mov rax, [rel __g_parser_TOK_SEMICOLON]
     push rax
     pop rcx
@@ -27133,12 +27208,12 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2813
+    jne .L2824
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2814
-.L2813:
-.L2814:
+    jmp .__ret_2802
+    jmp .L2825
+.L2824:
+.L2825:
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27149,18 +27224,18 @@ prs_run:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2815
+    jne .L2826
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2816
-.L2815:
-.L2816:
+    jmp .__ret_2802
+    jmp .L2827
+.L2826:
+.L2827:
     sub rsp, 32
     call prs_adv
     add rsp, 32
     mov rax, 1
     mov [rel __g_parser_par_hdr_phase], rax
-.L2817:
+.L2828:
     sub rsp, 32
     call prs_ct
     add rsp, 32
@@ -27169,14 +27244,14 @@ prs_run:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    je .L2818
+    je .L2829
     mov rax, [rel __g_parser_par_hdr_phase]
     mov rcx, 0
     cmp rax, rcx
     setne al
     movzx rax, al
     test rax, rax
-    jz .L2822
+    jz .L2833
     sub rsp, 32
     call prs_ct
     add rsp, 32
@@ -27188,43 +27263,43 @@ prs_run:
     sete al
     movzx rax, al
     test rax, rax
-    jz .L2822
+    jz .L2833
     mov rax, 1
-    jmp .L2823
-.L2822:
+    jmp .L2834
+.L2833:
     mov rax, 0
-.L2823:
+.L2834:
     test rax, rax
-    jz .L2820
+    jz .L2831
     sub rsp, 32
     call prs_adv
     add rsp, 32
     mov rax, 0
     mov [rel __g_parser_par_hdr_phase], rax
-    jmp .L2821
-.L2820:
+    jmp .L2832
+.L2831:
     sub rsp, 32
     call prs_top_level
     add rsp, 32
     mov r12, rax
     cmp r12, 0
-    jne .L2824
+    jne .L2835
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2825
-.L2824:
-.L2825:
+    jmp .__ret_2802
+    jmp .L2836
+.L2835:
+.L2836:
     mov rdx, [rbp-16]
     add rdx, 8
     mov rax, [rdx]
     cmp rax, 0
-    jne .L2826
+    jne .L2837
     mov rax, r12
     mov rdx, [rbp-16]
     add rdx, 8
     mov [rdx], rax
-    jmp .L2827
-.L2826:
+    jmp .L2838
+.L2837:
     mov rax, [rel __g_parser_AST_PROGRAM]
     push rax
     pop rcx
@@ -27233,12 +27308,12 @@ prs_run:
     add rsp, 32
     mov rbx, rax
     cmp rbx, 0
-    jne .L2828
+    jne .L2839
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2829
-.L2828:
-.L2829:
+    jmp .__ret_2802
+    jmp .L2840
+.L2839:
+.L2840:
     mov rax, rbx
     mov rdx, [rbp-16]
     add rdx, 16
@@ -27249,22 +27324,22 @@ prs_run:
     mov rdx, [rbp-16]
     add rdx, 8
     mov [rdx], rax
-.L2827:
-.L2821:
-.L2819:
-    jmp .L2817
-.L2818:
+.L2838:
+.L2832:
+.L2830:
+    jmp .L2828
+.L2829:
     mov rax, [rel __g_parser_par_hdr_phase]
     cmp rax, 0
-    je .L2830
+    je .L2841
     mov rax, 0
-    jmp .__ret_2791
-    jmp .L2831
-.L2830:
-.L2831:
+    jmp .__ret_2802
+    jmp .L2842
+.L2841:
+.L2842:
     mov rax, 1
-    jmp .__ret_2791
-.__ret_2791:
+    jmp .__ret_2802
+.__ret_2802:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov rsp, rbp
@@ -27293,42 +27368,42 @@ prs_top_level:
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2833
+    jne .L2844
     sub rsp, 32
     call prs_function
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2834
-.L2833:
-.L2834:
+    jmp .__ret_2843
+    jmp .L2845
+.L2844:
+.L2845:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_VAR]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2835
+    jne .L2846
     sub rsp, 32
     call prs_statement
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2836
-.L2835:
-.L2836:
+    jmp .__ret_2843
+    jmp .L2847
+.L2846:
+.L2847:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_CONST]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2837
+    jne .L2848
     sub rsp, 32
     call prs_statement
     add rsp, 32
     mov [rbp-16], rax
     mov rax, [rbp-16]
     cmp rax, 0
-    je .L2839
+    je .L2850
     mov rdx, [rbp-16]
     add rdx, 38
     movzx eax, word [rdx]
@@ -27336,21 +27411,21 @@ prs_top_level:
     mov rdx, [rbp-16]
     add rdx, 38
     mov [rdx], ax
-    jmp .L2840
-.L2839:
-.L2840:
+    jmp .L2851
+.L2850:
+.L2851:
     mov rax, [rbp-16]
-    jmp .__ret_2832
-    jmp .L2838
-.L2837:
-.L2838:
+    jmp .__ret_2843
+    jmp .L2849
+.L2848:
+.L2849:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_SHARED]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2841
+    jne .L2852
     sub rsp, 32
     call prs_adv
     add rsp, 32
@@ -27361,19 +27436,19 @@ prs_top_level:
     call prs_want
     add rsp, 32
     cmp rax, 0
-    jne .L2843
+    jne .L2854
     mov rax, 0
-    jmp .__ret_2832
-    jmp .L2844
-.L2843:
-.L2844:
+    jmp .__ret_2843
+    jmp .L2855
+.L2854:
+.L2855:
     sub rsp, 32
     call prs_statement
     add rsp, 32
     mov [rbp-16], rax
     mov rax, [rbp-16]
     cmp rax, 0
-    je .L2845
+    je .L2856
     mov rdx, [rbp-16]
     add rdx, 38
     movzx eax, word [rdx]
@@ -27381,98 +27456,98 @@ prs_top_level:
     mov rdx, [rbp-16]
     add rdx, 38
     mov [rdx], ax
-    jmp .L2846
-.L2845:
-.L2846:
+    jmp .L2857
+.L2856:
+.L2857:
     mov rax, [rbp-16]
-    jmp .__ret_2832
-    jmp .L2842
-.L2841:
-.L2842:
+    jmp .__ret_2843
+    jmp .L2853
+.L2852:
+.L2853:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_STRUCT]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2847
+    jne .L2858
     sub rsp, 32
     call prs_struct
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2848
-.L2847:
-.L2848:
+    jmp .__ret_2843
+    jmp .L2859
+.L2858:
+.L2859:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_ENUM]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2849
+    jne .L2860
     sub rsp, 32
     call prs_enum
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2850
-.L2849:
-.L2850:
+    jmp .__ret_2843
+    jmp .L2861
+.L2860:
+.L2861:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_KRON_ISA]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2851
+    jne .L2862
     sub rsp, 32
     call prs_isa
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2852
-.L2851:
-.L2852:
+    jmp .__ret_2843
+    jmp .L2863
+.L2862:
+.L2863:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_BOOT_SEQUENCE]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2853
+    jne .L2864
     sub rsp, 32
     call prs_boot
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2854
-.L2853:
-.L2854:
+    jmp .__ret_2843
+    jmp .L2865
+.L2864:
+.L2865:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_MMU_CONFIGURATION]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2855
+    jne .L2866
     sub rsp, 32
     call prs_mmu
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2856
-.L2855:
-.L2856:
+    jmp .__ret_2843
+    jmp .L2867
+.L2866:
+.L2867:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_INTERRUPT_SERVICE]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2857
+    jne .L2868
     sub rsp, 32
     call prs_isr
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2858
-.L2857:
-.L2858:
+    jmp .__ret_2843
+    jmp .L2869
+.L2868:
+.L2869:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_DMA_CHANNEL]
@@ -27482,7 +27557,7 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2863
+    jnz .L2874
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_HARDWARE_DRIVER]
@@ -27492,14 +27567,14 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2863
+    jnz .L2874
     mov rax, 0
-    jmp .L2864
-.L2863:
+    jmp .L2875
+.L2874:
     mov rax, 1
-.L2864:
+.L2875:
     test rax, rax
-    jnz .L2861
+    jnz .L2872
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_KERNEL_ARCHITECTURE]
@@ -27509,21 +27584,21 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2861
+    jnz .L2872
     mov rax, 0
-    jmp .L2862
-.L2861:
+    jmp .L2873
+.L2872:
     mov rax, 1
-.L2862:
+.L2873:
     test rax, rax
-    jz .L2859
+    jz .L2870
     sub rsp, 32
     call prs_config
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2860
-.L2859:
-.L2860:
+    jmp .__ret_2843
+    jmp .L2871
+.L2870:
+.L2871:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_SECURITY_MODEL]
@@ -27533,7 +27608,7 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2869
+    jnz .L2880
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_FILESYSTEM_VOLUME]
@@ -27543,14 +27618,14 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2869
+    jnz .L2880
     mov rax, 0
-    jmp .L2870
-.L2869:
+    jmp .L2881
+.L2880:
     mov rax, 1
-.L2870:
+.L2881:
     test rax, rax
-    jnz .L2867
+    jnz .L2878
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_NETWORK_KERNEL]
@@ -27560,21 +27635,21 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2867
+    jnz .L2878
     mov rax, 0
-    jmp .L2868
-.L2867:
+    jmp .L2879
+.L2878:
     mov rax, 1
-.L2868:
+.L2879:
     test rax, rax
-    jz .L2865
+    jz .L2876
     sub rsp, 32
     call prs_config
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2866
-.L2865:
-.L2866:
+    jmp .__ret_2843
+    jmp .L2877
+.L2876:
+.L2877:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_POWER_MANAGER]
@@ -27584,7 +27659,7 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2875
+    jnz .L2886
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_KRON_HYPERVISOR]
@@ -27594,14 +27669,14 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2875
+    jnz .L2886
     mov rax, 0
-    jmp .L2876
-.L2875:
+    jmp .L2887
+.L2886:
     mov rax, 1
-.L2876:
+.L2887:
     test rax, rax
-    jnz .L2873
+    jnz .L2884
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_PACKAGE_MANAGER]
@@ -27611,21 +27686,21 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2873
+    jnz .L2884
     mov rax, 0
-    jmp .L2874
-.L2873:
+    jmp .L2885
+.L2884:
     mov rax, 1
-.L2874:
+.L2885:
     test rax, rax
-    jz .L2871
+    jz .L2882
     sub rsp, 32
     call prs_config
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2872
-.L2871:
-.L2872:
+    jmp .__ret_2843
+    jmp .L2883
+.L2882:
+.L2883:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_EXECUTABLE_LOADER]
@@ -27635,7 +27710,7 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2881
+    jnz .L2892
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_HUMAN_MACHINE]
@@ -27645,14 +27720,14 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2881
+    jnz .L2892
     mov rax, 0
-    jmp .L2882
-.L2881:
+    jmp .L2893
+.L2892:
     mov rax, 1
-.L2882:
+.L2893:
     test rax, rax
-    jnz .L2879
+    jnz .L2890
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_KRON3D_CONTEXT]
@@ -27662,21 +27737,21 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2879
+    jnz .L2890
     mov rax, 0
-    jmp .L2880
-.L2879:
+    jmp .L2891
+.L2890:
     mov rax, 1
-.L2880:
+.L2891:
     test rax, rax
-    jz .L2877
+    jz .L2888
     sub rsp, 32
     call prs_config
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2878
-.L2877:
-.L2878:
+    jmp .__ret_2843
+    jmp .L2889
+.L2888:
+.L2889:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_EXECUTION_MODEL]
@@ -27686,7 +27761,7 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2887
+    jnz .L2898
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_DEPLOYMENT_MODEL]
@@ -27696,14 +27771,14 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2887
+    jnz .L2898
     mov rax, 0
-    jmp .L2888
-.L2887:
+    jmp .L2899
+.L2898:
     mov rax, 1
-.L2888:
+.L2899:
     test rax, rax
-    jnz .L2885
+    jnz .L2896
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_SECURITY_RING]
@@ -27713,95 +27788,95 @@ prs_top_level:
     sete al
     movzx rax, al
     test rax, rax
-    jnz .L2885
+    jnz .L2896
     mov rax, 0
-    jmp .L2886
-.L2885:
+    jmp .L2897
+.L2896:
     mov rax, 1
-.L2886:
+.L2897:
     test rax, rax
-    jz .L2883
+    jz .L2894
     sub rsp, 32
     call prs_config
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2884
-.L2883:
-.L2884:
+    jmp .__ret_2843
+    jmp .L2895
+.L2894:
+.L2895:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_SCHEDULER_DOMAIN]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2889
+    jne .L2900
     sub rsp, 32
     call prs_sched
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2890
-.L2889:
-.L2890:
+    jmp .__ret_2843
+    jmp .L2901
+.L2900:
+.L2901:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_SYSCALL_DISPATCH]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2891
+    jne .L2902
     sub rsp, 32
     call prs_sys
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2892
-.L2891:
-.L2892:
+    jmp .__ret_2843
+    jmp .L2903
+.L2902:
+.L2903:
     mov rax, r13
     push rax
     mov rax, [rel __g_parser_KW_EXTERN]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2893
+    jne .L2904
     sub rsp, 32
     call prs_extern
     add rsp, 32
-    jmp .__ret_2832
-    jmp .L2894
-.L2893:
-.L2894:
+    jmp .__ret_2843
+    jmp .L2905
+.L2904:
+.L2905:
     mov rax, r13
     mov rcx, 200
     cmp rax, rcx
     setl al
     movzx rax, al
     test rax, rax
-    jnz .L2897
+    jnz .L2908
     mov rax, r13
     mov rcx, 532
     cmp rax, rcx
     setge al
     movzx rax, al
     test rax, rax
-    jnz .L2897
+    jnz .L2908
     mov rax, 0
-    jmp .L2898
-.L2897:
+    jmp .L2909
+.L2908:
     mov rax, 1
-.L2898:
+.L2909:
     test rax, rax
-    jz .L2895
+    jz .L2906
 section .data
-.str2899: db 97,32,100,101,99,108,97,114,97,116,105,111,110,32,103,111,101,115,32,104,101,114,101,32,45,45,32,102,110,44,32,118,97,114,44,32,99,111,110,115,116,44,32,115,104,97,114,101,100,32,118,97,114,44,32,115,116,114,117,99,116,44,32,101
+.str2910: db 97,32,100,101,99,108,97,114,97,116,105,111,110,32,103,111,101,115,32,104,101,114,101,32,45,45,32,102,110,44,32,118,97,114,44,32,99,111,110,115,116,44,32,115,104,97,114,101,100,32,118,97,114,44,32,115,116,114,117,99,116,44,32,101
     db 110,117,109,58,32,105,115,32,116,104,101,114,101,32,97,32,125,32,116,111,111,32,109,97,110,121,32,97,98,111,118,101,63,0
 section .text
-    lea rax, [rel .str2899]
+    lea rax, [rel .str2910]
     mov [rel __g_parser_par_custom_msg], rax
     mov rax, 0
-    jmp .__ret_2832
-    jmp .L2896
-.L2895:
-.L2896:
+    jmp .__ret_2843
+    jmp .L2907
+.L2906:
+.L2907:
     sub rsp, 32
     call prs_cur
     add rsp, 32
@@ -27817,7 +27892,7 @@ section .text
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2900
+    jne .L2911
     sub rsp, 32
     call prs_cur
     add rsp, 32
@@ -27825,19 +27900,19 @@ section .text
     sub rsp, 32
     call prs_adv
     add rsp, 32
-    jmp .L2901
-.L2900:
-.L2901:
+    jmp .L2912
+.L2911:
+.L2912:
     sub rsp, 32
     call prs_generic_decl
     add rsp, 32
     cmp rax, 0
-    jne .L2902
+    jne .L2913
     mov rax, 0
-    jmp .__ret_2832
-    jmp .L2903
-.L2902:
-.L2903:
+    jmp .__ret_2843
+    jmp .L2914
+.L2913:
+.L2914:
     mov rax, [rel __g_parser_AST_HARDWARE_BLOCK]
     push rax
     pop rcx
@@ -27847,12 +27922,12 @@ section .text
     mov [rbp-16], rax
     mov rax, [rbp-16]
     cmp rax, 0
-    jne .L2904
+    jne .L2915
     mov rax, 0
-    jmp .__ret_2832
-    jmp .L2905
-.L2904:
-.L2905:
+    jmp .__ret_2843
+    jmp .L2916
+.L2915:
+.L2916:
     mov rax, r12
     mov rdx, [rbp-16]
     add rdx, 24
@@ -27862,8 +27937,8 @@ section .text
     add rdx, 8
     mov [rdx], rax
     mov rax, [rbp-16]
-    jmp .__ret_2832
-.__ret_2832:
+    jmp .__ret_2843
+.__ret_2843:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -27875,8 +27950,8 @@ prs_ast_root:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_parser_par_ast_root]
-    jmp .__ret_2906
-.__ret_2906:
+    jmp .__ret_2917
+.__ret_2917:
     mov rsp, rbp
     pop rbp
     ret
@@ -27890,8 +27965,8 @@ prs_error_token:
     mov [rbp-8], rax
     mov rdx, [rbp-8]
     mov rax, [rdx]
-    jmp .__ret_2907
-.__ret_2907:
+    jmp .__ret_2918
+.__ret_2918:
     mov rsp, rbp
     pop rbp
     ret
@@ -27900,8 +27975,8 @@ prs_position:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_parser_par_pos]
-    jmp .__ret_2908
-.__ret_2908:
+    jmp .__ret_2919
+.__ret_2919:
     mov rsp, rbp
     pop rbp
     ret
@@ -27916,8 +27991,8 @@ prs_error_line:
     mov rdx, [rbp-8]
     add rdx, 20
     movzx eax, word [rdx]
-    jmp .__ret_2909
-.__ret_2909:
+    jmp .__ret_2920
+.__ret_2920:
     mov rsp, rbp
     pop rbp
     ret
@@ -27932,8 +28007,8 @@ prs_error_col:
     mov rdx, [rbp-8]
     add rdx, 22
     movzx eax, word [rdx]
-    jmp .__ret_2910
-.__ret_2910:
+    jmp .__ret_2921
+.__ret_2921:
     mov rsp, rbp
     pop rbp
     ret
@@ -27948,8 +28023,8 @@ prs_error_len:
     mov rdx, [rbp-8]
     add rdx, 16
     mov eax, dword [rdx]
-    jmp .__ret_2911
-.__ret_2911:
+    jmp .__ret_2922
+.__ret_2922:
     mov rsp, rbp
     pop rbp
     ret
@@ -27958,8 +28033,8 @@ prs_expected:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_parser_par_expected]
-    jmp .__ret_2912
-.__ret_2912:
+    jmp .__ret_2923
+.__ret_2923:
     mov rsp, rbp
     pop rbp
     ret
@@ -27968,8 +28043,8 @@ prs_custom_msg:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_parser_par_custom_msg]
-    jmp .__ret_2913
-.__ret_2913:
+    jmp .__ret_2924
+.__ret_2924:
     mov rsp, rbp
     pop rbp
     ret
@@ -27978,11 +28053,11 @@ prs_error_msg:
     mov rbp, rsp
     sub rsp, 32
 section .data
-.str2915: db 80,97,114,115,101,114,58,32,105,110,118,97,108,105,100,32,115,116,114,117,99,116,117,114,101,0
+.str2926: db 80,97,114,115,101,114,58,32,105,110,118,97,108,105,100,32,115,116,114,117,99,116,117,114,101,0
 section .text
-    lea rax, [rel .str2915]
-    jmp .__ret_2914
-.__ret_2914:
+    lea rax, [rel .str2926]
+    jmp .__ret_2925
+.__ret_2925:
     mov rsp, rbp
     pop rbp
     ret
@@ -27991,8 +28066,8 @@ prs_token_count:
     mov rbp, rsp
     sub rsp, 32
     mov rax, [rel __g_parser_par_token_count]
-    jmp .__ret_2916
-.__ret_2916:
+    jmp .__ret_2927
+.__ret_2927:
     mov rsp, rbp
     pop rbp
     ret
@@ -28006,8 +28081,8 @@ prs_ast_used:
     mov rcx, rax
     pop rax
     sub rax, rcx
-    jmp .__ret_2917
-.__ret_2917:
+    jmp .__ret_2928
+.__ret_2928:
     mov rsp, rbp
     pop rbp
     ret
@@ -28027,197 +28102,197 @@ prs_token_name:
     mov rax, 0
     mov rbx, rax
     cmp r14, 0
-    jne .L2919
+    jne .L2930
 section .data
-.str2921: db 101,110,100,32,111,102,32,102,105,108,101,0
+.str2932: db 101,110,100,32,111,102,32,102,105,108,101,0
 section .text
-    lea rax, [rel .str2921]
-    jmp .__ret_2918
-    jmp .L2920
-.L2919:
-.L2920:
-    cmp r14, 1
-    jne .L2922
-section .data
-.str2924: db 97,110,32,105,100,101,110,116,105,102,105,101,114,0
-section .text
-    lea rax, [rel .str2924]
-    jmp .__ret_2918
-    jmp .L2923
-.L2922:
-.L2923:
-    cmp r14, 2
-    jne .L2925
-section .data
-.str2927: db 97,110,32,105,110,116,101,103,101,114,0
-section .text
-    lea rax, [rel .str2927]
-    jmp .__ret_2918
-    jmp .L2926
-.L2925:
-.L2926:
-    cmp r14, 3
-    jne .L2928
-section .data
-.str2930: db 97,32,100,101,99,105,109,97,108,32,110,117,109,98,101,114,0
-section .text
-    lea rax, [rel .str2930]
-    jmp .__ret_2918
-    jmp .L2929
-.L2928:
-.L2929:
-    cmp r14, 4
-    jne .L2931
-section .data
-.str2933: db 97,32,115,116,114,105,110,103,0
-section .text
-    lea rax, [rel .str2933]
-    jmp .__ret_2918
-    jmp .L2932
+    lea rax, [rel .str2932]
+    jmp .__ret_2929
+    jmp .L2931
+.L2930:
 .L2931:
-.L2932:
-    cmp r14, 10
-    jne .L2934
+    cmp r14, 1
+    jne .L2933
 section .data
-.str2936: db 39,123,39,0
+.str2935: db 97,110,32,105,100,101,110,116,105,102,105,101,114,0
 section .text
-    lea rax, [rel .str2936]
-    jmp .__ret_2918
-    jmp .L2935
+    lea rax, [rel .str2935]
+    jmp .__ret_2929
+    jmp .L2934
+.L2933:
 .L2934:
-.L2935:
-    cmp r14, 11
-    jne .L2937
+    cmp r14, 2
+    jne .L2936
 section .data
-.str2939: db 39,125,39,0
+.str2938: db 97,110,32,105,110,116,101,103,101,114,0
 section .text
-    lea rax, [rel .str2939]
-    jmp .__ret_2918
-    jmp .L2938
+    lea rax, [rel .str2938]
+    jmp .__ret_2929
+    jmp .L2937
+.L2936:
 .L2937:
-.L2938:
-    cmp r14, 12
-    jne .L2940
+    cmp r14, 3
+    jne .L2939
 section .data
-.str2942: db 39,40,39,0
+.str2941: db 97,32,100,101,99,105,109,97,108,32,110,117,109,98,101,114,0
 section .text
-    lea rax, [rel .str2942]
-    jmp .__ret_2918
-    jmp .L2941
+    lea rax, [rel .str2941]
+    jmp .__ret_2929
+    jmp .L2940
+.L2939:
 .L2940:
-.L2941:
-    cmp r14, 13
-    jne .L2943
+    cmp r14, 4
+    jne .L2942
 section .data
-.str2945: db 39,41,39,0
+.str2944: db 97,32,115,116,114,105,110,103,0
 section .text
-    lea rax, [rel .str2945]
-    jmp .__ret_2918
-    jmp .L2944
+    lea rax, [rel .str2944]
+    jmp .__ret_2929
+    jmp .L2943
+.L2942:
 .L2943:
-.L2944:
-    cmp r14, 14
-    jne .L2946
+    cmp r14, 10
+    jne .L2945
 section .data
-.str2948: db 39,91,39,0
+.str2947: db 39,123,39,0
 section .text
-    lea rax, [rel .str2948]
-    jmp .__ret_2918
-    jmp .L2947
+    lea rax, [rel .str2947]
+    jmp .__ret_2929
+    jmp .L2946
+.L2945:
 .L2946:
-.L2947:
-    cmp r14, 15
-    jne .L2949
+    cmp r14, 11
+    jne .L2948
 section .data
-.str2951: db 39,93,39,0
+.str2950: db 39,125,39,0
 section .text
-    lea rax, [rel .str2951]
-    jmp .__ret_2918
-    jmp .L2950
+    lea rax, [rel .str2950]
+    jmp .__ret_2929
+    jmp .L2949
+.L2948:
 .L2949:
-.L2950:
-    cmp r14, 16
-    jne .L2952
+    cmp r14, 12
+    jne .L2951
 section .data
-.str2954: db 39,59,39,0
+.str2953: db 39,40,39,0
 section .text
-    lea rax, [rel .str2954]
-    jmp .__ret_2918
-    jmp .L2953
+    lea rax, [rel .str2953]
+    jmp .__ret_2929
+    jmp .L2952
+.L2951:
 .L2952:
-.L2953:
-    cmp r14, 17
-    jne .L2955
+    cmp r14, 13
+    jne .L2954
 section .data
-.str2957: db 39,58,39,0
+.str2956: db 39,41,39,0
 section .text
-    lea rax, [rel .str2957]
-    jmp .__ret_2918
-    jmp .L2956
+    lea rax, [rel .str2956]
+    jmp .__ret_2929
+    jmp .L2955
+.L2954:
 .L2955:
-.L2956:
-    cmp r14, 18
-    jne .L2958
+    cmp r14, 14
+    jne .L2957
 section .data
-.str2960: db 39,44,39,0
+.str2959: db 39,91,39,0
 section .text
-    lea rax, [rel .str2960]
-    jmp .__ret_2918
-    jmp .L2959
+    lea rax, [rel .str2959]
+    jmp .__ret_2929
+    jmp .L2958
+.L2957:
 .L2958:
-.L2959:
-    cmp r14, 20
-    jne .L2961
+    cmp r14, 15
+    jne .L2960
 section .data
-.str2963: db 39,61,39,0
+.str2962: db 39,93,39,0
 section .text
-    lea rax, [rel .str2963]
-    jmp .__ret_2918
-    jmp .L2962
+    lea rax, [rel .str2962]
+    jmp .__ret_2929
+    jmp .L2961
+.L2960:
 .L2961:
-.L2962:
-    cmp r14, 21
-    jne .L2964
+    cmp r14, 16
+    jne .L2963
 section .data
-.str2966: db 39,45,62,39,0
+.str2965: db 39,59,39,0
 section .text
-    lea rax, [rel .str2966]
-    jmp .__ret_2918
-    jmp .L2965
+    lea rax, [rel .str2965]
+    jmp .__ret_2929
+    jmp .L2964
+.L2963:
 .L2964:
-.L2965:
+    cmp r14, 17
+    jne .L2966
+section .data
+.str2968: db 39,58,39,0
+section .text
+    lea rax, [rel .str2968]
+    jmp .__ret_2929
+    jmp .L2967
+.L2966:
+.L2967:
+    cmp r14, 18
+    jne .L2969
+section .data
+.str2971: db 39,44,39,0
+section .text
+    lea rax, [rel .str2971]
+    jmp .__ret_2929
+    jmp .L2970
+.L2969:
+.L2970:
+    cmp r14, 20
+    jne .L2972
+section .data
+.str2974: db 39,61,39,0
+section .text
+    lea rax, [rel .str2974]
+    jmp .__ret_2929
+    jmp .L2973
+.L2972:
+.L2973:
+    cmp r14, 21
+    jne .L2975
+section .data
+.str2977: db 39,45,62,39,0
+section .text
+    lea rax, [rel .str2977]
+    jmp .__ret_2929
+    jmp .L2976
+.L2975:
+.L2976:
     mov rax, r14
     push rax
     mov rax, [rel __g_parser_TOK_EXPECT_EXPR]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jne .L2967
+    jne .L2978
 section .data
-.str2969: db 97,110,32,101,120,112,114,101,115,115,105,111,110,0
+.str2980: db 97,110,32,101,120,112,114,101,115,115,105,111,110,0
 section .text
-    lea rax, [rel .str2969]
-    jmp .__ret_2918
-    jmp .L2968
-.L2967:
-.L2968:
+    lea rax, [rel .str2980]
+    jmp .__ret_2929
+    jmp .L2979
+.L2978:
+.L2979:
     cmp r14, 100
-    jl .L2970
+    jl .L2981
     mov rcx, r14
     sub rsp, 32
     call klx_keyword_name
     add rsp, 32
     mov r13, rax
     cmp r13, 0
-    jne .L2972
+    jne .L2983
 section .data
-.str2974: db 97,32,107,101,121,119,111,114,100,0
+.str2985: db 97,32,107,101,121,119,111,114,100,0
 section .text
-    lea rax, [rel .str2974]
-    jmp .__ret_2918
-    jmp .L2973
-.L2972:
-.L2973:
+    lea rax, [rel .str2985]
+    jmp .__ret_2929
+    jmp .L2984
+.L2983:
+.L2984:
     lea rax, [rel __g_parser_tn_kwbuf]
     push rax
     pop rcx
@@ -28227,9 +28302,9 @@ section .text
     add rsp, 32
     mov rax, 0
     mov r12, rax
-.L2975:
+.L2986:
     cmp r12, 60
-    jge .L2976
+    jge .L2987
     mov rax, r13
     add rax, r12
     push rax
@@ -28239,11 +28314,11 @@ section .text
     add rsp, 32
     mov rbx, rax
     cmp rbx, 0
-    jne .L2978
-    jmp .L2976
-    jmp .L2979
-.L2978:
-.L2979:
+    jne .L2989
+    jmp .L2987
+    jmp .L2990
+.L2989:
+.L2990:
     lea rax, [rel __g_parser_tn_kwbuf]
     add rax, 1
     add rax, r12
@@ -28254,9 +28329,9 @@ section .text
     call bset
     add rsp, 32
     add r12, 1
-.L2977:
-    jmp .L2975
-.L2976:
+.L2988:
+    jmp .L2986
+.L2987:
     lea rax, [rel __g_parser_tn_kwbuf]
     add rax, 1
     add rax, r12
@@ -28276,26 +28351,26 @@ section .text
     call bset
     add rsp, 32
     lea rax, [rel __g_parser_tn_kwbuf]
-    jmp .__ret_2918
-    jmp .L2971
-.L2970:
-.L2971:
-    cmp r14, 30
-    jl .L2980
-section .data
-.str2982: db 97,110,32,111,112,101,114,97,116,111,114,0
-section .text
-    lea rax, [rel .str2982]
-    jmp .__ret_2918
-    jmp .L2981
-.L2980:
+    jmp .__ret_2929
+    jmp .L2982
 .L2981:
+.L2982:
+    cmp r14, 30
+    jl .L2991
 section .data
-.str2983: db 97,32,116,111,107,101,110,0
+.str2993: db 97,110,32,111,112,101,114,97,116,111,114,0
 section .text
-    lea rax, [rel .str2983]
-    jmp .__ret_2918
-.__ret_2918:
+    lea rax, [rel .str2993]
+    jmp .__ret_2929
+    jmp .L2992
+.L2991:
+.L2992:
+section .data
+.str2994: db 97,32,116,111,107,101,110,0
+section .text
+    lea rax, [rel .str2994]
+    jmp .__ret_2929
+.__ret_2929:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]

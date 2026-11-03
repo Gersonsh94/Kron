@@ -13,11 +13,11 @@ kron_definitions
 //   mi_print_error_line(line, col, len)   the line, then carets under it
 //   mi_print_u64(v)
 //
-// They were in main.asm, and they are here now, byte for byte the same.
-// main.asm keeps the doors with the registers its callers use, the calls
-// into Windows (read_file, print_string, print_bytes), and the buffers the
-// rest of the assembly still reads (the program's name, the expanded
-// text, the line map).
+// They were in main.asm, and they are here now, byte for byte the same; the
+// driver (main_drv.kr, main_out.kr) and the code generator call them
+// directly. main.asm keeps the calls into Windows (read_file,
+// print_string, print_bytes) and the buffers (the program's name, the
+// expanded text, the line map).
 // =========================================================================
 
 extern "kronc" {

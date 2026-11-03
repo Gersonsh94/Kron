@@ -105,18 +105,15 @@ if defined LIST (
 echo ============================================================
 echo.
 echo   NOT touched, even though they look like it:
-echo     krn.asm karm.asm kasm.asm       compiler modules
+echo     main.asm                        the compiler's entry, by hand
 echo     kasmchar/new/rex/simd.asm       suite corpora
 echo     kasmdiff.asm                    comparison tool
 echo     KRN_FORMAT.md                   the own executable format
 echo     kron_alloc.kr                   allocator written in Kron
 echo     kc.bat                          builds a program in one go
 echo     kron_all.asm seed\ tests\expected\ and the .bat and .ps1
-echo     lexer\lexer_kr.asm              made from lexer.kr, part of the build
-echo     parser\parser_kr.asm            made from parser.kr, part of the build
-echo     semantic\semantic_kr.asm        made from semantic.kr, part of the build
-echo     codegen\codegen_kr.asm          made from codegen.kr, part of the build
-echo     kasm_kr.asm                     made from kasm.kr, part of the build
+echo     the NAME_kr.asm beside each part in Kron: BUILD.bat and
+echo     BOOTSTRAP.bat make them again from NAME.kr
 echo.
 if not defined DOFUSED echo   .fused.kr files are kept unless /fused is given.
 echo.

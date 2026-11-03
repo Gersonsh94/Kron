@@ -1,6 +1,262 @@
 ; A Kron module, written by kronc --module. Edit the .kr file it comes
 ; from, not this one: the build makes it again.
 section .data
+__g_elf_writer_A_ANDROID: dq 8
+section .text
+section .data
+__g_elf_writer_A_OUT_BIN_NAME: dq 10
+section .text
+section .data
+__g_elf_writer_A_BIN_EXT_PTR: dq 12
+section .text
+section .data
+__g_elf_writer_A_OUT_DYNAMIC: dq 29
+section .text
+section .data
+__g_elf_writer_ew_hsize: dq 0
+section .text
+section .data
+__g_elf_writer_ew_base: dq 0
+section .text
+ew_get_hsize:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_elf_writer_ew_hsize]
+    jmp .__ret_0
+.__ret_0:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_get_base:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_elf_writer_ew_base]
+    jmp .__ret_1
+.__ret_1:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_put_hb:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov [rbp-24], r12
+    mov r12, rcx
+    mov rbx, rdx
+    mov rax, r12
+    mov [rel __g_elf_writer_ew_hsize], rax
+    mov rax, rbx
+    mov [rel __g_elf_writer_ew_base], rax
+    mov rax, 0
+    jmp .__ret_2
+.__ret_2:
+    mov rbx, [rbp-32]
+    mov r12, [rbp-24]
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_flag:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 80
+    mov [rbp-48], rbx
+    mov [rbp-40], r12
+    mov r12, rcx
+    mov rax, 0
+    mov rbx, rax
+    mov rcx, r12
+    sub rsp, 32
+    call mn_addr
+    add rsp, 32
+    mov rbx, rax
+    mov rax, rbx
+    movzx rax, byte [rax]
+    mov rbx, rax
+    mov rax, rbx
+    jmp .__ret_3
+.__ret_3:
+    mov rbx, [rbp-48]
+    mov r12, [rbp-40]
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_out_dynamic:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_elf_writer_A_OUT_DYNAMIC]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call ew_flag
+    add rsp, 32
+    jmp .__ret_4
+.__ret_4:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_out_android:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, [rel __g_elf_writer_A_ANDROID]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call ew_flag
+    add rsp, 32
+    jmp .__ret_5
+.__ret_5:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_prepare_name:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov [rbp-32], rbx
+    mov [rbp-24], r12
+    mov rax, [rel __g_elf_writer_A_BIN_EXT_PTR]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call mn_addr
+    add rsp, 32
+    mov r12, rax
+section .data
+.str7: db 46,115,111,0
+section .text
+    lea rax, [rel .str7]
+    mov rbx, rax
+    mov rax, r12
+    push rax
+    mov rax, rbx
+    mov rcx, rax
+    pop rdx
+    mov [rdx], rcx
+    sub rsp, 32
+    call mc_build_bin_name
+    add rsp, 32
+    mov rax, [rel __g_elf_writer_A_OUT_BIN_NAME]
+    push rax
+    pop rcx
+    sub rsp, 32
+    call mn_addr
+    add rsp, 32
+    jmp .__ret_6
+.__ret_6:
+    mov rbx, [rbp-32]
+    mov r12, [rbp-24]
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_interp_x86:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str9: db 47,108,105,98,54,52,47,108,100,45,108,105,110,117,120,45,120,56,54,45,54,52,46,115,111,46,50,0
+section .text
+    lea rax, [rel .str9]
+    jmp .__ret_8
+.__ret_8:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_interp_arm:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str11: db 47,108,105,98,47,108,100,45,108,105,110,117,120,45,97,97,114,99,104,54,52,46,115,111,46,49,0
+section .text
+    lea rax, [rel .str11]
+    jmp .__ret_10
+.__ret_10:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_strtab:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str13: db 0,108,105,98,99,46,115,111,46,54,0,108,105,98,100,108,46,115,111,46,50,0,108,105,98,112,116,104,114,101,97,100,46,115,111,46,48,0,100,108,111,112,101,110,0,100,108,115,121,109,0,112,116,104,114,101,97,100,95,99,114,101,97,116
+    db 101,0,112,116,104,114,101,97,100,95,100,101,116,97,99,104,0,101,120,105,116,0,0
+section .text
+    lea rax, [rel .str13]
+    jmp .__ret_12
+.__ret_12:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_strtab_and:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str15: db 0,108,105,98,99,46,115,111,0,108,105,98,100,108,46,115,111,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,100,108,111,112,101,110,0,100,108,115,121,109,0,112,116,104,114,101,97,100,95,99,114,101,97,116
+    db 101,0,112,116,104,114,101,97,100,95,100,101,116,97,99,104,0,101,120,105,116,0,0
+section .text
+    lea rax, [rel .str15]
+    jmp .__ret_14
+.__ret_14:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_len_strtab:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov rax, 86
+    jmp .__ret_16
+.__ret_16:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_got_names:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str18: db 95,95,103,111,116,95,100,108,111,112,101,110,0,95,95,103,111,116,95,100,108,115,121,109,0,95,95,103,111,116,95,112,116,99,0,95,95,103,111,116,95,112,116,100,0,95,95,103,111,116,95,101,120,105,116,0,0
+section .text
+    lea rax, [rel .str18]
+    jmp .__ret_17
+.__ret_17:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_shnames:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str20: db 0,46,100,121,110,115,121,109,0,46,100,121,110,115,116,114,0,46,100,121,110,97,109,105,99,0,46,115,104,115,116,114,116,97,98,0,0
+section .text
+    lea rax, [rel .str20]
+    jmp .__ret_19
+.__ret_19:
+    mov rsp, rbp
+    pop rbp
+    ret
+ew_addr_start:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+section .data
+.str22: db 95,115,116,97,114,116,0
+section .text
+    lea rax, [rel .str22]
+    jmp .__ret_21
+.__ret_21:
+    mov rsp, rbp
+    pop rbp
+    ret
+section .data
 __g_elf_writer_el_img: dq 0
 section .text
 section .data
@@ -96,8 +352,8 @@ el_p8:
     pop rdx
     mov [rdx], cl
     mov rax, 0
-    jmp .__ret_0
-.__ret_0:
+    jmp .__ret_23
+.__ret_23:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -118,8 +374,8 @@ el_p16:
     pop rdx
     mov [rdx], cx
     mov rax, 0
-    jmp .__ret_1
-.__ret_1:
+    jmp .__ret_24
+.__ret_24:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -140,8 +396,8 @@ el_p32:
     pop rdx
     mov [rdx], ecx
     mov rax, 0
-    jmp .__ret_2
-.__ret_2:
+    jmp .__ret_25
+.__ret_25:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -162,8 +418,8 @@ el_p64:
     pop rdx
     mov [rdx], rcx
     mov rax, 0
-    jmp .__ret_3
-.__ret_3:
+    jmp .__ret_26
+.__ret_26:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -182,8 +438,8 @@ el_g8:
     movzx rax, byte [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_4
-.__ret_4:
+    jmp .__ret_27
+.__ret_27:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -202,8 +458,8 @@ el_g32:
     mov eax, dword [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_5
-.__ret_5:
+    jmp .__ret_28
+.__ret_28:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -222,8 +478,8 @@ el_g64:
     mov rax, [rax]
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_6
-.__ret_6:
+    jmp .__ret_29
+.__ret_29:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -242,9 +498,9 @@ el_copy:
     mov r12, r8
     mov rax, 0
     mov rbx, rax
-.L8:
+.L31:
     cmp rbx, r12
-    jge .L9
+    jge .L32
     mov rax, r14
     add rax, rbx
     push rax
@@ -255,12 +511,12 @@ el_copy:
     pop rdx
     mov [rdx], cl
     add rbx, 1
-.L10:
-    jmp .L8
-.L9:
+.L33:
+    jmp .L31
+.L32:
     mov rax, r14
-    jmp .__ret_7
-.__ret_7:
+    jmp .__ret_30
+.__ret_30:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -279,9 +535,9 @@ el_zero:
     mov r12, rdx
     mov rax, 0
     mov rbx, rax
-.L12:
+.L35:
     cmp rbx, r12
-    jge .L13
+    jge .L36
     mov rax, r13
     add rax, rbx
     push rax
@@ -290,12 +546,12 @@ el_zero:
     pop rdx
     mov [rdx], cl
     add rbx, 1
-.L14:
-    jmp .L12
-.L13:
+.L37:
+    jmp .L35
+.L36:
     mov rax, r13
-    jmp .__ret_11
-.__ret_11:
+    jmp .__ret_34
+.__ret_34:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -311,7 +567,7 @@ el_cstrlen:
     mov r12, rcx
     mov rax, 0
     mov rbx, rax
-.L16:
+.L39:
     mov rax, r12
     add rax, rbx
     push rax
@@ -320,14 +576,14 @@ el_cstrlen:
     call el_g8
     add rsp, 32
     cmp rax, 0
-    je .L17
+    je .L40
     add rbx, 1
-.L18:
-    jmp .L16
-.L17:
+.L41:
+    jmp .L39
+.L40:
     mov rax, rbx
-    jmp .__ret_15
-.__ret_15:
+    jmp .__ret_38
+.__ret_38:
     mov rbx, [rbp-32]
     mov r12, [rbp-24]
     mov rsp, rbp
@@ -344,15 +600,15 @@ el_neg1:
     and rax, rcx
     mov rcx, 4294967295
     cmp rax, rcx
-    jne .L20
+    jne .L43
     mov rax, 1
-    jmp .__ret_19
-    jmp .L21
-.L20:
-.L21:
+    jmp .__ret_42
+    jmp .L44
+.L43:
+.L44:
     mov rax, 0
-    jmp .__ret_19
-.__ret_19:
+    jmp .__ret_42
+.__ret_42:
     mov rbx, [rbp-32]
     mov rsp, rbp
     pop rbp
@@ -382,8 +638,8 @@ el_dyn:
     add rsp, 32
     mov rax, r13
     add rax, 16
-    jmp .__ret_22
-.__ret_22:
+    jmp .__ret_45
+.__ret_45:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -436,8 +692,8 @@ el_rel_add:
     add rax, 1
     mov [rel __g_elf_writer_el_nrel], rax
     mov rax, 0
-    jmp .__ret_23
-.__ret_23:
+    jmp .__ret_46
+.__ret_46:
     mov rbx, [rbp-80]
     mov r12, [rbp-72]
     mov r13, [rbp-64]
@@ -455,8 +711,8 @@ el_rela_at:
     mov rcx, rax
     mov rax, [rel __g_elf_writer_el_rela]
     add rax, rcx
-    jmp .__ret_24
-.__ret_24:
+    jmp .__ret_47
+.__ret_47:
     mov rsp, rbp
     pop rbp
     ret
@@ -477,9 +733,9 @@ el_elf_hash:
     mov r12, rax
     mov rax, 0
     mov rbx, rax
-.L26:
+.L49:
     cmp r12, r14
-    jge .L27
+    jge .L50
     mov rax, r13
     shl rax, 4
     push rax
@@ -502,24 +758,24 @@ el_elf_hash:
     sar rax, 28
     mov rbx, rax
     cmp rbx, 0
-    je .L29
+    je .L52
     mov rax, rbx
     shl rax, 4
     mov rcx, rax
     mov rax, r13
     xor rax, rcx
     mov r13, rax
-    jmp .L30
-.L29:
-.L30:
+    jmp .L53
+.L52:
+.L53:
     and r13, 268435455
     add r12, 1
-.L28:
-    jmp .L26
-.L27:
+.L51:
+    jmp .L49
+.L50:
     mov rax, r13
-    jmp .__ret_25
-.__ret_25:
+    jmp .__ret_48
+.__ret_48:
     mov rbx, [rbp-96]
     mov r12, [rbp-88]
     mov r13, [rbp-80]
@@ -539,7 +795,7 @@ el_va:
     mov rcx, r12
     mov rdx, rbx
     sub rsp, 32
-    call kasm_find_label
+    call ks_find_label
     add rsp, 32
     mov rbx, rax
     mov rcx, rbx
@@ -547,24 +803,24 @@ el_va:
     call el_neg1
     add rsp, 32
     cmp rax, 1
-    jne .L32
+    jne .L55
     mov rax, 0
-    jmp .__ret_31
-    jmp .L33
-.L32:
-.L33:
+    jmp .__ret_54
+    jmp .L56
+.L55:
+.L56:
     mov rcx, rbx
     sub rsp, 32
-    call kasm_get_label_section
+    call ksk_label_section
     add rsp, 32
     mov r12, rax
     mov rcx, rbx
     sub rsp, 32
-    call ew_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rbx, rax
     cmp r12, 1
-    jne .L34
+    jne .L57
     mov rax, rbx
     push rax
     mov rax, [rel __g_elf_writer_el_dbase]
@@ -572,11 +828,11 @@ el_va:
     pop rax
     add rax, rcx
     mov rbx, rax
-    jmp .L35
-.L34:
-.L35:
+    jmp .L58
+.L57:
+.L58:
     cmp r12, 2
-    jne .L36
+    jne .L59
     mov rax, rbx
     push rax
     mov rax, [rel __g_elf_writer_el_bbase]
@@ -584,9 +840,9 @@ el_va:
     pop rax
     add rax, rcx
     mov rbx, rax
-    jmp .L37
-.L36:
-.L37:
+    jmp .L60
+.L59:
+.L60:
     mov rax, rbx
     push rax
     sub rsp, 32
@@ -595,8 +851,8 @@ el_va:
     mov rcx, rax
     pop rax
     add rax, rcx
-    jmp .__ret_31
-.__ret_31:
+    jmp .__ret_54
+.__ret_54:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov rsp, rbp
@@ -615,9 +871,9 @@ el_fill_got_va:
     mov r13, rax
     mov rax, 0
     mov r12, rax
-.L39:
+.L62:
     cmp r12, 5
-    jge .L40
+    jge .L63
     mov rcx, r13
     sub rsp, 32
     call el_cstrlen
@@ -648,12 +904,12 @@ el_fill_got_va:
     add rax, 1
     mov r13, rax
     add r12, 1
-.L41:
-    jmp .L39
-.L40:
+.L64:
+    jmp .L62
+.L63:
     mov rax, 0
-    jmp .__ret_38
-.__ret_38:
+    jmp .__ret_61
+.__ret_61:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -673,9 +929,9 @@ el_fill_got_arm:
     mov r13, rax
     mov rax, 0
     mov r12, rax
-.L43:
+.L66:
     cmp r12, 5
-    jge .L44
+    jge .L67
     mov rcx, r13
     sub rsp, 32
     call el_cstrlen
@@ -692,7 +948,7 @@ el_fill_got_arm:
     push rax
     mov rcx, r13
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     push rax
     pop rdx
@@ -705,12 +961,12 @@ el_fill_got_arm:
     add rax, 1
     mov r13, rax
     add r12, 1
-.L45:
-    jmp .L43
-.L44:
+.L68:
+    jmp .L66
+.L67:
     mov rax, 0
-    jmp .__ret_42
-.__ret_42:
+    jmp .__ret_65
+.__ret_65:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -858,8 +1114,8 @@ el_head_exe:
     call el_p64
     add rsp, 32
     mov rax, 0
-    jmp .__ret_46
-.__ret_46:
+    jmp .__ret_69
+.__ret_69:
     mov rbx, [rbp-96]
     mov r12, [rbp-88]
     mov r13, [rbp-80]
@@ -887,7 +1143,7 @@ el_write:
     add rsp, 32
     mov [rbp-24], rax
     sub rsp, 32
-    call kasm_build_image
+    call ks_build_image
     add rsp, 32
     mov [rbp-32], rax
     mov rax, [rbp-32]
@@ -896,7 +1152,7 @@ el_write:
     add rax, r14
     push rax
     sub rsp, 32
-    call kasm_get_code
+    call ksk_code
     add rsp, 32
     push rax
     pop rdx
@@ -906,7 +1162,7 @@ el_write:
     call el_copy
     add rsp, 32
     sub rsp, 32
-    call kasm_get_code_size
+    call ksk_code_size
     add rsp, 32
     add rax, 15
     mov rcx, 16
@@ -918,7 +1174,7 @@ el_write:
     mov rax, r13
     push rax
     sub rsp, 32
-    call kasm_get_data_size
+    call ksk_data_size
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -935,25 +1191,25 @@ el_write:
     mov rax, [rbp-48]
     mov [rel __g_elf_writer_el_bbase], rax
     sub rsp, 32
-    call kasm_get_fixup_count
+    call ksk_fixup_count
     add rsp, 32
     mov [rbp-56], rax
     mov rax, 0
     mov r12, rax
-.L48:
+.L71:
     mov rax, r12
     mov rcx, [rbp-56]
     cmp rax, rcx
-    jge .L49
+    jge .L72
     mov rcx, r12
     sub rsp, 32
-    call kasm_get_fixup_kind
+    call ksk_fixup_kind
     add rsp, 32
     cmp rax, 6
-    jne .L51
+    jne .L74
     mov rcx, r12
     sub rsp, 32
-    call kasm_get_fixup_label
+    call ksk_fixup_label
     add rsp, 32
     mov rbx, rax
     mov rcx, rbx
@@ -961,34 +1217,34 @@ el_write:
     call el_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L53
+    jne .L76
     mov rcx, rbx
     sub rsp, 32
-    call kasm_get_label_section
+    call ksk_label_section
     add rsp, 32
     mov [rbp-80], rax
     mov rcx, rbx
     sub rsp, 32
-    call ew_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rbx, rax
     mov rax, [rbp-80]
     cmp rax, 1
-    jne .L55
+    jne .L78
     add rbx, r13
-    jmp .L56
-.L55:
-.L56:
+    jmp .L79
+.L78:
+.L79:
     mov rax, [rbp-80]
     cmp rax, 2
-    jne .L57
+    jne .L80
     mov rax, rbx
     mov rcx, [rbp-48]
     add rax, rcx
     mov rbx, rax
-    jmp .L58
-.L57:
-.L58:
+    jmp .L81
+.L80:
+.L81:
     mov rax, rbx
     mov rcx, [rbp-24]
     add rax, rcx
@@ -999,7 +1255,7 @@ el_write:
     push rax
     mov rcx, r12
     sub rsp, 32
-    call kasm_get_fixup_at
+    call ksk_fixup_at
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -1010,16 +1266,16 @@ el_write:
     sub rsp, 32
     call el_p64
     add rsp, 32
-    jmp .L54
-.L53:
-.L54:
-    jmp .L52
-.L51:
-.L52:
+    jmp .L77
+.L76:
+.L77:
+    jmp .L75
+.L74:
+.L75:
     add r12, 1
-.L50:
-    jmp .L48
-.L49:
+.L73:
+    jmp .L71
+.L72:
     mov rax, 0
     mov rbx, rax
     sub rsp, 32
@@ -1029,7 +1285,7 @@ el_write:
     pop rcx
     mov rdx, 6
     sub rsp, 32
-    call kasm_find_label
+    call ks_find_label
     add rsp, 32
     mov r12, rax
     mov rcx, r12
@@ -1037,15 +1293,15 @@ el_write:
     call el_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L59
+    jne .L82
     mov rcx, r12
     sub rsp, 32
-    call ew_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rbx, rax
-    jmp .L60
-.L59:
-.L60:
+    jmp .L83
+.L82:
+.L83:
     mov rax, rbx
     mov rcx, [rbp-24]
     add rax, rcx
@@ -1054,7 +1310,7 @@ el_write:
     add rax, r14
     mov r12, rax
     sub rsp, 32
-    call kasm_get_bss_size
+    call ksk_bss_size
     add rsp, 32
     mov rcx, [rbp-48]
     add rax, rcx
@@ -1073,7 +1329,7 @@ el_write:
     call ew_out_dynamic
     add rsp, 32
     cmp rax, 0
-    je .L61
+    je .L84
     sub rsp, 32
     call el_fill_got_va
     add rsp, 32
@@ -1082,12 +1338,12 @@ el_write:
     sub rsp, 32
     call el_dynamic
     add rsp, 32
-    jmp .L62
-.L61:
-.L62:
+    jmp .L85
+.L84:
+.L85:
     mov rax, r12
-    jmp .__ret_47
-.__ret_47:
+    jmp .__ret_70
+.__ret_70:
     mov rbx, [rbp-176]
     mov r12, [rbp-168]
     mov r13, [rbp-160]
@@ -1111,7 +1367,7 @@ el_write_arm:
     add rsp, 32
     mov r15, rax
     sub rsp, 32
-    call karm_build_image
+    call kc_build_image
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
@@ -1120,7 +1376,7 @@ el_write_arm:
     add rax, r15
     push rax
     sub rsp, 32
-    call karm_get_code
+    call kc_get_code
     add rsp, 32
     push rax
     pop rdx
@@ -1130,14 +1386,14 @@ el_write_arm:
     call el_copy
     add rsp, 32
     sub rsp, 32
-    call karm_get_entry
+    call kc_get_entry
     add rsp, 32
     mov r13, rax
     mov rax, rbx
     add rax, r15
     mov r12, rax
     sub rsp, 32
-    call karm_get_bss_size
+    call kc_get_bss_size
     add rsp, 32
     push rax
     mov rax, rbx
@@ -1165,7 +1421,7 @@ el_write_arm:
     call ew_out_dynamic
     add rsp, 32
     cmp rax, 0
-    je .L64
+    je .L87
     sub rsp, 32
     call el_fill_got_arm
     add rsp, 32
@@ -1174,12 +1430,12 @@ el_write_arm:
     sub rsp, 32
     call el_dynamic
     add rsp, 32
-    jmp .L65
-.L64:
-.L65:
+    jmp .L88
+.L87:
+.L88:
     mov rax, r12
-    jmp .__ret_63
-.__ret_63:
+    jmp .__ret_86
+.__ret_86:
     mov rbx, [rbp-96]
     mov r12, [rbp-88]
     mov r13, [rbp-80]
@@ -1201,9 +1457,9 @@ el_dynamic:
     mov r14, rdx
     mov rax, 0
     mov r15, rax
-.L67:
+.L90:
     cmp r15, 7
-    jge .L68
+    jge .L91
     lea rax, [rel __g_elf_writer_el_pl]
     push rax
     mov rax, r15
@@ -1234,14 +1490,14 @@ el_dynamic:
     call el_p64
     add rsp, 32
     add r15, 1
-.L69:
-    jmp .L67
-.L68:
+.L92:
+    jmp .L90
+.L91:
     mov rax, 8
     mov r15, rax
-.L70:
+.L93:
     cmp r15, 128
-    jge .L71
+    jge .L94
     mov rax, r15
     mov rcx, 8
     imul rax, rcx
@@ -1255,9 +1511,9 @@ el_dynamic:
     call el_p64
     add rsp, 32
     add r15, 1
-.L72:
-    jmp .L70
-.L71:
+.L95:
+    jmp .L93
+.L94:
     mov rax, r13
     add rax, 56
     push rax
@@ -1359,21 +1615,21 @@ el_dynamic:
     add rsp, 32
     mov r15, rax
     cmp r14, 0
-    je .L73
+    je .L96
     sub rsp, 32
     call ew_addr_interp_arm
     add rsp, 32
     mov r15, rax
-    jmp .L74
-.L73:
-.L74:
+    jmp .L97
+.L96:
+.L97:
     mov rax, 0
     mov r12, rax
     mov rax, 1
     mov rbx, rax
-.L75:
+.L98:
     cmp rbx, 0
-    je .L76
+    je .L99
     mov rax, r15
     add rax, r12
     push rax
@@ -1392,9 +1648,9 @@ el_dynamic:
     call el_p8
     add rsp, 32
     add r12, 1
-.L77:
-    jmp .L75
-.L76:
+.L100:
+    jmp .L98
+.L99:
     mov rax, r13
     add rax, 152
     push rax
@@ -1421,9 +1677,9 @@ el_dynamic:
     add rsp, 32
     mov rax, 0
     mov r15, rax
-.L78:
+.L101:
     cmp r15, 7
-    jge .L79
+    jge .L102
     mov rax, r13
     add rax, 176
     push rax
@@ -1454,9 +1710,9 @@ el_dynamic:
     call el_p64
     add rsp, 32
     add r15, 1
-.L80:
-    jmp .L78
-.L79:
+.L103:
+    jmp .L101
+.L102:
     mov rax, r13
     add rax, 232
     push rax
@@ -1581,17 +1837,17 @@ el_dynamic:
     mov rax, 6
     mov r12, rax
     cmp r14, 0
-    je .L81
+    je .L104
     mov rax, 1025
     mov r12, rax
-    jmp .L82
-.L81:
-.L82:
+    jmp .L105
+.L104:
+.L105:
     mov rax, 0
     mov r15, rax
-.L83:
+.L106:
     cmp r15, 5
-    jge .L84
+    jge .L107
     mov rax, r13
     add rax, 632
     push rax
@@ -1637,9 +1893,9 @@ el_dynamic:
     call el_p64
     add rsp, 32
     add r15, 1
-.L85:
-    jmp .L83
-.L84:
+.L108:
+    jmp .L106
+.L107:
     mov rax, r13
     add rax, 752
     mov rbx, rax
@@ -1729,8 +1985,8 @@ el_dynamic:
     add rsp, 32
     mov rbx, rax
     mov rax, rbx
-    jmp .__ret_66
-.__ret_66:
+    jmp .__ret_89
+.__ret_89:
     mov rbx, [rbp-128]
     mov r12, [rbp-120]
     mov r13, [rbp-112]
@@ -2062,8 +2318,8 @@ el_sections:
     call el_p16
     add rsp, 32
     mov rax, 0
-    jmp .__ret_86
-.__ret_86:
+    jmp .__ret_109
+.__ret_109:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]
@@ -2092,13 +2348,13 @@ el_write_so:
     mov rbx, rax
     mov rax, [rbp-16]
     cmp rax, 0
-    jne .L88
+    jne .L111
     sub rsp, 32
-    call kasm_build_image
+    call ks_build_image
     add rsp, 32
     mov [rel __g_elf_writer_el_img], rax
     sub rsp, 32
-    call kasm_get_code_size
+    call ksk_code_size
     add rsp, 32
     mov [rel __g_elf_writer_el_code], rax
     mov rax, [rel __g_elf_writer_el_code]
@@ -2112,7 +2368,7 @@ el_write_so:
     mov rax, [rel __g_elf_writer_el_doff]
     mov [rel __g_elf_writer_el_dbase], rax
     sub rsp, 32
-    call kasm_get_data_size
+    call ksk_data_size
     add rsp, 32
     mov [rel __g_elf_writer_el_dlen], rax
     mov rax, [rel __g_elf_writer_el_dlen]
@@ -2131,31 +2387,31 @@ el_write_so:
     mov rax, [rel __g_elf_writer_el_boff]
     mov [rel __g_elf_writer_el_bbase], rax
     sub rsp, 32
-    call kasm_get_bss_size
+    call ksk_bss_size
     add rsp, 32
     mov [rel __g_elf_writer_el_blen], rax
     sub rsp, 32
-    call kasm_get_code
+    call ksk_code
     add rsp, 32
     mov rbx, rax
     mov rax, 4096
     mov [rel __g_elf_writer_el_falign], rax
-    jmp .L89
-.L88:
+    jmp .L112
+.L111:
     sub rsp, 32
-    call karm_build_image
+    call kc_build_image
     add rsp, 32
     mov [rel __g_elf_writer_el_img], rax
     sub rsp, 32
-    call karm_get_code_len
+    call kc_get_code_len
     add rsp, 32
     mov [rel __g_elf_writer_el_code], rax
     sub rsp, 32
-    call karm_get_data_off
+    call kc_get_data_off
     add rsp, 32
     mov [rel __g_elf_writer_el_doff], rax
     sub rsp, 32
-    call karm_get_data_len
+    call kc_get_data_len
     add rsp, 32
     mov [rel __g_elf_writer_el_dlen], rax
     mov rax, [rel __g_elf_writer_el_dlen]
@@ -2172,16 +2428,16 @@ el_write_so:
     add rax, rcx
     mov [rel __g_elf_writer_el_boff], rax
     sub rsp, 32
-    call karm_get_bss_size
+    call kc_get_bss_size
     add rsp, 32
     mov [rel __g_elf_writer_el_blen], rax
     sub rsp, 32
-    call karm_get_code
+    call kc_get_code
     add rsp, 32
     mov rbx, rax
     mov rax, 65536
     mov [rel __g_elf_writer_el_falign], rax
-.L89:
+.L112:
     mov rcx, r15
     mov rdx, 512
     sub rsp, 32
@@ -2259,7 +2515,7 @@ el_write_so:
     imul rax, rcx
     mov [rel __g_elf_writer_el_V], rax
     sub rsp, 32
-    call codegen_export_count
+    call cgk_export_count
     add rsp, 32
     mov [rel __g_elf_writer_el_exp], rax
     sub rsp, 32
@@ -2268,19 +2524,19 @@ el_write_so:
     mov rbx, rax
     mov rax, 0
     mov r14, rax
-.L90:
+.L113:
     mov rax, r14
     push rax
     mov rax, [rel __g_elf_writer_el_exp]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L91
+    jge .L114
     mov rax, rbx
     push rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov rcx, rax
     pop rax
@@ -2288,9 +2544,9 @@ el_write_so:
     add rax, 1
     mov rbx, rax
     add r14, 1
-.L92:
-    jmp .L90
-.L91:
+.L115:
+    jmp .L113
+.L114:
     mov rax, rbx
     mov [rel __g_elf_writer_el_soname_off], rax
     mov rax, rbx
@@ -2328,12 +2584,12 @@ el_write_so:
     mov rax, [rel __g_elf_writer_el_exp]
     mov rbx, rax
     cmp rbx, 0
-    jne .L93
+    jne .L116
     mov rax, 1
     mov rbx, rax
-    jmp .L94
-.L93:
-.L94:
+    jmp .L117
+.L116:
+.L117:
     mov rax, rbx
     push rax
     mov rax, [rel __g_elf_writer_el_exp]
@@ -2376,14 +2632,14 @@ el_write_so:
     mov rbx, rax
     mov rax, [rel __g_elf_writer_el_android]
     cmp rax, 0
-    je .L95
+    je .L118
     sub rsp, 32
     call ew_addr_strtab_and
     add rsp, 32
     mov rbx, rax
-    jmp .L96
-.L95:
-.L96:
+    jmp .L119
+.L118:
+.L119:
     mov rax, r13
     add rax, 224
     push rax
@@ -2452,22 +2708,22 @@ el_write_so:
     mov [rbp-88], rax
     mov rax, 0
     mov r14, rax
-.L97:
+.L120:
     mov rax, r14
     push rax
     mov rax, [rel __g_elf_writer_el_exp]
     mov rcx, rax
     pop rax
     cmp rax, rcx
-    jge .L98
+    jge .L121
     mov rcx, r14
     sub rsp, 32
-    call ew_export_name
+    call cgk_export_name
     add rsp, 32
     mov [rbp-96], rax
     mov rcx, r14
     sub rsp, 32
-    call ew_export_len
+    call cgk_export_nlen
     add rsp, 32
     mov r12, rax
     mov rax, r13
@@ -2483,15 +2739,15 @@ el_write_so:
     add rsp, 32
     mov rax, 0
     mov rbx, rax
-.L100:
+.L123:
     cmp rbx, r12
-    jge .L101
+    jge .L124
     cmp rbx, 300
-    jl .L103
-    jmp .L101
-    jmp .L104
-.L103:
-.L104:
+    jl .L126
+    jmp .L124
+    jmp .L127
+.L126:
+.L127:
     lea rax, [rel __g_elf_writer_el_name]
     add rax, 5
     add rax, rbx
@@ -2510,9 +2766,9 @@ el_write_so:
     call el_p8
     add rsp, 32
     add rbx, 1
-.L102:
-    jmp .L100
-.L101:
+.L125:
+    jmp .L123
+.L124:
     lea rax, [rel __g_elf_writer_el_name]
     add rax, 0
     push rax
@@ -2569,7 +2825,7 @@ el_write_so:
     mov rbx, rax
     mov rax, [rel __g_elf_writer_el_arm]
     cmp rax, 0
-    jne .L105
+    jne .L128
     lea rax, [rel __g_elf_writer_el_name]
     push rax
     pop rcx
@@ -2578,16 +2834,16 @@ el_write_so:
     call el_va
     add rsp, 32
     mov rbx, rax
-    jmp .L106
-.L105:
+    jmp .L129
+.L128:
     lea rax, [rel __g_elf_writer_el_name]
     push rax
     pop rcx
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     mov rbx, rax
-.L106:
+.L129:
     mov rax, r13
     push rax
     mov rax, [rel __g_elf_writer_el_sym]
@@ -2693,9 +2949,9 @@ el_write_so:
     add rax, 1
     mov [rbp-88], rax
     add r14, 1
-.L99:
-    jmp .L97
-.L98:
+.L122:
+    jmp .L120
+.L121:
     mov rax, [rel __g_elf_writer_el_soname]
     mov r14, rax
     mov rax, r13
@@ -2708,9 +2964,9 @@ el_write_so:
     mov r12, rax
     mov rax, 1
     mov rbx, rax
-.L107:
+.L130:
     cmp rbx, 0
-    je .L108
+    je .L131
     mov rcx, r14
     sub rsp, 32
     call el_g8
@@ -2723,18 +2979,18 @@ el_write_so:
     add rsp, 32
     add r14, 1
     add r12, 1
-.L109:
-    jmp .L107
-.L108:
+.L132:
+    jmp .L130
+.L131:
     mov rax, [rel __g_elf_writer_el_exp]
     mov rbx, rax
     cmp rbx, 0
-    jne .L110
+    jne .L133
     mov rax, 1
     mov rbx, rax
-    jmp .L111
-.L110:
-.L111:
+    jmp .L134
+.L133:
+.L134:
     mov rax, r13
     push rax
     mov rax, [rel __g_elf_writer_el_hash]
@@ -2771,9 +3027,9 @@ el_write_so:
     mov r12, rax
     mov rax, 0
     mov r14, rax
-.L112:
+.L135:
     cmp r14, 5
-    jge .L113
+    jge .L136
     mov rcx, r12
     sub rsp, 32
     call el_cstrlen
@@ -2783,33 +3039,33 @@ el_write_so:
     mov [rbp-232], rax
     mov rax, [rel __g_elf_writer_el_arm]
     cmp rax, 0
-    jne .L115
+    jne .L138
     mov rcx, r12
     mov rdx, [rbp-224]
     sub rsp, 32
     call el_va
     add rsp, 32
     mov [rbp-232], rax
-    jmp .L116
-.L115:
+    jmp .L139
+.L138:
     mov rcx, r12
     sub rsp, 32
-    call karm_label
+    call kc_label
     add rsp, 32
     mov [rbp-232], rax
-.L116:
+.L139:
     mov rax, r14
     add rax, 1
     shl rax, 32
     mov rbx, rax
     mov rax, [rel __g_elf_writer_el_arm]
     cmp rax, 0
-    jne .L117
+    jne .L140
     or rbx, 6
-    jmp .L118
-.L117:
+    jmp .L141
+.L140:
     or rbx, 1025
-.L118:
+.L141:
     mov rcx, r13
     mov rdx, [rbp-232]
     mov r8, rbx
@@ -2823,32 +3079,32 @@ el_write_so:
     add rax, 1
     mov r12, rax
     add r14, 1
-.L114:
-    jmp .L112
-.L113:
+.L137:
+    jmp .L135
+.L136:
     mov rax, [rel __g_elf_writer_el_arm]
     cmp rax, 0
-    jne .L119
+    jne .L142
     sub rsp, 32
-    call kasm_get_fixup_count
+    call ksk_fixup_count
     add rsp, 32
     mov [rbp-248], rax
     mov rax, 0
     mov r14, rax
-.L121:
+.L144:
     mov rax, r14
     mov rcx, [rbp-248]
     cmp rax, rcx
-    jge .L122
+    jge .L145
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_kind
+    call ksk_fixup_kind
     add rsp, 32
     cmp rax, 6
-    jne .L124
+    jne .L147
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_label
+    call ksk_fixup_label
     add rsp, 32
     mov rbx, rax
     mov rcx, rbx
@@ -2856,19 +3112,19 @@ el_write_so:
     call el_neg1
     add rsp, 32
     cmp rax, 0
-    jne .L126
+    jne .L149
     mov rcx, rbx
     sub rsp, 32
-    call kasm_get_label_section
+    call ksk_label_section
     add rsp, 32
     mov r12, rax
     mov rcx, rbx
     sub rsp, 32
-    call ew_label_addr
+    call ksk_label_addr
     add rsp, 32
     mov rbx, rax
     cmp r12, 1
-    jne .L128
+    jne .L151
     mov rax, rbx
     push rax
     mov rax, [rel __g_elf_writer_el_doff]
@@ -2876,11 +3132,11 @@ el_write_so:
     pop rax
     add rax, rcx
     mov rbx, rax
-    jmp .L129
-.L128:
-.L129:
+    jmp .L152
+.L151:
+.L152:
     cmp r12, 2
-    jne .L130
+    jne .L153
     mov rax, rbx
     push rax
     mov rax, [rel __g_elf_writer_el_boff]
@@ -2888,13 +3144,13 @@ el_write_so:
     pop rax
     add rax, rcx
     mov rbx, rax
-    jmp .L131
-.L130:
-.L131:
+    jmp .L154
+.L153:
+.L154:
     add rbx, 512
     mov rcx, r14
     sub rsp, 32
-    call kasm_get_fixup_at
+    call ksk_fixup_at
     add rsp, 32
     push rax
     mov rax, [rel __g_elf_writer_el_doff]
@@ -2918,30 +3174,30 @@ el_write_so:
     sub rsp, 32
     call el_rel_add
     add rsp, 32
-    jmp .L127
-.L126:
-.L127:
-    jmp .L125
-.L124:
-.L125:
+    jmp .L150
+.L149:
+.L150:
+    jmp .L148
+.L147:
+.L148:
     add r14, 1
-.L123:
-    jmp .L121
-.L122:
-    jmp .L120
-.L119:
+.L146:
+    jmp .L144
+.L145:
+    jmp .L143
+.L142:
     sub rsp, 32
-    call karm_reloc_count
+    call kc_reloc_count
     add rsp, 32
     mov r12, rax
     mov rax, 0
     mov r14, rax
-.L132:
+.L155:
     cmp r14, r12
-    jge .L133
+    jge .L156
     mov rcx, r14
     sub rsp, 32
-    call karm_reloc_at
+    call kc_reloc_at
     add rsp, 32
     push rax
     mov rax, [rel __g_elf_writer_el_doff]
@@ -2972,10 +3228,10 @@ el_write_so:
     call el_rel_add
     add rsp, 32
     add r14, 1
-.L134:
-    jmp .L132
-.L133:
-.L120:
+.L157:
+    jmp .L155
+.L156:
+.L143:
     mov rax, [rel __g_elf_writer_el_nrel]
     mov rcx, 24
     imul rax, rcx
@@ -2994,7 +3250,7 @@ el_write_so:
     mov rbx, rax
     mov rax, [rel __g_elf_writer_el_android]
     cmp rax, 0
-    jne .L135
+    jne .L158
     mov rcx, rbx
     mov rdx, 1
     mov r8, 11
@@ -3002,8 +3258,8 @@ el_write_so:
     call el_dyn
     add rsp, 32
     mov rbx, rax
-    jmp .L136
-.L135:
+    jmp .L159
+.L158:
     mov rcx, rbx
     mov rdx, 1
     mov r8, 9
@@ -3011,10 +3267,10 @@ el_write_so:
     call el_dyn
     add rsp, 32
     mov rbx, rax
-.L136:
+.L159:
     mov rax, [rel __g_elf_writer_el_android]
     cmp rax, 0
-    jne .L137
+    jne .L160
     mov rcx, rbx
     mov rdx, 1
     mov r8, 22
@@ -3022,9 +3278,9 @@ el_write_so:
     call el_dyn
     add rsp, 32
     mov rbx, rax
-    jmp .L138
-.L137:
-.L138:
+    jmp .L161
+.L160:
+.L161:
     mov rax, rbx
     push rax
     mov rax, 14
@@ -3163,7 +3419,7 @@ el_write_so:
     add rsp, 32
     mov rax, [rbp-16]
     cmp rax, 0
-    jne .L139
+    jne .L162
     mov rax, r15
     add rax, 16
     push rax
@@ -3172,8 +3428,8 @@ el_write_so:
     sub rsp, 32
     call el_p64
     add rsp, 32
-    jmp .L140
-.L139:
+    jmp .L163
+.L162:
     mov rax, r15
     add rax, 16
     push rax
@@ -3182,7 +3438,7 @@ el_write_so:
     sub rsp, 32
     call el_p64
     add rsp, 32
-.L140:
+.L163:
     mov rax, r15
     add rax, 24
     push rax
@@ -3222,7 +3478,7 @@ el_write_so:
     mov rbx, rax
     mov rax, [rbp-16]
     cmp rax, 0
-    jne .L141
+    jne .L164
     mov rcx, r12
     mov rdx, 0x0000000700000001
     sub rsp, 32
@@ -3292,8 +3548,8 @@ el_write_so:
     add r12, 56
     mov rax, 3
     mov rbx, rax
-    jmp .L142
-.L141:
+    jmp .L165
+.L164:
     mov rcx, r12
     mov rdx, 0x0000000500000001
     sub rsp, 32
@@ -3435,7 +3691,7 @@ el_write_so:
     add r12, 112
     mov rax, 4
     mov rbx, rax
-.L142:
+.L165:
     mov rcx, r12
     mov rdx, 0x0000000600000001
     sub rsp, 32
@@ -3576,8 +3832,8 @@ el_write_so:
     call el_sections
     add rsp, 32
     mov rax, [rel __g_elf_writer_el_shend]
-    jmp .__ret_87
-.__ret_87:
+    jmp .__ret_110
+.__ret_110:
     mov rbx, [rbp-368]
     mov r12, [rbp-360]
     mov r13, [rbp-352]
@@ -3601,39 +3857,39 @@ el_prepare:
     mov r12, rax
     mov rax, 1
     mov rbx, rax
-.L144:
+.L167:
     cmp rbx, 0
-    je .L145
+    je .L168
     mov rcx, r13
     sub rsp, 32
     call el_g8
     add rsp, 32
     mov rbx, rax
     cmp rbx, 47
-    jne .L147
+    jne .L170
     mov rax, r13
     add rax, 1
     mov r12, rax
-    jmp .L148
-.L147:
-.L148:
+    jmp .L171
+.L170:
+.L171:
     cmp rbx, 92
-    jne .L149
+    jne .L172
     mov rax, r13
     add rax, 1
     mov r12, rax
-    jmp .L150
-.L149:
-.L150:
+    jmp .L173
+.L172:
+.L173:
     cmp rbx, 0
-    je .L151
+    je .L174
     add r13, 1
-    jmp .L152
-.L151:
-.L152:
-.L146:
-    jmp .L144
-.L145:
+    jmp .L175
+.L174:
+.L175:
+.L169:
+    jmp .L167
+.L168:
     mov rax, r12
     mov [rel __g_elf_writer_el_soname], rax
     sub rsp, 32
@@ -3641,8 +3897,8 @@ el_prepare:
     add rsp, 32
     mov [rel __g_elf_writer_el_android], rax
     mov rax, 0
-    jmp .__ret_143
-.__ret_143:
+    jmp .__ret_166
+.__ret_166:
     mov rbx, [rbp-64]
     mov r12, [rbp-56]
     mov r13, [rbp-48]

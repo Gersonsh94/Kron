@@ -48,8 +48,8 @@ kron_definitions
 //               are the browser's (the window, the canvas).
 //
 // It was xwasm.asm, and it is here now, byte for byte the same module out.
-// xwasm.asm keeps the door: xwasm_translate and the error getters main
-// calls.
+// main_out.kr calls xv_translate, and reads an error through xarm's
+// getters (the state is xarm's).
 // =========================================================================
 
 extern "kronc" {
@@ -68,7 +68,7 @@ extern "kronc" {
     fn xl_fail(msg: i64) -> i64;
 }
 
-// the shared state, in xarm's door: offsets in its block
+// the shared state, xarm's (xa_state): offsets in its block
 const S_IN: i64 = 16;
 const S_IN_END: i64 = 24;
 const S_LINE_NO: i64 = 32;

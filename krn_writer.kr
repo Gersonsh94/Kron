@@ -13,17 +13,16 @@ kron_definitions
 //
 //   header | section table | string pool | section data | signature
 //
-// It was krn.asm, and it is here now, byte for byte the same. krn.asm is
-// its door: main calls krn_init, krn_build, krn_get_image and krn_get_size
-// there, which keep every register but rax and call kw_* here.
+// It was krn.asm, and it is here now, byte for byte the same. main_out.kr
+// calls kw_init, kw_build and kw_get_image.
 // =========================================================================
 
 extern "kronc" {
-    fn kasm_get_code() -> i64;
-    fn kasm_get_code_size() -> i64;
-    fn kasm_get_data() -> i64;
-    fn kasm_get_data_size() -> i64;
-    fn kasm_get_bss_size() -> i64;
+    fn ksk_code() -> i64;
+    fn ksk_code_size() -> i64;
+    fn ksk_data() -> i64;
+    fn ksk_data_size() -> i64;
+    fn ksk_bss_size() -> i64;
 }
 
 const KW_MAGIC: i64 = 558781003;     // 'KRN!' little-endian, 0x214E524B
@@ -184,7 +183,7 @@ fn kw_build() -> i64 {
     kw_copy(b + pool, &kw_strpool, kw_strlen);
     // section 0: code
     var s: i64 = b + KW_HDR_SIZE;
-    var clen: i64 = kasm_get_code_size() & 4294967295;
+    var clen: i64 = ksk_code_size() & 4294967295;
     kw_p32(s + 0, ncode);             // name offset
     kw_p32(s + 4, KW_SEC_CODE);
     kw_p64(s + 8, 4096);              // virtual address
@@ -199,7 +198,7 @@ fn kw_build() -> i64 {
     kw_p32(s + 4, KW_SEC_DATA);
     kw_p64(s + 8, (doff + 4096) & 4294967295);
     kw_p32(s + 16, body + doff);
-    var dlen: i64 = kasm_get_data_size() & 4294967295;
+    var dlen: i64 = ksk_data_size() & 4294967295;
     kw_p32(s + 20, dlen);
     kw_p32(s + 24, dlen);
     kw_p32(s + 28, 3);                // read | write
@@ -210,11 +209,11 @@ fn kw_build() -> i64 {
     kw_p64(s + 8, (((doff + dlen + 15) / 16 * 16) + 4096) & 4294967295);
     kw_p32(s + 16, 0);                // nothing in the file
     kw_p32(s + 20, 0);
-    kw_p32(s + 24, kasm_get_bss_size());   // size in memory only
+    kw_p32(s + 24, ksk_bss_size());   // size in memory only
     kw_p32(s + 28, 3);
     // the code body, then the data body
-    kw_copy(b + body, kasm_get_code(), kasm_get_code_size());
-    kw_copy(b + body + doff, kasm_get_data(), kasm_get_data_size());
+    kw_copy(b + body, ksk_code(), ksk_code_size());
+    kw_copy(b + body + doff, ksk_data(), ksk_data_size());
     // the length before the signature
     kw_len = (body + doff + dlen + 15) / 16 * 16;
     kw_sign();
