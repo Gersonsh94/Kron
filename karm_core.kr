@@ -1,0 +1,1965 @@
+kron_program
+kron_domain karm_core;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KARM: the ARM64 assembler for Kron -- the core
+//
+// Reads ARM64 assembly text and writes machine code, as kasm does for
+// x86-64. Two passes: the first measures every line and records where each
+// label lands, the second writes the instructions with every address known.
+//
+// Syntax: ARM's operand syntax, kasm's directives.
+//   section .text / .data / .bss     global NAME     NAME equ EXPR
+//   db / dw / dd / dq  ITEMS          resb / resw / resd / resq  N
+//   times N db|dw|dd|dq V            align N
+//   name:   .local:  (a local label belongs to the last name before it)
+//   comments start with ';' or '//'. Immediates take '#' or not.
+//
+// The image is code, then data, then bss, at the base address set with
+// karm_set_base; each section starts on a multiple of the alignment set
+// with karm_set_align (16 unless told: macOS wants its 16 KB pages, so
+// that the code and the data can be mapped with different rights). Every
+// address is final in pass two. The places in .data where a dq holds an
+// address are kept (karm_reloc_*): an image that the system may load
+// anywhere (macOS) needs them moved with it.
+//
+// It was karm.asm, and it is here now, in three parts that make the same
+// bytes: this one (lines, labels, expressions, operands, emission,
+// directives, the wide immediates), karm_alu.kr (mov, arithmetic, logic,
+// shifts, selects) and karm_mem.kr (loads and stores, branches, reals).
+// karm.asm keeps the door: the karm_ names the rest of the compiler calls.
+// =========================================================================
+
+extern "kronc" {
+    fn cg_float_bits(text: i64, single: i64) -> i64;
+    // karm_alu.kr
+    fn ko_mov() -> i64;
+    fn ko_movw(base: i64) -> i64;
+    fn ko_addsub(op: i64) -> i64;
+    fn ko_cmpn(op: i64) -> i64;
+    fn ko_neg() -> i64;
+    fn ko_three_op(base: i64) -> i64;
+    fn ko_mfour(base: i64) -> i64;
+    fn ko_logic(reg: i64, imm: i64) -> i64;
+    fn ko_tst() -> i64;
+    fn ko_mvn() -> i64;
+    fn ko_shift(kind: i64) -> i64;
+    fn ko_cset() -> i64;
+    fn ko_csx(base: i64) -> i64;
+    fn ko_ext(imms: i64, signed: i64) -> i64;
+    // karm_mem.kr
+    fn kq_ldstr(load: i64, unscaled: i64) -> i64;
+    fn kq_ldsz(base: i64, size_log: i64, unscaled: i64) -> i64;
+    fn kq_ldsx(base: i64, size_log: i64) -> i64;
+    fn kq_ldrsw() -> i64;
+    fn kq_pair(load: i64) -> i64;
+    fn kq_ldex(base: i64) -> i64;
+    fn kq_stex(base: i64) -> i64;
+    fn kq_b26(base: i64) -> i64;
+    fn kq_bcond() -> i64;
+    fn kq_cb(base: i64) -> i64;
+    fn kq_breg(base: i64) -> i64;
+    fn kq_ret() -> i64;
+    fn kq_adr() -> i64;
+    fn kq_adrp() -> i64;
+    fn kq_adrl() -> i64;
+    fn kq_svc() -> i64;
+    fn kq_fmov() -> i64;
+    fn kq_f3(scalar: i64, vector: i64) -> i64;
+    fn kq_f2(base: i64) -> i64;
+    fn kq_fcmp() -> i64;
+    fn kq_cvt(base: i64, to_real: i64) -> i64;
+    fn kq_fcvt() -> i64;
+    fn kq_prfm() -> i64;
+    fn kq_dc() -> i64;
+}
+
+const KA_LBL_MAX: i64 = 65535;
+const KA_HASH_MASK: i64 = 131071;
+const KA_REL_MAX: i64 = 262144;
+const KA_MOVSZ_MAX: i64 = 1048575;
+
+var kc_code: [u8; 8388608];       // code; karm_build_image appends the data
+var kc_data: [u8; 4194304];
+var kc_code_len: i64;
+var kc_data_len: i64;
+var kc_bss_len: i64;
+var kc_final_code: i64;           // section lengths at the end of pass one
+var kc_final_data: i64;
+var kc_base: i64;
+var kc_pass_n: i64;
+var kc_salign: i64;               // sections start on multiples of this
+var kc_rsign: i64;                // sign of the term being read: 1 or -1
+var kc_nrel: i64;                 // address terms in an expression, signed
+var kc_rel_n: i64;                // dq of an address in .data: how many
+var kc_rel_text: i64;             // ... and in .text, which nothing can move
+var kc_rel_off: [i64; 262144];    // their offsets in .data
+var kc_sec: i64;                  // 0 text, 1 data, 2 bss
+var kc_pos: i64;
+var kc_end: i64;
+var kc_src: i64;
+var kc_len: i64;
+var kc_line: i64;
+var kc_linebuf: [u8; 1024];
+var kc_word: [u8; 256];
+var kc_wordlen: i64;
+var kc_mnem_buf: [u8; 64];
+var kc_rest: i64;
+var kc_ops: [u8; 1536];           // six operands of 256 bytes
+var kc_nops_n: i64;
+var kc_last: [u8; 256];           // last non-local label
+var kc_lastlen: i64;
+var kc_name: [u8; 512];
+var kc_deflbl: i64;
+var kc_err_count: i64;
+var kc_err_lines: [i64; 64];
+var kc_err_kind: [i64; 64];
+var kc_err_mnem: [u8; 1024];
+var kc_movseq: i64;
+var kc_movsz: [u8; 1048576];
+var kc_unres_f: i64;
+var kc_ep: i64;                   // expression cursor
+var kc_everr: i64;
+var kc_evok_f: i64;               // the last kc_eval was well formed
+var kc_tmp: [u8; 256];
+var kc_seq: [i64; 8];             // mov immediate: up to four words
+var kc_rnum_v: i64;               // kc_reg: the register's number
+var kc_shamt_v: i64;              // kc_shiftop: the amount
+var kc_item_f: i64;               // kc_item found one
+// labels
+var kc_lb_count: i64;
+var kc_lb_noff: [i64; 65536];
+var kc_lb_nlen: [i64; 65536];
+var kc_lb_sec: [i64; 65536];
+var kc_lb_val: [i64; 65536];
+var kc_lb_pool: [u8; 2097152];
+var kc_lb_pool_len: i64;
+var kc_lb_hash: [u8; 524288];     // u32 each: the label + 1
+// the memory operand, filled by kc_mem
+var kc_km_base: i64;
+var kc_km_kind: i64;              // 0 [Xn], 1 [Xn, #imm], 2 [Xn, Rm{, ext}]
+var kc_km_imm: i64;
+var kc_km_idx: i64;
+var kc_km_idxw: i64;              // 1 when the index is a w register
+var kc_km_ext: i64;               // 0 lsl/uxtx, 1 sxtw, 2 uxtw, 3 sxtx
+var kc_km_amt: i64;               // shift amount, -1 when none
+var kc_km_pre: i64;               // '!' after the bracket
+
+// -------------------------------------------------------------------------
+// memory
+// -------------------------------------------------------------------------
+
+fn kc_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn kc_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn kc_g32(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek32(a);
+    }
+    return r & 4294967295;
+}
+
+fn kc_p32(a: i64, v: i64) -> i64 {
+    raw {
+        poke32(a, v);
+    }
+    return 0;
+}
+
+fn kc_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn kc_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn kc_at(arr: i64, i: i64) -> i64 {
+    return kc_g64(arr + i * 8);
+}
+
+fn kc_put(arr: i64, i: i64, v: i64) -> i64 {
+    return kc_p64(arr + i * 8, v);
+}
+
+// -------------------------------------------------------------------------
+// the door: the karm_ functions
+// -------------------------------------------------------------------------
+
+fn kc_init() -> i64 {
+    kc_base = 0x400080;
+    kc_salign = 16;
+    kc_err_count = 0;
+    return kc_reset_labels();
+}
+
+// the address of the first byte of the image in memory
+fn kc_set_base(b: i64) -> i64 {
+    kc_base = b;
+    return 0;
+}
+
+// a power of two: where .data and .bss start
+fn kc_set_align(a: i64) -> i64 {
+    kc_salign = a;
+    return 0;
+}
+
+// rounded up to the section alignment
+fn kc_align(x: i64) -> i64 {
+    var m: i64 = kc_salign - 1;
+    return (x + m) & ~m;
+}
+
+// the length of the code -> where .data starts in the image: the first
+// address on a section boundary in MEMORY. With a base on a boundary --
+// every executable -- that is the length rounded up; a library's image
+// starts 512 bytes into its first page, and its .data has to start on a
+// page of its own all the same.
+fn kc_align_code(x: i64) -> i64 {
+    var m: i64 = kc_salign - 1;
+    var c: i64 = kc_base & m;
+    return ((x + c + m) & ~m) - c;
+}
+
+fn kc_get_data_off() -> i64 {
+    return kc_align_code(kc_code_len);
+}
+
+fn kc_get_code_len() -> i64 {
+    return kc_code_len;
+}
+
+fn kc_get_data_len() -> i64 {
+    return kc_data_len;
+}
+
+// a label's address by its 0-terminated name, -1 when unknown
+fn kc_label(name: i64) -> i64 {
+    var n: i64 = 0;
+    while kc_g8(name + n) != 0 {
+        n = n + 1;
+    }
+    var f: i64 = kc_find_exact(name, n);
+    if f == -1 {
+        return -1;
+    }
+    return kc_label_addr(f);
+}
+
+fn kc_reloc_count() -> i64 {
+    return kc_rel_n;
+}
+
+// the offset in .data of a dq holding an address
+fn kc_reloc_at(i: i64) -> i64 {
+    return kc_at(&kc_rel_off, i);
+}
+
+fn kc_reloc_text() -> i64 {
+    return kc_rel_text;
+}
+
+// 1 when the text assembled
+fn kc_assemble(text: i64, len: i64) -> i64 {
+    kc_src = text;
+    kc_len = len;
+    kc_err_count = 0;
+    kc_reset_labels();
+    kc_final_code = 0;
+    kc_final_data = 0;
+    kc_pass_n = 1;
+    kc_run_pass();
+    kc_final_code = kc_code_len;
+    kc_final_data = kc_data_len;
+    kc_pass_n = 2;
+    kc_rel_n = 0;
+    kc_rel_text = 0;
+    kc_run_pass();
+    if kc_err_count != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// code + padding + data, in the code buffer: its length
+fn kc_build_image() -> i64 {
+    var d: i64 = kc_align_code(kc_code_len);
+    var code: i64 = &kc_code;
+    var i: i64 = kc_code_len;
+    while i < d {
+        kc_p8(code + i, 0);
+        i = i + 1;
+    }
+    var data: i64 = &kc_data;
+    i = 0;
+    while i < kc_data_len {
+        kc_p8(code + d + i, kc_g8(data + i));
+        i = i + 1;
+    }
+    return d + kc_data_len;
+}
+
+fn kc_get_code() -> i64 {
+    return &kc_code;
+}
+
+fn kc_get_size() -> i64 {
+    return kc_code_len;
+}
+
+fn kc_get_bss_size() -> i64 {
+    return kc_bss_len;
+}
+
+// the address of _start, 0 when there is none
+fn kc_get_entry() -> i64 {
+    var f: i64 = kc_find_exact("_start", 6);
+    if f == -1 {
+        return 0;
+    }
+    return kc_label_addr(f);
+}
+
+fn kc_get_error_count() -> i64 {
+    return kc_err_count;
+}
+
+fn kc_get_error_line_at(i: i64) -> i64 {
+    return kc_at(&kc_err_lines, i) & 4294967295;
+}
+
+// the mnemonic of that error's line
+fn kc_get_error_mnem(i: i64) -> i64 {
+    return &kc_err_mnem + i * 16;
+}
+
+// what went wrong
+fn kc_get_error_text(i: i64) -> i64 {
+    var k: i64 = kc_at(&kc_err_kind, i) & 4294967295;
+    if k == 1 { return "unknown instruction"; }
+    if k == 2 { return "operands this instruction does not take"; }
+    if k == 3 { return "value or distance out of range"; }
+    if k == 4 { return "undefined symbol"; }
+    if k == 5 { return "label defined twice"; }
+    if k == 6 { return "needs a value known on the first pass"; }
+    if k == 7 { return "immediate cannot be encoded as an ARM64 bit mask"; }
+    return "unknown section";
+}
+
+// -------------------------------------------------------------------------
+// what the instruction parts read and set
+// -------------------------------------------------------------------------
+
+fn kc_pass() -> i64 {
+    return kc_pass_n;
+}
+
+fn kc_nops() -> i64 {
+    return kc_nops_n;
+}
+
+fn kc_set_nops(n: i64) -> i64 {
+    kc_nops_n = n;
+    return 0;
+}
+
+fn kc_mnem() -> i64 {
+    return &kc_mnem_buf;
+}
+
+fn kc_unres() -> i64 {
+    return kc_unres_f;
+}
+
+fn kc_clear_unres() -> i64 {
+    kc_unres_f = 0;
+    return 0;
+}
+
+fn kc_evok() -> i64 {
+    return kc_evok_f;
+}
+
+fn kc_rnum() -> i64 {
+    return kc_rnum_v;
+}
+
+fn kc_shamt() -> i64 {
+    return kc_shamt_v;
+}
+
+fn kc_mbase() -> i64 { return kc_km_base; }
+fn kc_mkind() -> i64 { return kc_km_kind; }
+fn kc_mimm() -> i64 { return kc_km_imm; }
+fn kc_midx() -> i64 { return kc_km_idx; }
+fn kc_mext() -> i64 { return kc_km_ext; }
+fn kc_mamt() -> i64 { return kc_km_amt; }
+fn kc_mpre() -> i64 { return kc_km_pre; }
+
+// -------------------------------------------------------------------------
+// passes and lines
+// -------------------------------------------------------------------------
+
+fn kc_run_pass() -> i64 {
+    kc_code_len = 0;
+    kc_data_len = 0;
+    kc_bss_len = 0;
+    kc_sec = 0;
+    kc_line = 0;
+    kc_movseq = 0;
+    kc_lastlen = 0;
+    kc_p8(&kc_last, 0);
+    kc_pos = kc_src;
+    kc_end = kc_src + kc_len;
+    while kc_read_line() != 0 {
+        kc_do_line();
+    }
+    return 0;
+}
+
+// 0 at the end of the text. One line into the line buffer without its
+// comment (';' or '//' outside quotes) or its '\r'.
+fn kc_read_line() -> i64 {
+    var p: i64 = kc_pos;
+    if p >= kc_end {
+        return 0;
+    }
+    kc_line = kc_line + 1;
+    var buf: i64 = &kc_linebuf;
+    var n: i64 = 0;
+    var q: i64 = 0;                   // the open quote, 0 when outside
+    var comment: i64 = 0;
+    while p < kc_end {
+        var c: i64 = kc_g8(p);
+        if c == 10 {
+            p = p + 1;
+            break;
+        }
+        if c != 13 {
+            if q != 0 {
+                if c == q {
+                    q = 0;
+                }
+            } else {
+                if c == 59 {
+                    comment = 1;
+                } else if c == 47 && p + 1 < kc_end && kc_g8(p + 1) == 47 {
+                    comment = 1;
+                } else if c == 39 || c == 34 {
+                    q = c;
+                }
+            }
+            if comment != 0 {
+                // drop the rest of the line
+                while p < kc_end && kc_g8(p) != 10 {
+                    p = p + 1;
+                }
+                if p < kc_end {
+                    p = p + 1;
+                }
+                break;
+            }
+            if n < 1000 {
+                kc_p8(buf + n, c);
+                n = n + 1;
+            }
+        }
+        p = p + 1;
+    }
+    kc_p8(buf + n, 0);
+    kc_pos = p;
+    return 1;
+}
+
+// past blanks and tabs
+fn kc_skipb(p: i64) -> i64 {
+    var q: i64 = p;
+    while kc_g8(q) == 32 || kc_g8(q) == 9 {
+        q = q + 1;
+    }
+    return q;
+}
+
+// the word at p into kc_word; where it ends. A word ends at a blank, a
+// tab, ':' or the end of the line.
+fn kc_getword(p: i64) -> i64 {
+    var q: i64 = p;
+    var w: i64 = &kc_word;
+    var n: i64 = 0;
+    while true {
+        var c: i64 = kc_g8(q);
+        if c == 0 || c == 32 || c == 9 || c == 58 {
+            break;
+        }
+        if n < 250 {
+            kc_p8(w + n, c);
+            n = n + 1;
+        }
+        q = q + 1;
+    }
+    kc_p8(w + n, 0);
+    kc_wordlen = n;
+    return q;
+}
+
+// the word, as the mnemonic (60 characters at most)
+fn kc_word_to_mnem() -> i64 {
+    var w: i64 = &kc_word;
+    var m: i64 = &kc_mnem_buf;
+    var i: i64 = 0;
+    while true {
+        var c: i64 = kc_g8(w + i);
+        kc_p8(m + i, c);
+        if c == 0 {
+            return 0;
+        }
+        i = i + 1;
+        if i >= 60 {
+            kc_p8(m + i, 0);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// one line: label, then instruction or directive
+fn kc_do_line() -> i64 {
+    kc_deflbl = -1;
+    var s: i64 = kc_skipb(&kc_linebuf);
+    if kc_g8(s) == 0 {
+        return 0;
+    }
+    s = kc_getword(s);
+    kc_word_to_mnem();
+    if kc_g8(s) == 58 {
+        kc_define_label();
+        s = kc_skipb(s + 1);
+        if kc_g8(s) == 0 {
+            return 0;
+        }
+        s = kc_getword(s);
+    } else if kc_peek_datadir(kc_skipb(s)) != 0 {
+        // NASM style: 'name db ...' is a label without its colon
+        kc_define_label();
+        s = kc_skipb(s);
+        s = kc_getword(s);
+    }
+    // the word becomes the mnemonic
+    kc_word_to_mnem();
+    s = kc_skipb(s);
+    kc_rest = s;
+    kc_split(s);
+    return kc_dispatch();
+}
+
+// 1 when the next word is a data directive
+fn kc_peek_datadir(p: i64) -> i64 {
+    var t: i64 = &kc_tmp;
+    var n: i64 = 0;
+    while true {
+        var c: i64 = kc_g8(p + n);
+        if c == 0 || c == 32 || c == 9 {
+            break;
+        }
+        if n >= 16 {
+            return 0;
+        }
+        kc_p8(t + n, c);
+        n = n + 1;
+    }
+    kc_p8(t + n, 0);
+    if kc_streq(t, "db") != 0 || kc_streq(t, "dw") != 0 || kc_streq(t, "dd") != 0 || kc_streq(t, "dq") != 0 {
+        return 1;
+    }
+    if kc_streq(t, "resb") != 0 || kc_streq(t, "resw") != 0 || kc_streq(t, "resd") != 0 || kc_streq(t, "resq") != 0 {
+        return 1;
+    }
+    if kc_streq(t, "equ") != 0 || kc_streq(t, "times") != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// 1 when the two zero-terminated texts match
+fn kc_streq(a: i64, b: i64) -> i64 {
+    var i: i64 = 0;
+    while true {
+        var c: i64 = kc_g8(a + i);
+        if c != kc_g8(b + i) {
+            return 0;
+        }
+        if c == 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the operand text at p -> the six operand slots and their count. Commas
+// split operands, except inside brackets or quotes; each is trimmed.
+fn kc_split(p: i64) -> i64 {
+    var ops: i64 = &kc_ops;
+    var k: i64 = 0;
+    while k < 6 {
+        // every operand starts empty: a missing one must not read the last
+        // line's
+        kc_p8(ops + k * 256, 0);
+        k = k + 1;
+    }
+    kc_nops_n = 0;
+    var s: i64 = kc_skipb(p);
+    if kc_g8(s) == 0 {
+        return 0;
+    }
+    k = 0;
+    while true {
+        if k >= 6 {
+            // more than six operands: no instruction takes that many, so
+            // the count refuses it instead of the extra ones being dropped
+            kc_nops_n = 7;
+            return 0;
+        }
+        var d: i64 = ops + k * 256;
+        var n: i64 = 0;
+        var q: i64 = 0;
+        var br: i64 = 0;
+        s = kc_skipb(s);
+        var next: i64 = 0;
+        while next == 0 {
+            var c: i64 = kc_g8(s);
+            if c == 0 {
+                kc_finish(d, n);
+                kc_nops_n = k + 1;
+                return 0;
+            }
+            if q != 0 {
+                if c == q {
+                    q = 0;
+                }
+            } else if c == 39 || c == 34 {
+                q = c;
+            } else if c == 91 {
+                br = br + 1;
+            } else if c == 93 {
+                br = br - 1;
+            } else if c == 44 && br == 0 {
+                next = 1;
+            }
+            if next == 0 && n < 250 {
+                kc_p8(d + n, c);
+                n = n + 1;
+            }
+            s = s + 1;
+        }
+        kc_finish(d, n);
+        k = k + 1;
+    }
+    return 0;
+}
+
+// an operand ended, its trailing blanks and tabs trimmed
+fn kc_finish(d: i64, n: i64) -> i64 {
+    var k: i64 = n;
+    while k > 0 && (kc_g8(d + k - 1) == 32 || kc_g8(d + k - 1) == 9) {
+        k = k - 1;
+    }
+    kc_p8(d + k, 0);
+    return 0;
+}
+
+// the text of operand k
+fn kc_op(k: i64) -> i64 {
+    return &kc_ops + k * 256;
+}
+
+// an error of that kind, recorded (duplicate labels already in pass one)
+fn kc_err(kind: i64) -> i64 {
+    var c: i64 = kc_err_count;
+    if c >= 64 {
+        return 0;
+    }
+    kc_put(&kc_err_kind, c, kind);
+    kc_put(&kc_err_lines, c, kc_line);
+    // the mnemonic, 15 characters at most
+    var d: i64 = &kc_err_mnem + c * 16;
+    var m: i64 = &kc_mnem_buf;
+    var i: i64 = 0;
+    while true {
+        var ch: i64 = kc_g8(m + i);
+        kc_p8(d + i, ch);
+        if ch == 0 {
+            break;
+        }
+        i = i + 1;
+        if i >= 15 {
+            kc_p8(d + i, 0);
+            break;
+        }
+    }
+    kc_err_count = c + 1;
+    return 0;
+}
+
+// an error, but only on pass two
+fn kc_err2(kind: i64) -> i64 {
+    if kc_pass_n == 2 {
+        return kc_err(kind);
+    }
+    return 0;
+}
+
+fn kc_bad() -> i64 {
+    return kc_err2(2);
+}
+
+fn kc_range() -> i64 {
+    return kc_err2(3);
+}
+
+// -------------------------------------------------------------------------
+// labels
+// -------------------------------------------------------------------------
+
+fn kc_reset_labels() -> i64 {
+    kc_lb_count = 0;
+    kc_lb_pool_len = 0;
+    var h: i64 = &kc_lb_hash;
+    var i: i64 = 0;
+    while i < 524288 {
+        kc_p64(h + i, 0);
+        i = i + 8;
+    }
+    return 0;
+}
+
+// the slot of a name: FNV-1a, 32 bits
+fn kc_hash(name: i64, len: i64) -> i64 {
+    var h: i64 = 2166136261;
+    var i: i64 = 0;
+    while i < len {
+        h = ((h ^ kc_g8(name + i)) * 16777619) & 4294967295;
+        i = i + 1;
+    }
+    return h & KA_HASH_MASK;
+}
+
+// the label of exactly that name, -1 when absent
+fn kc_find_exact(name: i64, len: i64) -> i64 {
+    var slot: i64 = kc_hash(name, len);
+    while true {
+        var e: i64 = kc_g32(&kc_lb_hash + slot * 4);
+        if e == 0 {
+            return -1;
+        }
+        var idx: i64 = e - 1;
+        if kc_at(&kc_lb_nlen, idx) == len {
+            var p: i64 = &kc_lb_pool + kc_at(&kc_lb_noff, idx);
+            var i: i64 = 0;
+            while i < len && kc_g8(p + i) == kc_g8(name + i) {
+                i = i + 1;
+            }
+            if i >= len {
+                return idx;
+            }
+        }
+        slot = (slot + 1) & KA_HASH_MASK;
+    }
+    return -1;
+}
+
+// a new label: its index, -1 when the table is full
+fn kc_add_label(name: i64, len: i64) -> i64 {
+    var n: i64 = kc_lb_count;
+    if n >= KA_LBL_MAX {
+        return -1;
+    }
+    var off: i64 = kc_lb_pool_len;
+    kc_put(&kc_lb_noff, n, off);
+    kc_put(&kc_lb_nlen, n, len);
+    var p: i64 = &kc_lb_pool + off;
+    var i: i64 = 0;
+    while i < len {
+        kc_p8(p + i, kc_g8(name + i));
+        i = i + 1;
+    }
+    kc_p8(p + len, 0);
+    kc_lb_pool_len = off + len + 1;
+    var slot: i64 = kc_hash(name, len);
+    while kc_g32(&kc_lb_hash + slot * 4) != 0 {
+        slot = (slot + 1) & KA_HASH_MASK;
+    }
+    kc_p32(&kc_lb_hash + slot * 4, n + 1);
+    kc_lb_count = n + 1;
+    return n;
+}
+
+// the full name in kc_name, its length: a name that starts with '.' is
+// local, and the last ordinary label goes first
+fn kc_fullname(name: i64, len: i64) -> i64 {
+    var d: i64 = &kc_name;
+    var n: i64 = 0;
+    if kc_g8(name) == 46 {
+        var l: i64 = &kc_last;
+        while n < kc_lastlen {
+            kc_p8(d + n, kc_g8(l + n));
+            n = n + 1;
+        }
+    }
+    var i: i64 = 0;
+    while i < len && n < 500 {
+        kc_p8(d + n, kc_g8(name + i));
+        n = n + 1;
+        i = i + 1;
+    }
+    kc_p8(d + n, 0);
+    return n;
+}
+
+// the word is a label defined here, in the current section
+fn kc_define_label() -> i64 {
+    var w: i64 = &kc_word;
+    var len: i64 = kc_wordlen;
+    if len == 0 {
+        return 0;
+    }
+    if kc_g8(w) != 46 {
+        // an ordinary label becomes the prefix of the local ones that follow
+        var l: i64 = &kc_last;
+        var n: i64 = 0;
+        while n < len && n < 250 {
+            kc_p8(l + n, kc_g8(w + n));
+            n = n + 1;
+        }
+        kc_p8(l + n, 0);
+        kc_lastlen = n;
+    }
+    var full: i64 = kc_fullname(w, len);
+    var f: i64 = kc_find_exact(&kc_name, full);
+    if kc_pass_n != 1 {
+        kc_deflbl = f;
+        return 0;
+    }
+    if f != -1 {
+        return kc_err(5);
+    }
+    var i: i64 = kc_add_label(&kc_name, full);
+    if i == -1 {
+        return 0;
+    }
+    kc_deflbl = i;
+    kc_put(&kc_lb_sec, i, kc_sec);
+    kc_put(&kc_lb_val, i, kc_cur_off());
+    return 0;
+}
+
+// the offset of the current position in its section
+fn kc_cur_off() -> i64 {
+    if kc_sec == 0 {
+        return kc_code_len;
+    }
+    if kc_sec == 1 {
+        return kc_data_len;
+    }
+    return kc_bss_len;
+}
+
+// a label's final address
+fn kc_label_addr(i: i64) -> i64 {
+    var v: i64 = kc_at(&kc_lb_val, i);
+    var s: i64 = kc_at(&kc_lb_sec, i);
+    if s == 3 {
+        return v;
+    }
+    v = v + kc_base;
+    if s == 0 {
+        return v;
+    }
+    v = v + kc_align_code(kc_final_code);
+    if s == 1 {
+        return v;
+    }
+    return v + kc_align(kc_final_data);
+}
+
+// the address of the current position
+fn kc_pc() -> i64 {
+    var v: i64 = kc_cur_off() + kc_base;
+    if kc_sec == 0 {
+        return v;
+    }
+    v = v + kc_align_code(kc_final_code);
+    if kc_sec == 1 {
+        return v;
+    }
+    return v + kc_align(kc_final_data);
+}
+
+// -------------------------------------------------------------------------
+// emission
+// -------------------------------------------------------------------------
+
+fn kc_emit32(w: i64) -> i64 {
+    if kc_sec == 0 {
+        kc_p32(&kc_code + kc_code_len, w);
+        kc_code_len = kc_code_len + 4;
+    } else if kc_sec == 1 {
+        kc_p32(&kc_data + kc_data_len, w);
+        kc_data_len = kc_data_len + 4;
+    } else {
+        kc_bss_len = kc_bss_len + 4;
+    }
+    return 0;
+}
+
+fn kc_emit8(b: i64) -> i64 {
+    if kc_sec == 0 {
+        kc_p8(&kc_code + kc_code_len, b);
+        kc_code_len = kc_code_len + 1;
+    } else if kc_sec == 1 {
+        kc_p8(&kc_data + kc_data_len, b);
+        kc_data_len = kc_data_len + 1;
+    } else {
+        kc_bss_len = kc_bss_len + 1;
+    }
+    return 0;
+}
+
+// n bytes of the value, little-endian
+fn kc_emit_n(value: i64, n: i64) -> i64 {
+    var v: i64 = value;
+    var k: i64 = n;
+    while k > 0 {
+        kc_emit8(v & 255);
+        v = v >>> 8;
+        k = k - 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// operands
+// -------------------------------------------------------------------------
+
+// a register's class (kc_rnum = its number):
+//   0 none, 1 x, 2 w, 3 d, 4 s, 5 sp (number 31), 6 q, 7 vN.16b,
+//   8 vN.2d, 9 vN.4s. xzr and wzr are x31 and w31; fp is x29, lr is x30.
+fn kc_reg(t: i64) -> i64 {
+    kc_rnum_v = 0;
+    var c0: i64 = kc_g8(t);
+    if c0 == 115 && kc_g8(t + 1) == 112 && kc_g8(t + 2) == 0 {
+        kc_rnum_v = 31;
+        return 5;
+    }
+    if c0 == 102 {
+        if kc_g8(t + 1) == 112 && kc_g8(t + 2) == 0 {
+            kc_rnum_v = 29;
+            return 1;
+        }
+        return 0;
+    }
+    if c0 == 108 {
+        if kc_g8(t + 1) == 114 && kc_g8(t + 2) == 0 {
+            kc_rnum_v = 30;
+            return 1;
+        }
+        return 0;
+    }
+    if c0 == 118 {
+        return kc_reg_vec(t);
+    }
+    var cls: i64 = 0;
+    if c0 == 120 { cls = 1; }
+    if c0 == 119 { cls = 2; }
+    if c0 == 100 { cls = 3; }
+    if c0 == 115 { cls = 4; }
+    if c0 == 113 { cls = 6; }
+    if cls == 0 {
+        return 0;
+    }
+    var p: i64 = t + 1;
+    // zr for x and w
+    if kc_g8(p) == 122 {
+        if cls > 2 || kc_g8(p + 1) != 114 || kc_g8(p + 2) != 0 {
+            return 0;
+        }
+        kc_rnum_v = 31;
+        return cls;
+    }
+    var d: i64 = kc_g8(p) - 48;
+    if d < 0 || d > 9 {
+        return 0;
+    }
+    var n: i64 = d;
+    p = p + 1;
+    if kc_g8(p) != 0 {
+        d = kc_g8(p) - 48;
+        if d < 0 || d > 9 {
+            return 0;
+        }
+        n = n * 10 + d;
+        p = p + 1;
+        if kc_g8(p) != 0 {
+            return 0;
+        }
+    }
+    // x31 and w31 are not names: 31 is zr or sp by context
+    if n > 31 || (n == 31 && cls <= 2) {
+        return 0;
+    }
+    kc_rnum_v = n;
+    return cls;
+}
+
+// vN.16b -> 7, vN.2d -> 8, vN.4s -> 9
+fn kc_reg_vec(t: i64) -> i64 {
+    var p: i64 = t + 1;
+    var d: i64 = kc_g8(p) - 48;
+    if d < 0 || d > 9 {
+        return 0;
+    }
+    var n: i64 = d;
+    p = p + 1;
+    if kc_g8(p) != 46 {
+        d = kc_g8(p) - 48;
+        if d < 0 || d > 9 {
+            return 0;
+        }
+        n = n * 10 + d;
+        p = p + 1;
+        if kc_g8(p) != 46 {
+            return 0;
+        }
+    }
+    if n > 31 {
+        return 0;
+    }
+    var a: i64 = kc_g8(p + 1);
+    var b: i64 = kc_g8(p + 2);
+    var c: i64 = kc_g8(p + 3);
+    if a == 49 {
+        if b == 54 && c == 98 && kc_g8(p + 4) == 0 {
+            kc_rnum_v = n;
+            return 7;
+        }
+        return 0;
+    }
+    if a == 52 {
+        if b == 115 && c == 0 {
+            kc_rnum_v = n;
+            return 9;
+        }
+        return 0;
+    }
+    if a == 50 && b == 100 && c == 0 {
+        kc_rnum_v = n;
+        return 8;
+    }
+    return 0;
+}
+
+// the class of operand k's register
+fn kc_opreg(k: i64) -> i64 {
+    return kc_reg(kc_op(k));
+}
+
+// a condition by its two letters: 0..15, -1 when unknown
+fn kc_cond(t: i64) -> i64 {
+    var a: i64 = kc_g8(t);
+    var b: i64 = kc_g8(t + 1);
+    if kc_g8(t + 2) != 0 {
+        return -1;
+    }
+    // hs and lo are the other names of cs and cc
+    if a == 104 && b == 115 {
+        return 2;
+    }
+    if a == 108 && b == 111 {
+        return 3;
+    }
+    var names: i64 = "eqnecsccmiplvsvchilsgeltgtlealnv";
+    var i: i64 = 0;
+    while i < 16 {
+        if kc_g8(names + i * 2) == a && kc_g8(names + i * 2 + 1) == b {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// "lsl #3" -> 0 lsl, 1 lsr, 2 asr, 3 ror, -1 none; kc_shamt = the amount
+fn kc_shiftop(t: i64) -> i64 {
+    kc_shamt_v = 0;
+    var a: i64 = kc_g8(t);
+    var b: i64 = kc_g8(t + 1);
+    var c: i64 = kc_g8(t + 2);
+    var k: i64 = -1;
+    if a == 108 && b == 115 && c == 108 {
+        k = 0;
+    } else if a == 108 && b == 115 && c == 114 {
+        k = 1;
+    } else if a == 97 && b == 115 && c == 114 {
+        k = 2;
+    } else if a == 114 && b == 111 && c == 114 {
+        k = 3;
+    }
+    if k == -1 {
+        return -1;
+    }
+    var v: i64 = kc_eval(t + 3);
+    if kc_evok_f == 0 {
+        return -1;
+    }
+    kc_shamt_v = v;
+    return k;
+}
+
+// -------------------------------------------------------------------------
+// expressions: + - * on numbers, characters and symbols, with
+// parentheses. kc_eval -> the value, kc_evok = 1 when well formed. An
+// unknown symbol counts as 0 and sets kc_unres; on pass two it is an error.
+// -------------------------------------------------------------------------
+
+fn kc_eval(t: i64) -> i64 {
+    kc_ep = t;
+    kc_everr = 0;
+    var v: i64 = kc_expr();
+    // nothing may follow but blanks
+    if kc_g8(kc_skipb(kc_ep)) != 0 {
+        kc_everr = 1;
+    }
+    kc_evok_f = 0;
+    if kc_everr == 0 {
+        kc_evok_f = 1;
+    }
+    return v;
+}
+
+fn kc_flip() -> i64 {
+    kc_rsign = 0 - kc_rsign;
+    return 0;
+}
+
+fn kc_expr() -> i64 {
+    var v: i64 = kc_term();
+    while true {
+        kc_ep = kc_skipb(kc_ep);
+        var c: i64 = kc_g8(kc_ep);
+        if c == 43 {
+            kc_ep = kc_ep + 1;
+            v = v + kc_term();
+        } else if c == 45 {
+            kc_ep = kc_ep + 1;
+            kc_flip();
+            var t: i64 = kc_term();
+            kc_flip();
+            v = v - t;
+        } else {
+            return v;
+        }
+    }
+    return v;
+}
+
+fn kc_term() -> i64 {
+    var v: i64 = kc_factor();
+    while true {
+        kc_ep = kc_skipb(kc_ep);
+        if kc_g8(kc_ep) != 42 {
+            return v;
+        }
+        kc_ep = kc_ep + 1;
+        v = v * kc_factor();
+    }
+    return v;
+}
+
+fn kc_symchar(c: i64) -> i64 {
+    if c == 95 || c == 46 || c == 36 {
+        return 1;
+    }
+    if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+        return 1;
+    }
+    return 0;
+}
+
+fn kc_factor() -> i64 {
+    var s: i64 = kc_skipb(kc_ep);
+    if kc_g8(s) == 35 {
+        s = kc_skipb(s + 1);
+    }
+    kc_ep = s;
+    var c: i64 = kc_g8(s);
+    if c == 45 {
+        kc_ep = kc_ep + 1;
+        kc_flip();
+        var f: i64 = kc_factor();
+        kc_flip();
+        return 0 - f;
+    }
+    if c == 40 {
+        kc_ep = kc_ep + 1;
+        var e: i64 = kc_expr();
+        var q: i64 = kc_skipb(kc_ep);
+        if kc_g8(q) != 41 {
+            kc_everr = 1;
+            return 0;
+        }
+        kc_ep = q + 1;
+        return e;
+    }
+    if c == 39 {
+        if kc_g8(s + 2) != 39 {
+            kc_everr = 1;
+            return 0;
+        }
+        kc_ep = s + 3;
+        return kc_g8(s + 1);
+    }
+    if c >= 48 && c <= 57 {
+        var v: i64 = 0;
+        var p: i64 = s;
+        if kc_g8(p) == 48 && kc_g8(p + 1) == 120 {
+            p = p + 2;
+            while true {
+                var h: i64 = kc_g8(p);
+                var d: i64 = -1;
+                if h >= 48 && h <= 57 {
+                    d = h - 48;
+                } else if h >= 97 && h <= 102 {
+                    d = h - 87;
+                } else if h >= 65 && h <= 70 {
+                    d = h - 55;
+                }
+                if d == -1 {
+                    break;
+                }
+                v = (v << 4) + d;
+                p = p + 1;
+            }
+        } else {
+            while kc_g8(p) >= 48 && kc_g8(p) <= 57 {
+                v = v * 10 + (kc_g8(p) - 48);
+                p = p + 1;
+            }
+        }
+        kc_ep = p;
+        return v;
+    }
+    // a symbol: letters, digits, '_', '.', '$'
+    var n: i64 = 0;
+    while kc_symchar(kc_g8(s + n)) != 0 {
+        n = n + 1;
+    }
+    if n == 0 {
+        kc_everr = 1;
+        return 0;
+    }
+    kc_ep = s + n;
+    var full: i64 = kc_fullname(s, n);
+    var f: i64 = kc_find_exact(&kc_name, full);
+    if f == -1 {
+        kc_unres_f = 1;
+        return 0;
+    }
+    // an address (a label of a section, not an equ) counts with its sign
+    if kc_at(&kc_lb_sec, f) != 3 {
+        kc_nrel = kc_nrel + kc_rsign;
+    }
+    return kc_label_addr(f);
+}
+
+// operand k's value; kc_evok = 1 when it is a value. Registers are not.
+fn kc_imm(k: i64) -> i64 {
+    var t: i64 = kc_op(k);
+    if kc_reg(t) != 0 {
+        kc_evok_f = 0;
+        return 0;
+    }
+    return kc_eval(t);
+}
+
+// on pass two, an unknown symbol in the last expression is an error
+fn kc_undef_check() -> i64 {
+    if kc_unres_f != 0 {
+        kc_err2(4);
+    }
+    return 0;
+}
+
+// the text up to ',' or ']' into kc_tmp, trimmed; where it stopped
+fn kc_piece(p: i64) -> i64 {
+    var t: i64 = &kc_tmp;
+    var q: i64 = p;
+    var n: i64 = 0;
+    while kc_g8(q) != 0 && kc_g8(q) != 44 && kc_g8(q) != 93 {
+        if n < 250 {
+            kc_p8(t + n, kc_g8(q));
+            n = n + 1;
+        }
+        q = q + 1;
+    }
+    while n > 0 && kc_g8(t + n - 1) == 32 {
+        n = n - 1;
+    }
+    kc_p8(t + n, 0);
+    return q;
+}
+
+// 1 when the text is a memory operand; the kc_km_ fields filled:
+//   [Xn]  [Xn, #imm]  [Xn, #imm]!  [Xn, Xm]  [Xn, Xm, lsl #s]
+//   [Xn, Wm, sxtw]  [Xn, Wm, uxtw #s]
+fn kc_mem(t: i64) -> i64 {
+    kc_km_kind = 0;
+    kc_km_imm = 0;
+    kc_km_amt = -1;
+    kc_km_pre = 0;
+    kc_km_ext = 0;
+    kc_km_idxw = 0;
+    if kc_g8(t) != 91 {
+        return 0;
+    }
+    var tmp: i64 = &kc_tmp;
+    // the base register, up to ',' or ']'
+    var p: i64 = kc_piece(kc_skipb(t + 1));
+    var c: i64 = kc_reg(tmp);
+    if c != 1 && c != 5 {
+        return 0;
+    }
+    kc_km_base = kc_rnum_v;
+    if kc_g8(p) != 93 {
+        if kc_g8(p) != 44 {
+            return 0;
+        }
+        p = kc_piece(kc_skipb(p + 1));
+        // an index register, or an immediate
+        c = kc_reg(tmp);
+        if c == 1 || c == 2 {
+            if c == 2 {
+                kc_km_idxw = 1;
+                kc_km_ext = 2;
+            }
+            kc_km_idx = kc_rnum_v;
+            kc_km_kind = 2;
+            if kc_g8(p) != 93 {
+                if kc_g8(p) != 44 {
+                    return 0;
+                }
+                p = kc_piece(kc_skipb(p + 1));
+                if kc_mem_ext(tmp) == 0 {
+                    return 0;
+                }
+                if kc_g8(p) != 93 {
+                    return 0;
+                }
+            }
+        } else {
+            var v: i64 = kc_eval(tmp);
+            if kc_evok_f == 0 {
+                return 0;
+            }
+            kc_km_imm = v;
+            kc_km_kind = 1;
+            if kc_g8(p) != 93 {
+                return 0;
+            }
+        }
+    }
+    // the closing bracket, and '!'
+    p = kc_skipb(p + 1);
+    if kc_g8(p) == 33 {
+        kc_km_pre = 1;
+        p = kc_skipb(p + 1);
+    }
+    if kc_g8(p) != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// lsl #s, or an extension with an optional amount: 1 when understood
+fn kc_mem_ext(t: i64) -> i64 {
+    var a: i64 = kc_g8(t);
+    if a == 108 {
+        if kc_shiftop(t) != 0 {
+            return 0;
+        }
+        kc_km_amt = kc_shamt_v;
+        return 1;
+    }
+    if a == 115 {
+        if kc_g8(t + 1) != 120 || kc_g8(t + 2) != 116 {
+            return 0;
+        }
+        kc_km_ext = 1;
+        if kc_g8(t + 3) == 120 {
+            kc_km_ext = 3;
+        } else if kc_g8(t + 3) != 119 {
+            return 0;
+        }
+    } else if a == 117 {
+        if kc_g8(t + 1) != 120 || kc_g8(t + 2) != 116 || kc_g8(t + 3) != 119 {
+            return 0;
+        }
+        kc_km_ext = 2;
+    } else {
+        return 0;
+    }
+    if kc_g8(t + 4) != 0 {
+        var v: i64 = kc_eval(t + 4);
+        if kc_evok_f == 0 {
+            return 0;
+        }
+        kc_km_amt = v;
+    }
+    return 1;
+}
+
+// -------------------------------------------------------------------------
+// dispatch
+// -------------------------------------------------------------------------
+
+fn kc_is(name: i64) -> i64 {
+    return kc_streq(&kc_mnem_buf, name);
+}
+
+fn kc_dispatch() -> i64 {
+    kc_unres_f = 0;
+    // directives
+    if kc_is("section") != 0 { return kc_section(); }
+    if kc_is("global") != 0 { return 0; }
+    // Linux ARM64 programs import nothing: every name must be defined here
+    if kc_is("extern") != 0 { return kc_bad(); }
+    if kc_is("align") != 0 { return kc_align_dir(); }
+    if kc_is("db") != 0 { return kc_data_dir(1); }
+    if kc_is("dw") != 0 { return kc_data_dir(2); }
+    if kc_is("dd") != 0 { return kc_data_dir(4); }
+    if kc_is("dq") != 0 { return kc_data_dir(8); }
+    if kc_is("resb") != 0 { return kc_res(1); }
+    if kc_is("resw") != 0 { return kc_res(2); }
+    if kc_is("resd") != 0 { return kc_res(4); }
+    if kc_is("resq") != 0 { return kc_res(8); }
+    if kc_is("equ") != 0 { return kc_equ(); }
+    if kc_is("times") != 0 { return kc_times(); }
+    return kc_dispatch_insn();
+}
+
+fn kc_dispatch_insn() -> i64 {
+    if kc_is("mov") != 0 { return ko_mov(); }
+    if kc_is("movz") != 0 { return ko_movw(0x52800000); }
+    if kc_is("movn") != 0 { return ko_movw(0x12800000); }
+    if kc_is("movk") != 0 { return ko_movw(0x72800000); }
+    if kc_is("add") != 0 { return ko_addsub(0); }
+    if kc_is("sub") != 0 { return ko_addsub(1); }
+    if kc_is("adds") != 0 { return ko_addsub(2); }
+    if kc_is("subs") != 0 { return ko_addsub(3); }
+    if kc_is("cmp") != 0 { return ko_cmpn(3); }
+    if kc_is("cmn") != 0 { return ko_cmpn(2); }
+    if kc_is("neg") != 0 { return ko_neg(); }
+    if kc_is("mul") != 0 { return ko_three_op(0x9B007C00); }
+    if kc_is("madd") != 0 { return ko_mfour(0x9B000000); }
+    if kc_is("msub") != 0 { return ko_mfour(0x9B008000); }
+    if kc_is("sdiv") != 0 { return ko_three_op(0x9AC00C00); }
+    if kc_is("udiv") != 0 { return ko_three_op(0x9AC00800); }
+    if kc_is("and") != 0 { return ko_logic(0x8A000000, 0x92000000); }
+    if kc_is("orr") != 0 { return ko_logic(0xAA000000, 0xB2000000); }
+    if kc_is("eor") != 0 { return ko_logic(0xCA000000, 0xD2000000); }
+    if kc_is("ands") != 0 { return ko_logic(0xEA000000, 0xF2000000); }
+    if kc_is("bic") != 0 { return ko_logic(0x8A200000, 0); }
+    if kc_is("orn") != 0 { return ko_logic(0xAA200000, 0); }
+    if kc_is("eon") != 0 { return ko_logic(0xCA200000, 0); }
+    if kc_is("tst") != 0 { return ko_tst(); }
+    if kc_is("mvn") != 0 { return ko_mvn(); }
+    if kc_is("lsl") != 0 { return ko_shift(0); }
+    if kc_is("lsr") != 0 { return ko_shift(1); }
+    if kc_is("asr") != 0 { return ko_shift(2); }
+    if kc_is("ror") != 0 { return ko_shift(3); }
+    if kc_is("cset") != 0 { return ko_cset(); }
+    if kc_is("csel") != 0 { return ko_csx(0x9A800000); }
+    if kc_is("csinc") != 0 { return ko_csx(0x9A800400); }
+    if kc_is("csneg") != 0 { return ko_csx(0xDA800400); }
+    if kc_is("sxtb") != 0 { return ko_ext(7, 1); }
+    if kc_is("sxth") != 0 { return ko_ext(15, 1); }
+    if kc_is("sxtw") != 0 { return ko_ext(31, 1); }
+    if kc_is("uxtb") != 0 { return ko_ext(7, 0); }
+    if kc_is("uxth") != 0 { return ko_ext(15, 0); }
+    return kc_dispatch_mem();
+}
+
+fn kc_dispatch_mem() -> i64 {
+    if kc_is("ldr") != 0 { return kq_ldstr(1, 0); }
+    if kc_is("str") != 0 { return kq_ldstr(0, 0); }
+    if kc_is("ldrb") != 0 { return kq_ldsz(0x39400000, 0, 0); }
+    if kc_is("strb") != 0 { return kq_ldsz(0x39000000, 0, 0); }
+    if kc_is("ldrh") != 0 { return kq_ldsz(0x79400000, 1, 0); }
+    if kc_is("strh") != 0 { return kq_ldsz(0x79000000, 1, 0); }
+    if kc_is("ldrsb") != 0 { return kq_ldsx(0x39800000, 0); }
+    if kc_is("ldrsh") != 0 { return kq_ldsx(0x79800000, 1); }
+    if kc_is("ldrsw") != 0 { return kq_ldrsw(); }
+    if kc_is("ldur") != 0 { return kq_ldstr(1, 1); }
+    if kc_is("stur") != 0 { return kq_ldstr(0, 1); }
+    // the unscaled byte and halfword forms: [Xn, #-N], which is how a
+    // packed local array element is stored below the frame pointer
+    if kc_is("ldurb") != 0 { return kq_ldsz(0x39400000, 0, 1); }
+    if kc_is("sturb") != 0 { return kq_ldsz(0x39000000, 0, 1); }
+    if kc_is("ldurh") != 0 { return kq_ldsz(0x79400000, 1, 1); }
+    if kc_is("sturh") != 0 { return kq_ldsz(0x79000000, 1, 1); }
+    if kc_is("ldp") != 0 { return kq_pair(1); }
+    if kc_is("stp") != 0 { return kq_pair(0); }
+    if kc_is("ldxr") != 0 { return kq_ldex(0xC85F7C00); }
+    if kc_is("stxr") != 0 { return kq_stex(0xC8007C00); }
+    if kc_is("ldaxr") != 0 { return kq_ldex(0xC85FFC00); }
+    if kc_is("stlxr") != 0 { return kq_stex(0xC800FC00); }
+    if kc_is("b") != 0 { return kq_b26(0x14000000); }
+    if kc_is("bl") != 0 { return kq_b26(0x94000000); }
+    if kc_is("cbz") != 0 { return kq_cb(0x34000000); }
+    if kc_is("cbnz") != 0 { return kq_cb(0x35000000); }
+    if kc_is("br") != 0 { return kq_breg(0xD61F0000); }
+    if kc_is("blr") != 0 { return kq_breg(0xD63F0000); }
+    if kc_is("ret") != 0 { return kq_ret(); }
+    if kc_is("adr") != 0 { return kq_adr(); }
+    if kc_is("adrp") != 0 { return kq_adrp(); }
+    if kc_is("adrl") != 0 { return kq_adrl(); }
+    if kc_is("svc") != 0 { return kq_svc(); }
+    if kc_is("nop") != 0 { return kc_emit32(0xD503201F); }
+    // only 'dmb ish', the barrier threads need
+    if kc_is("dmb") != 0 { return kc_emit32(0xD5033BBF); }
+    if kc_is("fmov") != 0 { return kq_fmov(); }
+    if kc_is("fadd") != 0 { return kq_f3(0x1E602800, 0x4E60D400); }
+    if kc_is("fsub") != 0 { return kq_f3(0x1E603800, 0x4EE0D400); }
+    if kc_is("fmul") != 0 { return kq_f3(0x1E600800, 0x6E60DC00); }
+    if kc_is("fdiv") != 0 { return kq_f3(0x1E601800, 0x6E60FC00); }
+    if kc_is("fsqrt") != 0 { return kq_f2(0x1E61C000); }
+    if kc_is("fneg") != 0 { return kq_f2(0x1E614000); }
+    if kc_is("fabs") != 0 { return kq_f2(0x1E60C000); }
+    if kc_is("fcmp") != 0 { return kq_fcmp(); }
+    if kc_is("scvtf") != 0 { return kq_cvt(0x1E220000, 1); }
+    if kc_is("ucvtf") != 0 { return kq_cvt(0x1E230000, 1); }
+    if kc_is("fcvtzs") != 0 { return kq_cvt(0x1E380000, 0); }
+    if kc_is("fcvtzu") != 0 { return kq_cvt(0x1E390000, 0); }
+    if kc_is("fcvt") != 0 { return kq_fcvt(); }
+    // to the nearest integer, ties to even: the x86-64 default rounding
+    if kc_is("fcvtns") != 0 { return kq_cvt(0x1E200000, 0); }
+    if kc_is("prfm") != 0 { return kq_prfm(); }
+    if kc_is("dc") != 0 { return kq_dc(); }
+    // b.cond
+    var m: i64 = &kc_mnem_buf;
+    if kc_g8(m) == 98 && kc_g8(m + 1) == 46 {
+        return kq_bcond();
+    }
+    return kc_err2(1);
+}
+
+// -------------------------------------------------------------------------
+// directives
+// -------------------------------------------------------------------------
+
+fn kc_section() -> i64 {
+    var t: i64 = kc_op(0);
+    if kc_streq(t, ".text") != 0 {
+        kc_sec = 0;
+        return 0;
+    }
+    if kc_streq(t, ".data") != 0 {
+        kc_sec = 1;
+        return 0;
+    }
+    if kc_streq(t, ".bss") != 0 {
+        kc_sec = 2;
+        return 0;
+    }
+    return kc_err2(8);
+}
+
+// align N: zero bytes in data, nop in code, until the position is a
+// multiple
+fn kc_align_dir() -> i64 {
+    var n: i64 = kc_imm(0);
+    if kc_evok_f == 0 || n == 0 {
+        return kc_bad();
+    }
+    while kc_cur_off() % n != 0 {
+        if kc_sec == 0 && (kc_cur_off() & 3) == 0 {
+            kc_emit32(0xD503201F);
+        } else {
+            kc_emit8(0);
+        }
+    }
+    return 0;
+}
+
+// db / dw / dd / dq: numbers, characters, strings (bytes only), and for dq
+// also labels -- their final address. The items are read from the line
+// itself, not from the six operand slots: a data line can hold any number
+// of them.
+fn kc_data_dir(size: i64) -> i64 {
+    var p: i64 = kc_rest;
+    while true {
+        p = kc_item(p);
+        if kc_item_f == 0 {
+            return 0;
+        }
+        if kc_data_item(size) == 0 {
+            return kc_bad();
+        }
+    }
+    return 0;
+}
+
+// the next item, trimmed, into the first operand slot (kc_item_f = 1);
+// where the cursor goes on, past its comma. kc_item_f = 0 at the end.
+fn kc_item(p: i64) -> i64 {
+    var s: i64 = kc_skipb(p);
+    kc_item_f = 0;
+    if kc_g8(s) == 0 {
+        return s;
+    }
+    var d: i64 = &kc_ops;
+    var n: i64 = 0;
+    var q: i64 = 0;
+    while kc_g8(s) != 0 {
+        var c: i64 = kc_g8(s);
+        if q == 0 && c == 44 {
+            s = s + 1;
+            break;
+        }
+        if q != 0 {
+            if c == q {
+                q = 0;
+            }
+        } else if c == 39 || c == 34 {
+            q = c;
+        }
+        if n < 250 {
+            kc_p8(d + n, c);
+            n = n + 1;
+        }
+        s = s + 1;
+    }
+    kc_finish(d, n);
+    kc_item_f = 1;
+    return s;
+}
+
+// one item of size bytes, from the first operand slot: 1 when it was
+// written -- a number or expression, a quoted string (its bytes), or for
+// dq a real
+fn kc_data_item(size: i64) -> i64 {
+    var t: i64 = &kc_ops;
+    var c: i64 = kc_g8(t);
+    if c == 39 || c == 34 {
+        // a string: each byte an item of the size
+        var p: i64 = t + 1;
+        while kc_g8(p) != 0 && kc_g8(p) != c {
+            kc_emit_n(kc_g8(p), size);
+            p = p + 1;
+        }
+        return 1;
+    }
+    // dq with a '.' in a token that starts like a number is a real: its
+    // IEEE-754 bits. '.label' and 'name.local' are addresses.
+    if size == 8 && (c == 45 || c == 43 || (c >= 48 && c <= 57)) {
+        var k: i64 = 0;
+        while kc_g8(t + k) != 0 {
+            if kc_g8(t + k) == 46 {
+                kc_emit_n(cg_float_bits(t, 0), 8);
+                return 1;
+            }
+            k = k + 1;
+        }
+    }
+    kc_unres_f = 0;
+    kc_rsign = 1;
+    kc_nrel = 0;
+    var v: i64 = kc_eval(t);
+    if kc_evok_f == 0 {
+        return 0;
+    }
+    kc_undef_check();
+    // an address in a dq: where it is, for an image that moves
+    if size == 8 && kc_nrel == 1 && kc_pass_n == 2 {
+        kc_note_reloc();
+    }
+    kc_emit_n(v, size);
+    return 1;
+}
+
+// the dq about to be written holds an address
+fn kc_note_reloc() -> i64 {
+    if kc_sec == 1 {
+        if kc_rel_n < KA_REL_MAX {
+            kc_put(&kc_rel_off, kc_rel_n, kc_data_len);
+            kc_rel_n = kc_rel_n + 1;
+        }
+    } else if kc_sec == 0 {
+        kc_rel_text = kc_rel_text + 1;
+    }
+    return 0;
+}
+
+// resb / resw / resd / resq N: space. In .bss it only counts; elsewhere
+// zeros.
+fn kc_res(size: i64) -> i64 {
+    kc_unres_f = 0;
+    var n: i64 = kc_imm(0);
+    if kc_evok_f == 0 {
+        return kc_bad();
+    }
+    if kc_unres_f != 0 {
+        return kc_err(6);
+    }
+    var b: i64 = n * size;
+    if kc_sec == 2 {
+        kc_bss_len = kc_bss_len + b;
+        return 0;
+    }
+    while b > 0 {
+        kc_emit8(0);
+        b = b - 1;
+    }
+    return 0;
+}
+
+// NAME equ EXPR: the label of this line becomes a constant
+fn kc_equ() -> i64 {
+    var d: i64 = kc_deflbl;
+    if d == -1 {
+        return kc_bad();
+    }
+    var v: i64 = kc_imm(0);
+    if kc_evok_f == 0 {
+        return kc_bad();
+    }
+    kc_put(&kc_lb_sec, d, 3);
+    kc_put(&kc_lb_val, d, v);
+    return 0;
+}
+
+// times N db|dw|dd|dq V: the value repeated. The rest is "N db V": N is
+// the first word, the rest is a data line.
+fn kc_times() -> i64 {
+    var p: i64 = kc_getword(kc_rest);
+    kc_unres_f = 0;
+    var n: i64 = kc_eval(&kc_word);
+    if kc_evok_f == 0 {
+        return kc_bad();
+    }
+    if kc_unres_f != 0 {
+        return kc_err(6);
+    }
+    p = kc_getword(kc_skipb(p));
+    var w: i64 = &kc_word;
+    var size: i64 = 0;
+    if kc_streq(w, "db") != 0 {
+        size = 1;
+    } else if kc_streq(w, "dw") != 0 {
+        size = 2;
+    } else if kc_streq(w, "dd") != 0 {
+        size = 4;
+    } else if kc_streq(w, "dq") != 0 {
+        size = 8;
+    } else {
+        return kc_bad();
+    }
+    var v: i64 = kc_eval(kc_skipb(p));
+    if kc_evok_f == 0 {
+        return kc_bad();
+    }
+    while n > 0 {
+        kc_emit_n(v, size);
+        n = n - 1;
+    }
+    return 0;
+}
+
+// -------------------------------------------------------------------------
+// the wide immediates
+// -------------------------------------------------------------------------
+
+// sf for a register class: 0x80000000 for x, 0 for w
+fn kc_sf(cls: i64) -> i64 {
+    if cls == 2 {
+        return 0;
+    }
+    return 0x80000000;
+}
+
+// mov Rd, #value of a class (1 x, 2 w): MOVZ/MOVN then MOVK. How many words
+// a value takes depends on the value; pass one records it per occurrence,
+// so pass two writes exactly as many even when the value was not known
+// yet (padding with a MOVK that repeats a chunk).
+fn kc_movimm(rd: i64, value: i64, cls: i64) -> i64 {
+    var chunks: i64 = 4;
+    var v: i64 = value;
+    if cls == 2 {
+        chunks = 2;
+        v = v & 4294967295;
+    }
+    // nz = chunks that are not 0, nf = chunks that are not 0xFFFF
+    var nz: i64 = 0;
+    var nf: i64 = 0;
+    var i: i64 = 0;
+    while i < chunks {
+        var c: i64 = (v >>> (i * 16)) & 65535;
+        if c != 0 {
+            nz = nz + 1;
+        }
+        if c != 65535 {
+            nf = nf + 1;
+        }
+        i = i + 1;
+    }
+    var sf: i64 = kc_sf(cls);
+    var first: i64 = 0x52800000;      // MOVZ: the first nonzero chunk
+    var inv: i64 = 0;
+    if nf < nz {
+        first = 0x12800000;           // MOVN
+        inv = 1;
+    }
+    var seq: i64 = &kc_seq;
+    var n: i64 = 0;
+    var have: i64 = 0;
+    i = 0;
+    while i < chunks {
+        var ch: i64 = (v >>> (i * 16)) & 65535;
+        // skip the chunks the first word already gives
+        var skip: i64 = 0;
+        if inv == 0 && ch == 0 {
+            skip = 1;
+        }
+        if inv != 0 && ch == 65535 {
+            skip = 1;
+        }
+        if skip == 0 {
+            var w: i64 = 0x72800000;  // MOVK
+            if have == 0 {
+                if inv != 0 {
+                    ch = ch ^ 65535;
+                }
+                w = first;
+                have = 1;
+            }
+            kc_put(seq, n, w | sf | (ch << 5) | (i << 21) | (rd & 31));
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    if have == 0 {
+        // every chunk was skipped: the value is 0 (MOVZ #0) or all ones
+        // (MOVN #0)
+        kc_put(seq, 0, first | sf | (rd & 31));
+        n = 1;
+    }
+    // the size recorded for this occurrence
+    var k: i64 = kc_movseq;
+    kc_movseq = kc_movseq + 1;
+    if k < KA_MOVSZ_MAX {
+        var want: i64 = 0;
+        if kc_pass_n == 1 {
+            want = n;
+            if kc_unres_f != 0 {
+                want = chunks;        // unknown yet: room for every chunk
+            }
+            kc_p8(&kc_movsz + k, want);
+        } else {
+            kc_undef_check();
+            want = kc_g8(&kc_movsz + k);
+            if want < n {
+                kc_err(6);
+                want = n;
+            }
+        }
+        // pad with MOVK of chunk 0, which writes what is already there
+        while n < want {
+            kc_put(seq, n, 0x72800000 | sf | ((v & 65535) << 5) | (rd & 31));
+            n = n + 1;
+        }
+    }
+    i = 0;
+    while i < n {
+        kc_emit32(kc_at(seq, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the base word with Rd, Rn and Rm in their fields
+fn kc_rrr(base: i64, rd: i64, rn: i64, rm: i64) -> i64 {
+    return kc_emit32(base | ((rm & 31) << 16) | ((rn & 31) << 5) | (rd & 31));
+}
+
+// 1 when there are exactly n operands
+fn kc_need(n: i64) -> i64 {
+    if kc_nops_n == n {
+        return 1;
+    }
+    return 0;
+}
+
+// operand k's text copied over operand j's
+fn kc_copyop(k: i64, j: i64) -> i64 {
+    var s: i64 = kc_op(k);
+    var d: i64 = kc_op(j);
+    var i: i64 = 0;
+    while i < 255 {
+        var c: i64 = kc_g8(s + i);
+        kc_p8(d + i, c);
+        if c == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// operands move one place right; the count grows by one
+fn kc_shift_ops() -> i64 {
+    var n: i64 = kc_nops_n;
+    if n >= 5 {
+        return 0;
+    }
+    while n > 0 {
+        kc_copyop(n - 1, n);
+        n = n - 1;
+    }
+    kc_nops_n = kc_nops_n + 1;
+    return 0;
+}
+
+// operand k becomes xzr, or wzr for a w class
+fn kc_zr(k: i64, cls: i64) -> i64 {
+    var d: i64 = kc_op(k);
+    kc_p8(d, 120);
+    if cls == 2 {
+        kc_p8(d, 119);
+    }
+    kc_p8(d + 1, 122);
+    kc_p8(d + 2, 114);
+    kc_p8(d + 3, 0);
+    return 0;
+}

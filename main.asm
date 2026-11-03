@@ -36,7 +36,14 @@ extern xarm_set_os, karm_set_align, macho_write
 extern mo_dylib, mo_platform, mo_idname
 extern xarm_set_lib
 extern ww_write_host
-global write_file, ww_out_bin_name, ww_html_name, ww_js_path, ww_page
+global write_file, read_file, pp_buffer, print_string, print_bytes
+global mn_arg_input, mn_exp_buffer, mn_lmap_count, mn_lmap, mn_addr, os_cmdline
+extern mc_scan_flag, mc_build_bin_name, mc_module_tag, mc_build_asm_name
+extern mc_scan_target, mc_parse_command_line
+extern mi_print_error_line, mi_print_u64, mi_lmap_lookup, mi_lmap_line
+extern mi_imp_have, mi_reset_pool
+extern mp_preprocess
+global ww_out_bin_name, ww_html_name, ww_js_path, ww_page
 global ww_page_a, ww_page_b, ww_page_c, ww_html_ext, ww_js_name
 global ww_host_js, ww_host_js_size
 extern kasm_init, kasm_assemble, kasm_get_code, kasm_get_code_size, kasm_had_error
@@ -74,12 +81,6 @@ section .data
     msg_link     db "[6/6] Linking...", 0
     msg_asm_mode db "Assembler mode (kasm)", 13, 10, 0
     msg_asm_mode_arm db "Assembler mode (karm, ARM64)", 13, 10, 0
-    s_pp_include  db "include", 0
-    s_pp_define   db "define", 0
-    s_pp_macro    db "macro", 0
-    s_pp_endmacro db "%endmacro", 0
-    s_pp_equ      db " equ ", 0
-    s_pp_incdir   db "include", 92, 0     ; 92 = backslash
     s_pp_dump     db "preproc.asm", 0
     msg_asm_line db "  at line ", 0
     msg_mnem     db "   ", 0
@@ -230,9 +231,7 @@ section .data
     so_shnames    db 0, ".dynsym", 0, ".dynstr", 0, ".dynamic", 0, ".shstrtab", 0
     ed_got_names  db "__got_dlopen", 0, "__got_dlsym", 0, "__got_ptc", 0, "__got_ptd", 0, "__got_exit", 0
     so_ext        db ".so", 0
-    tg_android    db "android", 0
     mac_fw_ext    db ".framework"
-    tg_ios        db "ios", 0
     msg_lib_only  db "ERROR: Android and iOS run Kron inside an app: build a library with --lib (see templates/)", 13, 10, 0
     dll_ext       db ".dll", 0
     dylib_ext     db ".dylib", 0
@@ -245,7 +244,6 @@ section .bss
     arg_input    resb 512
     arg_output   resb 512
     arg_flag_S   resb 1        ; -S: write the .asm instead of the .exe
-    imp_pathbuf  resb 512      ; a module's name, next to the program
     ew_hsize     resq 1        ; bytes of headers before the image: 128, 1024 with externs
     ew_base      resq 1        ; where the image is in memory: 0x400000 + ew_hsize
     out_dynamic  resb 1        ; the program calls the system's libraries
@@ -262,10 +260,6 @@ section .bss
     exp_buffer   resb SRC_BUFFER_SIZE   ; source after expanding imports
     inc_buffer   resb SRC_BUFFER_SIZE   ; one imported file at a time
     inc_buffer2  resb SRC_BUFFER_SIZE   ; the level below that one
-    pp_depth     resq 1                 ; nesting level of %include
-    pp_out_end   resq 1                 ; one past the last writable byte
-    pp_dup       resb 1                 ; 1 when the macro was already known
-    pp_inc_buf   resq 1                 ; buffer chosen for the current %include
     inc_name     resb 260
     ; --- import resolution ------------------------------------------------
     ; Before anything is spliced, every module the program needs is found by
@@ -280,18 +274,13 @@ section .bss
     imp_err      resd 1                 ; 1 cannot open, 2 too deep, 3 too many
     imp_names    resb IMP_MAX * 256     ; the resolved list, in order
     imp_errname  resb 260
-    ; --- the import pass's reading (imports.kr, through imp_read) -------------
-    ; Each module's bytes go to a place of their own in imp_pool: the pass
-    ; holds them all at once. 64 MB together, 4 MB for one file.
-    imp_pool       resb IMP_POOL
-    imp_pool_used  resq 1
+    ; --- the import pass (imports.kr; its modules are read by main_io.kr) ---
     imp_src        resq 1               ; expand_imports' arguments, kept
     imp_len        resq 1               ; across the calls into Kron
     imp_out        resq 1
     imp_ret        resq 1
     imp_lmbytes    resq 1
     imp_nbytes     resq 1
-    pp_name      resb 260               ; filename from a %include
     ; --- line map -------------------------------------------------------
     ; expand_imports splices whole files into exp_buffer, so a line number
     ; from the parser refers to the EXPANDED text and not to any file the
@@ -301,7 +290,6 @@ section .bss
     ; One entry per switch of file: two per import plus the first, so 128
     ; covers 63 imports. Imports are one level deep, so no nesting.
     LMAP_MAX     equ 128
-    IMP_POOL     equ 67108864           ; 64 MB for the modules' bytes
     lmap_out     resq LMAP_MAX          ; first line in the expanded text
     lmap_file    resq LMAP_MAX          ; pointer to the file name
     lmap_src     resq LMAP_MAX          ; line it starts at in that file
@@ -311,20 +299,6 @@ section .bss
     lmap_srcline resq 1        ; line being read in the main file
     lmap_hdrskip resq 1        ; lines of the importee's own module header
                                ; that the splice steps over
-    pp_path      resb 320               ; the same name with a directory prefix
-    mac_names    resb 1024              ; packed macro names
-    mac_names_len resq 1
-    mac_name_off resd 32
-    mac_nparams  resb 32
-    mac_body_off resd 32
-    mac_body_len resd 32
-    mac_bodies   resb 16384             ; macro bodies, verbatim
-    mac_bodies_len resq 1
-    mac_count    resq 1
-    pp_args      resb 512               ; arguments of the call being expanded
-    pp_arg_off   resd 8
-    pp_arg_len   resd 8
-    pp_argc      resq 1
     out_target   resb 1
     web_html_name resb 512
     web_js_path  resb 512
@@ -1906,361 +1880,249 @@ main:
 ; from the .asm it eventually produced -- which cost an afternoon of wrong
 ; diagnoses, each one a full rebuild.
 ; ==============================================================================
+; ==============================================================================
+; main_cli.kr's doors: the flags anywhere on the command line (-> al = 1),
+; the output names, the module's tag. Each keeps every register but rax.
+; ==============================================================================
 scan_dump_flag:
-    ; 8 for the return address plus 8 for the push leaves rsp aligned; the
-    ; 32 bytes of shadow space keep it that way. The original scanner used
-    ; 40 here, which works where it is called but leaves rsp off by eight
-    ; anywhere else -- and GetCommandLineA is a Windows call that expects
-    ; 16-byte alignment.
+    push rbx
+    push rcx
+    push rdx
     push rsi
-    sub  rsp, 32
-    call GetCommandLineA
-    add  rsp, 32
-    mov  rsi, rax
-    test rsi, rsi
-    jz   .dno
-.dl:
-    mov  al, [rsi]
-    test al, al
-    jz   .dno
-    cmp  al, '-'
-    jne  .dnx
-    cmp  byte [rsi+1], '-'
-    jne  .dnx
-    cmp  byte [rsi+2], 'd'
-    jne  .dnx
-    cmp  byte [rsi+3], 'u'
-    jne  .dnx
-    cmp  byte [rsi+4], 'm'
-    jne  .dnx
-    cmp  byte [rsi+5], 'p'
-    jne  .dnx
-    mov  al, 1
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    xor  ecx, ecx
+    call mc_scan_flag
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
     pop  rsi
-    ret
-.dnx:
-    inc  rsi
-    jmp  .dl
-.dno:
-    xor  al, al
-    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
     ret
 
 scan_assemble_flag:
+    push rbx
+    push rcx
+    push rdx
     push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
     sub  rsp, 40
-    call GetCommandLineA
+    mov  ecx, 1
+    call mc_scan_flag
     add  rsp, 40
-    mov  rsi, rax
-    test rsi, rsi
-    jz   .no
-.l:
-    mov  al, [rsi]
-    test al, al
-    jz   .no
-    cmp  al, '-'
-    jne  .nx
-    cmp  byte [rsi+1], '-'
-    jne  .nx
-    cmp  byte [rsi+2], 'a'
-    jne  .nx
-    cmp  byte [rsi+3], 's'
-    jne  .nx
-    cmp  byte [rsi+4], 's'
-    jne  .nx
-    cmp  byte [rsi+5], 'e'
-    jne  .nx
-    mov  al, 1
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
     pop  rsi
-    ret
-.nx:
-    inc  rsi
-    jmp  .l
-.no:
-    xor  al, al
-    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
     ret
 
-; ==============================================================================
-; ==============================================================================
-; scan_pe_flag() -> al = 1 when --pe appears on the command line
-; ==============================================================================
 scan_pe_flag:
+    push rbx
+    push rcx
+    push rdx
     push rsi
-    sub  rsp, 32
-    call GetCommandLineA
-    add  rsp, 32
-    mov  rsi, rax
-    test rsi, rsi
-    jz   .no
-.l:
-    mov  al, [rsi]
-    test al, al
-    jz   .no
-    cmp  al, '-'
-    jne  .nx
-    cmp  byte [rsi+1], '-'
-    jne  .nx
-    cmp  byte [rsi+2], 'p'
-    jne  .nx
-    cmp  byte [rsi+3], 'e'
-    jne  .nx
-    ; make sure it ends here (--pe, not --peXXX): next char is a space or nul
-    mov  al, [rsi+4]
-    test al, al
-    jz   .yes
-    cmp  al, ' '
-    jne  .nx
-.yes:
-    mov  al, 1
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    mov  ecx, 2
+    call mc_scan_flag
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
     pop  rsi
-    ret
-.nx:
-    inc  rsi
-    jmp  .l
-.no:
-    xor  al, al
-    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
     ret
 
-; ==============================================================================
-; scan_krn_flag() -> al = 1 when --krn appears on the command line
-; ==============================================================================
 scan_krn_flag:
+    push rbx
+    push rcx
+    push rdx
     push rsi
-    sub  rsp, 32
-    call GetCommandLineA
-    add  rsp, 32
-    mov  rsi, rax
-    test rsi, rsi
-    jz   .no
-.l:
-    mov  al, [rsi]
-    test al, al
-    jz   .no
-    cmp  al, '-'
-    jne  .nx
-    cmp  byte [rsi+1], '-'
-    jne  .nx
-    cmp  byte [rsi+2], 'j'
-    jne  .nx
-    cmp  byte [rsi+3], 'p'
-    jne  .nx
-    cmp  byte [rsi+4], 'x'
-    jne  .nx
-    mov  al, 1
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    mov  ecx, 3
+    call mc_scan_flag
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
     pop  rsi
-    ret
-.nx:
-    inc  rsi
-    jmp  .l
-.no:
-    xor  al, al
-    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
     ret
 
-; ==============================================================================
-; build_bin_name() : arg_input with its extension replaced by .kbin
-; ==============================================================================
 build_bin_name:
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
-    ; given -o, that path is the name, as it is
-    lea  rsi, [rel arg_output]
-    lea  rdi, [rel out_bin_name]
-    xor  rbx, rbx
-    cmp  byte [rsi], 0
-    je   .from_input
-    jmp  .copy_o
-.copy_o:
-    mov  al, [rsi + rbx]
-    mov  [rdi + rbx], al
-    test al, al
-    jz   .bn_done
-    inc  rbx
-    cmp  rbx, 511
-    jb   .copy_o
-    mov  byte [rdi + rbx], 0
-    jmp  .bn_done
-.bn_done:
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mc_build_bin_name
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
-    pop  rbx
-    ret
-.from_input:
-    lea  rsi, [rel arg_input]
-.copy:
-    mov  al, [rsi + rbx]
-    test al, al
-    jz   .find_dot
-    mov  [rdi + rbx], al
-    inc  rbx
-    jmp  .copy
-.find_dot:
-    mov  rcx, rbx
-.scan:
-    test rcx, rcx
-    jz   .append
-    dec  rcx
-    cmp  byte [rdi + rcx], '.'
-    je   .trim
-    cmp  byte [rdi + rcx], '/'
-    je   .append
-    cmp  byte [rdi + rcx], 92
-    je   .append
-    jmp  .scan
-.trim:
-    mov  rbx, rcx
-.append:
-    mov  rsi, [rel bin_ext_ptr]
-    test rsi, rsi
-    jnz  .have_ext
-    lea  rsi, [rel bin_ext]
-.have_ext:
-    xor  rcx, rcx
-.app_loop:
-    mov  al, [rsi + rcx]
-    mov  [rdi + rbx], al
-    test al, al
-    jz   .done
-    inc  rbx
-    inc  rcx
-    jmp  .app_loop
-.done:
-    pop  rdi
-    pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
-; ==============================================================================
-; module_tag(): the module's name -- the input's file name without folder
-; and extension, letters, digits and '_' kept, anything else made '_' --
-; followed by '_', into cg_mod_tag. Its globals carry it: __g_lexer_pos.
 module_tag:
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
-    lea  rsi, [rel arg_input]
-    mov  rdi, rsi
-.mt_find:
-    mov  al, [rsi]
-    test al, al
-    jz   .mt_start
-    inc  rsi
-    cmp  al, '/'
-    je   .mt_sep
-    cmp  al, '\'
-    jne  .mt_find
-.mt_sep:
-    mov  rdi, rsi
-    jmp  .mt_find
-.mt_start:
-    lea  rsi, [rel cg_mod_tag]
-    xor  ebx, ebx
-.mt_copy:
-    cmp  ebx, 63
-    jae  .mt_end
-    mov  al, [rdi + rbx]
-    test al, al
-    jz   .mt_end
-    cmp  al, '.'
-    je   .mt_end
-    cmp  al, '_'
-    je   .mt_keep
-    cmp  al, '0'
-    jb   .mt_other
-    cmp  al, '9'
-    jbe  .mt_keep
-    cmp  al, 'A'
-    jb   .mt_other
-    cmp  al, 'Z'
-    jbe  .mt_keep
-    cmp  al, 'a'
-    jb   .mt_other
-    cmp  al, 'z'
-    jbe  .mt_keep
-.mt_other:
-    mov  al, '_'
-.mt_keep:
-    mov  [rsi + rbx], al
-    inc  ebx
-    jmp  .mt_copy
-.mt_end:
-    lea  rdi, [rsi + rbx]
-    mov  byte [rdi], '_'
-    mov  byte [rdi + 1], 0
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mc_module_tag
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
 build_asm_name:
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
-    ; given -o, that path is the name, as it is
-    lea  rsi, [rel arg_output]
-    lea  rdi, [rel out_asm_name]
-    xor  rbx, rbx
-    cmp  byte [rsi], 0
-    je   .from_input
-    jmp  .copy_o
-.copy_o:
-    mov  al, [rsi + rbx]
-    mov  [rdi + rbx], al
-    test al, al
-    jz   .done
-    inc  rbx
-    cmp  rbx, 511
-    jb   .copy_o
-    mov  byte [rdi + rbx], 0
-    jmp  .done
-.from_input:
-    lea  rsi, [rel arg_input]
-.copy:
-    mov  al, [rsi + rbx]
-    test al, al
-    jz   .find_dot
-    mov  [rdi + rbx], al
-    inc  rbx
-    jmp  .copy
-.find_dot:
-    ; find the last '.' to cut the extension
-    mov  rcx, rbx
-.scan:
-    test rcx, rcx
-    jz   .append               ; no dot: append .asm at the end
-    dec  rcx
-    cmp  byte [rdi + rcx], '.'
-    je   .trim
-    cmp  byte [rdi + rcx], '/'
-    je   .append
-    cmp  byte [rdi + rcx], '\'
-    je   .append
-    jmp  .scan
-.trim:
-    mov  rbx, rcx              ; cut at the dot
-.append:
-    ; append ".asm" -- "_kr.asm" for a module, so that lexer.kr does not
-    ; overwrite the lexer.asm beside it
-    lea  rsi, [rel asm_ext]
-    cmp  byte [rel arg_flag_module], 0
-    je   .app_go
-    lea  rsi, [rel mod_ext]
-.app_go:
-    xor  rcx, rcx
-.app_loop:
-    mov  al, [rsi + rcx]
-    mov  [rdi + rbx], al
-    test al, al
-    jz   .done
-    inc  rbx
-    inc  rcx
-    jmp  .app_loop
-.done:
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mc_build_asm_name
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
@@ -2417,103 +2279,193 @@ write_file:
 ; reported. Both the line and the column come from the token itself; they
 ; were there all along and no diagnostic printed them.
 ; ==============================================================================
+; ==============================================================================
+; main_io.kr's doors: print_error_line(rcx = line, rdx = column, r8 = token
+; length), lmap_lookup(rcx = expanded line) -> rax = file, rdx = line in it,
+; imp_have(rdi = module name) -> eax = 1 when the program imports it,
+; print_u64(rcx). Each keeps every register but the ones it answers in.
+; The calls into Windows stay here: print_string, print_bytes.
+; ==============================================================================
 print_error_line:
-    ; rcx = line (1-based), rdx = column (1-based), r8 = token length
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
     push r12
     push r13
     push r14
+    push r15
+    sub  rsp, 40
+    call mi_print_error_line
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    ret
 
-    mov  r12, rcx                    ; target line
-    test r12, r12
-    jz   .done
-    mov  r13, rdx                    ; column
-    mov  r14, r8                     ; token length
-    test r14, r14
-    jnz  .have_len
-    mov  r14, 1
-.have_len:
+print_u64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mi_print_u64
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    ret
 
-    ; walk exp_buffer to the start of line r12
-    lea  rsi, [rel exp_buffer]
-    mov  rbx, 1                      ; current line
-.scan:
-    cmp  rbx, r12
-    jae  .at_line
-    mov  al, [rsi]
-    test al, al
-    jz   .done                       ; ran off the end
-    inc  rsi
-    cmp  al, 10
-    jne  .scan
-    inc  rbx
-    jmp  .scan
+lmap_lookup:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    sub  rsp, 8
+    call mi_lmap_lookup
+    mov  [rsp + 8 + 40 + 112], rax
+    call mi_lmap_line
+    mov  [rsp + 8 + 40 + 88], rax
+    add  rsp, 8
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    pop  rax
+    ret
 
-.at_line:
-    ; No indent of our own: the source line brings its own leading spaces,
-    ; and adding four more would push the caret out of alignment with it.
-    mov  rdi, rsi                    ; start of the line
-    xor  rbx, rbx                    ; length
-.len_loop:
-    mov  al, [rdi + rbx]
-    test al, al
-    jz   .len_done
-    cmp  al, 10
-    je   .len_done
-    cmp  al, 13
-    je   .len_done
-    inc  rbx
-    cmp  rbx, 400
-    jb   .len_loop
-.len_done:
-    test rbx, rbx
-    jz   .after_line
+imp_have:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    mov  rcx, rdi
+    call mi_imp_have
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    ret
+
+; the getters main_io.kr reads main's buffers through
+mn_arg_input:
+    lea  rax, [rel arg_input]
+    ret
+mn_exp_buffer:
+    lea  rax, [rel exp_buffer]
+    ret
+mn_lmap_count:
+    mov  rax, [rel lmap_count]
+    ret
+; mn_lmap(rcx = 0 output lines, 1 file names, 2 lines of the files)
+mn_lmap:
+    lea  rax, [rel lmap_out]
+    cmp  rcx, 1
+    jne  .l2
+    lea  rax, [rel lmap_file]
+.l2:
+    cmp  rcx, 2
+    jne  .l3
+    lea  rax, [rel lmap_src]
+.l3:
+    ret
+
+; print_bytes(rcx = text, rdx = length)
+print_bytes:
+    push rbx
+    push rsi
+    push rdi
     sub  rsp, 64
+    mov  r8, rdx
+    mov  rdx, rcx
     mov  rcx, [rel hStdOut]
-    mov  rdx, rdi
-    mov  r8, rbx
     lea  r9, [rsp + 48]
     mov  qword [rsp + 32], 0
     call WriteFile
     add  rsp, 64
-.after_line:
-    lea  rcx, [rel d_nl]
-    call print_string
-
-    ; col-1 spaces, then one caret per byte of the token
-    mov  rbx, r13
-    test rbx, rbx
-    jz   .carets
-    dec  rbx
-.pad:
-    test rbx, rbx
-    jz   .carets
-    lea  rcx, [rel d_sp1]
-    call print_string
-    dec  rbx
-    jmp  .pad
-.carets:
-    mov  rbx, r14
-    cmp  rbx, 200
-    jbe  .cloop
-    mov  rbx, 200
-.cloop:
-    test rbx, rbx
-    jz   .cdone
-    lea  rcx, [rel d_caret]
-    call print_string
-    dec  rbx
-    jmp  .cloop
-.cdone:
-    lea  rcx, [rel d_nl]
-    call print_string
-
-.done:
-    pop  r14
-    pop  r13
-    pop  r12
     pop  rdi
     pop  rsi
     pop  rbx
@@ -2550,81 +2502,6 @@ print_string:
     ret
 
 ; ==============================================================================
-; lmap_lookup(rcx = expanded line) -> rax = file name, rdx = line in that file
-; Falls back to the input file and the line as given when the map is empty.
-; ==============================================================================
-lmap_lookup:
-    push rbx
-    push r8
-    push r9
-    mov  r9, [rel lmap_count]
-    test r9, r9
-    jz   .none
-    xor  rbx, rbx
-    xor  r8, r8                  ; best index
-.find:
-    cmp  rbx, r9
-    jae  .found
-    lea  rax, [rel lmap_out]
-    mov  rax, [rax + rbx*8]
-    cmp  rax, rcx
-    ja   .found
-    mov  r8, rbx
-    inc  rbx
-    jmp  .find
-.found:
-    lea  rax, [rel lmap_out]
-    mov  rax, [rax + r8*8]
-    mov  rdx, rcx
-    sub  rdx, rax                ; offset within the run
-    lea  rax, [rel lmap_src]
-    ; load then add: kasm's arithmetic path takes a scaled-index memory
-    ; operand as the DESTINATION only, never as the source, and an
-    ; 'add rdx, [rax + r8*8]' stops the kasm build dead.
-    mov  rbx, [rax + r8*8]
-    add  rdx, rbx
-    lea  rax, [rel lmap_file]
-    mov  rax, [rax + r8*8]
-    pop  r9
-    pop  r8
-    pop  rbx
-    ret
-.none:
-    lea  rax, [rel arg_input]
-    mov  rdx, rcx
-    pop  r9
-    pop  r8
-    pop  rbx
-    ret
-
-; ==============================================================================
-; imp_have(rdi = module name) -> eax = 1 when the program imports it, itself
-; or through another module.
-; ==============================================================================
-imp_have:
-    push rbx
-    push rsi
-    xor  ebx, ebx
-.ih_loop:
-    cmp  ebx, [rel imp_count]
-    jae  .ih_no
-    mov  eax, ebx
-    shl  rax, 8
-    lea  rsi, [rel imp_names]
-    add  rsi, rax
-    call imp_streq
-    test eax, eax
-    jnz  .ih_out
-    inc  ebx
-    jmp  .ih_loop
-.ih_no:
-    xor  eax, eax
-.ih_out:
-    pop  rsi
-    pop  rbx
-    ret
-
-; ==============================================================================
 ; imp_streq(rsi, rdi) -> eax = 1 when the two zero-terminated names match.
 ; ==============================================================================
 imp_streq:
@@ -2652,33 +2529,6 @@ imp_streq:
     pop  rsi
     ret
 
-; imp_strcpy(rdi = destination, rsi = source) -- at most 255 characters and
-; the terminator. Preserves every register.
-imp_strcpy:
-    push rax
-    push rcx
-    push rsi
-    push rdi
-    xor  ecx, ecx
-.sc_loop:
-    cmp  ecx, 255
-    jae  .sc_end
-    mov  al, [rsi]
-    test al, al
-    jz   .sc_end
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    inc  ecx
-    jmp  .sc_loop
-.sc_end:
-    mov  byte [rdi], 0
-    pop  rdi
-    pop  rsi
-    pop  rcx
-    pop  rax
-    ret
-
 
 ; ==============================================================================
 ; ew_set_layout(): the header area and the base of the image, from
@@ -2693,161 +2543,6 @@ ew_set_layout:
     mov  [rel ew_hsize], rax
     add  rax, 0x400000
     mov  [rel ew_base], rax
-    ret
-
-; imp_fullpath(rcx = module name) -> rax = where to look for it first: the
-; folder of the program, then the name. A module is looked for next to the
-; program, not in the folder kronc happens to run from. An absolute name, or a
-; program given with no folder, comes back unchanged. Preserves every register
-; but rax.
-imp_fullpath:
-    push rbx
-    push rdx
-    push rsi
-    push rdi
-    push r8
-    mov  rsi, rcx
-    mov  al, [rsi]
-    cmp  al, '\'
-    je   .fp_same
-    cmp  al, '/'
-    je   .fp_same
-    cmp  byte [rsi+1], ':'
-    je   .fp_same
-    jmp  .fp_dir
-.fp_dir:
-    ; the program's folder: everything up to its last \ or /
-    lea  rdx, [rel arg_input]
-    xor  ebx, ebx
-    xor  r8, r8
-    jmp  .fp_scan
-.fp_scan:
-    mov  al, [rdx + rbx]
-    test al, al
-    jz   .fp_scanned
-    inc  rbx
-    cmp  al, '\'
-    je   .fp_mark
-    cmp  al, '/'
-    je   .fp_mark
-    jmp  .fp_scan
-.fp_mark:
-    mov  r8, rbx
-    jmp  .fp_scan
-.fp_scanned:
-    test r8, r8
-    jz   .fp_same
-    lea  rdi, [rel imp_pathbuf]
-    xor  ebx, ebx
-    jmp  .fp_cdir
-.fp_cdir:
-    cmp  rbx, r8
-    jae  .fp_cname
-    mov  al, [rdx + rbx]
-    mov  [rdi + rbx], al
-    inc  rbx
-    jmp  .fp_cdir
-.fp_cname:
-    ; then the name, 510 bytes at most in all
-    mov  al, [rsi]
-    mov  [rdi + rbx], al
-    test al, al
-    jz   .fp_full
-    inc  rsi
-    inc  rbx
-    cmp  rbx, 510
-    jb   .fp_cname
-    xor  eax, eax
-    mov  [rdi + rbx], al
-    jmp  .fp_full
-.fp_full:
-    lea  rax, [rel imp_pathbuf]
-    jmp  .fp_out
-.fp_same:
-    mov  rax, rcx
-    jmp  .fp_out
-.fp_out:
-    pop  r8
-    pop  rdi
-    pop  rsi
-    pop  rdx
-    pop  rbx
-    ret
-
-; ==============================================================================
-; imp_read(rcx = module name, rdx = address of a qword for the length)
-;   -> rax = where the module's bytes are, 0 when there is no such file,
-;      -1 when the file is longer than the room left (IMP_POOL bytes in all,
-;      at most SRC_BUFFER_SIZE for one file)
-;
-; The module is looked for next to the program first, then as written, as
-; %include does. Each file takes its own place in imp_pool, so the bytes of
-; one module stay where they are while the next is read. The import pass
-; (imports.kr, in Kron) calls this to read a file; the pass is in Kron, and
-; only this reading is here. Keeps every register but rax.
-; ==============================================================================
-imp_read:
-    push rbx
-    push rsi
-    push rdi
-    push r12
-    push r13
-    push r14
-    push r15
-    push rbp
-    sub  rsp, 40
-    mov  r12, rdx                   ; where the length goes
-    mov  r13, rcx                   ; the name
-    mov  rbx, [rel imp_pool_used]   ; the first free byte of the pool
-    mov  r14, IMP_POOL
-    sub  r14, rbx                   ; bytes left
-    jz   .ir_full
-    cmp  r14, SRC_BUFFER_SIZE
-    jbe  .ir_room
-    mov  r14, SRC_BUFFER_SIZE       ; one file at most this long
-.ir_room:
-    mov  rcx, r13
-    call imp_fullpath               ; first next to the program
-    mov  rcx, rax
-    lea  rdx, [rel imp_pool]
-    add  rdx, rbx
-    mov  r8, r14
-    call read_file
-    test rax, rax
-    jnz  .ir_got
-    mov  rcx, r13                   ; then as written
-    lea  rdx, [rel imp_pool]
-    add  rdx, rbx
-    mov  r8, r14
-    call read_file
-    test rax, rax
-    jz   .ir_none
-.ir_got:
-    cmp  rax, r14
-    jae  .ir_full                   ; as long as the room: it may be cut short
-    mov  [r12], rax
-    lea  rcx, [rax + 15]            ; the next file starts on a 16-byte boundary
-    and  rcx, -16
-    add  rcx, rbx
-    mov  [rel imp_pool_used], rcx
-    lea  rax, [rel imp_pool]
-    add  rax, rbx
-    jmp  .ir_out
-.ir_none:
-    xor  eax, eax
-    jmp  .ir_out
-.ir_full:
-    mov  rax, -1
-.ir_out:
-    add  rsp, 40
-    pop  rbp
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rdi
-    pop  rsi
-    pop  rbx
     ret
 
 ; ==============================================================================
@@ -2875,7 +2570,7 @@ expand_imports:
     mov  [rel imp_src], rcx
     mov  [rel imp_len], rdx
     mov  [rel imp_out], r8
-    mov  qword [rel imp_pool_used], 0
+    call mi_reset_pool              ; a new pass: the modules' pool empty
     movzx rcx, byte [rel arg_flag_debug]
     call ip_debug_set
     lea  rcx, [rel arg_input]       ; the program's name, for the map
@@ -2961,754 +2656,53 @@ copy_bytes:
     ret
 
 ; ==============================================================================
-; ==============================================================================
 ; asm_preprocess(rcx = src, rdx = length, r8 = out) -> rax = bytes written
 ;
-; Expands the three preprocessor forms the compiler's own sources use:
-;   %include "file"      the file's text is spliced in (no nesting occurs)
-;   %define NAME value   rewritten as  NAME equ value, which kasm already
-;                        understands through its expression evaluator
-;   %macro NAME n ... %endmacro   collected, then expanded at each call with
-;                        %1..%n replaced by the arguments
-;
-; Any other %-line is dropped, which also covers the %line markers nasm -E
-; leaves behind.
+; The preprocessor (%include, %define, %macro) is written in Kron, in
+; main_pp.kr: this is its door. It keeps every register but rax and aligns
+; the stack. pp_buffer(rcx = 0 or 1) -> rax = the buffer an included file is
+; read into (1 for one included from an included file).
 ; ==============================================================================
 asm_preprocess:
     push rbx
+    push rcx
+    push rdx
     push rsi
     push rdi
-    push r12
-    push r13
-    push r14
-    push r15
-    mov  rsi, rcx
-    mov  r12, rcx
-    add  r12, rdx                ; end of input
-    mov  rdi, r8
-    mov  r15, r8                 ; remember the start, to measure at the end
-    mov  rax, r8
-    add  rax, SRC_BUFFER_SIZE
-    sub  rax, 64                 ; leave a margin
-    mov  [rel pp_out_end], rax
-    mov  qword [rel mac_count], 0
-    mov  qword [rel mac_names_len], 0
-    mov  qword [rel mac_bodies_len], 0
-    mov  qword [rel pp_depth], 0
-    call pp_range
-    mov  rax, rdi
-    sub  rax, r15
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; pp_range: process input [rsi, r12) appending to rdi. Both cursors advance.
-pp_range:
-.line:
-    cmp  rsi, r12
-    jae  .out
-    mov  r13, rsi                ; start of this line
-.find_eol:
-    cmp  rsi, r12
-    jae  .have_line
-    mov  al, [rsi]
-    cmp  al, 10
-    je   .have_line
-    inc  rsi
-    jmp  .find_eol
-.have_line:
-    mov  r14, rsi                ; end of line, before the newline
-    cmp  rsi, r12
-    jae  .no_nl
-    inc  rsi                     ; step over the newline
-.no_nl:
-    call pp_one_line
-    jmp  .line
-.out:
-    ret
-
-; pp_one_line: the line lives in [r13, r14); rdi is the output cursor.
-pp_one_line:
-    push rsi
-    push r12
-    mov  rbx, r13
-.skip_ws:
-    cmp  rbx, r14
-    jae  .copy_verbatim
-    mov  al, [rbx]
-    cmp  al, ' '
-    je   .ws_adv
-    cmp  al, 9
-    jne  .check
-.ws_adv:
-    inc  rbx
-    jmp  .skip_ws
-.check:
-    cmp  al, '%'
-    je   .directive
-    call pp_try_macro            ; al = 1 when the line was a macro call
-    test al, al
-    jnz  .done
-.copy_verbatim:
-    mov  rcx, r13
-    mov  rdx, r14
-    call pp_emit_range
-    call pp_emit_nl
-.done:
-    pop  r12
-    pop  rsi
-    ret
-
-.directive:
-    ; rbx points at '%'
-    lea  rcx, [rbx+1]
-    lea  rdx, [rel s_pp_include]
-    call pp_starts_with
-    test al, al
-    jnz  .do_include
-    lea  rcx, [rbx+1]
-    lea  rdx, [rel s_pp_define]
-    call pp_starts_with
-    test al, al
-    jnz  .do_define
-    lea  rcx, [rbx+1]
-    lea  rdx, [rel s_pp_macro]
-    call pp_starts_with
-    test al, al
-    jnz  .do_macro
-    jmp  .done                   ; %line and anything else: drop
-
-.do_include:
-    ; %include "name"  -> read the file and process its lines here
-    add  rbx, 8                  ; past '%include'
-.inc_findq:
-    cmp  rbx, r14
-    jae  .done
-    cmp  byte [rbx], '"'
-    je   .inc_gotq
-    inc  rbx
-    jmp  .inc_findq
-.inc_gotq:
-    inc  rbx
-    lea  rdx, [rel pp_name]
-    xor  rcx, rcx
-.inc_copy:
-    cmp  rbx, r14
-    jae  .inc_named
-    mov  al, [rbx]
-    cmp  al, '"'
-    je   .inc_named
-    cmp  rcx, 255
-    jae  .inc_named
-    mov  [rdx + rcx], al
-    inc  rcx
-    inc  rbx
-    jmp  .inc_copy
-.inc_named:
-    mov  byte [rdx + rcx], 0
-    ; Build 'include\NAME' using scratch registers only: rdi is the output
-    ; cursor and rsi the input cursor, so neither may be touched here.
-    lea  r8,  [rel pp_path]
-    lea  r9,  [rel s_pp_incdir]
-    xor  rcx, rcx
-.inc_pfx:
-    mov  al, [r9 + rcx]
-    test al, al
-    jz   .inc_pfx_done
-    mov  [r8 + rcx], al
-    inc  rcx
-    jmp  .inc_pfx
-.inc_pfx_done:
-    lea  r9,  [rel pp_name]
-    xor  rdx, rdx
-.inc_join:
-    mov  al, [r9 + rdx]
-    mov  [r8 + rcx], al
-    test al, al
-    jz   .inc_joined
-    inc  rcx
-    inc  rdx
-    jmp  .inc_join
-.inc_joined:
-    ; read_file goes through the Windows API, which clobbers freely; keep
-    ; every cursor of ours across it
-    push rsi
-    push rdi
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    push rbp                     ; paired with r15 to keep rsp 16-byte aligned
-    ; r15 holds the start of the output buffer and the caller subtracts it to
-    ; get the expanded length. It was left unsaved because one more push flips
-    ; the alignment read_file needs -- but the fix is to push two, not to leave
-    ; a register exposed. With a single import nothing read r15 before it was
-    ; reassigned; with a second the damage from the first was already done and
-    ; the text came out truncated, taking main with it.
-    ; a file included from an included file needs its own buffer
-    ; Keep the chosen buffer in memory rather than on the stack: read_file
-    ; reaches the Windows API, which requires 16-byte stack alignment, and an
-    ; extra push flips it.
-    lea  rdx, [rel inc_buffer]
-    cmp  qword [rel pp_depth], 0
-    je   .inc_buf_ok
-    lea  rdx, [rel inc_buffer2]
-.inc_buf_ok:
-    mov  [rel pp_inc_buf], rdx
-    lea  rcx, [rel pp_path]
-    mov  r8, SRC_BUFFER_SIZE
-    call read_file
-    test rax, rax
-    jnz  .inc_read_ok
-    lea  rcx, [rel pp_name]      ; retry without the directory
-    mov  rdx, [rel pp_inc_buf]
-    mov  r8, SRC_BUFFER_SIZE
-    call read_file
-.inc_read_ok:
-    pop  rbp
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rbx
-    pop  rdi
-    pop  rsi
-    test rax, rax
-    jz   .done                   ; not found: silently skip
-.inc_have:
-    push rsi
-    push r12
-    push r13
-    push r14
-    mov  rsi, [rel pp_inc_buf]   ; the buffer chosen above
-    mov  r12, rsi
-    add  r12, rax
-    inc  qword [rel pp_depth]
-    call pp_range
-    dec  qword [rel pp_depth]
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rsi
-    jmp  .done
-
-.do_define:
-    ; %define NAME value   ->   NAME equ value
-    add  rbx, 7                  ; past '%define'
-    call pp_skip_blanks_rbx
-    mov  rcx, rbx
-.def_name:
-    cmp  rbx, r14
-    jae  .def_emit
-    mov  al, [rbx]
-    cmp  al, ' '
-    je   .def_emit
-    cmp  al, 9
-    je   .def_emit
-    inc  rbx
-    jmp  .def_name
-.def_emit:
-    mov  rdx, rbx                ; [rcx, rdx) is the name
-    call pp_emit_range
-    lea  rcx, [rel s_pp_equ]
-    call pp_emit_cstr
-    call pp_skip_blanks_rbx
-    mov  rcx, rbx
-    mov  rdx, r14
-    call pp_emit_range
-    call pp_emit_nl
-    jmp  .done
-
-.do_macro:
-    ; %macro NAME n ... %endmacro
-    add  rbx, 6
-    call pp_skip_blanks_rbx
-    call pp_record_macro
-    ; the body has been consumed, so keep the advanced rsi instead of the
-    ; copy saved on entry -- otherwise the body would be seen again as code
-    pop  r12
-    add  rsp, 8
-    ret
-
-; ---- preprocessor helpers -----------------------------------------------
-
-; pp_emit_range(rcx = start, rdx = end): append [start, end) to rdi
-pp_emit_range:
-.l:
-    cmp  rcx, rdx
-    jae  .out
-    cmp  rdi, [rel pp_out_end]
-    jae  .out                    ; refuse to run past the buffer
-    mov  al, [rcx]
-    mov  [rdi], al
-    inc  rdi
-    inc  rcx
-    jmp  .l
-.out:
-    ret
-
-; pp_emit_cstr(rcx = zero-terminated text): append it to rdi
-pp_emit_cstr:
-.l:
-    mov  al, [rcx]
-    test al, al
-    jz   .out
-    cmp  rdi, [rel pp_out_end]
-    jae  .out
-    mov  [rdi], al
-    inc  rdi
-    inc  rcx
-    jmp  .l
-.out:
-    ret
-
-pp_emit_nl:
-    cmp  rdi, [rel pp_out_end]
-    jae  .out
-    mov  byte [rdi], 10
-    inc  rdi
-.out:
-    ret
-
-; pp_skip_blanks_rbx: advance rbx past spaces and tabs, stopping at r14
-pp_skip_blanks_rbx:
-.l:
-    cmp  rbx, r14
-    jae  .out
-    mov  al, [rbx]
-    cmp  al, ' '
-    je   .adv
-    cmp  al, 9
-    jne  .out
-.adv:
-    inc  rbx
-    jmp  .l
-.out:
-    ret
-
-; pp_starts_with(rcx = text, rdx = prefix) -> al = 1 when text begins with it
-pp_starts_with:
-.l:
-    mov  al, [rdx]
-    test al, al
-    jz   .yes
-    cmp  al, [rcx]
-    jne  .no
-    inc  rcx
-    inc  rdx
-    jmp  .l
-.no:
-    xor  al, al
-    ret
-.yes:
-    mov  al, 1
-    ret
-
-; pp_record_macro: rbx points at the macro name; the body runs to %endmacro.
-; Consumes input through rsi, which pp_range then continues from.
-pp_record_macro:
-    push rcx
-    push rdx
-    push r8
-    push r9
-    ; Every module includes the same headers, so the same macro arrives once
-    ; per module. Record it the first time and let the repeats skip the body.
-    mov  byte [rel pp_dup], 0
-    push rbx
-    call pp_macro_known
-    pop  rbx
-    test al, al
-    jz   .not_dup
-    mov  byte [rel pp_dup], 1
-    jmp  .skip_body
-.not_dup:
-    mov  r8, [rel mac_count]
-    cmp  r8, 32
-    jae  .skip_body
-    ; store the name
-    mov  rax, [rel mac_names_len]
-    lea  rdx, [rel mac_name_off]
-    mov  [rdx + r8*4], eax
-    lea  rdx, [rel mac_names]
-    add  rdx, rax
-    xor  rcx, rcx
-.nm:
-    cmp  rbx, r14
-    jae  .nm_done
-    mov  al, [rbx]
-    cmp  al, ' '
-    je   .nm_done
-    cmp  al, 9
-    je   .nm_done
-    cmp  al, 13
-    je   .nm_done
-    mov  [rdx + rcx], al
-    inc  rcx
-    inc  rbx
-    jmp  .nm
-.nm_done:
-    mov  byte [rdx + rcx], 0
-    inc  rcx
-    add  [rel mac_names_len], rcx
-    ; parameter count
-    call pp_skip_blanks_rbx
-    xor  rax, rax
-.np:
-    cmp  rbx, r14
-    jae  .np_done
-    movzx ecx, byte [rbx]
-    cmp  cl, '0'
-    jb   .np_done
-    cmp  cl, '9'
-    ja   .np_done
-    imul rax, rax, 10
-    sub  rcx, 48
-    add  rax, rcx
-    inc  rbx
-    jmp  .np
-.np_done:
-    lea  rdx, [rel mac_nparams]
-    mov  [rdx + r8], al
-    ; body start
-    mov  rax, [rel mac_bodies_len]
-    lea  rdx, [rel mac_body_off]
-    mov  [rdx + r8*4], eax
-.skip_body:
-    ; copy lines until %endmacro
-    xor  r9, r9                  ; bytes copied
-.bl:
-    cmp  rsi, r12
-    jae  .bl_done
-    mov  r13, rsi
-.bl_eol:
-    cmp  rsi, r12
-    jae  .bl_have
-    mov  al, [rsi]
-    cmp  al, 10
-    je   .bl_have
-    inc  rsi
-    jmp  .bl_eol
-.bl_have:
-    mov  r14, rsi
-    cmp  rsi, r12
-    jae  .bl_nonl
-    inc  rsi
-.bl_nonl:
-    ; is it %endmacro?
-    mov  rcx, r13
-.bl_ws:
-    cmp  rcx, r14
-    jae  .bl_copy
-    mov  al, [rcx]
-    cmp  al, ' '
-    je   .bl_wsa
-    cmp  al, 9
-    jne  .bl_chk
-.bl_wsa:
-    inc  rcx
-    jmp  .bl_ws
-.bl_chk:
-    lea  rdx, [rel s_pp_endmacro]
-    call pp_starts_with
-    test al, al
-    jnz  .bl_done
-.bl_copy:
-    mov  rax, [rel mac_bodies_len]
-    add  rax, r9
-    lea  rdx, [rel mac_bodies]
-    add  rdx, rax
-    mov  rcx, r13
-.bl_cp:
-    cmp  rcx, r14
-    jae  .bl_cp_nl
-    cmp  r9, 16000
-    jae  .bl_cp_nl
-    mov  al, [rcx]
-    mov  [rdx], al
-    inc  rdx
-    inc  rcx
-    inc  r9
-    jmp  .bl_cp
-.bl_cp_nl:
-    mov  byte [rdx], 10
-    inc  r9
-    jmp  .bl
-.bl_done:
-    cmp  byte [rel pp_dup], 0
-    jne  .out                    ; a repeat: body consumed, nothing recorded
-    mov  r8, [rel mac_count]
-    cmp  r8, 32
-    jae  .out
-    lea  rdx, [rel mac_body_len]
-    mov  [rdx + r8*4], r9d
-    add  [rel mac_bodies_len], r9
-    inc  r8
-    mov  [rel mac_count], r8
-.out:
-    pop  r9
-    pop  r8
-    pop  rdx
-    pop  rcx
-    ret
-
-; pp_try_macro: rbx points at the first token of the line, which runs to r14.
-; If it names a macro, expand the body with %1..%n replaced by the arguments
-; and return al = 1. Otherwise al = 0 and nothing is emitted.
-; pp_macro_known: rbx points at a macro name -> al = 1 when already recorded
-pp_macro_known:
-    push rcx
-    push rdx
-    push rsi
-    push r8
-    push r9
-    push r10
-    mov  r10, rbx
-    xor  r9, r9
-.len:
-    mov  al, [r10 + r9]
-    cmp  al, ' '
-    je   .len_done
-    cmp  al, 9
-    je   .len_done
-    cmp  al, 13
-    je   .len_done
-    cmp  al, 10
-    je   .len_done
-    test al, al
-    jz   .len_done
-    inc  r9
-    jmp  .len
-.len_done:
-    xor  r8, r8
-.find:
-    cmp  r8, [rel mac_count]
-    jae  .no
-    lea  rdx, [rel mac_name_off]
-    mov  eax, [rdx + r8*4]
-    lea  rsi, [rel mac_names]
-    add  rsi, rax
-    xor  rcx, rcx
-.cmp:
-    cmp  rcx, r9
-    je   .cmp_end
-    mov  al, [r10 + rcx]
-    cmp  al, [rsi + rcx]
-    jne  .next
-    inc  rcx
-    jmp  .cmp
-.cmp_end:
-    cmp  byte [rsi + rcx], 0
-    je   .yes
-.next:
-    inc  r8
-    jmp  .find
-.yes:
-    mov  al, 1
-    jmp  .out
-.no:
-    xor  al, al
-.out:
-    pop  r10
-    pop  r9
-    pop  r8
-    pop  rsi
-    pop  rdx
-    pop  rcx
-    ret
-
-pp_try_macro:
-    push rbx
-    push rcx
-    push rdx
-    push rsi
+    push rbp
     push r8
     push r9
     push r10
     push r11
-    ; measure the first token
-    mov  r10, rbx                ; token start
-.tok:
-    cmp  rbx, r14
-    jae  .tok_done
-    mov  al, [rbx]
-    cmp  al, ' '
-    je   .tok_done
-    cmp  al, 9
-    je   .tok_done
-    cmp  al, 13
-    je   .tok_done
-    inc  rbx
-    jmp  .tok
-.tok_done:
-    mov  r11, rbx
-    sub  r11, r10                ; token length
-    ; look it up
-    xor  r8, r8
-.find:
-    cmp  r8, [rel mac_count]
-    jae  .no
-    lea  rdx, [rel mac_name_off]
-    mov  eax, [rdx + r8*4]
-    lea  rsi, [rel mac_names]
-    add  rsi, rax
-    xor  rcx, rcx
-.cmp:
-    cmp  rcx, r11
-    je   .cmp_end
-    mov  al, [r10 + rcx]
-    cmp  al, [rsi + rcx]
-    jne  .next
-    inc  rcx
-    jmp  .cmp
-.cmp_end:
-    cmp  byte [rsi + rcx], 0
-    je   .found
-.next:
-    inc  r8
-    jmp  .find
-.no:
-    xor  al, al
-    jmp  .out
-
-.found:
-    ; split the rest of the line into comma-separated arguments
-    mov  qword [rel pp_argc], 0
-    call pp_skip_blanks_rbx
-.arg:
-    cmp  rbx, r14
-    jae  .args_done
-    mov  rcx, [rel pp_argc]
-    cmp  rcx, 8
-    jae  .args_done
-    mov  rsi, rbx                ; argument start
-.arg_scan:
-    cmp  rbx, r14
-    jae  .arg_end
-    mov  al, [rbx]
-    cmp  al, ','
-    je   .arg_end
-    cmp  al, 13
-    je   .arg_end
-    inc  rbx
-    jmp  .arg_scan
-.arg_end:
-    ; trim trailing blanks
-    mov  rdx, rbx
-.arg_trim:
-    cmp  rdx, rsi
-    jbe  .arg_store
-    mov  al, [rdx-1]
-    cmp  al, ' '
-    je   .arg_trim_adv
-    cmp  al, 9
-    jne  .arg_store
-.arg_trim_adv:
-    dec  rdx
-    jmp  .arg_trim
-.arg_store:
-    ; copy into pp_args
-    mov  r9, rcx                 ; index
-    mov  rax, 0
-    test r9, r9
-    jz   .arg_at0
-    lea  rcx, [rel pp_arg_off]
-    mov  eax, [rcx + r9*4 - 4]
-    lea  rcx, [rel pp_arg_len]
-    add  eax, [rcx + r9*4 - 4]
-.arg_at0:
-    lea  rcx, [rel pp_arg_off]
-    mov  [rcx + r9*4], eax
-    lea  rcx, [rel pp_args]
-    add  rcx, rax
-    xor  r11, r11
-.arg_cp:
-    cmp  rsi, rdx
-    jae  .arg_cp_done
-    mov  al, [rsi]
-    mov  [rcx + r11], al
-    inc  r11
-    inc  rsi
-    jmp  .arg_cp
-.arg_cp_done:
-    lea  rcx, [rel pp_arg_len]
-    mov  [rcx + r9*4], r11d
-    inc  r9
-    mov  [rel pp_argc], r9
-    cmp  rbx, r14
-    jae  .args_done
-    inc  rbx                     ; step over the comma
-    call pp_skip_blanks_rbx
-    jmp  .arg
-.args_done:
-    ; emit the body, substituting %1..%9
-    lea  rdx, [rel mac_body_off]
-    mov  eax, [rdx + r8*4]
-    lea  rsi, [rel mac_bodies]
-    add  rsi, rax
-    lea  rdx, [rel mac_body_len]
-    mov  r11d, [rdx + r8*4]
-    xor  rcx, rcx
-.body:
-    cmp  rcx, r11
-    jae  .body_done
-    mov  al, [rsi + rcx]
-    cmp  al, '%'
-    jne  .body_plain
-    inc  rcx
-    cmp  rcx, r11
-    jae  .body_done
-    movzx eax, byte [rsi + rcx]
-    sub  rax, 49                 ; '1' -> index 0
-    cmp  rax, 8
-    jae  .body_plain2
-    cmp  rax, [rel pp_argc]
-    jae  .body_skiparg
-    push rcx
-    push rsi
-    mov  r9, rax
-    lea  rdx, [rel pp_arg_off]
-    mov  eax, [rdx + r9*4]
-    lea  rcx, [rel pp_args]
-    add  rcx, rax
-    lea  rdx, [rel pp_arg_len]
-    mov  eax, [rdx + r9*4]
-    mov  rdx, rcx
-    add  rdx, rax
-    call pp_emit_range
-    pop  rsi
-    pop  rcx
-.body_skiparg:
-    inc  rcx
-    jmp  .body
-.body_plain2:
-    mov  al, '%'
-    mov  [rdi], al
-    inc  rdi
-    mov  al, [rsi + rcx]
-.body_plain:
-    cmp  rdi, [rel pp_out_end]
-    jae  .body_done
-    mov  [rdi], al
-    inc  rdi
-    inc  rcx
-    jmp  .body
-.body_done:
-    mov  al, 1
-.out:
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mp_preprocess
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
     pop  r11
     pop  r10
     pop  r9
     pop  r8
+    pop  rbp
+    pop  rdi
     pop  rsi
     pop  rdx
     pop  rcx
     pop  rbx
+    ret
+
+pp_buffer:
+    lea  rax, [rel inc_buffer]
+    test rcx, rcx
+    jz   .o
+    lea  rax, [rel inc_buffer2]
+.o:
     ret
 
 ; read_file(rcx = filename, rdx = buffer, r8 = max_size)
@@ -3777,624 +2771,98 @@ read_file:
     ret
 
 ; ==============================================================================
-; print_u64(rcx = unsigned integer)
-; ==============================================================================
-print_u64:
-    push rbx
-    push rsi
-    push rdi
-    sub  rsp, 32
-    lea  rsi, [rsp + 31]
-    mov  byte [rsi], 0
-    mov  rax, rcx
-    mov  rbx, 10
-    test rax, rax
-    jnz  .convert
-    dec  rsi
-    mov  byte [rsi], '0'
-    jmp  .emit
-.convert:
-    xor  rdx, rdx
-    div  rbx
-    add  dl, '0'
-    dec  rsi
-    mov  [rsi], dl
-    test rax, rax
-    jnz  .convert
-.emit:
-    mov  rcx, rsi
-    call print_string
-    add  rsp, 32
-    pop  rdi
-    pop  rsi
-    pop  rbx
-    ret
-
-; ==============================================================================
-; scan_target(rcx = command line) -> al = TARGET_* constant
-;   --target=windows | linux | linux-arm64 | macos | web | krn | bare
-;   (default: windows)
-;   --bare is kept as a shorthand for --target=bare
+; scan_target(rcx = command line) -> al = TARGET_* constant (255: no such
+; target); parse_command_line(rcx = GetCommandLineA()) -> rax = 1 when there
+; is an input. Their doors; main_cli.kr has them.
 ; ==============================================================================
 scan_target:
-    push rsi
     push rbx
-    mov  rsi, rcx
-    mov  bl, TARGET_PE               ; default
-    test rsi, rsi
-    jz   .out
-.scan:
-    mov  al, [rsi]
-    test al, al
-    jz   .out
-    cmp  al, '-'
-    jne  .next
-    cmp  byte [rsi+1], '-'
-    jne  .next
-    ; --bare
-    cmp  byte [rsi+2], 'b'
-    jne  .try_target
-    cmp  byte [rsi+3], 'a'
-    jne  .next
-    cmp  byte [rsi+4], 'r'
-    jne  .next
-    cmp  byte [rsi+5], 'e'
-    jne  .next
-    mov  bl, TARGET_BARE
-    jmp  .out
-.try_target:
-    ; --target=
-    cmp  byte [rsi+2], 't'
-    jne  .next
-    cmp  byte [rsi+3], 'a'
-    jne  .next
-    cmp  byte [rsi+4], 'r'
-    jne  .next
-    cmp  byte [rsi+5], 'g'
-    jne  .next
-    cmp  byte [rsi+6], 'e'
-    jne  .next
-    cmp  byte [rsi+7], 't'
-    jne  .next
-    cmp  byte [rsi+8], '='
-    jne  .next
-    add  rsi, 9
-    ; the whole name, letter by letter: windows, linux, krn or bare.
-    ; Anything else is an error, never a silent Windows build.
-    jmp  .t_try_windows
-.t_try_windows:
-    cmp  byte [rsi+0], 'w'
-    jne  .t_not_windows
-    cmp  byte [rsi+1], 'i'
-    jne  .t_not_windows
-    cmp  byte [rsi+2], 'n'
-    jne  .t_not_windows
-    cmp  byte [rsi+3], 'd'
-    jne  .t_not_windows
-    cmp  byte [rsi+4], 'o'
-    jne  .t_not_windows
-    cmp  byte [rsi+5], 'w'
-    jne  .t_not_windows
-    cmp  byte [rsi+6], 's'
-    jne  .t_not_windows
-    cmp  byte [rsi+7], ' '
-    je   .t_windows
-    cmp  byte [rsi+7], 9
-    je   .t_windows
-    cmp  byte [rsi+7], 0
-    je   .t_windows
-    jmp  .t_not_windows
-.t_not_windows:
-    cmp  byte [rsi+0], 'l'
-    jne  .t_not_linux
-    cmp  byte [rsi+1], 'i'
-    jne  .t_not_linux
-    cmp  byte [rsi+2], 'n'
-    jne  .t_not_linux
-    cmp  byte [rsi+3], 'u'
-    jne  .t_not_linux
-    cmp  byte [rsi+4], 'x'
-    jne  .t_not_linux
-    cmp  byte [rsi+5], ' '
-    je   .t_linux
-    cmp  byte [rsi+5], 9
-    je   .t_linux
-    cmp  byte [rsi+5], 0
-    je   .t_linux
-    ; linux-arm64
-    cmp  byte [rsi+5], '-'
-    jne  .t_not_linux
-    cmp  byte [rsi+6], 'a'
-    jne  .t_not_linux
-    cmp  byte [rsi+7], 'r'
-    jne  .t_not_linux
-    cmp  byte [rsi+8], 'm'
-    jne  .t_not_linux
-    cmp  byte [rsi+9], '6'
-    jne  .t_not_linux
-    cmp  byte [rsi+10], '4'
-    jne  .t_not_linux
-    cmp  byte [rsi+11], ' '
-    je   .t_arm64
-    cmp  byte [rsi+11], 9
-    je   .t_arm64
-    cmp  byte [rsi+11], 0
-    je   .t_arm64
-    jmp  .t_not_linux
-.t_not_linux:
-    cmp  byte [rsi+0], 'k'
-    jne  .t_not_krn
-    cmp  byte [rsi+1], 'r'
-    jne  .t_not_krn
-    cmp  byte [rsi+2], 'n'
-    jne  .t_not_krn
-    cmp  byte [rsi+3], ' '
-    je   .t_krn
-    cmp  byte [rsi+3], 9
-    je   .t_krn
-    cmp  byte [rsi+3], 0
-    je   .t_krn
-    jmp  .t_not_krn
-.t_not_krn:
-    cmp  byte [rsi+0], 'w'
-    jne  .t_not_web
-    cmp  byte [rsi+1], 'e'
-    jne  .t_not_web
-    cmp  byte [rsi+2], 'b'
-    jne  .t_not_web
-    cmp  byte [rsi+3], ' '
-    je   .t_web
-    cmp  byte [rsi+3], 9
-    je   .t_web
-    cmp  byte [rsi+3], 0
-    je   .t_web
-    jmp  .t_not_web
-.t_web:
-    mov  bl, TARGET_WEB
-    jmp  .out
-.t_not_web:
-    cmp  byte [rsi+0], 'm'
-    jne  .t_not_mac
-    cmp  byte [rsi+1], 'a'
-    jne  .t_not_mac
-    cmp  byte [rsi+2], 'c'
-    jne  .t_not_mac
-    cmp  byte [rsi+3], 'o'
-    jne  .t_not_mac
-    cmp  byte [rsi+4], 's'
-    jne  .t_not_mac
-    cmp  byte [rsi+5], ' '
-    je   .t_mac
-    cmp  byte [rsi+5], 9
-    je   .t_mac
-    cmp  byte [rsi+5], 0
-    je   .t_mac
-    jmp  .t_not_mac
-.t_mac:
-    mov  bl, TARGET_MACOS
-    jmp  .out
-.t_not_mac:
-    ; android: ARM64 Linux with Android's C library; ios: macOS's program
-    ; for an iPhone. Both are libraries (--lib) an app loads.
-    lea  rdi, [rel tg_android]
-    call st_word
-    test eax, eax
-    jz   .t_not_android
-    mov  byte [rel out_android], 1
-    mov  bl, TARGET_ARM64
-    jmp  .out
-.t_not_android:
-    lea  rdi, [rel tg_ios]
-    call st_word
-    test eax, eax
-    jz   .t_not_ios
-    mov  byte [rel out_ios], 1
-    mov  bl, TARGET_MACOS
-    jmp  .out
-.t_not_ios:
-    cmp  byte [rsi+0], 'b'
-    jne  .t_not_bare
-    cmp  byte [rsi+1], 'a'
-    jne  .t_not_bare
-    cmp  byte [rsi+2], 'r'
-    jne  .t_not_bare
-    cmp  byte [rsi+3], 'e'
-    jne  .t_not_bare
-    cmp  byte [rsi+4], ' '
-    je   .t_bare
-    cmp  byte [rsi+4], 9
-    je   .t_bare
-    cmp  byte [rsi+4], 0
-    je   .t_bare
-    jmp  .t_not_bare
-.t_not_bare:
-    mov  bl, 255                     ; unknown target
-    jmp  .out
-.t_windows:
-    mov  bl, TARGET_PE
-    jmp  .out
-.t_linux:
-    mov  bl, TARGET_ELF
-    jmp  .out
-.t_arm64:
-    mov  bl, TARGET_ARM64
-    jmp  .out
-.t_krn:
-    mov  bl, TARGET_KRN
-    jmp  .out
-.t_bare:
-    mov  bl, TARGET_BARE
-    jmp  .out
-.next:
-    inc  rsi
-    jmp  .scan
-.out:
-    mov  al, bl
-    pop  rbx
-    pop  rsi
-    ret
-
-; st_word(rsi = text, rdi = a word) -> eax = 1 when the text is that word,
-; then a blank or its end
-st_word:
     push rcx
-    xor  ecx, ecx
-.sw_l:
-    mov  al, [rdi + rcx]
-    test al, al
-    jz   .sw_end
-    cmp  al, [rsi + rcx]
-    jne  .sw_no
-    inc  ecx
-    jmp  .sw_l
-.sw_end:
-    mov  al, [rsi + rcx]
-    cmp  al, ' '
-    je   .sw_yes
-    cmp  al, 9
-    je   .sw_yes
-    test al, al
-    jz   .sw_yes
-.sw_no:
-    xor  eax, eax
-    pop  rcx
-    ret
-.sw_yes:
-    mov  eax, 1
-    pop  rcx
-    ret
-
-; ==============================================================================
-; parse_command_line(rcx = GetCommandLineA())
-; Takes the first argument (source file) and optionally -o output.
-; Handles quoted paths. Returns rax=1 if there is an input, 0 if not.
-; ==============================================================================
-parse_command_line:
-    push rbx
+    push rdx
     push rsi
     push rdi
-    mov  rsi, rcx
-
-    ; Skip the name of kronc.exe itself.
-    cmp  byte [rsi], '"'
-    jne  .skip_exe_plain
-    inc  rsi
-.skip_exe_quoted:
-    mov  al, [rsi]
-    test al, al
-    jz   .no_input
-    inc  rsi
-    cmp  al, '"'
-    jne  .skip_exe_quoted
-    jmp  .skip_spaces
-
-.skip_exe_plain:
-    mov  al, [rsi]
-    test al, al
-    jz   .no_input
-    cmp  al, ' '
-    je   .skip_spaces
-    cmp  al, 9
-    je   .skip_spaces
-    inc  rsi
-    jmp  .skip_exe_plain
-
-.skip_spaces:
-    mov  al, [rsi]
-    cmp  al, ' '
-    je   .space_advance
-    cmp  al, 9
-    jne  .input_start
-.space_advance:
-    inc  rsi
-    jmp  .skip_spaces
-
-.input_start:
-    test al, al
-    jz   .no_input
-    lea  rdi, [rel arg_input]
-    xor  rbx, rbx
-    cmp  al, '"'
-    jne  .copy_plain
-    inc  rsi
-
-.copy_quoted:
-    cmp  rbx, 511
-    jae  .finish_input
-    mov  al, [rsi]
-    test al, al
-    jz   .finish_input
-    cmp  al, '"'
-    je   .finish_input_advance
-    mov  [rdi + rbx], al
-    inc  rbx
-    inc  rsi
-    jmp  .copy_quoted
-
-.copy_plain:
-    cmp  rbx, 511
-    jae  .finish_input
-    mov  al, [rsi]
-    test al, al
-    jz   .finish_input
-    cmp  al, ' '
-    je   .finish_input
-    cmp  al, 9
-    je   .finish_input
-    mov  [rdi + rbx], al
-    inc  rbx
-    inc  rsi
-    jmp  .copy_plain
-
-.finish_input_advance:
-    inc  rsi
-.finish_input:
-    mov  byte [rdi + rbx], 0
-    test rbx, rbx
-    jz   .no_input
-
-    ; -o <path>: where the .asm goes, instead of next to the source. The rest
-    ; of the command line is read token by token, so a '-o' inside a path or a
-    ; quoted name is never taken for the option.
-    lea  rdi, [rel arg_output]
-    mov  byte [rdi], 0
-    mov  byte [rel arg_flag_S], 0
-    mov  byte [rel arg_flag_check], 0
-    mov  byte [rel arg_flag_debug], 0
-    mov  byte [rel arg_flag_window], 0
-    mov  byte [rel arg_flag_lib], 0
-    mov  byte [rel arg_flag_module], 0
-    jmp  .o_scan
-.o_scan:
-    mov  al, [rsi]
-    cmp  al, ' '
-    je   .o_blank
-    cmp  al, 9
-    je   .o_blank
-    test al, al
-    jz   .o_done
-    cmp  al, '-'
-    jne  .o_skiptok
-    ; -S: write the generated assembly instead of the executable
-    cmp  byte [rsi+1], 'S'
-    jne  .o_notS
-    cmp  byte [rsi+2], ' '
-    je   .o_isS
-    cmp  byte [rsi+2], 9
-    je   .o_isS
-    cmp  byte [rsi+2], 0
-    jne  .o_skiptok
-    jmp  .o_isS
-.o_isS:
-    mov  byte [rel arg_flag_S], 1
-    add  rsi, 2
-    jmp  .o_scan
-.o_notS:
-    ; --check: check everything, write nothing
-    cmp  byte [rsi+1], '-'
-    jne  .o_notcheck
-    cmp  byte [rsi+2], 'w'
-    je   .o_window
-    cmp  byte [rsi+2], 'l'
-    je   .o_lib
-    cmp  byte [rsi+2], 'd'
-    je   .o_debug
-    cmp  byte [rsi+2], 'm'
-    je   .o_module
-    cmp  byte [rsi+2], 'c'
-    jne  .o_skiptok
-    cmp  byte [rsi+3], 'h'
-    jne  .o_skiptok
-    cmp  byte [rsi+4], 'e'
-    jne  .o_skiptok
-    cmp  byte [rsi+5], 'c'
-    jne  .o_skiptok
-    cmp  byte [rsi+6], 'k'
-    jne  .o_skiptok
-    mov  byte [rel arg_flag_check], 1
-    add  rsi, 7
-    jmp  .o_skiptok
-.o_debug:
-    ; --debug: a build the debugger can stop (std_debug.kr)
-    cmp  byte [rsi+3], 'e'
-    jne  .o_skiptok
-    cmp  byte [rsi+4], 'b'
-    jne  .o_skiptok
-    cmp  byte [rsi+5], 'u'
-    jne  .o_skiptok
-    cmp  byte [rsi+6], 'g'
-    jne  .o_skiptok
-    mov  byte [rel arg_flag_debug], 1
-    add  rsi, 7
-    jmp  .o_skiptok
-.o_module:
-    ; --module: the functions of a part of the compiler, as assembly text
-    cmp  byte [rsi+3], 'o'
-    jne  .o_skiptok
-    cmp  byte [rsi+4], 'd'
-    jne  .o_skiptok
-    cmp  byte [rsi+5], 'u'
-    jne  .o_skiptok
-    cmp  byte [rsi+6], 'l'
-    jne  .o_skiptok
-    cmp  byte [rsi+7], 'e'
-    jne  .o_skiptok
-    mov  al, [rsi+8]
-    cmp  al, ' '
-    je   .o_module_yes
-    cmp  al, 9
-    je   .o_module_yes
-    test al, al
-    jnz  .o_skiptok
-.o_module_yes:
-    mov  byte [rel arg_flag_module], 1
-    add  rsi, 8
-    jmp  .o_skiptok
-.o_lib:
-    ; --lib: a library C and the rest can load, not a program
-    cmp  byte [rsi+3], 'i'
-    jne  .o_skiptok
-    cmp  byte [rsi+4], 'b'
-    jne  .o_skiptok
-    mov  al, [rsi+5]
-    cmp  al, ' '
-    je   .o_lib_yes
-    cmp  al, 9
-    je   .o_lib_yes
-    test al, al
-    jnz  .o_skiptok
-.o_lib_yes:
-    mov  byte [rel arg_flag_lib], 1
-    add  rsi, 5
-    jmp  .o_skiptok
-.o_window:
-    ; --window: Windows opens no console for the program (std_window)
-    cmp  byte [rsi+3], 'i'
-    jne  .o_skiptok
-    cmp  byte [rsi+4], 'n'
-    jne  .o_skiptok
-    cmp  byte [rsi+5], 'd'
-    jne  .o_skiptok
-    cmp  byte [rsi+6], 'o'
-    jne  .o_skiptok
-    cmp  byte [rsi+7], 'w'
-    jne  .o_skiptok
-    mov  byte [rel arg_flag_window], 1
-    add  rsi, 8
-    jmp  .o_skiptok
-.o_notcheck:
-    cmp  byte [rsi+1], 'o'
-    jne  .o_skiptok
-    cmp  byte [rsi+2], ' '
-    je   .o_found
-    cmp  byte [rsi+2], 9
-    je   .o_found
-    jmp  .o_skiptok
-.o_blank:
-    inc  rsi
-    jmp  .o_scan
-.o_skiptok:
-    ; to the next blank, stepping over quoted parts whole
-    mov  al, [rsi]
-    test al, al
-    jz   .o_done
-    cmp  al, '"'
-    je   .o_skipq
-    cmp  al, ' '
-    je   .o_scan
-    cmp  al, 9
-    je   .o_scan
-    inc  rsi
-    jmp  .o_skiptok
-.o_skipq:
-    inc  rsi
-    jmp  .o_sq
-.o_sq:
-    mov  al, [rsi]
-    test al, al
-    jz   .o_done
-    inc  rsi
-    cmp  al, '"'
-    jne  .o_sq
-    jmp  .o_skiptok
-.o_found:
-    add  rsi, 3
-    jmp  .o_pre
-.o_pre:
-    mov  al, [rsi]
-    cmp  al, ' '
-    je   .o_pre_next
-    cmp  al, 9
-    jne  .o_path
-    jmp  .o_pre_next
-.o_pre_next:
-    inc  rsi
-    jmp  .o_pre
-.o_path:
-    xor  ebx, ebx
-    cmp  al, '"'
-    jne  .o_plain
-    inc  rsi
-    jmp  .o_quoted
-.o_quoted:
-    cmp  rbx, 511
-    jae  .o_end
-    mov  al, [rsi]
-    test al, al
-    jz   .o_end
-    cmp  al, '"'
-    je   .o_end
-    mov  [rdi + rbx], al
-    inc  rbx
-    inc  rsi
-    jmp  .o_quoted
-.o_plain:
-    cmp  rbx, 511
-    jae  .o_end
-    mov  al, [rsi]
-    test al, al
-    jz   .o_end
-    cmp  al, ' '
-    je   .o_end
-    cmp  al, 9
-    je   .o_end
-    mov  [rdi + rbx], al
-    inc  rbx
-    inc  rsi
-    jmp  .o_plain
-.o_end:
-    mov  byte [rdi + rbx], 0
-    jmp  .o_done
-.o_done:
-    mov  eax, 1
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mc_scan_target
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
-.no_input:
-    xor  eax, eax
+parse_command_line:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call mc_parse_command_line
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
     pop  rdi
     pop  rsi
+    pop  rdx
+    pop  rcx
     pop  rbx
     ret
 
-; ==============================================================================
-; strcpy_n(rcx = dst, rdx = src, rsi = max_len)
-; ==============================================================================
-strcpy_n:
-    xor  rax, rax
-.loop:
-    cmp  rax, rsi
-    jge  .done
-    mov  r9b, [rdx + rax]   ; use r9b so rdx is not destroyed
-    mov  [rcx + rax], r9b
-    test r9b, r9b
-    jz   .done
-    inc  rax
-    jmp  .loop
-.done:
+; os_cmdline() -> rax = the command line (GetCommandLineA)
+os_cmdline:
+    push rbx
+    sub  rsp, 32
+    call GetCommandLineA
+    add  rsp, 32
+    pop  rbx
     ret
 
+; mn_addr(rcx = which) -> rax = the address of a buffer or flag main_cli.kr
+; reads or writes (its A_ constants, in that order)
+mn_addr:
+    lea  rax, [rel mn_addr_table]
+    mov  rax, [rax + rcx*8]
+    ret
 
-
+section .data
+mn_addr_table:
+    dq arg_input, arg_output, arg_flag_S, arg_flag_check, arg_flag_debug
+    dq arg_flag_window, arg_flag_lib, arg_flag_module, out_android, out_ios
+    dq out_bin_name, out_asm_name, bin_ext_ptr, bin_ext, asm_ext, mod_ext
+    dq cg_mod_tag
+section .text

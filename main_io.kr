@@ -1,0 +1,286 @@
+kron_program
+kron_domain main_io;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// MAIN'S FILES AND MESSAGES: the modules read for the import pass, the
+// line map, the source line under an error, numbers
+//
+//   imp_read(name, len_out)   a module's bytes, read for imports.kr
+//   mi_imp_have(name)         1 when the program imports that module
+//   mi_lmap_lookup(line)      the file and the line an expanded line is
+//   mi_print_error_line(line, col, len)   the line, then carets under it
+//   mi_print_u64(v)
+//
+// They were in main.asm, and they are here now, byte for byte the same.
+// main.asm keeps the doors with the registers its callers use, the calls
+// into Windows (read_file, print_string, print_bytes), and the buffers the
+// rest of the assembly still reads (the program's name, the expanded
+// text, the line map).
+// =========================================================================
+
+extern "kronc" {
+    fn read_file(name: i64, buf: i64, cap: i64) -> i64;
+    fn print_string(s: i64) -> i64;
+    fn print_bytes(s: i64, n: i64) -> i64;
+    fn mn_arg_input() -> i64;
+    fn mn_exp_buffer() -> i64;
+    fn mn_lmap(k: i64) -> i64;
+    fn mn_lmap_count() -> i64;
+    // imports.kr
+    fn ip_count_get() -> i64;
+    fn ip_names_addr() -> i64;
+}
+
+const MI_SRC_SIZE: i64 = 16777216;    // SRC_BUFFER_SIZE: one file at most
+const MI_POOL: i64 = 67108864;        // 64 MB for the modules' bytes
+
+var mi_pool: [u8; 67108864];          // each module read takes its own place
+var mi_pool_used: i64;
+var mi_pathbuf: [u8; 512];            // a module's name, next to the program
+var mi_line_out: i64;                 // mi_lmap_lookup: the line in the file
+var mi_digits: [u8; 32];
+
+fn mi_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn mi_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn mi_at(arr: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(arr + i * 8);
+    }
+    return r;
+}
+
+fn mi_streq(a: i64, b: i64) -> i64 {
+    var i: i64 = 0;
+    while true {
+        var c: i64 = mi_g8(a + i);
+        if c != mi_g8(b + i) {
+            return 0;
+        }
+        if c == 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---- modules ------------------------------------------------------------
+
+// a new import pass: the pool empty
+fn mi_reset_pool() -> i64 {
+    mi_pool_used = 0;
+    return 0;
+}
+
+// where to look for a module first: the folder of the program, then the
+// name. A module is looked for next to the program, not in the folder
+// kronc happens to run from. An absolute name, or a program given with no
+// folder, comes back unchanged.
+fn mi_fullpath(name: i64) -> i64 {
+    var c0: i64 = mi_g8(name);
+    if c0 == 92 || c0 == 47 || mi_g8(name + 1) == 58 {
+        return name;
+    }
+    // the program's folder: everything up to its last \ or /
+    var prog: i64 = mn_arg_input();
+    var i: i64 = 0;
+    var dir: i64 = 0;
+    while mi_g8(prog + i) != 0 {
+        var c: i64 = mi_g8(prog + i);
+        i = i + 1;
+        if c == 92 || c == 47 {
+            dir = i;
+        }
+    }
+    if dir == 0 {
+        return name;
+    }
+    var d: i64 = &mi_pathbuf;
+    var n: i64 = 0;
+    while n < dir {
+        mi_p8(d + n, mi_g8(prog + n));
+        n = n + 1;
+    }
+    // then the name, 510 bytes at most in all
+    var k: i64 = 0;
+    while true {
+        var ch: i64 = mi_g8(name + k);
+        mi_p8(d + n, ch);
+        if ch == 0 {
+            return d;
+        }
+        k = k + 1;
+        n = n + 1;
+        if n >= 510 {
+            mi_p8(d + n, 0);
+            return d;
+        }
+    }
+    return d;
+}
+
+// a module's bytes: where they are (their length at len_out), 0 when there
+// is no such file, -1 when the file is longer than the room left (MI_POOL
+// bytes in all, at most MI_SRC_SIZE for one file). The module is looked
+// for next to the program first, then as written, as %include does. Each
+// file takes its own place in the pool, so the bytes of one module stay
+// where they are while the next is read.
+fn imp_read(name: i64, len_out: i64) -> i64 {
+    var used: i64 = mi_pool_used;
+    var room: i64 = MI_POOL - used;
+    if room == 0 {
+        return -1;
+    }
+    if room > MI_SRC_SIZE {
+        room = MI_SRC_SIZE;             // one file at most this long
+    }
+    var at: i64 = &mi_pool + used;
+    var n: i64 = read_file(mi_fullpath(name), at, room);
+    if n == 0 {
+        n = read_file(name, at, room);  // then as written
+        if n == 0 {
+            return 0;
+        }
+    }
+    if n >= room {
+        return -1;                      // as long as the room: it may be cut short
+    }
+    raw {
+        poke(len_out, n);
+    }
+    // the next file starts on a 16-byte boundary
+    mi_pool_used = used + ((n + 15) & -16);
+    return at;
+}
+
+// 1 when the program imports the module, itself or through another
+fn mi_imp_have(name: i64) -> i64 {
+    var n: i64 = ip_count_get() & 4294967295;
+    var names: i64 = ip_names_addr();
+    var i: i64 = 0;
+    while i < n {
+        if mi_streq(names + i * 256, name) != 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---- the line map -------------------------------------------------------
+
+// the file an expanded line comes from (mi_lmap_line: its line there).
+// The program and the line as given when the map is empty.
+fn mi_lmap_lookup(line: i64) -> i64 {
+    var n: i64 = mn_lmap_count();
+    if n == 0 {
+        mi_line_out = line;
+        return mn_arg_input();
+    }
+    var outs: i64 = mn_lmap(0);
+    var best: i64 = 0;
+    var i: i64 = 0;
+    while i < n && mi_at(outs, i) <= line {
+        best = i;
+        i = i + 1;
+    }
+    mi_line_out = line - mi_at(outs, best) + mi_at(mn_lmap(2), best);
+    return mi_at(mn_lmap(1), best);
+}
+
+fn mi_lmap_line() -> i64 {
+    return mi_line_out;
+}
+
+// ---- messages -----------------------------------------------------------
+
+// the line (1-based) of the expanded text, then col-1 spaces and one
+// caret per byte of the token (len, 1 at least, 200 at most). No indent of
+// its own: the source line brings its own leading spaces.
+fn mi_print_error_line(line: i64, col: i64, len: i64) -> i64 {
+    if line == 0 {
+        return 0;
+    }
+    var carets: i64 = len;
+    if carets == 0 {
+        carets = 1;
+    }
+    var p: i64 = mn_exp_buffer();
+    var cur: i64 = 1;
+    while cur < line {
+        var c: i64 = mi_g8(p);
+        if c == 0 {
+            return 0;                   // ran off the end
+        }
+        p = p + 1;
+        if c == 10 {
+            cur = cur + 1;
+        }
+    }
+    var n: i64 = 0;
+    while true {
+        var ch: i64 = mi_g8(p + n);
+        if ch == 0 || ch == 10 || ch == 13 {
+            break;
+        }
+        n = n + 1;
+        if n >= 400 {
+            break;
+        }
+    }
+    if n > 0 {
+        print_bytes(p, n);
+    }
+    print_string("\r\n");
+    var pad: i64 = col - 1;
+    while pad > 0 {
+        print_string(" ");
+        pad = pad - 1;
+    }
+    if carets > 200 {
+        carets = 200;
+    }
+    while carets > 0 {
+        print_string("^");
+        carets = carets - 1;
+    }
+    print_string("\r\n");
+    return 0;
+}
+
+// an unsigned number in decimal
+fn mi_print_u64(value: i64) -> i64 {
+    var d: i64 = &mi_digits;
+    var i: i64 = 31;
+    mi_p8(d + i, 0);
+    var v: i64 = value;
+    if v == 0 {
+        i = i - 1;
+        mi_p8(d + i, 48);
+    }
+    while v != 0 {
+        // v / 10 and v % 10 as unsigned values
+        var q: i64 = (v >>> 1) / 5;
+        var r: i64 = v - q * 10;
+        i = i - 1;
+        mi_p8(d + i, 48 + r);
+        v = q;
+    }
+    return print_string(d + i);
+}

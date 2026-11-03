@@ -1,0 +1,436 @@
+kron_program
+kron_domain main_pp;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE ASSEMBLY PREPROCESSOR: what kasm, xarm and xwasm read, expanded
+//
+// mp_preprocess(src, length, out) -> bytes written. Expands the three
+// preprocessor forms the compiler's own sources use:
+//   %include "file"      the file's text is spliced in (include\NAME first,
+//                        then NAME)
+//   %define NAME value   rewritten as  NAME equ value, which kasm already
+//                        understands through its expression evaluator
+//   %macro NAME n ... %endmacro   collected, then expanded at each call
+//                        with %1..%8 replaced by the arguments
+// Any other %-line is dropped, which also covers the %line markers nasm -E
+// leaves behind.
+//
+// It was asm_preprocess in main.asm, and it is here now, byte for byte the
+// same text out. main.asm keeps asm_preprocess as its door, read_file, and
+// the two buffers an included file is read into (pp_buffer).
+// =========================================================================
+
+extern "kronc" {
+    fn read_file(name: i64, buf: i64, cap: i64) -> i64;
+    fn pp_buffer(k: i64) -> i64;
+}
+
+const MP_SRC_SIZE: i64 = 16777216;    // SRC_BUFFER_SIZE: 16 MB
+const MP_MAC_MAX: i64 = 32;
+const MP_BODY_MAX: i64 = 16000;       // bytes of one macro's body
+
+var mp_in: i64;                       // the input cursor
+var mp_end: i64;                      // and the end of the range it reads
+var mp_out: i64;                      // the output cursor
+var mp_out_end: i64;                  // one past the last writable byte
+var mp_depth: i64;                    // nesting level of %include
+var mp_name: [u8; 264];               // the filename of a %include
+var mp_path: [u8; 328];               // the same name with its directory
+var mp_mac_count: i64;
+var mp_mac_names: [u8; 8192];         // packed macro names
+var mp_mac_names_len: i64;
+var mp_mac_name_off: [i64; 32];
+var mp_mac_body_off: [i64; 32];
+var mp_mac_body_len: [i64; 32];
+var mp_mac_bodies: [u8; 32768];       // macro bodies, verbatim
+var mp_mac_bodies_len: i64;
+var mp_args: [u8; 8192];              // the arguments of the call expanded
+var mp_arg_off: [i64; 8];
+var mp_arg_len: [i64; 8];
+var mp_argc: i64;
+
+fn mp_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn mp_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn mp_at(arr: i64, i: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(arr + i * 8);
+    }
+    return r;
+}
+
+fn mp_put(arr: i64, i: i64, v: i64) -> i64 {
+    raw {
+        poke(arr + i * 8, v);
+    }
+    return 0;
+}
+
+// ---- output -------------------------------------------------------------
+
+// [s, e) appended; never past the buffer
+fn mp_emit_range(s: i64, e: i64) -> i64 {
+    var p: i64 = s;
+    while p < e && mp_out < mp_out_end {
+        mp_p8(mp_out, mp_g8(p));
+        mp_out = mp_out + 1;
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn mp_emit_cstr(s: i64) -> i64 {
+    var p: i64 = s;
+    while mp_g8(p) != 0 && mp_out < mp_out_end {
+        mp_p8(mp_out, mp_g8(p));
+        mp_out = mp_out + 1;
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn mp_emit_nl() -> i64 {
+    if mp_out < mp_out_end {
+        mp_p8(mp_out, 10);
+        mp_out = mp_out + 1;
+    }
+    return 0;
+}
+
+// ---- text ---------------------------------------------------------------
+
+// past spaces and tabs, stopping at e
+fn mp_skip(p: i64, e: i64) -> i64 {
+    var q: i64 = p;
+    while q < e && (mp_g8(q) == 32 || mp_g8(q) == 9) {
+        q = q + 1;
+    }
+    return q;
+}
+
+// 1 when the text begins with the prefix
+fn mp_starts(t: i64, prefix: i64) -> i64 {
+    var i: i64 = 0;
+    while mp_g8(prefix + i) != 0 {
+        if mp_g8(prefix + i) != mp_g8(t + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---- the door -----------------------------------------------------------
+
+fn mp_preprocess(src: i64, len: i64, out: i64) -> i64 {
+    mp_out = out;
+    mp_out_end = out + MP_SRC_SIZE - 64;  // leave a margin
+    mp_mac_count = 0;
+    mp_mac_names_len = 0;
+    mp_mac_bodies_len = 0;
+    mp_depth = 0;
+    mp_range(src, src + len);
+    return mp_out - out;
+}
+
+// every line of [s, e)
+fn mp_range(s: i64, e: i64) -> i64 {
+    mp_in = s;
+    mp_end = e;
+    while mp_in < mp_end {
+        var ls: i64 = mp_in;
+        while mp_in < mp_end && mp_g8(mp_in) != 10 {
+            mp_in = mp_in + 1;
+        }
+        var le: i64 = mp_in;              // the end of the line, before the newline
+        if mp_in < mp_end {
+            mp_in = mp_in + 1;            // over the newline
+        }
+        mp_line(ls, le);
+    }
+    return 0;
+}
+
+// one line, [ls, le)
+fn mp_line(ls: i64, le: i64) -> i64 {
+    var b: i64 = mp_skip(ls, le);
+    if b < le {
+        if mp_g8(b) == 37 {
+            return mp_directive(b, le);
+        }
+        if mp_try_macro(b, le) != 0 {
+            return 0;
+        }
+    }
+    mp_emit_range(ls, le);
+    return mp_emit_nl();
+}
+
+// b points at '%'
+fn mp_directive(b: i64, le: i64) -> i64 {
+    if mp_starts(b + 1, "include") != 0 {
+        return mp_include(b + 8, le);
+    }
+    if mp_starts(b + 1, "define") != 0 {
+        // %define NAME value   ->   NAME equ value
+        var p: i64 = mp_skip(b + 7, le);
+        var ns: i64 = p;
+        while p < le && mp_g8(p) != 32 && mp_g8(p) != 9 {
+            p = p + 1;
+        }
+        mp_emit_range(ns, p);
+        mp_emit_cstr(" equ ");
+        mp_emit_range(mp_skip(p, le), le);
+        return mp_emit_nl();
+    }
+    if mp_starts(b + 1, "macro") != 0 {
+        return mp_record_macro(mp_skip(b + 6, le), le);
+    }
+    return 0;                             // %line and anything else: dropped
+}
+
+// %include "name": the file's lines processed here
+fn mp_include(start: i64, le: i64) -> i64 {
+    var p: i64 = start;
+    while p < le && mp_g8(p) != 34 {
+        p = p + 1;
+    }
+    if p >= le {
+        return 0;
+    }
+    p = p + 1;
+    var name: i64 = &mp_name;
+    var n: i64 = 0;
+    while p < le && mp_g8(p) != 34 && n < 255 {
+        mp_p8(name + n, mp_g8(p));
+        n = n + 1;
+        p = p + 1;
+    }
+    mp_p8(name + n, 0);
+    // include\NAME
+    var path: i64 = &mp_path;
+    var dir: i64 = "include\\";
+    var k: i64 = 0;
+    while mp_g8(dir + k) != 0 {
+        mp_p8(path + k, mp_g8(dir + k));
+        k = k + 1;
+    }
+    var i: i64 = 0;
+    while true {
+        var c: i64 = mp_g8(name + i);
+        mp_p8(path + k, c);
+        if c == 0 {
+            break;
+        }
+        k = k + 1;
+        i = i + 1;
+    }
+    // a file included from an included file needs its own buffer
+    var buf: i64 = pp_buffer(0);
+    if mp_depth != 0 {
+        buf = pp_buffer(1);
+    }
+    var got: i64 = read_file(path, buf, MP_SRC_SIZE);
+    if got == 0 {
+        got = read_file(name, buf, MP_SRC_SIZE);   // without the directory
+    }
+    if got == 0 {
+        return 0;                         // not found: silently skipped
+    }
+    var keep_in: i64 = mp_in;
+    var keep_end: i64 = mp_end;
+    mp_depth = mp_depth + 1;
+    mp_range(buf, buf + got);
+    mp_depth = mp_depth - 1;
+    mp_in = keep_in;
+    mp_end = keep_end;
+    return 0;
+}
+
+// 1 when the macro whose name starts at p is already recorded. The name
+// ends at a blank, a tab, '\r', '\n' or 0.
+fn mp_macro_known(p: i64) -> i64 {
+    var n: i64 = 0;
+    while true {
+        var c: i64 = mp_g8(p + n);
+        if c == 32 || c == 9 || c == 13 || c == 10 || c == 0 {
+            break;
+        }
+        n = n + 1;
+    }
+    if mp_find(p, n) == -1 {
+        return 0;
+    }
+    return 1;
+}
+
+// the macro named by the n bytes at p, or -1
+fn mp_find(p: i64, n: i64) -> i64 {
+    var k: i64 = 0;
+    while k < mp_mac_count {
+        var nm: i64 = &mp_mac_names + mp_at(&mp_mac_name_off, k);
+        var i: i64 = 0;
+        while i < n && mp_g8(p + i) == mp_g8(nm + i) {
+            i = i + 1;
+        }
+        if i == n && mp_g8(nm + n) == 0 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return -1;
+}
+
+// %macro NAME n: p points at the name; the body runs to %endmacro, read
+// from the input, which the range then continues after. Every module
+// includes the same headers, so the same macro arrives once per module:
+// it is recorded the first time and the repeats skip the body.
+fn mp_record_macro(start: i64, le: i64) -> i64 {
+    var dup: i64 = 0;
+    if mp_macro_known(start) != 0 {
+        dup = 1;
+    }
+    var k: i64 = mp_mac_count;
+    if dup == 0 && k < MP_MAC_MAX {
+        // the name
+        mp_put(&mp_mac_name_off, k, mp_mac_names_len);
+        var d: i64 = &mp_mac_names + mp_mac_names_len;
+        var p: i64 = start;
+        var n: i64 = 0;
+        while p < le && mp_g8(p) != 32 && mp_g8(p) != 9 && mp_g8(p) != 13 {
+            mp_p8(d + n, mp_g8(p));
+            n = n + 1;
+            p = p + 1;
+        }
+        mp_p8(d + n, 0);
+        mp_mac_names_len = mp_mac_names_len + n + 1;
+        // the body
+        mp_put(&mp_mac_body_off, k, mp_mac_bodies_len);
+    }
+    // the lines up to %endmacro
+    var body: i64 = &mp_mac_bodies + mp_mac_bodies_len;
+    var r: i64 = 0;
+    while mp_in < mp_end {
+        var ls: i64 = mp_in;
+        while mp_in < mp_end && mp_g8(mp_in) != 10 {
+            mp_in = mp_in + 1;
+        }
+        var le2: i64 = mp_in;
+        if mp_in < mp_end {
+            mp_in = mp_in + 1;
+        }
+        var c: i64 = ls;
+        while c < le2 && (mp_g8(c) == 32 || mp_g8(c) == 9) {
+            c = c + 1;
+        }
+        if c < le2 && mp_starts(c, "%endmacro") != 0 {
+            break;
+        }
+        var q: i64 = ls;
+        while q < le2 && r < MP_BODY_MAX {
+            mp_p8(body + r, mp_g8(q));
+            r = r + 1;
+            q = q + 1;
+        }
+        mp_p8(body + r, 10);
+        r = r + 1;
+    }
+    if dup != 0 || k >= MP_MAC_MAX {
+        return 0;                         // a repeat: the body consumed, nothing recorded
+    }
+    mp_put(&mp_mac_body_len, k, r);
+    mp_mac_bodies_len = mp_mac_bodies_len + r;
+    mp_mac_count = k + 1;
+    return 0;
+}
+
+// b points at the first token of the line, which runs to le. When it names
+// a macro, its body is expanded with %1..%8 replaced by the arguments: 1.
+// Otherwise 0, and nothing is emitted.
+fn mp_try_macro(b: i64, le: i64) -> i64 {
+    var t: i64 = b;
+    while t < le && mp_g8(t) != 32 && mp_g8(t) != 9 && mp_g8(t) != 13 {
+        t = t + 1;
+    }
+    var k: i64 = mp_find(b, t - b);
+    if k == -1 {
+        return 0;
+    }
+    // the rest of the line, split into comma-separated arguments
+    mp_argc = 0;
+    var p: i64 = mp_skip(t, le);
+    while p < le && mp_argc < 8 {
+        var a0: i64 = p;
+        while p < le && mp_g8(p) != 44 && mp_g8(p) != 13 {
+            p = p + 1;
+        }
+        var ae: i64 = p;
+        while ae > a0 && (mp_g8(ae - 1) == 32 || mp_g8(ae - 1) == 9) {
+            ae = ae - 1;
+        }
+        var off: i64 = 0;
+        if mp_argc > 0 {
+            off = mp_at(&mp_arg_off, mp_argc - 1) + mp_at(&mp_arg_len, mp_argc - 1);
+        }
+        mp_put(&mp_arg_off, mp_argc, off);
+        var i: i64 = 0;
+        while a0 + i < ae {
+            mp_p8(&mp_args + off + i, mp_g8(a0 + i));
+            i = i + 1;
+        }
+        mp_put(&mp_arg_len, mp_argc, i);
+        mp_argc = mp_argc + 1;
+        if p >= le {
+            break;
+        }
+        p = mp_skip(p + 1, le);           // over the comma
+    }
+    // the body, %1..%8 substituted
+    var body: i64 = &mp_mac_bodies + mp_at(&mp_mac_body_off, k);
+    var n: i64 = mp_at(&mp_mac_body_len, k);
+    var j: i64 = 0;
+    while j < n {
+        var c: i64 = mp_g8(body + j);
+        if c == 37 {
+            j = j + 1;
+            if j >= n {
+                return 1;
+            }
+            var a: i64 = mp_g8(body + j) - 49;     // '1' -> argument 0
+            if a >= 0 && a < 8 {
+                if a < mp_argc {
+                    var s: i64 = &mp_args + mp_at(&mp_arg_off, a);
+                    mp_emit_range(s, s + mp_at(&mp_arg_len, a));
+                }
+                j = j + 1;
+                continue;
+            }
+            // not an argument: the '%' goes out as it is
+            mp_p8(mp_out, 37);
+            mp_out = mp_out + 1;
+            c = mp_g8(body + j);
+        }
+        if mp_out >= mp_out_end {
+            return 1;
+        }
+        mp_p8(mp_out, c);
+        mp_out = mp_out + 1;
+        j = j + 1;
+    }
+    return 1;
+}

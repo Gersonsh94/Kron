@@ -1,0 +1,489 @@
+kron_program
+kron_domain main_cli;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// MAIN'S COMMAND LINE AND OUTPUT NAMES
+//
+//   mc_parse_command_line(cmd)  the input, -o, -S, --check, --debug,
+//                               --window, --lib, --module: 1 with an input
+//   mc_scan_target(cmd)         --target=..., --bare: the TARGET_ value,
+//                               255 for a name that is none
+//   mc_scan_flag(k)             --dump, --assemble, --pe, --krn's old name
+//   mc_build_bin_name()         the output's name (-o, or the input with the
+//                               extension of the target)
+//   mc_build_asm_name()         the .asm's name (-S, --module)
+//   mc_module_tag()             a module's name for its labels
+//
+// They were in main.asm, and they are here now, the same names and flags
+// for every command line. main.asm keeps their doors, the buffers and flags
+// the rest of main reads (reached through mn_addr), and the call into
+// Windows that gives the command line (os_cmdline).
+// =========================================================================
+
+extern "kronc" {
+    fn os_cmdline() -> i64;
+    fn mn_addr(k: i64) -> i64;
+}
+
+// what mn_addr gives
+const A_INPUT: i64 = 0;               // arg_input, 512 bytes
+const A_OUTPUT: i64 = 1;              // arg_output, 512 bytes
+const A_FLAG_S: i64 = 2;              // the flags, a byte each
+const A_FLAG_CHECK: i64 = 3;
+const A_FLAG_DEBUG: i64 = 4;
+const A_FLAG_WINDOW: i64 = 5;
+const A_FLAG_LIB: i64 = 6;
+const A_FLAG_MODULE: i64 = 7;
+const A_ANDROID: i64 = 8;
+const A_IOS: i64 = 9;
+const A_BIN_NAME: i64 = 10;           // out_bin_name, 512 bytes
+const A_ASM_NAME: i64 = 11;           // out_asm_name, 512 bytes
+const A_BIN_EXT_PTR: i64 = 12;        // the extension the target chose, or 0
+const A_BIN_EXT: i64 = 13;            // ".kbin"
+const A_ASM_EXT: i64 = 14;            // ".asm"
+const A_MOD_EXT: i64 = 15;            // "_kr.asm"
+const A_MOD_TAG: i64 = 16;            // cg_mod_tag, 72 bytes
+
+const T_PE: i64 = 0;
+const T_ELF: i64 = 1;
+const T_KRN: i64 = 2;
+const T_BARE: i64 = 3;
+const T_ARM64: i64 = 4;
+const T_WEB: i64 = 5;
+const T_MACOS: i64 = 6;
+
+fn mc_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn mc_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn mc_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn mc_set(k: i64, v: i64) -> i64 {
+    return mc_p8(mn_addr(k), v);
+}
+
+fn mc_blank(c: i64) -> i64 {
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+// a blank, a tab or the end
+fn mc_end(c: i64) -> i64 {
+    if c == 32 || c == 9 || c == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// 1 when the text at t starts with the word w
+fn mc_starts(t: i64, w: i64) -> i64 {
+    var i: i64 = 0;
+    while mc_g8(w + i) != 0 {
+        if mc_g8(w + i) != mc_g8(t + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// 1 when the text is that word, then a blank or its end
+fn mc_word(t: i64, w: i64) -> i64 {
+    var i: i64 = 0;
+    while mc_g8(w + i) != 0 {
+        if mc_g8(w + i) != mc_g8(t + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return mc_end(mc_g8(t + i));
+}
+
+// ---- flags anywhere on the command line ---------------------------------
+
+// 1 when the command line holds the flag: 0 --dump, 1 --assemble, 2 --pe
+// (a whole word), 3 --jpx (the --krn of old)
+fn mc_scan_flag(k: i64) -> i64 {
+    var p: i64 = os_cmdline();
+    if p == 0 {
+        return 0;
+    }
+    var w: i64 = "--dump";
+    if k == 1 {
+        w = "--asse";
+    } else if k == 2 {
+        w = "--pe";
+    } else if k == 3 {
+        w = "--jpx";
+    }
+    while mc_g8(p) != 0 {
+        if mc_starts(p, w) != 0 {
+            if k != 2 {
+                return 1;
+            }
+            // --pe, not --peXXX: then a space or the end
+            if mc_g8(p + 4) == 0 || mc_g8(p + 4) == 32 {
+                return 1;
+            }
+        }
+        p = p + 1;
+    }
+    return 0;
+}
+
+// --target=windows | linux | linux-arm64 | macos | web | krn | bare |
+// android | ios (default: windows); --bare is kept as a shorthand for
+// --target=bare. Anything else after --target= is 255: an error, never a
+// silent Windows build.
+fn mc_scan_target(cmd: i64) -> i64 {
+    var p: i64 = cmd;
+    if p == 0 {
+        return T_PE;
+    }
+    while mc_g8(p) != 0 {
+        if mc_g8(p) == 45 && mc_g8(p + 1) == 45 {
+            if mc_g8(p + 2) == 98 {
+                if mc_starts(p + 2, "bare") != 0 {
+                    return T_BARE;
+                }
+            } else if mc_starts(p + 2, "target=") != 0 {
+                return mc_target_name(p + 9);
+            }
+        }
+        p = p + 1;
+    }
+    return T_PE;
+}
+
+fn mc_target_name(t: i64) -> i64 {
+    if mc_word(t, "windows") != 0 { return T_PE; }
+    if mc_word(t, "linux") != 0 { return T_ELF; }
+    if mc_word(t, "linux-arm64") != 0 { return T_ARM64; }
+    if mc_word(t, "krn") != 0 { return T_KRN; }
+    if mc_word(t, "web") != 0 { return T_WEB; }
+    if mc_word(t, "macos") != 0 { return T_MACOS; }
+    // android: ARM64 Linux with Android's C library; ios: macOS's program
+    // for an iPhone. Both are libraries (--lib) an app loads.
+    if mc_word(t, "android") != 0 {
+        mc_set(A_ANDROID, 1);
+        return T_ARM64;
+    }
+    if mc_word(t, "ios") != 0 {
+        mc_set(A_IOS, 1);
+        return T_MACOS;
+    }
+    if mc_word(t, "bare") != 0 { return T_BARE; }
+    return 255;
+}
+
+// ---- the arguments ------------------------------------------------------
+
+// the first argument (the source file) and the options after it. Quoted
+// paths are taken whole. 1 when there is an input, 0 when there is none.
+fn mc_parse_command_line(cmd: i64) -> i64 {
+    var p: i64 = cmd;
+    // past the name of kronc.exe itself
+    if mc_g8(p) == 34 {
+        p = p + 1;
+        while true {
+            var c: i64 = mc_g8(p);
+            if c == 0 {
+                return 0;
+            }
+            p = p + 1;
+            if c == 34 {
+                break;
+            }
+        }
+    } else {
+        while mc_blank(mc_g8(p)) == 0 {
+            if mc_g8(p) == 0 {
+                return 0;
+            }
+            p = p + 1;
+        }
+    }
+    while mc_blank(mc_g8(p)) != 0 {
+        p = p + 1;
+    }
+    if mc_g8(p) == 0 {
+        return 0;
+    }
+    // the input
+    var inp: i64 = mn_addr(A_INPUT);
+    var n: i64 = 0;
+    if mc_g8(p) == 34 {
+        p = p + 1;
+        while n < 511 && mc_g8(p) != 0 && mc_g8(p) != 34 {
+            mc_p8(inp + n, mc_g8(p));
+            n = n + 1;
+            p = p + 1;
+        }
+        if n < 511 && mc_g8(p) == 34 {
+            p = p + 1;
+        }
+    } else {
+        while n < 511 && mc_end(mc_g8(p)) == 0 {
+            mc_p8(inp + n, mc_g8(p));
+            n = n + 1;
+            p = p + 1;
+        }
+    }
+    mc_p8(inp + n, 0);
+    if n == 0 {
+        return 0;
+    }
+    // the options, token by token: a '-o' inside a path or a quoted name is
+    // never taken for the option
+    mc_p8(mn_addr(A_OUTPUT), 0);
+    mc_set(A_FLAG_S, 0);
+    mc_set(A_FLAG_CHECK, 0);
+    mc_set(A_FLAG_DEBUG, 0);
+    mc_set(A_FLAG_WINDOW, 0);
+    mc_set(A_FLAG_LIB, 0);
+    mc_set(A_FLAG_MODULE, 0);
+    while true {
+        var c: i64 = mc_g8(p);
+        if mc_blank(c) != 0 {
+            p = p + 1;
+        } else if c == 0 {
+            return 1;
+        } else {
+            if c == 45 {
+                if mc_word(p, "-S") != 0 {
+                    // -S: write the generated assembly instead of the executable
+                    mc_set(A_FLAG_S, 1);
+                    p = p + 2;
+                    continue;
+                }
+                if mc_g8(p + 1) == 45 {
+                    p = mc_long_option(p);
+                } else if mc_g8(p + 1) == 111 && mc_blank(mc_g8(p + 2)) != 0 {
+                    // -o <path>: where the output goes; the last option read
+                    mc_output(p + 3);
+                    return 1;
+                }
+            }
+            p = mc_skip_token(p);
+        }
+    }
+    return 1;
+}
+
+// --check --debug --module --lib --window at p: their flag set; where the
+// token goes on
+fn mc_long_option(p: i64) -> i64 {
+    var c: i64 = mc_g8(p + 2);
+    if c == 119 {
+        // --window: Windows opens no console for the program (std_window)
+        if mc_starts(p + 2, "window") != 0 {
+            mc_set(A_FLAG_WINDOW, 1);
+            return p + 8;
+        }
+    } else if c == 108 {
+        // --lib: a library C and the rest can load, not a program
+        if mc_word(p + 2, "lib") != 0 {
+            mc_set(A_FLAG_LIB, 1);
+            return p + 5;
+        }
+    } else if c == 100 {
+        // --debug: a build the debugger can stop (std_debug.kr)
+        if mc_starts(p + 2, "debug") != 0 {
+            mc_set(A_FLAG_DEBUG, 1);
+            return p + 7;
+        }
+    } else if c == 109 {
+        // --module: the functions of a part of the compiler, as text
+        if mc_word(p + 2, "module") != 0 {
+            mc_set(A_FLAG_MODULE, 1);
+            return p + 8;
+        }
+    } else if c == 99 {
+        // --check: check everything, write nothing
+        if mc_starts(p + 2, "check") != 0 {
+            mc_set(A_FLAG_CHECK, 1);
+            return p + 7;
+        }
+    }
+    return p;
+}
+
+// to the next blank, stepping over quoted parts whole
+fn mc_skip_token(start: i64) -> i64 {
+    var p: i64 = start;
+    while true {
+        var c: i64 = mc_g8(p);
+        if c == 0 || mc_blank(c) != 0 {
+            return p;
+        }
+        if c == 34 {
+            p = p + 1;
+            while true {
+                var q: i64 = mc_g8(p);
+                if q == 0 {
+                    return p;
+                }
+                p = p + 1;
+                if q == 34 {
+                    break;
+                }
+            }
+        } else {
+            p = p + 1;
+        }
+    }
+    return p;
+}
+
+// the path after -o, quoted or not, into arg_output
+fn mc_output(start: i64) -> i64 {
+    var p: i64 = start;
+    while mc_blank(mc_g8(p)) != 0 {
+        p = p + 1;
+    }
+    var out: i64 = mn_addr(A_OUTPUT);
+    var n: i64 = 0;
+    if mc_g8(p) == 34 {
+        p = p + 1;
+        while n < 511 && mc_g8(p) != 0 && mc_g8(p) != 34 {
+            mc_p8(out + n, mc_g8(p));
+            n = n + 1;
+            p = p + 1;
+        }
+    } else {
+        while n < 511 && mc_end(mc_g8(p)) == 0 {
+            mc_p8(out + n, mc_g8(p));
+            n = n + 1;
+            p = p + 1;
+        }
+    }
+    mc_p8(out + n, 0);
+    return 0;
+}
+
+// ---- the names ----------------------------------------------------------
+
+// -o as it is (511 bytes at most), or the input with its extension, after
+// its last folder, replaced by ext
+fn mc_name(dst: i64, ext: i64) -> i64 {
+    var o: i64 = mn_addr(A_OUTPUT);
+    var n: i64 = 0;
+    if mc_g8(o) != 0 {
+        while true {
+            var c: i64 = mc_g8(o + n);
+            mc_p8(dst + n, c);
+            if c == 0 {
+                return 0;
+            }
+            n = n + 1;
+            if n >= 511 {
+                mc_p8(dst + n, 0);
+                return 0;
+            }
+        }
+    }
+    var inp: i64 = mn_addr(A_INPUT);
+    while mc_g8(inp + n) != 0 {
+        mc_p8(dst + n, mc_g8(inp + n));
+        n = n + 1;
+    }
+    var k: i64 = n;
+    while k > 0 {
+        k = k - 1;
+        var ch: i64 = mc_g8(dst + k);
+        if ch == 46 {
+            n = k;
+            break;
+        }
+        if ch == 47 || ch == 92 {
+            break;
+        }
+    }
+    var i: i64 = 0;
+    while true {
+        var e: i64 = mc_g8(ext + i);
+        mc_p8(dst + n, e);
+        if e == 0 {
+            return 0;
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// out_bin_name: the extension the target chose (.kbin when none)
+fn mc_build_bin_name() -> i64 {
+    var ext: i64 = mc_g64(mn_addr(A_BIN_EXT_PTR));
+    if ext == 0 {
+        ext = mn_addr(A_BIN_EXT);
+    }
+    return mc_name(mn_addr(A_BIN_NAME), ext);
+}
+
+// out_asm_name: ".asm" -- "_kr.asm" for a module, so that lexer.kr does
+// not overwrite the lexer.asm beside it
+fn mc_build_asm_name() -> i64 {
+    var ext: i64 = mn_addr(A_ASM_EXT);
+    if mc_g8(mn_addr(A_FLAG_MODULE)) != 0 {
+        ext = mn_addr(A_MOD_EXT);
+    }
+    return mc_name(mn_addr(A_ASM_NAME), ext);
+}
+
+// cg_mod_tag: the module's name -- the input's file name without folder
+// and extension, letters, digits and '_' kept, anything else made '_' --
+// followed by '_'. Its globals carry it: __g_lexer_pos.
+fn mc_module_tag() -> i64 {
+    var inp: i64 = mn_addr(A_INPUT);
+    var start: i64 = inp;
+    var p: i64 = inp;
+    while mc_g8(p) != 0 {
+        var c: i64 = mc_g8(p);
+        p = p + 1;
+        if c == 47 || c == 92 {
+            start = p;
+        }
+    }
+    var tag: i64 = mn_addr(A_MOD_TAG);
+    var n: i64 = 0;
+    while n < 63 {
+        var ch: i64 = mc_g8(start + n);
+        if ch == 0 || ch == 46 {
+            break;
+        }
+        var keep: i64 = 0;
+        if ch == 95 || (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) {
+            keep = 1;
+        }
+        if keep == 0 {
+            ch = 95;
+        }
+        mc_p8(tag + n, ch);
+        n = n + 1;
+    }
+    mc_p8(tag + n, 95);
+    mc_p8(tag + n + 1, 0);
+    return 0;
+}

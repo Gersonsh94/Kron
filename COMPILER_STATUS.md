@@ -34,13 +34,17 @@ optimization is in Kron. Parts 1 to 5:
 | Changed (01-11-2026) | a real given to an integer parameter (of a Kron function or an `extern`), or returned from a function that returns an integer, is a compile error at the real (`x as i64` when the cut is meant; `list_set_real` and the other `_real` functions for lists); stores into an integer (`var n: i64 = x`, a field, an element) still truncate, as on 20-10; a struct as one of several results (`-> (Vec4, i64)`) is an error, it arrived as its address; `var l: i64 = f(3 as f64)` stays an i64 (the cast's type was taken for the declaration's); in std_gpu, making a mesh, shader, texture or target inside a frame or a target is an error, not a broken frame |
 | Library (27-10 to 01-11-2026) | std_gpu: render targets with colour and depth (shadow maps), mipmaps made on the card, BC1 textures; Vulkan only for now. std_ogg: the Ogg container. std_vorbis: Ogg Vorbis decoded in Kron (floor 1, residues 0-2, coupling, IMDCT through an FFT, up to 8 channels), `audio_load_ogg`; checked against ffmpeg sample by sample on five files, within its print precision |
 | Library (01-11-2026, second part) | std_net: UDP and `net_wait`; std_gpu: instanced drawing (`instance` inputs in KSL, Vulkan); std_task: `task_for` over every core; std_audio: pitch, low-pass, echo, synthesis, sound in space, streams, a mixer without a device; std_vorbis: `audio_stream_ogg` |
+| main's command line in Kron (03-11-2026) | `main_cli.kr`: the input and the options, --target=, the flags, the names of the output and of the .asm, a module's tag; main.asm keeps their doors; the same files and output for 47 command lines |
+| main's files and messages in Kron (02-11-2026) | `main_io.kr`: the modules read for the import pass, `imp_have`, the line map, the source line and carets under an error, `print_u64`; main.asm keeps their doors and the calls into Windows; the same messages for every program refused |
+| The preprocessor in Kron (02-11-2026) | `main_pp.kr` expands `%include`, `%define` and `%macro` for kasm, xarm and xwasm; `asm_preprocess` in main.asm is its door; the compiler it builds from kron_all.asm is the same file as before |
+| karm in Kron (02-11-2026) | `karm_core.kr`, `karm_alu.kr` and `karm_mem.kr` are the ARM64 assembler; `karm.asm` is their door; the same bytes for every ARM64 and macOS program and library of the suite, and arm_corpus still matches the GNU assembler |
 | xwasm in Kron (02-11-2026) | `xwasm.kr` lowers the x86-64 text to the WebAssembly module, reading it with xarm.kr's reader; `xwasm.asm` is its door; the same .wasm, page and host for every program of the suite |
 | xarm in Kron (01-11-2026) | `xarm.kr` lowers the x86-64 text to ARM64 text; `xarm.asm` is its door, keeps the state its reader keeps and the system call shims; the same ARM64 text for every program of the suite (Linux ARM64, macOS, libraries) and the same web output |
 | Writers in Kron (01-11-2026) | `macho_writer.kr` (Mach-O for macOS and iOS: executables, dylibs, the code signature and its SHA-256) `krn_writer.kr` (the KRN container) and `web_writer.kr` (the page and host beside a .wasm) replace `macho.asm`, `krn.asm` and main.asm's `web_write_host`, which are their doors; the same bytes as before for every program of the suite |
 | Fixed (20-10-2026) | a comparison of reals used as a value (`return a < b`, `f(x == 1.0)`) gave the left operand, not a bool; a real given to an integer (variable, field, element, parameter) kept its bits and an integer given to a real parameter was lost: now truncated and converted, and `var x = 2.5` is a real; `%` of reals is the remainder, bit operators on a real are an error; every `std_*.kr` compiles imported alone (std_exp, std_stats, std_vec3, std_random and std_ml did not); a function named like a register (`r8`, `eax`, `xmm9`) is refused instead of being called as the register |
 
-Still in assembly, in the order they come: karm, main (the runtime and
-the linker with it), and the doors.
+Still in assembly: main (the runtime and the linker with it), and the
+doors.
 
 Checked: the Kron lexer gives the same tokens as the assembly one, the
 Kron parser the same tree, tables and errors, the Kron semantic pass the
@@ -76,7 +80,8 @@ WebGPU (Dawn).
 
 | File | Lines | Role |
 |---|---:|---|
-| `karm.asm` | 5,259 | Kron's own ARM64 assembler |
+| `karm_core.kr`, `karm_alu.kr`, `karm_mem.kr` | 3,301 | Kron's own ARM64 assembler, in Kron (since 02-11-2026) |
+| `karm.asm` | 145 | The door to it; the `_kr.asm` files are made by `kronc --module` |
 | `xarm.kr` | 2,317 | x86-64 text -> ARM64 text, in Kron (since 01-11-2026) |
 | `xarm.asm` | 1,829 | The door to it, the state its reader keeps (xwasm reads with it too), and the Linux and the macOS shims (data); `xarm_kr.asm` is made by `kronc --module` |
 | `main.asm` | 4,641 | Driver, CLI, pipeline, ELF writers, the web page |
@@ -156,7 +161,8 @@ sector of BUILDOS.bat is assembled this way).
 
 ## 1b2. KARM — THE ARM64 ASSEMBLER
 
-`karm.asm` reads ARM64 assembly text, as kasm does for x86-64: ARM's operand
+karm (`karm_core.kr`, `karm_alu.kr`, `karm_mem.kr`; `karm.asm` its door)
+reads ARM64 assembly text, as kasm does for x86-64: ARM's operand
 syntax, kasm's directives (`section`, `db`/`dw`/`dd`/`dq`, `resb`..`resq`,
 `times`, `align`, `equ`), local labels, comments with `;` or `//`. Two passes;
 the image is code, then data, then bss, at a fixed base, so every address is
@@ -175,8 +181,7 @@ kronc.exe prog.s --assemble --target=linux-arm64      # AArch64 ELF, no extensio
 - **Verified:** 1523 instructions byte for byte against the GNU ARM assembler
   and linker (`arm_corpus.s`, reference in `tests\expected\arm_corpus.bin`);
   `arm_check.s` runs on ARM64 and checks constants, labels and data itself.
-  `ARMTESTS.bat` runs both under QEMU. kasm assembles karm in the bootstrap,
-  and the karm it builds gives the same bytes as the one NASM builds.
+  `ARMTESTS.bat` runs both under QEMU. kasm assembles karm in the bootstrap.
 - Also: q registers in loads and stores, `vN.16b` with mov/and/orr/eor,
   `vN.2d` with fadd/fsub/fmul/fdiv, `fcvtns`, `prfm`, `dc civac`, and reals
   in `dq` (`dq 1.5`). A data line takes any number of items; an instruction

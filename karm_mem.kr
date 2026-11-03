@@ -1,0 +1,737 @@
+kron_program
+kron_domain karm_mem;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// KARM: the ARM64 assembler for Kron -- loads and stores, branches,
+// addresses, reals
+//
+//   ldr str ldrb strb ldrh strh ldrsb ldrsh ldrsw ldur stur ldurb sturb
+//   ldurh sturh ldp stp  ldxr stxr ldaxr stlxr  b bl b.cond cbz cbnz br
+//   blr ret  adr adrp adrl  svc  fmov fadd fsub fmul fdiv fsqrt fneg fabs
+//   fcmp scvtf ucvtf fcvtzs fcvtzu fcvtns fcvt  prfm  dc civac
+//   q registers for 128-bit loads and stores; vN.2d and vN.4s with fadd,
+//   fsub, fmul, fdiv. adrl Xd, label is two instructions (adrp + add):
+//   any address in the image.
+//
+// The operands, the expressions and the emission are karm_core.kr's.
+// =========================================================================
+
+extern "kronc" {
+    fn kc_nops() -> i64;
+    fn kc_op(k: i64) -> i64;
+    fn kc_opreg(k: i64) -> i64;
+    fn kc_rnum() -> i64;
+    fn kc_imm(k: i64) -> i64;
+    fn kc_eval(t: i64) -> i64;
+    fn kc_evok() -> i64;
+    fn kc_unres() -> i64;
+    fn kc_clear_unres() -> i64;
+    fn kc_undef_check() -> i64;
+    fn kc_cond(t: i64) -> i64;
+    fn kc_mem(t: i64) -> i64;
+    fn kc_mbase() -> i64;
+    fn kc_mkind() -> i64;
+    fn kc_mimm() -> i64;
+    fn kc_midx() -> i64;
+    fn kc_mext() -> i64;
+    fn kc_mamt() -> i64;
+    fn kc_mpre() -> i64;
+    fn kc_pc() -> i64;
+    fn kc_pass() -> i64;
+    fn kc_mnem() -> i64;
+    fn kc_streq(a: i64, b: i64) -> i64;
+    fn kc_emit32(w: i64) -> i64;
+    fn kc_err(kind: i64) -> i64;
+    fn kc_err2(kind: i64) -> i64;
+    fn kc_bad() -> i64;
+    fn kc_range() -> i64;
+    fn kc_need(n: i64) -> i64;
+    fn kc_rrr(base: i64, rd: i64, rn: i64, rm: i64) -> i64;
+    // karm_alu.kr
+    fn ko_vec3(base: i64, cls: i64) -> i64;
+}
+
+var kq_tok: i64;                  // kq_target: the label was well formed
+
+fn kq_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+// out of range: an error on pass two, and still one word
+fn kq_range_word() -> i64 {
+    kc_err2(3);
+    return kc_emit32(0);
+}
+
+// ---- loads and stores ---------------------------------------------------
+
+// one load or store: base = the unsigned-offset word, size_log = log2 of
+// the size, rt = the register (operand 0, checked by the caller), the
+// memory operand 1, maybe a post-index 2. unscaled = 1 forces the
+// unscaled form (ldur/stur).
+fn kq_ldst(base: i64, size_log: i64, rt: i64, unscaled: i64) -> i64 {
+    var t: i64 = kc_op(1);
+    if kq_g8(t) != 91 {
+        return kq_literal(base, rt, t);
+    }
+    if kc_mem(t) == 0 {
+        return kc_bad();
+    }
+    var rn: i64 = kc_mbase();
+    var n: i64 = kc_nops();
+    var low: i64 = base & 0xFEFFFFFF;
+    var w: i64 = 0;
+    if n == 3 {
+        // [Xn], #imm
+        if kc_mkind() != 0 {
+            return kc_bad();
+        }
+        var p: i64 = kc_imm(2);
+        if kc_evok() == 0 {
+            return kc_bad();
+        }
+        if p < -256 || p > 255 {
+            return kq_range_word();
+        }
+        w = low | ((p & 511) << 12) | 1024;
+    } else {
+        if n != 2 {
+            return kc_bad();
+        }
+        if kc_mkind() == 2 {
+            return kq_ldst_reg(low, size_log, rt, rn);
+        }
+        var imm: i64 = kc_mimm();
+        if kc_mpre() != 0 {
+            if imm < -256 || imm > 255 {
+                return kq_range_word();
+            }
+            w = low | ((imm & 511) << 12) | 3072;
+        } else {
+            var done: i64 = 0;
+            // the unsigned offset when aligned and in range
+            if unscaled == 0 && imm >= 0 {
+                if (imm & ((1 << size_log) - 1)) == 0 && (imm >> size_log) <= 4095 {
+                    w = base | ((imm >> size_log) << 10);
+                    done = 1;
+                }
+            }
+            if done == 0 {
+                if imm < -256 || imm > 255 {
+                    return kq_range_word();
+                }
+                w = low | ((imm & 511) << 12);
+            }
+        }
+    }
+    return kc_emit32(w | ((rn & 31) << 5) | (rt & 31));
+}
+
+// [Xn, Rm{, ext #s}]: option 011 lsl, 110 sxtw, 010 uxtw, 111 sxtx
+fn kq_ldst_reg(low: i64, size_log: i64, rt: i64, rn: i64) -> i64 {
+    var w: i64 = low | 0x00200800;
+    var ext: i64 = kc_mext();
+    var opt: i64 = 3;
+    if ext == 1 {
+        opt = 6;
+    } else if ext == 2 {
+        opt = 2;
+    } else if ext == 3 {
+        opt = 7;
+    }
+    w = w | (opt << 13);
+    var amt: i64 = kc_mamt();
+    if amt != -1 && amt != 0 {
+        if amt != size_log {
+            return kq_range_word();
+        }
+        w = w | 4096;
+    }
+    w = w | ((kc_midx() & 31) << 16);
+    return kc_emit32(w | ((rn & 31) << 5) | (rt & 31));
+}
+
+// ldr Rt, label: PC-relative, +-1 MB (loads only)
+fn kq_literal(base: i64, rt: i64, t: i64) -> i64 {
+    if (base & 0x00400000) == 0 {
+        return kc_bad();
+    }
+    kc_clear_unres();
+    var v: i64 = kc_eval(t);
+    if kc_evok() == 0 {
+        return kc_bad();
+    }
+    kc_undef_check();
+    var d: i64 = v - kc_pc();
+    var ok: i64 = 0;
+    if (d & 3) == 0 {
+        d = d >> 2;
+        if d >= -262144 && d <= 262143 {
+            ok = 1;
+        }
+    }
+    if ok == 0 {
+        if kc_pass() == 2 {
+            kc_err(3);
+        }
+        d = 0;
+    }
+    // 0x58 x, 0x18 w, 0x5C d, 0x1C s, 0x98 ldrsw
+    var op: i64 = 0;
+    if base == 0xF9400000 {
+        op = 0x58000000;
+    } else if base == 0xB9400000 {
+        op = 0x18000000;
+    } else if base == 0xFD400000 {
+        op = 0x5C000000;
+    } else if base == 0xBD400000 {
+        op = 0x1C000000;
+    } else if base == 0xB9800000 {
+        op = 0x98000000;
+    } else {
+        return kc_bad();
+    }
+    return kc_emit32(op | ((d & 0x7FFFF) << 5) | rt);
+}
+
+// ldr/str/ldur/stur: the size follows the register class
+fn kq_ldstr(load: i64, unscaled: i64) -> i64 {
+    var c: i64 = kc_opreg(0);
+    var rt: i64 = kc_rnum();
+    var base: i64 = 0;
+    var sl: i64 = 0;
+    if c == 1 {
+        base = 0xF9000000;
+        sl = 3;
+    } else if c == 2 {
+        base = 0xB9000000;
+        sl = 2;
+    } else if c == 3 {
+        base = 0xFD000000;
+        sl = 3;
+    } else if c == 4 {
+        base = 0xBD000000;
+        sl = 2;
+    } else if c == 6 {
+        base = 0x3D800000;
+        sl = 4;
+    } else {
+        return kc_bad();
+    }
+    if load != 0 {
+        base = base | 0x00400000;
+    }
+    return kq_ldst(base, sl, rt, unscaled);
+}
+
+// the byte and halfword forms take a w register
+fn kq_ldsz(base: i64, size_log: i64, unscaled: i64) -> i64 {
+    if kc_opreg(0) != 2 {
+        return kc_bad();
+    }
+    return kq_ldst(base, size_log, kc_rnum(), unscaled);
+}
+
+// ldrsb/ldrsh: x or w
+fn kq_ldsx(base: i64, size_log: i64) -> i64 {
+    var c: i64 = kc_opreg(0);
+    var rt: i64 = kc_rnum();
+    if c == 1 {
+        return kq_ldst(base, size_log, rt, 0);
+    }
+    if c != 2 {
+        return kc_bad();
+    }
+    return kq_ldst(base | 0x00400000, size_log, rt, 0);   // the w forms
+}
+
+// ldrsw: x
+fn kq_ldrsw() -> i64 {
+    if kc_opreg(0) != 1 {
+        return kc_bad();
+    }
+    return kq_ldst(0xB9800000, 2, kc_rnum(), 0);
+}
+
+// ldp/stp Rt1, Rt2, [Xn{, #imm}]{!} | [Xn], #imm
+fn kq_pair(load: i64) -> i64 {
+    var c: i64 = kc_opreg(0);
+    var rt: i64 = kc_rnum();
+    var base: i64 = 0;
+    var sl: i64 = 3;
+    if c == 2 {
+        base = 0x29000000;            // w: signed offset
+        sl = 2;
+    } else if c == 1 {
+        base = 0xA9000000;            // x
+    } else if c == 3 {
+        base = 0x6D000000;            // d
+    } else {
+        return kc_bad();
+    }
+    if kc_opreg(1) != c {
+        return kc_bad();
+    }
+    var rt2: i64 = kc_rnum();
+    if load != 0 {
+        base = base | 0x00400000;
+    }
+    if kc_mem(kc_op(2)) == 0 {
+        return kc_bad();
+    }
+    if kc_mkind() == 2 {
+        return kc_bad();
+    }
+    var v: i64 = kc_mimm();
+    if kc_nops() == 4 {
+        // post-index: bits 24:23 = 01
+        if kc_mkind() != 0 {
+            return kc_bad();
+        }
+        v = kc_imm(3);
+        if kc_evok() == 0 {
+            return kc_bad();
+        }
+        base = (base & 0xFE7FFFFF) | 0x00800000;
+    } else {
+        if kc_nops() != 3 {
+            return kc_bad();
+        }
+        if kc_mpre() != 0 {
+            base = base | 0x01800000;     // bits 24:23 = 11
+        }
+    }
+    if (v & ((1 << sl) - 1)) != 0 {
+        return kq_range_word();
+    }
+    v = v >> sl;
+    if v < -64 || v > 63 {
+        return kq_range_word();
+    }
+    return kc_emit32(base | ((v & 127) << 15) | (rt2 << 10) | (kc_mbase() << 5) | rt);
+}
+
+// exclusive: ldxr/ldaxr Rt, [Xn]
+fn kq_ldex(base: i64) -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var w: i64 = base;
+    var c: i64 = kc_opreg(0);
+    var rt: i64 = kc_rnum();
+    if c == 2 {
+        w = w & 0xBFFFFFFF;
+    } else if c != 1 {
+        return kc_bad();
+    }
+    if kc_mem(kc_op(1)) == 0 || kc_mkind() != 0 {
+        return kc_bad();
+    }
+    return kc_emit32(w | (kc_mbase() << 5) | rt);
+}
+
+// stxr/stlxr Ws, Rt, [Xn]
+fn kq_stex(base: i64) -> i64 {
+    if kc_need(3) == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(0) != 2 {
+        return kc_bad();
+    }
+    var w: i64 = base | (kc_rnum() << 16);
+    var c: i64 = kc_opreg(1);
+    var rt: i64 = kc_rnum();
+    if c == 2 {
+        w = w & 0xBFFFFFFF;
+    } else if c != 1 {
+        return kc_bad();
+    }
+    if kc_mem(kc_op(2)) == 0 || kc_mkind() != 0 {
+        return kc_bad();
+    }
+    return kc_emit32(w | (kc_mbase() << 5) | rt);
+}
+
+// ---- branches and addresses ---------------------------------------------
+
+// operand k's label - pc (0 when not known yet); kq_tok = 1 when well
+// formed
+fn kq_target(k: i64) -> i64 {
+    var t: i64 = kc_op(k);
+    kc_clear_unres();
+    var v: i64 = kc_eval(t);
+    kq_tok = 0;
+    if kc_evok() == 0 {
+        return 0;
+    }
+    kc_undef_check();
+    kq_tok = 1;
+    if kc_unres() != 0 {
+        return 0;
+    }
+    return v - kc_pc();
+}
+
+// b / bl label: +-128 MB
+fn kq_b26(base: i64) -> i64 {
+    if kc_need(1) == 0 {
+        return kc_bad();
+    }
+    var d: i64 = kq_target(0);
+    if kq_tok == 0 {
+        return kc_bad();
+    }
+    d = d >> 2;
+    if d < -33554432 || d > 33554431 {
+        kc_err2(3);
+        return kc_emit32(base);
+    }
+    return kc_emit32(base | (d & 0x3FFFFFF));
+}
+
+// the word with imm19 in bits 23..5: +-1 MB
+fn kq_b19(base: i64, dist: i64) -> i64 {
+    var d: i64 = dist >> 2;
+    if d < -262144 || d > 262143 {
+        kc_err2(3);
+        return kc_emit32(base);
+    }
+    return kc_emit32(base | ((d & 0x7FFFF) << 5));
+}
+
+// b.cond label
+fn kq_bcond() -> i64 {
+    var cc: i64 = kc_cond(kc_mnem() + 2);
+    if cc == -1 {
+        return kc_err2(1);
+    }
+    var d: i64 = kq_target(0);
+    if kq_tok == 0 {
+        return kc_bad();
+    }
+    return kq_b19(0x54000000 | cc, d);
+}
+
+// cbz / cbnz Rt, label
+fn kq_cb(base: i64) -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var w: i64 = base;
+    var c: i64 = kc_opreg(0);
+    if c == 1 {
+        w = w | 0x80000000;
+    } else if c != 2 {
+        return kc_bad();
+    }
+    w = w | kc_rnum();
+    var d: i64 = kq_target(1);
+    if kq_tok == 0 {
+        return kc_bad();
+    }
+    return kq_b19(w, d);
+}
+
+// br / blr Xn
+fn kq_breg(base: i64) -> i64 {
+    if kc_need(1) == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(0) != 1 {
+        return kc_bad();
+    }
+    return kc_emit32(base | (kc_rnum() << 5));
+}
+
+// ret {Xn}
+fn kq_ret() -> i64 {
+    if kc_nops() != 0 {
+        return kq_breg(0xD65F0000);
+    }
+    return kc_emit32(0xD65F03C0);
+}
+
+// immlo in 30:29, immhi in 23:5
+fn kq_adr_enc(base: i64, v: i64, rd: i64) -> i64 {
+    return kc_emit32(base | ((v & 3) << 29) | (((v >> 2) & 0x7FFFF) << 5) | rd);
+}
+
+// adr Xd, label: +-1 MB
+fn kq_adr() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(0) != 1 {
+        return kc_bad();
+    }
+    var rd: i64 = kc_rnum();
+    var d: i64 = kq_target(1);
+    if kq_tok == 0 {
+        return kc_bad();
+    }
+    if d < -1048576 || d > 1048575 {
+        kc_err2(3);
+        d = 0;
+    }
+    return kq_adr_enc(0x10000000, d, rd);
+}
+
+// ADRP Xd to the page of operand 1's label; the label's address (0, and
+// nothing written, when the operand is no expression)
+fn kq_adrp_word(rd: i64) -> i64 {
+    var t: i64 = kc_op(1);
+    kc_clear_unres();
+    var v: i64 = kc_eval(t);
+    if kc_evok() == 0 {
+        return 0;
+    }
+    kc_undef_check();
+    var pages: i64 = (v >>> 12) - (kc_pc() >>> 12);
+    if kc_unres() != 0 {
+        pages = 0;
+    }
+    kq_adr_enc(0x90000000, pages, rd);
+    return v;
+}
+
+// adrp Xd, label: page of the label, +-4 GB
+fn kq_adrp() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(0) != 1 {
+        return kc_bad();
+    }
+    kq_adrp_word(kc_rnum());
+    return 0;
+}
+
+// adrl Xd, label: ADRP Xd, label + ADD Xd, Xd, #(label & 0xFFF) -- any
+// address in the image, always two words
+fn kq_adrl() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(0) != 1 {
+        return kc_bad();
+    }
+    var rd: i64 = kc_rnum();
+    var v: i64 = kq_adrp_word(rd);
+    return kc_emit32(0x91000000 | ((v & 4095) << 10) | (rd << 5) | rd);
+}
+
+// svc #imm16
+fn kq_svc() -> i64 {
+    var v: i64 = kc_imm(0);
+    if kc_evok() == 0 {
+        return kc_bad();
+    }
+    return kc_emit32(0xD4000001 | ((v & 65535) << 5));
+}
+
+// ---- floating point (d = double, s = single) ----------------------------
+
+// fmov: Dd, Dn | Dd, Xn | Xd, Dn | Sd, Sn | Sd, Wn | Wd, Sn
+fn kq_fmov() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var c0: i64 = kc_opreg(0);
+    var rd: i64 = kc_rnum();
+    var c1: i64 = kc_opreg(1);
+    var rn: i64 = kc_rnum();
+    var w: i64 = 0;
+    if c0 == 3 && c1 == 3 {
+        w = 0x1E604000;
+    } else if c0 == 3 && c1 == 1 {
+        w = 0x9E670000;
+    } else if c0 == 1 && c1 == 3 {
+        w = 0x9E660000;
+    } else if c0 == 4 && c1 == 4 {
+        w = 0x1E204000;
+    } else if c0 == 4 && c1 == 2 {
+        w = 0x1E270000;
+    } else if c0 == 2 && c1 == 4 {
+        w = 0x1E260000;
+    } else {
+        return kc_bad();
+    }
+    return kc_rrr(w, rd, rn, 0);
+}
+
+// Fd, Fn, Fm of one class (base for d; s clears bit 22): 1 when written
+fn kq_fop3(base: i64) -> i64 {
+    if kc_need(3) == 0 {
+        return 0;
+    }
+    var w: i64 = base;
+    var c: i64 = kc_opreg(0);
+    if c == 4 {
+        w = w & 0xFFBFFFFF;
+    } else if c != 3 {
+        return 0;
+    }
+    var rd: i64 = kc_rnum();
+    if kc_opreg(1) != c {
+        return 0;
+    }
+    var rn: i64 = kc_rnum();
+    if kc_opreg(2) != c {
+        return 0;
+    }
+    kc_rrr(w, rd, rn, kc_rnum());
+    return 1;
+}
+
+// fadd fsub fmul fdiv: scalar d or s, or vN.2d / vN.4s (the .2d word with
+// sz, bit 22, clear)
+fn kq_f3(scalar: i64, vector: i64) -> i64 {
+    var c: i64 = kc_opreg(0);
+    var ok: i64 = 0;
+    if c == 9 {
+        ok = ko_vec3(vector & 0xFFBFFFFF, 9);
+    } else if c == 8 {
+        ok = ko_vec3(vector, 8);
+    } else {
+        ok = kq_fop3(scalar);
+    }
+    if ok == 0 {
+        return kc_bad();
+    }
+    return 0;
+}
+
+// one source: fsqrt / fneg / fabs Fd, Fn
+fn kq_f2(base: i64) -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var w: i64 = base;
+    var c: i64 = kc_opreg(0);
+    var rd: i64 = kc_rnum();
+    if c == 4 {
+        w = w & 0xFFBFFFFF;
+    } else if c != 3 {
+        return kc_bad();
+    }
+    if kc_opreg(1) != c {
+        return kc_bad();
+    }
+    return kc_rrr(w, rd, kc_rnum(), 0);
+}
+
+// fcmp Fn, Fm | Fn, #0.0
+fn kq_fcmp() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var w: i64 = 0x1E602000;
+    var c: i64 = kc_opreg(0);
+    if c == 4 {
+        w = w & 0xFFBFFFFF;
+    } else if c != 3 {
+        return kc_bad();
+    }
+    var rn: i64 = kc_rnum();
+    var c1: i64 = kc_opreg(1);
+    if c1 == 0 {
+        // '#0.0' or '#0'
+        return kc_rrr(w | 8, 0, rn, 0);
+    }
+    if c1 != c {
+        return kc_bad();
+    }
+    return kc_rrr(w, 0, rn, kc_rnum());
+}
+
+// conversions between integer and real registers:
+//   scvtf/ucvtf Fd, Rn (to_real = 1)   fcvtzs/fcvtzu/fcvtns Rd, Fn
+fn kq_cvt(base: i64, to_real: i64) -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var c0: i64 = kc_opreg(0);
+    var rd: i64 = kc_rnum();
+    var c1: i64 = kc_opreg(1);
+    var rn: i64 = kc_rnum();
+    var real: i64 = c1;
+    var int: i64 = c0;
+    if to_real != 0 {
+        real = c0;
+        int = c1;
+    }
+    var w: i64 = base;
+    if real == 3 {
+        w = w | 0x00400000;
+    } else if real != 4 {
+        return kc_bad();
+    }
+    if int == 1 {
+        w = w | 0x80000000;
+    } else if int != 2 {
+        return kc_bad();
+    }
+    return kc_rrr(w, rd, rn, 0);
+}
+
+// fcvt Dd, Sn | Sd, Dn
+fn kq_fcvt() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    var c0: i64 = kc_opreg(0);
+    var rd: i64 = kc_rnum();
+    var c1: i64 = kc_opreg(1);
+    var rn: i64 = kc_rnum();
+    if c0 == 3 {
+        if c1 != 4 {
+            return kc_bad();
+        }
+        return kc_rrr(0x1E22C000, rd, rn, 0);
+    }
+    if c0 != 4 || c1 != 3 {
+        return kc_bad();
+    }
+    return kc_rrr(0x1E624000, rd, rn, 0);
+}
+
+// prfm pldl1keep, [Xn]: a hint to bring the line into the first-level cache
+fn kq_prfm() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    if kc_streq(kc_op(0), "pldl1keep") == 0 {
+        return kc_bad();
+    }
+    var t: i64 = kc_op(1);
+    if kq_g8(t) != 91 {
+        return kc_bad();
+    }
+    if kc_mem(t) == 0 || kc_mkind() != 0 {
+        return kc_bad();
+    }
+    if kc_mimm() != 0 {
+        return kc_range();
+    }
+    return kc_emit32(0xF9800000 | ((kc_mbase() & 31) << 5));
+}
+
+// dc civac, Xn: clean and invalidate the cache line holding the address
+fn kq_dc() -> i64 {
+    if kc_need(2) == 0 {
+        return kc_bad();
+    }
+    if kc_streq(kc_op(0), "civac") == 0 {
+        return kc_bad();
+    }
+    if kc_opreg(1) != 1 {
+        return kc_bad();
+    }
+    return kc_emit32(0xD50B7E20 | (kc_rnum() & 31));
+}

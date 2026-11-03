@@ -54,6 +54,18 @@ call :part xarm.kr
 if errorlevel 1 exit /b 1
 call :part xwasm.kr
 if errorlevel 1 exit /b 1
+call :part karm_core.kr
+if errorlevel 1 exit /b 1
+call :part karm_alu.kr
+if errorlevel 1 exit /b 1
+call :part karm_mem.kr
+if errorlevel 1 exit /b 1
+call :part main_pp.kr
+if errorlevel 1 exit /b 1
+call :part main_io.kr
+if errorlevel 1 exit /b 1
+call :part main_cli.kr
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :part

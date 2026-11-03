@@ -1095,8 +1095,57 @@ replaces, checked file by file before it is delivered.
   `xwasm_translate` and the error getters. The same .wasm, page and host
   for every program of the suite built for the web, and the same ARM64
   text as before for Linux ARM64 and macOS, libraries included.
-- Still in assembly: karm (5,290 lines), main (4,444 less what has left
-  it), the runtime and the linker, and the doors.
+- Piece 9, karm (02-11-2026): the ARM64 assembler in Kron, in three parts
+  of one design: `karm_core.kr` (the two passes, lines, labels and their
+  hash, expressions, registers, memory operands, emission, the
+  directives, the wide immediates), `karm_alu.kr` (mov, add and sub, the
+  logical forms and their bit masks, shifts, selects, extensions) and
+  `karm_mem.kr` (loads and stores, pairs, exclusives, branches,
+  adr/adrp/adrl, reals). `karm.asm` is a door of about 150 lines: the
+  karm_ names main and the ELF and Mach-O writers call. The same bytes as
+  before for every program of the suite built for Linux ARM64 and for
+  macOS, for the libraries for Linux, macOS and iOS, for arm_check,
+  arm_hello and arm_corpus (still the GNU assembler's bytes), and the same
+  errors for arm_bad.
+- Piece 10, main, goes in parts, each checked and delivered alone: 10a
+  the assembly preprocessor, 10b the imports and the files, 10c the
+  command line and the output names, 10d the driver; what stays in
+  assembly at the end is the entry point and the calls into Windows.
+- Piece 10a (02-11-2026): `main_pp.kr`, the preprocessor kasm, xarm and
+  xwasm read through (`%include`, `%define`, `%macro`), what was
+  `asm_preprocess` in main.asm. main.asm keeps `asm_preprocess` as its
+  door, `read_file`, and the two buffers an included file is read into
+  (`pp_buffer`). The compiler the old preprocessor builds from
+  kron_all.asm and the one the new preprocessor builds are the same file,
+  byte for byte, and so is every program of the suite for Windows, Linux,
+  Linux ARM64, macOS, the web and KRN.
+- Piece 10b (02-11-2026): `main_io.kr`, what main does with files and
+  messages besides the calls into Windows: `imp_read` (a module's bytes for
+  the import pass, next to the program first, each in its own place of a
+  64 MB pool, which moved from main.asm into the module), `imp_have`, the
+  line map (`lmap_lookup`), the source line with its carets under an error
+  (`print_error_line`) and `print_u64`. main.asm keeps their doors, with the
+  registers its callers use; the calls into Windows (`read_file`,
+  `write_file`, `print_string`, and `print_bytes`, new: a run of bytes to the
+  console); and, through getters, the buffers parser.asm and main still
+  read (the program's name, the expanded text, the line map). The same
+  output and the same exit code as before for every program of the suite on
+  every target, and the same messages for the 44 programs that must be
+  refused.
+- Piece 10c (03-11-2026): `main_cli.kr`, the command line and the output
+  names: the input and the options after it (-o, -S, --check, --debug,
+  --window, --lib, --module), --target= and --bare, the flags looked for
+  anywhere (--dump, --assemble, --pe, and --jpx, the old name --krn still
+  answers to), the names of the output and of the .asm, a module's tag.
+  main.asm keeps their doors, the buffers and flags the rest of main reads
+  (one table of their addresses, `mn_addr`), and the call into Windows
+  that gives the command line (`os_cmdline`). The same files, output and
+  exit code as before for 47 command lines (quotes, folders with spaces,
+  several dots, no extension, tabs, every target, the flags and their
+  near misses, none at all), and for every program of the suite on every
+  target.
+- Still in assembly: the rest of main (2,868 lines), the runtime and the
+  linker, and the doors.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 
