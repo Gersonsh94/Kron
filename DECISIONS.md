@@ -1144,8 +1144,23 @@ replaces, checked file by file before it is delivered.
   several dots, no extension, tabs, every target, the flags and their
   near misses, none at all), and for every program of the suite on every
   target.
-- Still in assembly: the rest of main (2,868 lines), the runtime and the
-  linker, and the doors.
+- Piece 10d, the driver, goes in parts too. 10d-1 (03-11-2026):
+  `main_drv.kr` has what main does before the output -- the command line
+  checked (`md_start`: the target, --lib, --debug, --module, --assemble)
+  and the phases (`md_phases`: the file and its imports, --dump, the lexer,
+  the parser and the library checks, the semantic pass, the code
+  generator, --check) -- with every error report: file, line and column,
+  the message, the name, the line and its carets, the hint, the exit code.
+  It calls the Kron functions behind the lexer's, the parser's, the
+  semantic pass's and the code generator's doors directly. Its messages are
+  Kron texts, made from main.asm's db lines byte for byte. main.asm calls
+  the two and keeps the rest of main, the buffers (mn_addr) and the calls
+  into Windows. The same output and exit codes as before for 49 command
+  lines, for every program of the suite on every target, for the 44
+  programs that must be refused and for errors of the lexer, the parser,
+  the imports, the library checks and the code generator made on purpose.
+- Still in assembly: the rest of main (2,177 lines: the outputs and
+  --assemble), the runtime and the linker, and the doors.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 

@@ -40,6 +40,8 @@ global write_file, read_file, pp_buffer, print_string, print_bytes
 global mn_arg_input, mn_exp_buffer, mn_lmap_count, mn_lmap, mn_addr, os_cmdline
 extern mc_scan_flag, mc_build_bin_name, mc_module_tag, mc_build_asm_name
 extern mc_scan_target, mc_parse_command_line
+extern md_start, md_phases
+global expand_imports, ew_set_layout
 extern mi_print_error_line, mi_print_u64, mi_lmap_lookup, mi_lmap_line
 extern mi_imp_have, mi_reset_pool
 extern mp_preprocess
@@ -316,6 +318,29 @@ section .bss
     hStdOut      resq 1
 
 section .text
+
+; a call into main_drv.kr from main: the registers main keeps saved, the
+; stack aligned (main's own frame leaves it at 16)
+%macro MD_CALL 1
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 40
+    call %1
+    add  rsp, 40
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbx
+%endmacro
+
 global main
 global print_string
 global lmap_lookup
@@ -336,487 +361,18 @@ main:
     lea  rcx, [rel banner]
     call print_string
     
-    ; GoLink enters directly with no CRT: there is no argc/argv.
-    ; Get and parse Windows' real command line.
-    sub  rsp, 32
-    call GetCommandLineA
-    add  rsp, 32
-    mov  rcx, rax
-    push rax
-    call parse_command_line
-    test rax, rax
-    pop  rcx
-    jz   .error_args
-    ; pick the output target from the command line (rcx = the line). It
-    ; comes first because --assemble needs it too: ARM64 goes to karm.
-    call scan_target
-    cmp  al, 255
-    je   .error_target
-    mov  [rel out_target], al
-    ; ARM64 generates the Linux program, which xarm then lowers to ARM64;
-    ; the web generates it too, and xwasm lowers it to WebAssembly
-    mov  dil, al
-    cmp  dil, TARGET_WEB
-    je   .cg_linux
-    cmp  dil, TARGET_MACOS
-    je   .cg_linux
-    cmp  dil, TARGET_ARM64
-    jne  .cg_target
-.cg_linux:
-    mov  dil, TARGET_ELF
-    jmp  .cg_target
-.cg_target:
-    call jup_codegen_set_target
-    ; --lib: a library, for a system that loads them
-    mov  dil, [rel arg_flag_lib]
-    call jup_codegen_set_lib
-    cmp  byte [rel arg_flag_lib], 0
-    jne  .lib_check
-    mov  al, [rel out_android]
-    or   al, [rel out_ios]
-    jz   .lib_ok
-    lea  rcx, [rel msg_lib_only]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-.lib_check:
-    mov  al, [rel out_target]
-    cmp  al, TARGET_PE
-    je   .lib_ok
-    cmp  al, TARGET_ELF
-    je   .lib_ok
-    cmp  al, TARGET_ARM64
-    je   .lib_ok
-    cmp  al, TARGET_MACOS
-    je   .lib_ok
-    lea  rcx, [rel msg_lib_target]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-.lib_ok:
-    ; --debug: the hooks are x86-64 code calling the debugger's module
-    mov  al, [rel arg_flag_debug]
-    mov  [rel cg_debug], al
-    test al, al
-    jz   .debug_ok
-    mov  al, [rel out_target]
-    cmp  al, TARGET_PE
-    je   .debug_ok
-    cmp  al, TARGET_ELF
-    je   .debug_ok
-    lea  rcx, [rel msg_debug_target]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-.debug_ok:
-    ; --module: a part of the compiler written in Kron. Its functions become
-    ; x86-64 text that kron_all.asm includes, so the compiler is still built
-    ; by kasm alone; nothing of a program goes with them.
-    cmp  byte [rel arg_flag_module], 0
-    je   .module_ok
-    mov  al, [rel out_target]
-    cmp  al, TARGET_PE
-    jne  .module_bad
-    mov  al, [rel arg_flag_lib]
-    or   al, [rel arg_flag_debug]
-    jnz  .module_bad
-    mov  byte [rel arg_flag_S], 1
-    mov  byte [rel cg_as_module], 1
-    call module_tag
-    jmp  .module_ok
-.module_bad:
-    lea  rcx, [rel msg_module_target]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-.module_ok:
-
-    ; --assemble : run only the assembler over an existing .asm file
-    call scan_assemble_flag
-    test al, al
-    jnz  .assemble_only
-
-
-    ; [PHASE 1] Read the file
-    lea  rcx, [rel msg_read]
-    call print_string
-    
-    lea  rcx, [rel arg_input]
-    lea  rdx, [rel src_buffer]
-    mov  r8, SRC_BUFFER_SIZE
-    call read_file
-    
-    mov  [rel src_size], rax
-    test rax, rax
-    jz   .error_read
-    cmp  rax, SRC_BUFFER_SIZE       ; read_file stops at the buffer: a file this long was cut
-    jae  .error_long
-    
-    ; expand  acquire_domain "file.jup";  directives into exp_buffer
-    sub  rsp, 32
-    lea  rcx, [rel src_buffer]
-    mov  rdx, [rel src_size]
-    lea  r8,  [rel exp_buffer]
-    call expand_imports          ; -> rax = expanded length, or -1
-    add  rsp, 32
+    ; the command line, then the phases: main_drv.kr. md_start answers -1
+    ; to go on, -2 for --assemble, or the exit code; md_phases -1 to go on
+    ; to the output, or the exit code. Everything main keeps in registers
+    ; is saved across them.
+    MD_CALL md_start
+    cmp  rax, -2
+    je   .assemble_only
     cmp  rax, -1
-    je   .error_import
-    mov  [rel src_size], rax
-
-    ; --dump: write the expanded text out before anything else touches it
-    call scan_dump_flag
-    test al, al
-    jz   .no_dump
-    ; build '<input>.expanded'
-    lea  rdi, [rel dump_name]
-    lea  rsi, [rel arg_input]
-.dcp:
-    mov  al, [rsi]
-    test al, al
-    jz   .dcp_end
-    mov  [rdi], al
-    inc  rsi
-    inc  rdi
-    jmp  .dcp
-.dcp_end:
-    lea  rsi, [rel dump_suffix]
-.dsf:
-    mov  al, [rsi]
-    mov  [rdi], al
-    test al, al
-    jz   .dsf_end
-    inc  rsi
-    inc  rdi
-    jmp  .dsf
-.dsf_end:
-    push r12
-    sub  rsp, 32
-    lea  rcx, [rel dump_name]
-    lea  rdx, [rel exp_buffer]
-    mov  r8, [rel src_size]
-    call write_file
-    add  rsp, 32
-    pop  r12
-    lea  rcx, [rel msg_dumped]
-    call print_string
-    lea  rcx, [rel dump_name]
-    call print_string
-    lea  rcx, [rel msg_nl]
-    call print_string
-.no_dump:
-
-    lea  rcx, [rel msg_ok]
-    call print_string
-    
-    ; [PHASE 2] LEXER
-    lea  rcx, [rel msg_lex]
-    call print_string
-    
-    sub  rsp, 32
-    lea  rcx, [rel exp_buffer]
-    mov  rdx, [rel src_size]
-    lea  r8,  [rel token_buffer]
-    lea  r9,  [rel token_count]
-    call jup_lexer_init
-    add  rsp, 32
-    
-    sub  rsp, 32
-    call jup_lexer_run
-    add  rsp, 32
-    test rax, rax
-    jle  .error_lex
-    
-    lea  rcx, [rel msg_ok]
-    call print_string
-    
-    ; [PHASE 3] PARSER
-    lea  rcx, [rel msg_parse]
-    call print_string
-
-    ; The parser's own internal ABI: rdi, rsi, rdx, rcx.
-    lea  rdi, [rel token_buffer]
-    mov  rsi, [rel token_count]
-    lea  rdx, [rel ast_buffer]
-    mov  rcx, AST_BUFFER_SIZE
-    call jup_parser_init
-    
-    sub  rsp, 32
-    call jup_parser_run
-    add  rsp, 32
-    test rax, rax
-    jz   .error_parse
-
-    ; v[i] on a slice became a call to slice_get / slice_set, which live in
-    ; std_arena.kr. Without that import kasm would not notice the missing
-    ; function -- it does not check undefined symbols -- so say it here.
-    cmp  dword [rel __g_parser_par_used_slice], 0
-    je   .slice_ok
-    xor  ebx, ebx
-.slice_imp:
-    cmp  ebx, [rel imp_count]
-    jae  .error_slice
-    mov  eax, ebx
-    shl  rax, 8
-    lea  rsi, [rel imp_names]
-    add  rsi, rax
-    lea  rdi, [rel s_std_arena]
-    call imp_streq
-    test eax, eax
-    jnz  .slice_ok
-    inc  ebx
-    jmp  .slice_imp
-.slice_ok:
-    ; the built-in types text, list<T> and map<T> are handles of the library
-    cmp  dword [rel __g_parser_par_used_text], 0
-    je   .text_ok
-    lea  rdi, [rel s_std_text]
-    call imp_have
-    test eax, eax
-    jnz  .text_ok
-    lea  rcx, [rel msg_text_imp]
-    jmp  .error_type_imp
-.text_ok:
-    cmp  dword [rel __g_parser_par_used_list], 0
-    je   .list_ok
-    lea  rdi, [rel s_std_list]
-    call imp_have
-    test eax, eax
-    jnz  .list_ok
-    lea  rcx, [rel msg_list_imp]
-    jmp  .error_type_imp
-.list_ok:
-    cmp  dword [rel __g_parser_par_used_map], 0
-    je   .map_ok
-    lea  rdi, [rel s_std_map]
-    call imp_have
-    test eax, eax
-    jnz  .map_ok
-    lea  rcx, [rel msg_map_imp]
-    jmp  .error_type_imp
-.map_ok:
-    
-    lea  rcx, [rel msg_ok]
-    call print_string
-
-    ; [PHASE 4] SEMANTIC ANALYSIS (type checking)
-    lea  rcx, [rel msg_sem]
-    call print_string
-    ; init with a dedicated arena buffer (rdi=buffer, rsi=size)
-    lea  rcx, [rel sym_buffer]
-    mov  rdx, SYM_BUFFER_SIZE
-    mov  rdi, rcx
-    mov  rsi, rdx
-    sub  rsp, 32
-    call jup_semantic_init
-    add  rsp, 32
-    call parser_get_ast_root
-    mov  rdi, rax
-    sub  rsp, 32
-    call jup_semantic_run
-    add  rsp, 32
-    test rax, rax
-    jz   .sem_ok
-    ; semantic error: report the line and abort
-    lea  rcx, [rel msg_newline]
-    call print_string
-    call jup_semantic_error_kind
-    cmp  rax, 1
-    je   .sem_msg_dup
-    cmp  rax, 2
-    je   .sem_msg_zero
-    cmp  rax, 3
-    je   .sem_msg_ovl
-    cmp  rax, 4
-    je   .sem_msg_noarr
-    cmp  rax, 5
-    je   .sem_msg_lval
-    cmp  rax, 6
-    je   .sem_msg_arrsz
-    cmp  rax, 7
-    je   .sem_msg_raw
-    cmp  rax, 9
-    je   .sem_msg_aw
-    lea  rcx, [rel d_sem_undecl]
-    jmp  .sem_msg_go
-.sem_msg_dup:
-    lea  rcx, [rel d_sem_dup]
-    jmp  .sem_msg_go
-.sem_msg_zero:
-    lea  rcx, [rel d_sem_zero]
-    jmp  .sem_msg_go
-.sem_msg_ovl:
-    lea  rcx, [rel d_sem_ovl]
-    jmp  .sem_msg_go
-.sem_msg_noarr:
-    lea  rcx, [rel d_sem_noarr]
-    jmp  .sem_msg_go
-.sem_msg_lval:
-    lea  rcx, [rel d_sem_lval]
-    jmp  .sem_msg_go
-.sem_msg_arrsz:
-    lea  rcx, [rel d_sem_arrsz]
-    jmp  .sem_msg_go
-.sem_msg_raw:
-    lea  rcx, [rel d_sem_raw]
-    jmp  .sem_msg_go
-.sem_msg_aw:
-    lea  rcx, [rel d_sem_aw]
-.sem_msg_go:
-    ; file:line:col: <what went wrong> 'name'
-    ;     <the source line>
-    ;     ^^^^
-    push rcx                         ; the message, printed after the position
-    call jup_semantic_error_line
-    mov  rcx, rax
-    call lmap_lookup
-    push rdx
-    mov  rcx, rax
-    call print_string
-    lea  rcx, [rel d_colon]
-    call print_string
-    pop  rcx
-    call print_u64
-    lea  rcx, [rel d_colon]
-    call print_string
-    call jup_semantic_error_col
-    mov  rcx, rax
-    call print_u64
-    lea  rcx, [rel d_colon2]
-    call print_string
-    pop  rcx
-    call print_string
-    ; the offending name, straight out of the source. Skipped for kind 5,
-    ; where what is wrong is the shape of the target, not a name.
-    call jup_semantic_error_kind
-    cmp  rax, 5
-    je   .sem_noname
-    cmp  rax, 11
-    je   .sem_noname
-    call jup_semantic_error_name
-    test rax, rax
-    jz   .sem_noname
-    test rdx, rdx
-    jz   .sem_noname
-    push rax
-    push rdx
-    lea  rcx, [rel d_quote]
-    call print_string
-    pop  r8
-    pop  rdx
-    sub  rsp, 64
-    mov  rcx, [rel hStdOut]
-    lea  r9, [rsp + 48]
-    mov  qword [rsp + 32], 0
-    call WriteFile
-    add  rsp, 64
-    lea  rcx, [rel d_quote]
-    call print_string
-.sem_noname:
-    lea  rcx, [rel d_nl]
-    call print_string
-    call jup_semantic_error_line
-    push rax
-    call jup_semantic_error_col
-    push rax
-    call jup_semantic_error_len
-    mov  r8, rax
-    pop  rdx
-    pop  rcx
-    call print_error_line
-    ; kind 6 has a fixed hint of its own; the closest-name one does not apply
-    call jup_semantic_error_kind
-    lea  rcx, [rel d_hint_arrsz]
-    cmp  rax, 6
-    je   .sem_fixed_hint
-    lea  rcx, [rel d_hint_raw]
-    cmp  rax, 7
-    je   .sem_fixed_hint
-    lea  rcx, [rel d_hint_aw]
-    cmp  rax, 9
-    je   .sem_fixed_hint
-    mov  rcx, [rel cg_hint_msg]
-    cmp  rax, 10
-    je   .sem_hint10
-    cmp  rax, 11
-    je   .sem_hint10
-    lea  rcx, [rel d_hint_thread]
-    cmp  rax, 8
-    jne  .sem_suggest
-.sem_hint10:
-    test rcx, rcx
-    jz   .sem_nohint
-.sem_fixed_hint:
-    call print_string
-    jmp  .sem_nohint
-.sem_suggest:
-    ; hint: the closest declared name, when one is within a single edit
-    call jup_semantic_suggestion
-    test rax, rax
-    jz   .sem_nohint
-    test rdx, rdx
-    jz   .sem_nohint
-    push rax
-    push rdx
-    lea  rcx, [rel d_hint_pre]
-    call print_string
-    pop  r8
-    pop  rdx
-    sub  rsp, 64
-    mov  rcx, [rel hStdOut]
-    lea  r9, [rsp + 48]
-    mov  qword [rsp + 32], 0
-    call WriteFile
-    add  rsp, 64
-    lea  rcx, [rel d_hint_suf]
-    call print_string
-.sem_nohint:
-    mov  eax, 4
-    pop  rbp
-    ret
-.sem_ok:
-    lea  rcx, [rel msg_ok]
-    call print_string
-
-    ; [PHASE 5] CODEGEN -> real x86-64 assembly
-    lea  rcx, [rel msg_code]
-    call print_string
-
-    lea  rcx, [rel code_buffer]
-    mov  rdx, CODE_BUFFER_SIZE
-    sub  rsp, 32
-    mov  rdi, rcx                 ; internal ABI: rdi=buf, rsi=cap
-    mov  rsi, rdx
-    call jup_codegen_init
-    add  rsp, 32
-
-    call parser_get_ast_root
-    mov  rdi, rax                 ; internal ABI: rdi = ast root
-    sub  rsp, 32
-    call jup_codegen_run
-    add  rsp, 32
-    test rax, rax
-    jle  .error_code                 ; 0 an error, negative an internal one
-    ; extern functions: the executable is linked with the system's loader
-    call codegen_uses_extern
-    mov  [rel out_dynamic], al
-    call ew_set_layout
-
-    lea  rcx, [rel msg_ok]
-    call print_string
-
-    ; --check: everything has been checked, the thread rule included;
-    ; nothing is written
-    cmp  byte [rel arg_flag_check], 0
-    je   .not_check
-    lea  rcx, [rel msg_checked]
-    call print_string
-    xor  eax, eax
-    pop  rbp
-    ret
+    jne  .exit_rax
+    MD_CALL md_phases
+    cmp  rax, -1
+    jne  .exit_rax
 .not_check:
 
     ; [PHASE 6] Write the output
@@ -1596,20 +1152,6 @@ main:
     pop  rbp
     ret
 
-.error_args:
-    lea  rcx, [rel msg_err_args]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-    
-.error_long:
-    lea  rcx, [rel msg_err_long]
-    call print_string
-    mov  eax, 2
-    pop  rbp
-    ret
-
 .error_read:
     lea  rcx, [rel msg_err_read]
     call print_string
@@ -1617,244 +1159,7 @@ main:
     pop  rbp
     ret
 
-.error_slice:
-    lea  rcx, [rel msg_slice_imp]
-.error_type_imp:
-    call print_string
-    mov  eax, 2
-    pop  rbp
-    ret
-
-.error_import:
-    ; an import that cannot be resolved stops the compile here, by name. It
-    ; used to be skipped without a word, and the program then failed further
-    ; on with an error that pointed nowhere near the cause.
-    lea  rcx, [rel msg_imp_pre]
-    call print_string
-    mov  eax, [rel imp_err]
-    lea  rcx, [rel msg_imp_open]
-    cmp  eax, 2
-    jne  .ei_n3
-    lea  rcx, [rel msg_imp_deep]
-    jmp  .ei_say
-.ei_n3:
-    cmp  eax, 3
-    jne  .ei_n4
-    lea  rcx, [rel msg_imp_many]
-    jmp  .ei_say
-.ei_n4:
-    cmp  eax, 4
-    jne  .ei_n5
-    lea  rcx, [rel msg_imp_lines]
-    jmp  .ei_say
-.ei_n5:
-    cmp  eax, 5
-    jne  .ei_n6
-    lea  rcx, [rel msg_imp_size]
-    jmp  .ei_say
-.ei_n6:
-    cmp  eax, 6
-    jne  .ei_say
-    lea  rcx, [rel msg_imp_pool]
-.ei_say:
-    call print_string
-    lea  rcx, [rel imp_errname]
-    call print_string
-    lea  rcx, [rel msg_imp_post]
-    call print_string
-    mov  eax, [rel imp_err]
-    lea  rcx, [rel msg_imp_hint1]
-    cmp  eax, 1
-    je   .ei_hint
-    lea  rcx, [rel msg_imp_hint2]
-.ei_hint:
-    call print_string
-    mov  eax, 2
-    pop  rbp
-    ret
-    
-.error_target:
-    lea  rcx, [rel msg_err_target]
-    call print_string
-    mov  eax, 1
-    pop  rbp
-    ret
-
-.error_lex:
-    ; where the lexer stopped, reported like the errors after it: the file,
-    ; line and column, the line itself, and the characters marked
-    call lexer_error_kind
-    cmp  rax, 1
-    je   .lex_char
-    cmp  rax, 2
-    je   .lex_text
-    lea  rcx, [rel msg_newline]
-    call print_string
-    lea  rcx, [rel msg_err_lex]
-    call print_string
-    mov  eax, 3
-    pop  rbp
-    ret
-.lex_char:
-    lea  rax, [rel d_hint_lexchar]
-    mov  [rel cg_hint_msg], rax
-    call lexer_error_token
-    mov  rcx, rax
-    mov  rdx, 10                     ; the character itself, then the hint
-    call jup_semantic_set_error
-    lea  rcx, [rel msg_newline]
-    call print_string
-    lea  rcx, [rel d_lex_char]
-    jmp  .sem_msg_go
-.lex_text:
-    lea  rax, [rel d_hint_lextext]
-    mov  [rel cg_hint_msg], rax
-    call lexer_error_token
-    mov  rcx, rax
-    mov  rdx, 11                     ; no name to show, a hint of its own
-    call jup_semantic_set_error
-    lea  rcx, [rel msg_newline]
-    call print_string
-    lea  rcx, [rel d_lex_text]
-    jmp  .sem_msg_go
-    
-.error_parse:
-    ; file:line:col: unexpected <token>
-    ;     <the source line>
-    ;     ^^^^
-    call parser_get_error_line
-    mov  rcx, rax
-    call lmap_lookup             ; rax = real file, rdx = real line
-    push rdx
-    mov  rcx, rax
-    call print_string
-    lea  rcx, [rel d_colon]
-    call print_string
-    pop  rcx
-    call print_u64
-    lea  rcx, [rel d_colon]
-    call print_string
-    call parser_get_error_col
-    mov  rcx, rax
-    call print_u64
-    ; a message of its own takes precedence over "expected X, found Y"
-    call parser_get_custom_msg
-    test rax, rax
-    jz   .diag_generic
-    push rax
-    lea  rcx, [rel d_colon2]
-    call print_string
-    pop  rcx
-    call print_string
-    lea  rcx, [rel d_nl]
-    call print_string
-    jmp  .diag_caret
-.diag_generic:
-    ; "expected <what>, found <what>" when the parser knows what it wanted
-    call parser_get_expected
-    test rax, rax
-    jz   .diag_nowant
-    push rax
-    lea  rcx, [rel d_expected]
-    call print_string
-    pop  rdi
-    sub  rsp, 32
-    call token_name
-    add  rsp, 32
-    mov  rcx, rax
-    call print_string
-    lea  rcx, [rel d_found]
-    call print_string
-    jmp  .diag_what
-.diag_nowant:
-    lea  rcx, [rel d_unexpected]
-    call print_string
-.diag_what:
-    call parser_get_error_token
-    mov  rdi, rax
-    sub  rsp, 32
-    call token_name
-    add  rsp, 32
-    mov  rcx, rax
-    call print_string
-    lea  rcx, [rel d_nl]
-    call print_string
-.diag_caret:
-    call parser_get_error_line
-    push rax
-    call parser_get_error_col
-    push rax
-    call parser_get_error_len
-    mov  r8, rax
-    pop  rdx
-    pop  rcx
-    call print_error_line
-    mov  eax, 4
-    pop  rbp
-    ret
-
-.error_code:
-    ; a type error codegen found (print of a list without std_text...):
-    ; with its position when it has one, and its hint
-    call cg_type_error
-    test rax, rax
-    jz   .error_code_thr
-    mov  [rel cg_hint_msg], r8
-    test rdx, rdx
-    jz   .error_code_nopos
-    push rax
-    mov  rcx, rdx
-    mov  rdx, 10
-    call jup_semantic_set_error
-    lea  rcx, [rel msg_newline]
-    call print_string
-    pop  rcx
-    jmp  .sem_msg_go
-.error_code_nopos:
-    push rax
-    lea  rcx, [rel msg_newline]
-    call print_string
-    lea  rcx, [rel d_error_pre]
-    call print_string
-    pop  rcx
-    call print_string
-    lea  rcx, [rel d_nl]
-    call print_string
-    mov  rcx, [rel cg_hint_msg]
-    test rcx, rcx
-    jz   .error_code_nohint
-    call print_string
-.error_code_nohint:
-    mov  eax, 5
-    pop  rbp
-    ret
-.error_code_thr:
-    ; the thread check: a non-shared global in code that runs in a thread.
-    ; Reported like a semantic error, with its position and source line.
-    call cg_thread_error_tok
-    test rax, rax
-    jz   .error_code_plain
-    mov  rcx, rax
-    mov  rdx, 8
-    call jup_semantic_set_error
-    lea  rcx, [rel msg_newline]
-    call print_string
-    lea  rcx, [rel d_sem_thread]
-    jmp  .sem_msg_go
-.error_code_plain:
-    cmp  byte [rel dbg_which], 1
-    jne  .error_code_other
-    lea  rcx, [rel msg_err_codebig]
-    call print_string
-    mov  eax, 5
-    pop  rbp
-    ret
-.error_code_other:
-    lea  rcx, [rel msg_err_code]
-    call print_string
-    movzx rcx, byte [rel dbg_which]
-    call print_u64
-    mov  eax, 5
+.exit_rax:
     pop  rbp
     ret
 
@@ -2864,5 +2169,9 @@ mn_addr_table:
     dq arg_input, arg_output, arg_flag_S, arg_flag_check, arg_flag_debug
     dq arg_flag_window, arg_flag_lib, arg_flag_module, out_android, out_ios
     dq out_bin_name, out_asm_name, bin_ext_ptr, bin_ext, asm_ext, mod_ext
-    dq cg_mod_tag
+    dq cg_mod_tag, out_target, src_buffer, src_size, exp_buffer
+    dq token_buffer, token_count, ast_buffer, sym_buffer, code_buffer
+    dq cg_debug, cg_as_module, dbg_which, out_dynamic, imp_err, imp_errname
+    dq lmap_count, __g_parser_par_used_slice, __g_parser_par_used_text
+    dq __g_parser_par_used_list, __g_parser_par_used_map
 section .text

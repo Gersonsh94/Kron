@@ -1,0 +1,553 @@
+kron_program
+kron_domain main_drv;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE DRIVER: what kronc does with a program, phase by phase
+//
+//   md_start()    the command line read and checked: -1 to go on, -2 for
+//                 --assemble, or the exit code
+//   md_phases()   [1/6] reading and the imports, [2/6] the lexer, [3/6] the
+//                 parser, [4/6] the semantic pass, [5/6] the code
+//                 generator, --check: -1 to go on to the output, or the
+//                 exit code; every error reported with its file, line,
+//                 column, the line itself and its carets
+//
+// It was main in main.asm, and it is coming here part by part (10d): the
+// same messages, the same exit codes. main.asm keeps main's entry, the
+// outputs not moved yet, the buffers (reached through mn_addr) and the
+// calls into Windows.
+// =========================================================================
+
+extern "kronc" {
+    fn os_cmdline() -> i64;
+    fn mn_addr(k: i64) -> i64;
+    fn mn_lmap(k: i64) -> i64;
+    fn print_string(s: i64) -> i64;
+    fn print_bytes(s: i64, n: i64) -> i64;
+    fn read_file(name: i64, buf: i64, cap: i64) -> i64;
+    fn write_file(name: i64, buf: i64, len: i64) -> i64;
+    fn expand_imports(src: i64, len: i64, out: i64) -> i64;
+    fn ew_set_layout() -> i64;
+    // main_cli.kr, main_io.kr
+    fn mc_parse_command_line(cmd: i64) -> i64;
+    fn mc_scan_target(cmd: i64) -> i64;
+    fn mc_scan_flag(k: i64) -> i64;
+    fn mc_module_tag() -> i64;
+    fn mi_print_error_line(line: i64, col: i64, len: i64) -> i64;
+    fn mi_print_u64(v: i64) -> i64;
+    fn mi_lmap_lookup(line: i64) -> i64;
+    fn mi_lmap_line() -> i64;
+    fn mi_imp_have(name: i64) -> i64;
+    // the lexer, the parser, the semantic pass, the code generator
+    fn klx_init(src: i64, len: i64, buf: i64, count_ptr: i64, cap: i64) -> i64;
+    fn klx_run() -> i64;
+    fn klx_error_kind() -> i64;
+    fn klx_error_token() -> i64;
+    fn prs_env(name: i64, src: i64, lm_out: i64, lm_file: i64, lm_count: i64) -> i64;
+    fn prs_init(toks: i64, count: i64, ast: i64, cap: i64) -> i64;
+    fn prs_run() -> i64;
+    fn prs_ast_root() -> i64;
+    fn prs_error_token() -> i64;
+    fn prs_error_line() -> i64;
+    fn prs_error_col() -> i64;
+    fn prs_error_len() -> i64;
+    fn prs_expected() -> i64;
+    fn prs_custom_msg() -> i64;
+    fn prs_token_name(t: i64) -> i64;
+    fn sem_init(buf: i64, size: i64) -> i64;
+    fn sem_run(ast: i64) -> i64;
+    fn sem_set_error(tok: i64, kind: i64) -> i64;
+    fn sem_kind() -> i64;
+    fn sem_line() -> i64;
+    fn sem_col() -> i64;
+    fn sem_len() -> i64;
+    fn sem_name() -> i64;
+    fn sem_suggest_name() -> i64;
+    fn sem_suggest_len() -> i64;
+    fn cgk_init(buf: i64, cap: i64) -> i64;
+    fn cgk_set_target(t: i64) -> i64;
+    fn cgk_set_lib(l: i64) -> i64;
+    fn cgk_flags(dbg: i64, mdl: i64) -> i64;
+    fn cgk_run(ast: i64) -> i64;
+    fn cgk_dbg_which() -> i64;
+    fn cgk_uses_extern() -> i64;
+    fn cgk_thread_tok() -> i64;
+    fn cgk_err_tok() -> i64;
+    fn cgk_err_hint() -> i64;
+    fn cgk_err_msg() -> i64;
+}
+
+// what mn_addr gives (main_cli.kr has 0..16)
+const A_INPUT: i64 = 0;
+const A_FLAG_S: i64 = 2;
+const A_FLAG_CHECK: i64 = 3;
+const A_FLAG_DEBUG: i64 = 4;
+const A_FLAG_LIB: i64 = 6;
+const A_FLAG_MODULE: i64 = 7;
+const A_ANDROID: i64 = 8;
+const A_IOS: i64 = 9;
+const A_MOD_TAG: i64 = 16;
+const A_OUT_TARGET: i64 = 17;         // a byte
+const A_SRC_BUFFER: i64 = 18;
+const A_SRC_SIZE: i64 = 19;           // a qword
+const A_EXP_BUFFER: i64 = 20;
+const A_TOKEN_BUFFER: i64 = 21;
+const A_TOKEN_COUNT: i64 = 22;        // a qword
+const A_AST_BUFFER: i64 = 23;
+const A_SYM_BUFFER: i64 = 24;
+const A_CODE_BUFFER: i64 = 25;
+const A_CG_DEBUG: i64 = 26;           // codegen.asm's bytes
+const A_CG_AS_MODULE: i64 = 27;
+const A_DBG_WHICH: i64 = 28;
+const A_OUT_DYNAMIC: i64 = 29;        // a byte
+const A_IMP_ERR: i64 = 30;            // a dword
+const A_IMP_ERRNAME: i64 = 31;
+const A_LMAP_COUNT: i64 = 32;
+const A_USED_SLICE: i64 = 33;         // the parser's dwords
+const A_USED_TEXT: i64 = 34;
+const A_USED_LIST: i64 = 35;
+const A_USED_MAP: i64 = 36;
+
+const T_PE: i64 = 0;
+const T_ELF: i64 = 1;
+const T_ARM64: i64 = 4;
+const T_WEB: i64 = 5;
+const T_MACOS: i64 = 6;
+
+const SRC_BUFFER_SIZE: i64 = 16777216;
+const TOKEN_BUFFER_SIZE: i64 = 67108864;
+const TOKEN_SIZE: i64 = 24;
+const AST_BUFFER_SIZE: i64 = 268435456;
+const SYM_BUFFER_SIZE: i64 = 4194304;
+const CODE_BUFFER_SIZE: i64 = 16777216;
+
+var md_hint: i64;                     // the hint of a codegen or lexer error
+var md_dump_name: [u8; 528];          // '<input>.expanded'
+
+fn md_g8(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek8(a);
+    }
+    return r;
+}
+
+fn md_p8(a: i64, v: i64) -> i64 {
+    raw {
+        poke8(a, v);
+    }
+    return 0;
+}
+
+fn md_g32(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek32(a);
+    }
+    return r & 4294967295;
+}
+
+fn md_g64(a: i64) -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn md_p64(a: i64, v: i64) -> i64 {
+    raw {
+        poke(a, v);
+    }
+    return 0;
+}
+
+fn md_flag(k: i64) -> i64 {
+    return md_g8(mn_addr(k));
+}
+
+fn md_say(s: i64) -> i64 {
+    return print_string(s);
+}
+
+// ---- the command line ---------------------------------------------------
+
+fn md_start() -> i64 {
+    var cmd: i64 = os_cmdline();
+    if mc_parse_command_line(cmd) == 0 {
+        md_say("ERROR: usage: kronc.exe file.kr [-o output] [-S] [--check] [--debug]\r\n");
+        return 1;
+    }
+    // the output target; it comes first because --assemble needs it too:
+    // ARM64 goes to karm
+    var t: i64 = mc_scan_target(cmd);
+    if t == 255 {
+        md_say("ERROR: unknown target\r\n  hint: use --target=windows, --target=linux, --target=linux-arm64, --target=web, --target=krn or --target=bare\r\n");
+        return 1;
+    }
+    md_p8(mn_addr(A_OUT_TARGET), t);
+    // ARM64 and macOS generate the Linux program, which xarm then lowers to
+    // ARM64; the web generates it too, and xwasm lowers it to WebAssembly
+    var cg: i64 = t;
+    if t == T_WEB || t == T_MACOS || t == T_ARM64 {
+        cg = T_ELF;
+    }
+    cgk_set_target(cg);
+    // --lib: a library, for a system that loads them
+    var lib: i64 = md_flag(A_FLAG_LIB);
+    cgk_set_lib(lib);
+    if lib == 0 {
+        if md_flag(A_ANDROID) != 0 || md_flag(A_IOS) != 0 {
+            md_say("ERROR: Android and iOS run Kron inside an app: build a library with --lib (see templates/)\r\n");
+            return 1;
+        }
+    } else if t != T_PE && t != T_ELF && t != T_ARM64 && t != T_MACOS {
+        md_say("ERROR: --lib makes a library for windows, linux, linux-arm64 or macos\r\n");
+        return 1;
+    }
+    // --debug: the hooks are x86-64 code calling the debugger's module
+    var dbg: i64 = md_flag(A_FLAG_DEBUG);
+    md_p8(mn_addr(A_CG_DEBUG), dbg);
+    if dbg != 0 && t != T_PE && t != T_ELF {
+        md_say("ERROR: --debug builds for windows and linux (x86-64); build there to debug, then for the other systems\r\n");
+        return 1;
+    }
+    // --module: a part of the compiler written in Kron. Its functions
+    // become x86-64 text that kron_all.asm includes, so the compiler is
+    // still built by kasm alone; nothing of a program goes with them.
+    if md_flag(A_FLAG_MODULE) != 0 {
+        if t != T_PE || lib != 0 || dbg != 0 {
+            md_say("ERROR: --module writes x86-64 text for the compiler's own build: it goes with --target=windows only, and not with --lib or --debug\r\n");
+            return 1;
+        }
+        md_p8(mn_addr(A_FLAG_S), 1);
+        md_p8(mn_addr(A_CG_AS_MODULE), 1);
+        mc_module_tag();
+    }
+    // --assemble: only the assembler, over an existing .asm file
+    if mc_scan_flag(1) != 0 {
+        return -2;
+    }
+    return -1;
+}
+
+// ---- the phases ---------------------------------------------------------
+
+fn md_phases() -> i64 {
+    // [1/6] the file, and its imports
+    md_say("[1/6] Reading file...");
+    var src: i64 = mn_addr(A_SRC_BUFFER);
+    var exp: i64 = mn_addr(A_EXP_BUFFER);
+    var size_at: i64 = mn_addr(A_SRC_SIZE);
+    var n: i64 = read_file(mn_addr(A_INPUT), src, SRC_BUFFER_SIZE);
+    md_p64(size_at, n);
+    if n == 0 {
+        md_say("ERROR: cannot read the file.\r\n");
+        return 2;
+    }
+    if n >= SRC_BUFFER_SIZE {
+        // read_file stops at the buffer: a file this long was cut
+        md_say("ERROR: the source file is longer than 16 MB.\r\n");
+        return 2;
+    }
+    var e: i64 = expand_imports(src, n, exp);
+    if e == -1 {
+        return md_import_error();
+    }
+    md_p64(size_at, e);
+    // --dump: the expanded text written out before anything else touches it
+    if mc_scan_flag(0) != 0 {
+        md_dump(exp, e);
+    }
+    md_say(" OK\r\n");
+
+    // [2/6] the lexer
+    md_say("[2/6] Lexer...");
+    klx_init(exp, e, mn_addr(A_TOKEN_BUFFER), mn_addr(A_TOKEN_COUNT), TOKEN_BUFFER_SIZE / TOKEN_SIZE);
+    if klx_run() <= 0 {
+        return md_lex_error();
+    }
+    md_say(" OK\r\n");
+
+    // [3/6] the parser
+    md_say("[3/6] Parser...");
+    prs_env(mn_addr(A_INPUT), src, mn_lmap(0), mn_lmap(1), mn_addr(A_LMAP_COUNT));
+    prs_init(mn_addr(A_TOKEN_BUFFER), md_g64(mn_addr(A_TOKEN_COUNT)), mn_addr(A_AST_BUFFER), AST_BUFFER_SIZE);
+    if prs_run() == 0 {
+        return md_parse_error();
+    }
+    // v[i] on a slice became a call to slice_get / slice_set, which live in
+    // std_arena.kr. Without that import kasm would not notice the missing
+    // function -- it does not check undefined symbols -- so say it here.
+    // The built-in types text, list<T> and map<T> are handles of the library.
+    if md_g32(mn_addr(A_USED_SLICE)) != 0 && mi_imp_have("std_arena.kr") == 0 {
+        md_say("\r\nERROR: slice<...> uses std_arena.kr, which is not imported\r\n  hint: add  acquire_domain \"std_arena.kr\";  to the header\r\n");
+        return 2;
+    }
+    if md_g32(mn_addr(A_USED_TEXT)) != 0 && mi_imp_have("std_text.kr") == 0 {
+        md_say("\r\nERROR: the type text uses std_text.kr, which is not imported\r\n  hint: add  acquire_domain \"std_text.kr\";  to the header\r\n");
+        return 2;
+    }
+    if md_g32(mn_addr(A_USED_LIST)) != 0 && mi_imp_have("std_list.kr") == 0 {
+        md_say("\r\nERROR: list<...> uses std_list.kr, which is not imported\r\n  hint: add  acquire_domain \"std_list.kr\";  (or std_text.kr, which brings it) to the header\r\n");
+        return 2;
+    }
+    if md_g32(mn_addr(A_USED_MAP)) != 0 && mi_imp_have("std_map.kr") == 0 {
+        md_say("\r\nERROR: map<...> uses std_map.kr, which is not imported\r\n  hint: add  acquire_domain \"std_map.kr\";  to the header\r\n");
+        return 2;
+    }
+    md_say(" OK\r\n");
+
+    // [4/6] the semantic pass (type checking)
+    md_say("[4/6] Semantic...");
+    sem_init(mn_addr(A_SYM_BUFFER), SYM_BUFFER_SIZE);
+    if sem_run(prs_ast_root()) != 0 {
+        md_say("\r\n");
+        return md_sem_report(md_sem_message(sem_kind()));
+    }
+    md_say(" OK\r\n");
+
+    // [5/6] the code generator: real x86-64 assembly
+    md_say("[5/6] Codegen...");
+    cgk_init(mn_addr(A_CODE_BUFFER), CODE_BUFFER_SIZE);
+    if md_codegen_run(prs_ast_root()) <= 0 {
+        return md_code_error();            // 0 an error, negative an internal one
+    }
+    // extern functions: the executable is linked with the system's loader
+    md_p8(mn_addr(A_OUT_DYNAMIC), cgk_uses_extern() & 255);
+    ew_set_layout();
+    md_say(" OK\r\n");
+    // --check: everything has been checked, the thread rule included;
+    // nothing is written
+    if md_flag(A_FLAG_CHECK) != 0 {
+        md_say("Check passed: no errors.\r\n");
+        return 0;
+    }
+    return -1;
+}
+
+// the flags and the module's tag go over, the program is generated, and
+// why it failed comes back
+fn md_codegen_run(ast: i64) -> i64 {
+    var tag: i64 = cgk_flags(md_flag(A_CG_DEBUG), md_flag(A_CG_AS_MODULE));
+    var mine: i64 = mn_addr(A_MOD_TAG);
+    var i: i64 = 0;
+    while i < 72 {
+        md_p8(tag + i, md_g8(mine + i));
+        i = i + 1;
+    }
+    var r: i64 = cgk_run(ast);
+    md_p8(mn_addr(A_DBG_WHICH), cgk_dbg_which() & 255);
+    return r;
+}
+
+// '<input>.expanded', the text that comes out of the import pass
+fn md_dump(exp: i64, n: i64) -> i64 {
+    var d: i64 = &md_dump_name;
+    var inp: i64 = mn_addr(A_INPUT);
+    var k: i64 = 0;
+    while md_g8(inp + k) != 0 {
+        md_p8(d + k, md_g8(inp + k));
+        k = k + 1;
+    }
+    var suffix: i64 = ".expanded";
+    var i: i64 = 0;
+    while true {
+        var c: i64 = md_g8(suffix + i);
+        md_p8(d + k + i, c);
+        if c == 0 {
+            break;
+        }
+        i = i + 1;
+    }
+    write_file(d, exp, n);
+    md_say("Expanded text written to: ");
+    md_say(d);
+    return md_say("\r\n");
+}
+
+// ---- the errors ---------------------------------------------------------
+
+// an import that cannot be resolved stops the compile here, by name
+fn md_import_error() -> i64 {
+    md_say("ERROR: acquire_domain: ");
+    var k: i64 = md_g32(mn_addr(A_IMP_ERR));
+    var m: i64 = "cannot find the module '";
+    if k == 2 {
+        m = "imports nest deeper than 8 levels, at '";
+    } else if k == 3 {
+        m = "too many modules (more than 64, or more than 16 imports in one file), at '";
+    } else if k == 4 {
+        m = "the line map is full: more than 128 runs of lines from the imports, at '";
+    } else if k == 5 {
+        m = "the program with its imports is longer than 16 MB, at '";
+    } else if k == 6 {
+        m = "a module is longer than 16 MB, or the modules are longer than 64 MB together, at '";
+    }
+    md_say(m);
+    md_say(mn_addr(A_IMP_ERRNAME));
+    md_say("'\r\n");
+    if k == 1 {
+        md_say("  hint: the file has to be in the program's folder, with its .kr extension\r\n");
+    } else {
+        md_say("  hint: check the chain of imports: each module imports only what it uses\r\n");
+    }
+    return 2;
+}
+
+// where the lexer stopped, reported like the errors after it
+fn md_lex_error() -> i64 {
+    var k: i64 = klx_error_kind();
+    if k == 1 {
+        md_hint = "  hint: outside a \"...\" text and a // comment, Kron is written with letters, digits, _ and its operators\r\n";
+        sem_set_error(klx_error_token(), 10);     // the character itself, then the hint
+        md_say("\r\n");
+        return md_sem_report("a character Kron does not use ");
+    }
+    if k == 2 {
+        md_hint = "  hint: a text ends on its own \"; inside one, write \\\" for a quote and \\\\ for a backslash\r\n";
+        sem_set_error(klx_error_token(), 11);     // no name to show, a hint of its own
+        md_say("\r\n");
+        return md_sem_report("a text with no closing quote");
+    }
+    md_say("\r\n");
+    md_say("ERROR: the program with its modules is too big for the lexer: more than 2796202 tokens.\r\n");
+    return 3;
+}
+
+// file:line:col: unexpected <token>, the source line, its carets
+fn md_parse_error() -> i64 {
+    md_position(prs_error_line(), prs_error_col());
+    // a message of its own takes precedence over "expected X, found Y"
+    var custom: i64 = prs_custom_msg();
+    if custom != 0 {
+        md_say(": ");
+        md_say(custom);
+        md_say("\r\n");
+    } else {
+        var want: i64 = prs_expected();
+        if want != 0 {
+            md_say(": expected ");
+            md_say(prs_token_name(want));
+            md_say(", found ");
+        } else {
+            md_say(": unexpected ");
+        }
+        md_say(prs_token_name(prs_error_token()));
+        md_say("\r\n");
+    }
+    mi_print_error_line(prs_error_line(), prs_error_col(), prs_error_len());
+    return 4;
+}
+
+// file:line:col of an expanded line and a column
+fn md_position(line: i64, col: i64) -> i64 {
+    md_say(mi_lmap_lookup(line));
+    var in_file: i64 = mi_lmap_line();
+    md_say(":");
+    mi_print_u64(in_file);
+    md_say(":");
+    return mi_print_u64(col);
+}
+
+// what a semantic error of that kind says
+fn md_sem_message(k: i64) -> i64 {
+    if k == 1 { return "duplicate arena name "; }
+    if k == 2 { return "arena declared with zero size "; }
+    if k == 3 { return "arenas overlap "; }
+    if k == 4 { return "undeclared array "; }
+    if k == 5 { return "cannot assign to this"; }
+    if k == 6 { return "array smaller than the parameter it is passed to "; }
+    if k == 7 { return "only allowed inside raw: "; }
+    if k == 9 { return "array element type differs from the parameter's "; }
+    return "undeclared name ";
+}
+
+// file:line:col: <what went wrong> 'name', the source line, its carets,
+// and the hint
+fn md_sem_report(msg: i64) -> i64 {
+    md_position(sem_line(), sem_col());
+    md_say(": ");
+    md_say(msg);
+    // the offending name, straight out of the source. Skipped for kind 5,
+    // where what is wrong is the shape of the target, not a name.
+    var k: i64 = sem_kind();
+    if k != 5 && k != 11 {
+        var len: i64 = sem_len();
+        var name: i64 = sem_name();
+        if name != 0 && len != 0 {
+            md_say("'");
+            print_bytes(name, len);
+            md_say("'");
+        }
+    }
+    md_say("\r\n");
+    mi_print_error_line(sem_line(), sem_col(), sem_len());
+    k = sem_kind();
+    // kinds 6 7 8 9 have a fixed hint of their own, 10 and 11 the one their
+    // error brought; the closest-name one does not apply to them
+    if k == 6 {
+        md_say("  hint: the function indexes as far as its parameter declares; pass an array at least that big\r\n");
+    } else if k == 7 {
+        md_say("  hint: put it inside raw { ... }: memory by address (peek, poke, *p) and the system (dll_load, dll_proc, syscall) are reached only there\r\n");
+    } else if k == 9 {
+        md_say("  hint: elements are stored at their own width ([u8; N] one byte each), so the parameter must declare the same element type\r\n");
+    } else if k == 10 || k == 11 {
+        if md_hint != 0 {
+            md_say(md_hint);
+        }
+    } else if k == 8 {
+        md_say("  hint: declare it 'shared var' and guard it with a lock, or pass the value through a channel\r\n");
+    } else {
+        // the closest declared name, when one is within a single edit
+        var s: i64 = sem_suggest_name();
+        var sl: i64 = sem_suggest_len();
+        if s != 0 && sl != 0 {
+            md_say("  hint: did you mean '");
+            print_bytes(s, sl);
+            md_say("'?\r\n");
+        }
+    }
+    return 4;
+}
+
+// an error the code generator found: a type error (with its position when
+// it has one, and its hint), the thread rule, or its own trouble
+fn md_code_error() -> i64 {
+    var tok: i64 = cgk_err_tok();
+    var why: i64 = cgk_err_hint();
+    var msg: i64 = cgk_err_msg();
+    if msg != 0 {
+        md_hint = why;
+        if tok != 0 {
+            sem_set_error(tok, 10);
+            md_say("\r\n");
+            return md_sem_report(msg);
+        }
+        md_say("\r\n");
+        md_say("ERROR: ");
+        md_say(msg);
+        md_say("\r\n");
+        if md_hint != 0 {
+            md_say(md_hint);
+        }
+        return 5;
+    }
+    // the thread check: a non-shared global in code that runs in a thread
+    var t: i64 = cgk_thread_tok();
+    if t != 0 {
+        sem_set_error(t, 8);
+        md_say("\r\n");
+        return md_sem_report("global used by code that runs in a thread ");
+    }
+    var which: i64 = md_flag(A_DBG_WHICH);
+    if which == 1 {
+        md_say("ERROR: the generated code is larger than the compiler's buffers hold.\r\n  hint: split the longest function, or the program, into smaller ones\r\n");
+        return 5;
+    }
+    md_say("ERROR: codegen failed.\r\n");
+    mi_print_u64(which);
+    return 5;
+}

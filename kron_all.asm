@@ -51,3 +51,4 @@
 %include "main_pp_kr.asm"
 %include "main_io_kr.asm"
 %include "main_cli_kr.asm"
+%include "main_drv_kr.asm"
