@@ -1,0 +1,10 @@
+*_kr.asm
+*.fused.asm
+*.fused.kr
+ref_asm/
+tests/pe/
+kernel_program.asm
+preproc.asm
+*.kbin
+stage*.exe
+boot*.exe
