@@ -1,10 +1,32 @@
+# ---- what the build makes -------------------------------------------------
 *_kr.asm
 *.fused.asm
 *.fused.kr
-ref_asm/
-tests/pe/
-kernel_program.asm
-preproc.asm
-*.kbin
 stage*.exe
 boot*.exe
+obj/
+seed/kronc.prev.exe
+
+# ---- what the tests write (RUNTESTS, ARMTESTS, LINUXTESTS, MACTESTS,
+#      WEBTESTS, GPUTESTS): every run makes them again ---------------------
+tests/tmp/
+tests/arm/
+tests/linux/
+tests/mac/
+tests/web/
+tests/pe/
+tests/*.log
+ref_asm/
+
+# ---- what compiling a program leaves beside it ------------------------------
+# (kronc.exe and seed/kronc.exe are kept: they are committed on purpose)
+*.kbin
+*.expanded
+*.obj
+preproc.asm
+kernel_program.asm
+test_*.exe
+lexer/*.exe
+parser/*.exe
+semantic/*.exe
+codegen/*.exe

@@ -1,1 +1,10 @@
+# Kron (.kr) is not a language GitHub knows; it is counted as Rust.
 *.kr linguist-language=Rust
+
+# The assembly left in the repository is not the compiler: it is what kasm
+# and karm are tested with (kasm*.asm, test_scope.asm, test_kasmfix.asm,
+# arm_*.s) and the boot code of the bare-metal demo (mbr.asm, boot.asm,
+# kernel.asm). It stays out of GitHub's count of languages.
+*.asm linguist-detectable=false
+*.s   linguist-detectable=false
+*.inc linguist-detectable=false
