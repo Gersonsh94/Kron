@@ -1,0 +1,64 @@
+kron_program
+kron_domain main_defs;
+kron_imports
+acquire_domain "include/defs.kr";
+kron_definitions
+
+// =========================================================================
+// What the driver's files (main_*.kr) and the writers share: the numbers
+// of main's buffers and flags (mn_addr, in main_buf.kr), the targets, the
+// line map's size. The buffers' sizes and the TARGET_ names are
+// include/defs.kr's, which this brings in.
+// =========================================================================
+
+// mn_addr(k): what k gives
+const A_INPUT: i64 = 0;              // arg_input, 512 bytes
+const A_OUTPUT: i64 = 1;             // arg_output, 512 bytes
+const A_FLAG_S: i64 = 2;             // the flags, a byte each
+const A_FLAG_CHECK: i64 = 3;
+const A_FLAG_DEBUG: i64 = 4;
+const A_FLAG_WINDOW: i64 = 5;
+const A_FLAG_LIB: i64 = 6;
+const A_FLAG_MODULE: i64 = 7;
+const A_ANDROID: i64 = 8;            // a byte, as every flag
+const A_IOS: i64 = 9;
+const A_BIN_NAME: i64 = 10;          // out_bin_name, 512 bytes
+const A_OUT_BIN_NAME: i64 = 10;
+const A_ASM_NAME: i64 = 11;          // out_asm_name, 512 bytes
+const A_OUT_ASM_NAME: i64 = 11;
+const A_BIN_EXT_PTR: i64 = 12;       // a qword
+const A_BIN_EXT: i64 = 13;           // ".kbin"
+const A_ASM_EXT: i64 = 14;           // ".asm"
+const A_MOD_EXT: i64 = 15;           // "_kr.asm"
+const A_MOD_TAG: i64 = 16;           // cg_mod_tag, 72 bytes
+const A_OUT_TARGET: i64 = 17;        // a byte
+const A_SRC_BUFFER: i64 = 18;
+const A_SRC_SIZE: i64 = 19;          // a qword
+const A_EXP_BUFFER: i64 = 20;
+const A_TOKEN_BUFFER: i64 = 21;
+const A_TOKEN_COUNT: i64 = 22;       // a qword
+const A_AST_BUFFER: i64 = 23;
+const A_SYM_BUFFER: i64 = 24;
+const A_CODE_BUFFER: i64 = 25;
+const A_CG_DEBUG: i64 = 26;          // the code generator's switches, bytes
+const A_CG_AS_MODULE: i64 = 27;
+const A_DBG_WHICH: i64 = 28;
+const A_OUT_DYNAMIC: i64 = 29;       // a byte
+const A_IMP_ERR: i64 = 30;           // a dword
+const A_IMP_ERRNAME: i64 = 31;
+const A_LMAP_COUNT: i64 = 32;
+const A_USED_SLICE: i64 = 33;        // the parser's dwords
+const A_USED_TEXT: i64 = 34;
+const A_USED_LIST: i64 = 35;
+const A_USED_MAP: i64 = 36;
+
+// the targets (TARGET_ in include/defs.kr)
+const T_PE: i64 = 0;
+const T_ELF: i64 = 1;
+const T_KRN: i64 = 2;
+const T_BARE: i64 = 3;
+const T_ARM64: i64 = 4;
+const T_WEB: i64 = 5;
+const T_MACOS: i64 = 6;
+
+const LMAP_MAX: i64 = 128;            // runs of lines in the line map

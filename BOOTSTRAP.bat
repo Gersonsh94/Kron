@@ -3,8 +3,8 @@ setlocal enabledelayedexpansion
 echo ============================================================
 echo   KRON - BOOTSTRAP FIXPOINT
 echo   Three self-compiled generations, compared byte for byte
-echo   (each generation makes the parts in Kron with the compiler
-echo   before it: gen 1 with the installed kronc.exe)
+echo   (each generation compiles kron.kr, the compiler, with the
+echo   one before it: gen 1 with the installed kronc.exe)
 echo ============================================================
 echo.
 
@@ -12,36 +12,24 @@ if not exist kronc.exe (
     echo [ERROR] kronc.exe missing -- run BUILD.bat first
     exit /b 1
 )
-if not exist kron_all.asm (
-    echo [ERROR] kron_all.asm missing
+if not exist kron.kr (
+    echo [ERROR] kron.kr missing
     exit /b 1
 )
 
-del /q kron_all.exe boot1.exe boot2.exe boot3.exe 2>nul
+del /q boot1.exe boot2.exe boot3.exe 2>nul
 
-echo [gen 1] kronc.exe (the installed compiler) makes the parts in Kron, then --^> boot1.exe
-call KRONPARTS.bat kronc.exe
-if errorlevel 1 goto :noparts
-kronc.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nogen1
-copy /y kron_all.exe boot1.exe >nul
-del /q kron_all.exe
+echo [gen 1] kronc.exe (the installed compiler) --^> boot1.exe
+kronc.exe kron.kr -o boot1.exe >nul
+if not exist boot1.exe goto :nogen1
 
-echo [gen 2] boot1.exe makes the parts in Kron again, then --^> boot2.exe
-call KRONPARTS.bat boot1.exe
-if errorlevel 1 goto :noparts
-boot1.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nogen2
-copy /y kron_all.exe boot2.exe >nul
-del /q kron_all.exe
+echo [gen 2] boot1.exe --^> boot2.exe
+boot1.exe kron.kr -o boot2.exe >nul
+if not exist boot2.exe goto :nogen2
 
-echo [gen 3] boot2.exe makes the parts in Kron again, then --^> boot3.exe
-call KRONPARTS.bat boot2.exe
-if errorlevel 1 goto :noparts
-boot2.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nogen3
-copy /y kron_all.exe boot3.exe >nul
-del /q kron_all.exe
+echo [gen 3] boot2.exe --^> boot3.exe
+boot2.exe kron.kr -o boot3.exe >nul
+if not exist boot3.exe goto :nogen3
 
 echo.
 echo --- comparing ---
@@ -56,8 +44,9 @@ echo ============================================================
 echo   FIXPOINT REACHED
 echo   gen1 == gen2 == gen3
 echo.
-echo   The compiler, assembled by its own kasm and written by its own
-echo   pe_writer, reproduces itself exactly: nothing else took part.
+echo   The compiler, a Kron program compiled by itself, assembled by
+echo   its own kasm and written by its own pe_writer, reproduces
+echo   itself exactly: nothing else took part.
 echo ============================================================
 goto :verify
 
@@ -90,17 +79,17 @@ echo   OK -- compiles, assembles, and the executable runs
 echo.
 exit /b 0
 
-:noparts
-echo   [FAIL] a part of the compiler written in Kron does not compile
-exit /b 1
 :nogen1
-echo   [FAIL] gen 1 produced no executable
+echo   [FAIL] gen 1 produced no executable:
+kronc.exe kron.kr -o boot1.exe
 exit /b 1
 :nogen2
-echo   [FAIL] gen 2 produced no executable -- boot1 cannot assemble
+echo   [FAIL] gen 2 produced no executable:
+boot1.exe kron.kr -o boot2.exe
 exit /b 1
 :nogen3
-echo   [FAIL] gen 3 produced no executable -- boot2 cannot assemble
+echo   [FAIL] gen 3 produced no executable:
+boot2.exe kron.kr -o boot3.exe
 exit /b 1
 
 :nofix

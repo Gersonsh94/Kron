@@ -1,6 +1,7 @@
 kron_program
 kron_domain main_out;
 kron_imports
+acquire_domain "include/main_defs.kr";
 kron_definitions
 
 // =========================================================================
@@ -22,8 +23,8 @@ kron_definitions
 //
 // They were main in main.asm (10d-2), byte for byte the same: the same
 // messages, the same files, the same exit codes. Every part is called
-// directly. main.asm keeps the entry (the console's handle), the buffers
-// (mn_addr) and the calls into Windows.
+// directly; kron.kr's main calls mx_main, the buffers are main_buf.kr's
+// (mn_addr), the calls into Windows main_os.kr's.
 //
 // Exit codes: 0 done, 1 an assembler or lowering error, 2 the file could
 // not be read, 6 the output could not be written.
@@ -101,33 +102,6 @@ extern "kronc" {
 }
 
 // what mn_addr gives (main_cli.kr and main_drv.kr have 0..36)
-const A_INPUT: i64 = 0;
-const A_FLAG_S: i64 = 2;
-const A_FLAG_DEBUG: i64 = 4;
-const A_FLAG_WINDOW: i64 = 5;
-const A_FLAG_LIB: i64 = 6;
-const A_IOS: i64 = 9;
-const A_OUT_BIN_NAME: i64 = 10;
-const A_OUT_ASM_NAME: i64 = 11;
-const A_BIN_EXT_PTR: i64 = 12;        // a qword: the extension of the output
-const A_OUT_TARGET: i64 = 17;         // a byte
-const A_SRC_BUFFER: i64 = 18;
-const A_SRC_SIZE: i64 = 19;           // a qword
-const A_EXP_BUFFER: i64 = 20;
-const A_CODE_BUFFER: i64 = 25;
-const A_OUT_DYNAMIC: i64 = 29;        // a byte
-const A_IMP_ERR: i64 = 30;            // a dword
-const A_IMP_ERRNAME: i64 = 31;        // 260 bytes
-const A_LMAP_COUNT: i64 = 32;         // a qword
-
-const T_PE: i64 = 0;
-const T_ELF: i64 = 1;
-const T_ARM64: i64 = 4;
-const T_WEB: i64 = 5;
-const T_MACOS: i64 = 6;
-
-const SRC_BUFFER_SIZE: i64 = 16777216;
-const CODE_BUFFER_SIZE: i64 = 16777216;
 
 var mx_idbuf: [u8; 520];              // a framework dylib's install name
 

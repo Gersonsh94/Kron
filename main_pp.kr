@@ -18,8 +18,8 @@ kron_definitions
 // leaves behind.
 //
 // It was asm_preprocess in main.asm, and it is here now, byte for byte the
-// same text out; main_out.kr calls it directly. main.asm keeps read_file and
-// the two buffers an included file is read into (pp_buffer).
+// same text out; main_out.kr calls it directly. read_file is main_os.kr's,
+// the two buffers an included file is read into (pp_buffer) main_buf.kr's.
 // =========================================================================
 
 extern "kronc" {

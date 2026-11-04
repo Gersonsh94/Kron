@@ -3,17 +3,19 @@ setlocal enabledelayedexpansion
 REM ============================================================
 REM   KRON - SELF-BUILD
 REM
-REM   Builds kronc.exe from seed\kronc.exe using nothing
-REM   but kasm and pe_writer.  No NASM.  No GoLink.
+REM   Builds kronc.exe from seed\kronc.exe.  The compiler is a
+REM   Kron program, kron.kr, built like any other:
+REM
+REM       kronc kron.kr -o kronc.exe
+REM
+REM   No assembly file, no NASM, no GoLink: the seed compiles it,
+REM   its own kasm assembles it, its own pe_writer writes it.
 REM
 REM   Three generations, because the seed may be an older
-REM   compiler: stage1 is assembled by the seed's kasm, stage2
-REM   by the kasm just built.  The parts of the compiler written
-REM   in Kron (KRONPARTS.bat) are made by the seed for stage1, by
-REM   stage1 for stage2 and by stage2 for stage3: no assembly made
-REM   from them is kept between builds.  stage1 and stage2 may
-REM   legitimately differ.  stage2 and stage3 may not -- that is
-REM   the fixpoint, and stage3 is what gets installed.
+REM   compiler: stage1 is the seed's work, stage2 stage1's and
+REM   stage3 stage2's.  stage1 and stage2 may legitimately differ.
+REM   stage2 and stage3 may not -- that is the fixpoint, and
+REM   stage3 is what gets installed.
 REM
 REM   If you have no seed yet, SEED.bat kronc promotes the kronc.exe
 REM   you have.
@@ -23,8 +25,8 @@ if not exist seed\kronc.exe (
     echo [ERROR] seed\kronc.exe missing -- run SEED.bat first
     exit /b 1
 )
-if not exist kron_all.asm (
-    echo [ERROR] kron_all.asm missing
+if not exist kron.kr (
+    echo [ERROR] kron.kr missing
     exit /b 1
 )
 
@@ -35,31 +37,19 @@ echo.
 type seed\SEED.txt 2>nul
 echo.
 
-del /q stage1.exe stage2.exe stage3.exe kron_all.exe 2>nul
+del /q stage1.exe stage2.exe stage3.exe 2>nul
 
-echo [stage 1] the seed makes the parts in Kron, then --^> stage1.exe
-call KRONPARTS.bat seed\kronc.exe
-if errorlevel 1 goto :noparts
-seed\kronc.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nostage1
-copy /y kron_all.exe stage1.exe >nul
-del /q kron_all.exe
+echo [stage 1] seed --^> stage1.exe
+seed\kronc.exe kron.kr -o stage1.exe >nul
+if not exist stage1.exe goto :nostage1
 
-echo [stage 2] stage1.exe makes the parts in Kron again, then --^> stage2.exe
-call KRONPARTS.bat stage1.exe
-if errorlevel 1 goto :noparts
-stage1.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nostage2
-copy /y kron_all.exe stage2.exe >nul
-del /q kron_all.exe
+echo [stage 2] stage1.exe --^> stage2.exe
+stage1.exe kron.kr -o stage2.exe >nul
+if not exist stage2.exe goto :nostage2
 
-echo [stage 3] stage2.exe makes the parts in Kron again, then --^> stage3.exe
-call KRONPARTS.bat stage2.exe
-if errorlevel 1 goto :noparts
-stage2.exe kron_all.asm --assemble --pe >nul
-if not exist kron_all.exe goto :nostage3
-copy /y kron_all.exe stage3.exe >nul
-del /q kron_all.exe
+echo [stage 3] stage2.exe --^> stage3.exe
+stage2.exe kron.kr -o stage3.exe >nul
+if not exist stage3.exe goto :nostage3
 
 echo.
 echo --- checking the fixpoint ---
@@ -103,19 +93,18 @@ echo ============================================================
 echo.
 exit /b 0
 
-:noparts
-echo   [FAIL] a part of the compiler written in Kron does not compile
-echo          -- kronc.exe was NOT replaced
-exit /b 1
 :nostage1
 echo   [FAIL] stage 1 produced no executable -- the seed cannot
-echo          assemble the current kron_all.asm
+echo          compile the current kron.kr:
+seed\kronc.exe kron.kr -o stage1.exe
 exit /b 1
 :nostage2
-echo   [FAIL] stage 2 produced no executable -- stage1 cannot assemble
+echo   [FAIL] stage 2 produced no executable:
+stage1.exe kron.kr -o stage2.exe
 exit /b 1
 :nostage3
-echo   [FAIL] stage 3 produced no executable -- stage2 cannot assemble
+echo   [FAIL] stage 3 produced no executable:
+stage2.exe kron.kr -o stage3.exe
 exit /b 1
 
 :nofix

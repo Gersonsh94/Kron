@@ -1,6 +1,7 @@
 kron_program
 kron_domain elf_writer;
 kron_imports
+acquire_domain "include/main_defs.kr";
 kron_definitions
 
 // =========================================================================
@@ -50,15 +51,10 @@ extern "kronc" {
     fn ksk_label_addr(idx: i64) -> i64;
     fn cgk_export_name(i: i64) -> i64;
     fn cgk_export_nlen(i: i64) -> i64;
-    // main.asm's buffers and flags, main_cli.kr's name of the output
+    // the driver's buffers and flags (main_buf.kr), the output's name
     fn mn_addr(k: i64) -> i64;
     fn mc_build_bin_name() -> i64;
 }
-
-const A_ANDROID: i64 = 8;             // mn_addr: a byte
-const A_OUT_BIN_NAME: i64 = 10;
-const A_BIN_EXT_PTR: i64 = 12;        // a qword
-const A_OUT_DYNAMIC: i64 = 29;        // a byte
 
 var ew_hsize: i64;                    // bytes of headers before the image: 128, 1024 with externs
 var ew_base: i64;                     // where the image is in memory: 0x400000 + ew_hsize

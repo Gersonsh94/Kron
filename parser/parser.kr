@@ -3,11 +3,11 @@ kron_domain parser;
 kron_imports
 acquire_domain "include/tokens.kr";
 acquire_domain "include/ast.kr";
-acquire_domain "parser_state.kr";
-acquire_domain "parser_stmt.kr";
-acquire_domain "parser_expr.kr";
-acquire_domain "parser_titan.kr";
-acquire_domain "parser_ng.kr";
+acquire_domain "parser/parser_state.kr";
+acquire_domain "parser/parser_stmt.kr";
+acquire_domain "parser/parser_expr.kr";
+acquire_domain "parser/parser_titan.kr";
+acquire_domain "parser/parser_ng.kr";
 kron_definitions
 
 // =========================================================================
@@ -15,9 +15,8 @@ kron_definitions
 //
 // The second part of the compiler written in Kron. It reads the tokens
 // the lexer made and builds the tree (include/ast.kr) the semantic pass
-// and the code generator walk. kronc --module turns it, with the files it
-// imports, into parser_kr.asm; the driver calls the prs_ functions
-// directly.
+// and the code generator walk. kron.kr brings it in with the files it
+// imports; the driver calls the prs_ functions directly.
 //
 //   parser.kr          the program, declarations, what the driver calls
 //   parser_state.kr    the state: every global, before what uses it

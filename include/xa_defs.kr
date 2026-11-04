@@ -1,0 +1,46 @@
+kron_program
+kron_domain xa_defs;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// The state xarm.kr keeps and xwasm.kr reads with it (xa_state, in
+// xarm.kr): the offset of each piece in the block
+// =========================================================================
+
+const S_OS: i64 = 0;              // 0 Linux, 1 macOS
+const S_LIB: i64 = 8;             // 1 for a library: __centry in the tail
+const S_IN: i64 = 16;
+const S_IN_END: i64 = 24;
+const S_LINE_NO: i64 = 32;
+const S_ERR: i64 = 40;
+const S_ERR_LINE: i64 = 48;
+const S_ERR_MSG: i64 = 56;
+const S_REST: i64 = 64;
+const S_NOPS: i64 = 72;
+const S_SKIPPING: i64 = 80;       // inside a routine the tail supplies
+const S_ERR_INSN: i64 = 88;       // 160 bytes
+const S_LINE: i64 = 248;          // 1024 bytes
+const S_MN: i64 = 1272;           // 32 bytes
+const S_OPT: i64 = 1304;          // three operand texts of 256 bytes
+const S_OPS: i64 = 2072;          // three operand records of 32 bytes
+
+// an operand record, 32 bytes, as xarm reads one
+const OP_KIND: i64 = 0;           // 0 none, 1 reg, 2 xmm, 3 imm, 4 mem, 5 label
+const OP_REG: i64 = 1;            // x86 register 0..15
+const OP_RSIZE: i64 = 2;          // 1 2 4 8
+const OP_XMM: i64 = 3;            // xmm number
+const OP_MSIZE: i64 = 4;          // byte/word/dword/qword/oword prefix, 0 none
+const OP_SCALE: i64 = 5;
+const OP_BASE: i64 = 6;           // 255 none
+const OP_INDEX: i64 = 7;          // 255 none
+const OP_VAL: i64 = 8;            // immediate, or displacement
+const OP_REL: i64 = 16;           // label text of [rel L] / [L], 0 none
+const OP_TEXT: i64 = 24;          // the operand text
+
+// the kinds of operand (OP_KIND)
+const K_REG: i64 = 1;
+const K_XMM: i64 = 2;
+const K_IMM: i64 = 3;
+const K_MEM: i64 = 4;
+const K_LABEL: i64 = 5;

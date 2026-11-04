@@ -1,0 +1,136 @@
+kron_program
+kron_domain main_os;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// THE COMPILER'S CALLS INTO WINDOWS
+//
+//   os_init()                        the console's handle, once, first
+//   print_string(s)                  a zero-terminated text, to the console
+//   print_bytes(s, n)                n bytes, to the console
+//   read_file(name, buf, cap)        at most cap bytes of a file: how many
+//                                    were read, 0 when it cannot be opened
+//   write_file(name, buf, n)         a file made anew: 1, or 0 when it
+//                                    cannot be made
+//   os_cmdline()                     the command line, as Windows has it
+//
+// They were the last assembly written by hand (main.asm), and they are the
+// same calls in the same order: kernel32's, through an extern block, which
+// passes the fifth argument and the ones after it on the stack as Windows
+// wants them.
+// =========================================================================
+
+extern "kernel32.dll" {
+    fn GetStdHandle(which: i64) -> i64;
+    fn WriteFile(h: i64, buf: i64, n: i64, done: i64, ov: i64) -> i64;
+    fn ReadFile(h: i64, buf: i64, n: i64, done: i64, ov: i64) -> i64;
+    fn CreateFileA(name: i64, access: i64, share: i64, sec: i64, disp: i64, flags: i64, tmpl: i64) -> i64;
+    fn CloseHandle(h: i64) -> i64;
+    fn GetCommandLineA() -> i64;
+}
+
+const STD_OUTPUT_HANDLE: i64 = -11;
+const GENERIC_READ: i64 = 0x80000000;
+const GENERIC_WRITE: i64 = 0x40000000;
+const FILE_SHARE_READ: i64 = 1;
+const OPEN_EXISTING: i64 = 3;
+const CREATE_ALWAYS: i64 = 2;
+
+var os_out: i64;                      // the console's handle
+var os_done: [i64; 1];                // the bytes a call wrote or read
+
+fn os_init() -> i64 {
+    var h: i64 = 0;
+    raw {
+        h = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    os_out = h;
+    return 0;
+}
+
+fn os_count() -> i64 {
+    var r: i64 = 0;
+    var a: i64 = &os_done;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn os_count_zero() -> i64 {
+    var a: i64 = &os_done;
+    raw {
+        poke(a, 0);
+    }
+    return 0;
+}
+
+fn print_bytes(s: i64, n: i64) -> i64 {
+    var h: i64 = os_out;
+    var d: i64 = &os_done;
+    var r: i64 = 0;
+    raw {
+        r = WriteFile(h, s, n, d, 0);
+    }
+    return r;
+}
+
+fn print_string(s: i64) -> i64 {
+    var n: i64 = 0;
+    var c: i64 = 1;
+    while c != 0 {
+        raw {
+            c = peek8(s + n);
+        }
+        if c != 0 {
+            n = n + 1;
+        }
+    }
+    return print_bytes(s, n);
+}
+
+fn read_file(name: i64, buf: i64, cap: i64) -> i64 {
+    var h: i64 = 0;
+    raw {
+        h = CreateFileA(name, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+    }
+    if h == -1 {
+        return 0;
+    }
+    os_count_zero();
+    var d: i64 = &os_done;
+    raw {
+        ReadFile(h, buf, cap, d, 0);
+    }
+    var n: i64 = os_count();
+    raw {
+        CloseHandle(h);
+    }
+    return n;
+}
+
+fn write_file(name: i64, buf: i64, n: i64) -> i64 {
+    var h: i64 = 0;
+    raw {
+        h = CreateFileA(name, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+    }
+    if h == -1 {
+        return 0;
+    }
+    os_count_zero();
+    var d: i64 = &os_done;
+    raw {
+        WriteFile(h, buf, n, d, 0);
+        CloseHandle(h);
+    }
+    return 1;
+}
+
+fn os_cmdline() -> i64 {
+    var r: i64 = 0;
+    raw {
+        r = GetCommandLineA();
+    }
+    return r;
+}

@@ -7,9 +7,8 @@ kron_definitions
 // =========================================================================
 // THE LEXER
 //
-// The first part of the compiler written in Kron. kronc --module turns this
-// file into lexer_kr.asm, which kron_all.asm includes; the driver calls the
-// klx_ functions below directly.
+// The first part of the compiler written in Kron. kron.kr brings it in; the
+// driver calls the klx_ functions below directly.
 //
 //     klx_init(src, len, buf, count_ptr, cap)   start on a source
 //     klx_run()                                 every token, then TOK_EOF;

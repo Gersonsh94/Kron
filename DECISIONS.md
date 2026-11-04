@@ -1219,6 +1219,39 @@ replaces, checked file by file before it is delivered.
   - The compiler is 10 KB smaller; it writes the same files, messages and
     exit codes as before for every program of the suite on every target,
     the command lines and the assembler's own tests.
+- Piece 12, 100% Kron (03-11-2026, Gerson: "te dije 100% kron"). The
+  compiler is a Kron program, built as any other:
+  `kronc kron.kr -o kronc.exe`.
+  - `kron.kr` has `main` (the console's handle, then `mx_main`) and brings
+    in every part: `kron_front.kr` (main_os, main_buf, the lexer, the
+    parser, the semantic pass, the code generator, the import pass, the
+    preprocessor, the driver) and `kron_back.kr` (kasm, karm, xarm and its
+    shims, xwasm, the writers, web_host). Two files because one file
+    imports 16 at most.
+  - `main_os.kr` is what main.asm did with Windows: GetStdHandle,
+    WriteFile, ReadFile, CreateFileA, CloseHandle, GetCommandLineA, in the
+    same order, through `extern "kernel32.dll"`, which puts the fifth
+    argument and the ones after it on the stack. `main_buf.kr` holds the
+    buffers and flags and `mn_addr`.
+  - `web_host.kr` is kron_web.js as one text; `web/make_host.kr` writes it
+    (it wrote include/web_host.inc).
+  - In one program the parts share one name space: the constants several
+    of them repeated are in `include/main_defs.kr` (the numbers of
+    mn_addr, the targets) and `include/xa_defs.kr` (xarm's state and
+    operand records, which xwasm reads). parser.kr and codegen.kr import
+    their files by their folder (`parser/parser_state.kr`), as kron.kr
+    sees them. The `extern "kronc"` blocks stay: in a program a function
+    defined in it is called directly, as Kron calls.
+  - Gone: main.asm, kron_all.asm, KRONPARTS.bat, the NAME_kr.asm files,
+    include/kron_types.inc, include/win64_api.inc, include/web_host.inc,
+    and kasmdiff.asm, RAALLOC.ps1 and RATRACE.ps1, which served the
+    assembly. BUILD.bat and BOOTSTRAP.bat compile kron.kr three times.
+  - The compiler built this way compiles itself to the same file (the
+    fixpoint holds from its first generation), and writes the same files,
+    messages and exit codes as the one before for every program of the
+    suite on every target, the command lines, the assembler's tests and
+    the programs that must be refused. It builds itself in about three
+    seconds.
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 

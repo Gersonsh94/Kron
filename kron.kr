@@ -1,0 +1,21 @@
+kron_program
+kron_domain kron;
+kron_imports
+acquire_domain "kron_front.kr";
+acquire_domain "kron_back.kr";
+kron_definitions
+
+// =========================================================================
+// THE COMPILER: kronc.exe is this program
+//
+//   kronc kron.kr -o kronc.exe
+//
+// Every part is written in Kron; this file only brings them together
+// (kron_front.kr: reading, checking and generating a program; kron_back.kr:
+// assembling it and writing the file) and starts the driver.
+// =========================================================================
+
+fn main() -> i64 {
+    os_init();
+    return mx_main();
+}

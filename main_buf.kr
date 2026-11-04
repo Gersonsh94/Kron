@@ -1,0 +1,135 @@
+kron_program
+kron_domain main_buf;
+kron_imports
+acquire_domain "include/main_defs.kr";
+kron_definitions
+
+// =========================================================================
+// THE DRIVER'S BUFFERS AND FLAGS
+//
+//   mn_addr(k)        the address of one of them, by its number (the A_
+//                     constants of main_cli.kr, main_drv.kr and main_out.kr)
+//   mn_arg_input()    the program's name
+//   mn_exp_buffer()   the text after the imports
+//   mn_lmap_count()   the runs of lines in the line map
+//   mn_lmap(k)        the map's tables: 0 the expanded lines, 1 the files,
+//                     2 the lines in the files
+//   pp_buffer(k)      where the preprocessor reads an included file (1 for
+//                     one included from an included file)
+//
+// They were main.asm's .data and .bss. A flag is a byte, read and written
+// by address; each lives in a word of its own here.
+// =========================================================================
+
+var arg_input: [u8; 512];
+var arg_output: [u8; 512];
+var arg_flag_S: [u8; 8];              // -S: write the .asm instead of the .exe
+var arg_flag_check: [u8; 8];          // --check: report errors, write nothing
+var arg_flag_debug: [u8; 8];          // --debug: a build the debugger can stop
+var arg_flag_window: [u8; 8];         // --window: a Windows program with no console
+var arg_flag_lib: [u8; 8];            // --lib: a library (.dll .so .dylib), not a program
+var arg_flag_module: [u8; 8];         // --module: a part of a program, as text
+var out_android: [u8; 8];             // --target=android (out_target ARM64)
+var out_ios: [u8; 8];                 // --target=ios (out_target MACOS)
+var out_target: [u8; 8];
+var out_dynamic: [u8; 8];             // the program calls the system's libraries
+var out_bin_name: [u8; 512];
+var out_asm_name: [u8; 512];
+var bin_ext_ptr: [u8; 8];             // the extension of the output, or 0
+var src_size: [u8; 8];
+var token_count: [u8; 8];
+var imp_err: [u8; 8];                 // 1 cannot open, 2 too deep, 3 too many
+var imp_errname: [u8; 264];
+var lmap_out: [i64; 128];             // first line in the expanded text
+var lmap_file: [i64; 128];            // the file's name
+var lmap_src: [i64; 128];             // the line it starts at in that file
+var lmap_count: [u8; 8];
+// the code generator's switches, which main_cli.kr and main_drv.kr set and
+// read and md_codegen_run hands over
+var mn_dbg_which: [u8; 8];               // why the output failed: 1 full, 2 locals
+var mn_cg_debug: [u8; 8];                // --debug: hooks before statements, records
+var mn_cg_as_module: [u8; 8];            // --module: the functions alone, no program
+var mn_cg_mod_tag: [u8; 72];             // '<name>_': what a module's data labels carry
+
+var src_buffer: [u8; 16777216];
+var exp_buffer: [u8; 16777216];       // the source after its imports
+var inc_buffer: [u8; 16777216];       // one included file at a time
+var inc_buffer2: [u8; 16777216];      // the level below that one
+var token_buffer: [u8; 67108864];
+var ast_buffer: [u8; 268435456];
+var code_buffer: [u8; 16777216];
+var sym_buffer: [u8; 4194304];
+
+fn mn_addr(k: i64) -> i64 {
+    if k == 0 { return &arg_input; }
+    if k == 1 { return &arg_output; }
+    if k == 2 { return &arg_flag_S; }
+    if k == 3 { return &arg_flag_check; }
+    if k == 4 { return &arg_flag_debug; }
+    if k == 5 { return &arg_flag_window; }
+    if k == 6 { return &arg_flag_lib; }
+    if k == 7 { return &arg_flag_module; }
+    if k == 8 { return &out_android; }
+    if k == 9 { return &out_ios; }
+    if k == 10 { return &out_bin_name; }
+    if k == 11 { return &out_asm_name; }
+    if k == 12 { return &bin_ext_ptr; }
+    if k == 13 { return ".kbin"; }
+    if k == 14 { return ".asm"; }
+    if k == 15 { return "_kr.asm"; }
+    if k == 16 { return &mn_cg_mod_tag; }
+    if k == 17 { return &out_target; }
+    if k == 18 { return &src_buffer; }
+    if k == 19 { return &src_size; }
+    if k == 20 { return &exp_buffer; }
+    if k == 21 { return &token_buffer; }
+    if k == 22 { return &token_count; }
+    if k == 23 { return &ast_buffer; }
+    if k == 24 { return &sym_buffer; }
+    if k == 25 { return &code_buffer; }
+    if k == 26 { return &mn_cg_debug; }
+    if k == 27 { return &mn_cg_as_module; }
+    if k == 28 { return &mn_dbg_which; }
+    if k == 29 { return &out_dynamic; }
+    if k == 30 { return &imp_err; }
+    if k == 31 { return &imp_errname; }
+    if k == 32 { return &lmap_count; }
+    if k == 33 { return &par_used_slice; }
+    if k == 34 { return &par_used_text; }
+    if k == 35 { return &par_used_list; }
+    return &par_used_map;
+}
+
+fn mn_arg_input() -> i64 {
+    return &arg_input;
+}
+
+fn mn_exp_buffer() -> i64 {
+    return &exp_buffer;
+}
+
+fn mn_lmap_count() -> i64 {
+    var r: i64 = 0;
+    var a: i64 = &lmap_count;
+    raw {
+        r = peek(a);
+    }
+    return r;
+}
+
+fn mn_lmap(k: i64) -> i64 {
+    if k == 1 {
+        return &lmap_file;
+    }
+    if k == 2 {
+        return &lmap_src;
+    }
+    return &lmap_out;
+}
+
+fn pp_buffer(k: i64) -> i64 {
+    if k != 0 {
+        return &inc_buffer2;
+    }
+    return &inc_buffer;
+}

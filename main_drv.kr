@@ -1,6 +1,7 @@
 kron_program
 kron_domain main_drv;
 kron_imports
+acquire_domain "include/main_defs.kr";
 kron_definitions
 
 // =========================================================================
@@ -15,9 +16,8 @@ kron_definitions
 //                 column, the line itself and its carets
 //
 // It was main in main.asm (10d-1): the same messages, the same exit codes.
-// main_out.kr's mx_main calls the two, then writes the output. main.asm
-// keeps main's entry, the buffers (reached through mn_addr) and the calls
-// into Windows.
+// main_out.kr's mx_main calls the two, then writes the output. The buffers
+// are main_buf.kr's (mn_addr), the calls into Windows main_os.kr's.
 // =========================================================================
 
 extern "kronc" {
@@ -80,48 +80,6 @@ extern "kronc" {
 }
 
 // what mn_addr gives (main_cli.kr has 0..16)
-const A_INPUT: i64 = 0;
-const A_FLAG_S: i64 = 2;
-const A_FLAG_CHECK: i64 = 3;
-const A_FLAG_DEBUG: i64 = 4;
-const A_FLAG_LIB: i64 = 6;
-const A_FLAG_MODULE: i64 = 7;
-const A_ANDROID: i64 = 8;
-const A_IOS: i64 = 9;
-const A_MOD_TAG: i64 = 16;
-const A_OUT_TARGET: i64 = 17;         // a byte
-const A_SRC_BUFFER: i64 = 18;
-const A_SRC_SIZE: i64 = 19;           // a qword
-const A_EXP_BUFFER: i64 = 20;
-const A_TOKEN_BUFFER: i64 = 21;
-const A_TOKEN_COUNT: i64 = 22;        // a qword
-const A_AST_BUFFER: i64 = 23;
-const A_SYM_BUFFER: i64 = 24;
-const A_CODE_BUFFER: i64 = 25;
-const A_CG_DEBUG: i64 = 26;           // codegen.asm's bytes
-const A_CG_AS_MODULE: i64 = 27;
-const A_DBG_WHICH: i64 = 28;
-const A_OUT_DYNAMIC: i64 = 29;        // a byte
-const A_IMP_ERR: i64 = 30;            // a dword
-const A_IMP_ERRNAME: i64 = 31;
-const A_LMAP_COUNT: i64 = 32;
-const A_USED_SLICE: i64 = 33;         // the parser's dwords
-const A_USED_TEXT: i64 = 34;
-const A_USED_LIST: i64 = 35;
-const A_USED_MAP: i64 = 36;
-
-const T_PE: i64 = 0;
-const T_ELF: i64 = 1;
-const T_ARM64: i64 = 4;
-const T_WEB: i64 = 5;
-const T_MACOS: i64 = 6;
-
-const SRC_BUFFER_SIZE: i64 = 16777216;
-const TOKEN_BUFFER_SIZE: i64 = 67108864;
-const TOKEN_SIZE: i64 = 24;
-const AST_BUFFER_SIZE: i64 = 268435456;
-const SYM_BUFFER_SIZE: i64 = 4194304;
-const CODE_BUFFER_SIZE: i64 = 16777216;
 
 var md_hint: i64;                     // the hint of a codegen or lexer error
 var md_dump_name: [u8; 528];          // '<input>.expanded'
@@ -214,9 +172,8 @@ fn md_start() -> i64 {
         md_say("ERROR: --debug builds for windows and linux (x86-64); build there to debug, then for the other systems\r\n");
         return 1;
     }
-    // --module: a part of the compiler written in Kron. Its functions
-    // become x86-64 text that kron_all.asm includes, so the compiler is
-    // still built by kasm alone; nothing of a program goes with them.
+    // --module: a part of a program, as x86-64 text: its functions alone,
+    // for an assembly file to include; nothing of a program goes with them.
     if md_flag(A_FLAG_MODULE) != 0 {
         if t != T_PE || lib != 0 || dbg != 0 {
             md_say("ERROR: --module writes x86-64 text for the compiler's own build: it goes with --target=windows only, and not with --lib or --debug\r\n");

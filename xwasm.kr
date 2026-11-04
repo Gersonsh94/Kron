@@ -1,6 +1,7 @@
 kron_program
 kron_domain xwasm;
 kron_imports
+acquire_domain "include/xa_defs.kr";
 kron_definitions
 
 // =========================================================================
@@ -68,38 +69,8 @@ extern "kronc" {
     fn xl_fail(msg: i64) -> i64;
 }
 
-// the shared state, xarm's (xa_state): offsets in its block
-const S_IN: i64 = 16;
-const S_IN_END: i64 = 24;
-const S_LINE_NO: i64 = 32;
-const S_ERR: i64 = 40;
-const S_ERR_LINE: i64 = 48;
-const S_ERR_MSG: i64 = 56;
-const S_REST: i64 = 64;
-const S_SKIPPING: i64 = 80;
-const S_ERR_INSN: i64 = 88;
-const S_LINE: i64 = 248;
-const S_MN: i64 = 1272;
-const S_OPS: i64 = 2072;
-
-// operand record, as xarm writes it (32 bytes)
-const OP_KIND: i64 = 0;
-const OP_REG: i64 = 1;
-const OP_RSIZE: i64 = 2;
-const OP_XMM: i64 = 3;
-const OP_MSIZE: i64 = 4;
-const OP_SCALE: i64 = 5;
-const OP_BASE: i64 = 6;
-const OP_INDEX: i64 = 7;
-const OP_VAL: i64 = 8;
-const OP_REL: i64 = 16;
-const OP_TEXT: i64 = 24;
-
-const K_REG: i64 = 1;
-const K_XMM: i64 = 2;
-const K_IMM: i64 = 3;
-const K_MEM: i64 = 4;
-const K_LABEL: i64 = 5;
+// the shared state, xarm's (xa_state), and the operand records xarm
+// writes in it: their offsets and kinds are include/xa_defs.kr's
 
 // who set the flags
 const FK_NONE: i64 = 0;

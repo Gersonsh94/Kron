@@ -34,7 +34,7 @@ const IP_MAX: i64 = 64;        // modules a program can pull in, in total
 const IP_DEPTH: i64 = 8;       // how deep imports may nest
 const IP_KIDS: i64 = 16;       // imports one file may declare
 const IP_NAME: i64 = 256;      // a name, with its zero byte
-const IP_LMAP: i64 = 128;      // runs in the line map (main.asm keeps 128)
+const IP_LMAP: i64 = 128;      // runs in the line map (main_buf.kr keeps 128)
 
 var ip_names: [u8; 16384];     // the modules, in dependency order (64 x 256)
 var ip_count: i64;

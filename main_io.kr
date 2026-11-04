@@ -15,9 +15,9 @@ kron_definitions
 //
 // They were in main.asm, and they are here now, byte for byte the same; the
 // driver (main_drv.kr, main_out.kr) and the code generator call them
-// directly. main.asm keeps the calls into Windows (read_file,
-// print_string, print_bytes) and the buffers (the program's name, the
-// expanded text, the line map).
+// directly. The calls into Windows (read_file, print_string, print_bytes)
+// are main_os.kr's, the buffers (the program's name, the expanded text, the
+// line map) main_buf.kr's.
 // =========================================================================
 
 extern "kronc" {

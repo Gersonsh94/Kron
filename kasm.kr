@@ -12,7 +12,7 @@ kron_definitions
 // KASM, THE KRON ASSEMBLER
 //
 // The fifth part of the compiler written in Kron. It turns the text the code
-// generator writes -- and the compiler's own sources, kron_all.asm -- into
+// generator writes, the compiler's own code among it, into
 // x86-64 machine code. Two passes: the first records where every label
 // lands, the second emits the bytes with every reference resolved. It is not
 // a general assembler, and deliberately so: it has to understand exactly the
@@ -26,8 +26,8 @@ kron_definitions
 //   ks_encode.kr    the instructions
 //   ks_enc_mov.kr   mov and xchg
 //
-// kronc --module turns it into kasm_kr.asm; the driver and the writers call
-// its ks_ and ksk_ functions directly.
+// kron.kr brings it in; the driver and the writers call its ks_ and ksk_
+// functions directly.
 // =========================================================================
 
 // =========================================================================

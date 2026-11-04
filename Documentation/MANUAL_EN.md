@@ -373,6 +373,10 @@ arena_free(a);
 print(v[0]);             // 0, and failed() is 1: the arena is gone
 ```
 
+An arena takes its memory from the system when it is made, as big as asked:
+up to 32 GB, and as much as the system gives. Freeing an arena keeps its
+memory for new slices, as before.
+
 ---
 
 ## 9. Raw access
@@ -1013,31 +1017,27 @@ editor, the tests, building for other systems.
 
 ## 22. Building the compiler
 
-The compiler is written in x86-64 assembly and, part by part, in Kron
-itself: its lexer is `lexer/lexer.kr`, its parser `parser/parser.kr` and
-the files it imports, its semantic pass `semantic/semantic.kr`, its code
-generator `codegen/codegen.kr` and its assembler `kasm.kr`, with the
-files they import. `BUILD.bat`
-builds `kronc.exe` from the seed with nothing but Kron's own tools, and
-`BOOTSTRAP.bat` checks that it reproduces itself byte for byte.
-
-A part in Kron is compiled as a module:
+The compiler is written in Kron, all of it: `kron.kr` is the program, and
+it brings in every part through `kron_front.kr` (the calls into Windows,
+the buffers, the lexer, the parser, the semantic pass, the code generator,
+the import pass, the preprocessor and the driver) and `kron_back.kr` (kasm,
+karm, xarm, xwasm and the writers of every file it makes). It is built like
+any program:
 
 ```
-kronc.exe lexer\lexer.kr --module        lexer\lexer_kr.asm
-kronc.exe parser\parser.kr --module      parser\parser_kr.asm
-kronc.exe semantic\semantic.kr --module  semantic\semantic_kr.asm
-kronc.exe codegen\codegen.kr --module    codegen\codegen_kr.asm
-kronc.exe kasm.kr --module               kasm_kr.asm
+kronc.exe kron.kr -o kronc.exe
 ```
 
-which is its functions as assembly text, with no runtime and no entry, for
-`kron_all.asm` to include. A module has no `main` and exports nothing; its
-globals start from numbers written out. A function of the compiler outside
-the part is named in `extern "kronc" { fn name(...); }` and called as any
-other. `KRONPARTS.bat` makes every part
-again, and BUILD.bat and BOOTSTRAP.bat call it with each compiler they
-build.
+`BUILD.bat` builds `kronc.exe` from the seed that way, three generations,
+and `BOOTSTRAP.bat` checks that it reproduces itself byte for byte. No
+assembly file takes part: the compiler compiles itself, its own kasm
+assembles it and its own pe_writer writes it.
+
+`kronc file.kr --module` still writes a program's functions alone, as
+x86-64 text with no runtime and no entry, for an assembly file to include.
+A module has no `main` and exports nothing; its globals start from numbers
+written out. A function outside it is named in
+`extern "kronc" { fn name(...); }` and called as any other.
 
 ---
 

@@ -1,0 +1,21 @@
+kron_program
+kron_domain kron_back;
+kron_imports
+acquire_domain "kasm.kr";
+acquire_domain "karm_core.kr";
+acquire_domain "karm_alu.kr";
+acquire_domain "karm_mem.kr";
+acquire_domain "xarm.kr";
+acquire_domain "xarm_tails.kr";
+acquire_domain "xwasm.kr";
+acquire_domain "pe_writer.kr";
+acquire_domain "elf_writer.kr";
+acquire_domain "macho_writer.kr";
+acquire_domain "krn_writer.kr";
+acquire_domain "web_writer.kr";
+acquire_domain "web_host.kr";
+kron_definitions
+
+// The compiler's back: the two assemblers (kasm, karm), the two lowerings
+// (xarm, xwasm) and the writers of every file it makes. kron.kr brings it
+// in.

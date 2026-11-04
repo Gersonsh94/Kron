@@ -1,21 +1,21 @@
 kron_program
 kron_domain codegen;
 kron_imports
-acquire_domain "cg_state.kr";
-acquire_domain "cg_ir.kr";
-acquire_domain "cg_hdr.kr";
-acquire_domain "cg_run.kr";
-acquire_domain "cg_titan.kr";
-acquire_domain "cg_fn.kr";
-acquire_domain "cg_vars.kr";
-acquire_domain "cg_types.kr";
-acquire_domain "cg_fnval.kr";
-acquire_domain "cg_ext.kr";
-acquire_domain "cg_kt.kr";
-acquire_domain "cg_expr.kr";
-acquire_domain "cg_struct.kr";
-acquire_domain "cg_emit.kr";
-acquire_domain "cg_lend.kr";
+acquire_domain "codegen/cg_state.kr";
+acquire_domain "codegen/cg_ir.kr";
+acquire_domain "codegen/cg_hdr.kr";
+acquire_domain "codegen/cg_run.kr";
+acquire_domain "codegen/cg_titan.kr";
+acquire_domain "codegen/cg_fn.kr";
+acquire_domain "codegen/cg_vars.kr";
+acquire_domain "codegen/cg_types.kr";
+acquire_domain "codegen/cg_fnval.kr";
+acquire_domain "codegen/cg_ext.kr";
+acquire_domain "codegen/cg_kt.kr";
+acquire_domain "codegen/cg_expr.kr";
+acquire_domain "codegen/cg_struct.kr";
+acquire_domain "codegen/cg_emit.kr";
+acquire_domain "codegen/cg_lend.kr";
 kron_definitions
 
 // =========================================================================
@@ -23,9 +23,9 @@ kron_definitions
 //
 // The fourth part of the compiler written in Kron. It walks the tree the
 // parser built and the semantic pass checked, and writes the program as
-// x86-64 assembly text, which kasm assembles. kronc --module turns it, with
-// the files it imports, into codegen_kr.asm; the driver (main_drv.kr,
-// main_out.kr) calls its cgk_ functions directly.
+// x86-64 assembly text, which kasm assembles. kron.kr brings it in with the
+// files it imports; the driver (main_drv.kr, main_out.kr) calls its cgk_
+// functions directly.
 //
 //   codegen.kr      the entry points, and the helpers every file uses
 //   cg_state.kr     the state: every global, before what uses it

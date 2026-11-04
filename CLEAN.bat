@@ -10,9 +10,8 @@ REM   CLEAN.bat /scratch   also loose debugging files
 REM   CLEAN.bat /all       all of the above
 REM   CLEAN.bat /list      deletes nothing, only says what it would delete
 REM
-REM   An .asm counts as GENERATED when a .kr of the same name exists. The
-REM   compiler's modules have no .kr, so they survive; neither do the
-REM   kasm*.asm corpora.
+REM   An .asm counts as GENERATED when a .kr of the same name exists, and so
+REM   does a NAME_kr.asm (kronc --module). The kasm*.asm corpora survive.
 REM ===========================================================================
 
 set "DOFUSED="
@@ -42,6 +41,7 @@ echo --- .asm generated from a .kr ---
 for %%F in (*.asm) do (
     if exist "%%~nF.kr" call :kill "%%F"
 )
+for %%F in (*_kr.asm lexer\*_kr.asm parser\*_kr.asm semantic\*_kr.asm codegen\*_kr.asm) do call :kill "%%F"
 
 echo.
 echo --- test objects and binaries ---
@@ -105,15 +105,12 @@ if defined LIST (
 echo ============================================================
 echo.
 echo   NOT touched, even though they look like it:
-echo     main.asm                        the compiler's entry, by hand
+echo     kron.kr                         the compiler, a Kron program
 echo     kasmchar/new/rex/simd.asm       suite corpora
-echo     kasmdiff.asm                    comparison tool
 echo     KRN_FORMAT.md                   the own executable format
 echo     kron_alloc.kr                   allocator written in Kron
 echo     kc.bat                          builds a program in one go
-echo     kron_all.asm seed\ tests\expected\ and the .bat and .ps1
-echo     the NAME_kr.asm beside each part in Kron: BUILD.bat and
-echo     BOOTSTRAP.bat make them again from NAME.kr
+echo     seed\ tests\expected\ and the .bat and .ps1
 echo.
 if not defined DOFUSED echo   .fused.kr files are kept unless /fused is given.
 echo.

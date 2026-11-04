@@ -12,9 +12,8 @@ kron_definitions
 // parser built, keeps every name declared so far in a symbol table and
 // stops a program that uses a name nobody declared, reaches memory by
 // address outside raw { }, gives a function a smaller array than it
-// declares, or lays out two arenas on the same memory. kronc --module
-// turns it into semantic_kr.asm; the driver calls the sem_ functions
-// directly.
+// declares, or lays out two arenas on the same memory. kron.kr brings it
+// in; the driver calls the sem_ functions directly.
 //
 //     sem_init(buf, size)     start, with the memory for the symbols
 //     sem_run(root)           0 when the program is right, -1 if not

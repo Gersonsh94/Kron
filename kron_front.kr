@@ -1,0 +1,21 @@
+kron_program
+kron_domain kron_front;
+kron_imports
+acquire_domain "main_os.kr";
+acquire_domain "main_buf.kr";
+acquire_domain "lexer/lexer.kr";
+acquire_domain "parser/parser.kr";
+acquire_domain "semantic/semantic.kr";
+acquire_domain "codegen/codegen.kr";
+acquire_domain "imports.kr";
+acquire_domain "main_pp.kr";
+acquire_domain "main_io.kr";
+acquire_domain "main_cli.kr";
+acquire_domain "main_drv.kr";
+acquire_domain "main_out.kr";
+kron_definitions
+
+// The compiler's front and its driver: the calls into Windows, the
+// buffers, the lexer, the parser, the semantic pass, the code generator,
+// the import pass, the preprocessor, the command line, the phases and the
+// outputs. kron.kr brings it in.

@@ -34,6 +34,7 @@ optimization is in Kron. Parts 1 to 5:
 | Changed (01-11-2026) | a real given to an integer parameter (of a Kron function or an `extern`), or returned from a function that returns an integer, is a compile error at the real (`x as i64` when the cut is meant; `list_set_real` and the other `_real` functions for lists); stores into an integer (`var n: i64 = x`, a field, an element) still truncate, as on 20-10; a struct as one of several results (`-> (Vec4, i64)`) is an error, it arrived as its address; `var l: i64 = f(3 as f64)` stays an i64 (the cast's type was taken for the declaration's); in std_gpu, making a mesh, shader, texture or target inside a frame or a target is an error, not a broken frame |
 | Library (27-10 to 01-11-2026) | std_gpu: render targets with colour and depth (shadow maps), mipmaps made on the card, BC1 textures; Vulkan only for now. std_ogg: the Ogg container. std_vorbis: Ogg Vorbis decoded in Kron (floor 1, residues 0-2, coupling, IMDCT through an FFT, up to 8 channels), `audio_load_ogg`; checked against ffmpeg sample by sample on five files, within its print precision |
 | Library (01-11-2026, second part) | std_net: UDP and `net_wait`; std_gpu: instanced drawing (`instance` inputs in KSL, Vulkan); std_task: `task_for` over every core; std_audio: pitch, low-pass, echo, synthesis, sound in space, streams, a mixer without a device; std_vorbis: `audio_stream_ogg` |
+| 100% Kron (03-11-2026) | `main.asm`, `kron_all.asm`, `KRONPARTS.bat` and the `.inc` files are gone: the compiler is the Kron program `kron.kr`, built with `kronc kron.kr -o kronc.exe`; its calls into Windows are `main_os.kr` (an extern block of kernel32), its buffers `main_buf.kr`; it writes the same files, messages and exit codes as before |
 | No doors left (03-11-2026) | The doors are gone: every Kron part calls the others directly, the writers' flags and xarm's state are Kron globals, the shims are `xarm_tails.kr`; `runtime/runtime.asm` and `linker/linker.asm`, which nothing called, are gone too; main.asm (380 lines) is the only assembly written by hand |
 | The driver's outputs in Kron (03-11-2026) | `main_out.kr`: every output (.exe, .dll, ELF, .so, ARM64, Mach-O and dylibs with frameworks, .wasm and its page, -S), --assemble (.kbin, --pe, --krn, ARM64), the assemblers' and lowerings' errors, the import pass's door; main.asm is down to 533 lines; the same files, output and exit codes |
 | No `_kr.asm` kept (03-11-2026) | BUILD.bat and BOOTSTRAP.bat make every `NAME_kr.asm` from its `NAME.kr` first with the compiler they start from; the repository keeps only the `.kr` files and the assembly written by hand |
@@ -47,9 +48,8 @@ optimization is in Kron. Parts 1 to 5:
 | Writers in Kron (01-11-2026) | `macho_writer.kr` (Mach-O for macOS and iOS: executables, dylibs, the code signature and its SHA-256) `krn_writer.kr` (the KRN container) and `web_writer.kr` (the page and host beside a .wasm) replace `macho.asm`, `krn.asm` and main.asm's `web_write_host`, which are their doors; the same bytes as before for every program of the suite |
 | Fixed (20-10-2026) | a comparison of reals used as a value (`return a < b`, `f(x == 1.0)`) gave the left operand, not a bool; a real given to an integer (variable, field, element, parameter) kept its bits and an integer given to a real parameter was lost: now truncated and converted, and `var x = 2.5` is a real; `%` of reals is the remainder, bit operators on a real are an error; every `std_*.kr` compiles imported alone (std_exp, std_stats, std_vec3, std_random and std_ml did not); a function named like a register (`r8`, `eax`, `xmm9`) is refused instead of being called as the register |
 
-Still in assembly, written by hand: main.asm alone (380 lines: main's
-entry, the buffers, the calls into Windows). The doors, the runtime and the
-linker are gone (03-11-2026).
+Still in assembly: nothing. The compiler is a Kron program (`kron.kr`),
+compiled by itself (03-11-2026).
 
 Checked: the Kron lexer gives the same tokens as the assembly one, the
 Kron parser the same tree, tables and errors, the Kron semantic pass the
@@ -83,11 +83,10 @@ WebGPU (Dawn).
 
 ## 1. CODEBASE (verified line counts, 03-11-2026)
 
-Every part of the compiler is written in Kron and calls the others
-directly; `kronc --module` makes each `NAME_kr.asm` from its `NAME.kr` (they
-are not kept: BUILD.bat and BOOTSTRAP.bat make them), and `kron_all.asm`
-puts them together for kasm. The only assembly written by hand is
-`main.asm`.
+The compiler is a Kron program, 100% Kron: `kron.kr` brings in every part
+(`kron_front.kr`, `kron_back.kr`) and is built like any other program,
+`kronc kron.kr -o kronc.exe`. No assembly file, written by hand or made,
+takes part in the build.
 
 | File | Lines | Role |
 |---|---:|---|
@@ -102,9 +101,9 @@ puts them together for kasm. The only assembly written by hand is
 | `imports.kr` | 600 | The import pass |
 | `pe_writer.kr`, `elf_writer.kr`, `macho_writer.kr`, `krn_writer.kr`, `web_writer.kr` | 3,097 | The writers: PE32+, ELF, Mach-O with its signature, KRN, the page beside a .wasm |
 | `main_cli.kr`, `main_drv.kr`, `main_out.kr`, `main_io.kr`, `main_pp.kr` | 2,426 | The driver: the command line, the phases and their errors, the outputs, --assemble, the preprocessor |
-| `main.asm` | 380 | By hand: main's entry, the buffers and flags (`mn_addr`), the calls into Windows (read_file, write_file, print_string, print_bytes, os_cmdline) |
-| `include/kron_types.inc`, `include/win64_api.inc` | 796 | The constants and the Windows declarations main.asm uses |
-| `include/web_host.inc` | 2,388 | `web/kron_web.js` as data, carried by the compiler (made by `web/make_host.kr`) |
+| `main_os.kr`, `main_buf.kr`, `include/main_defs.kr` | 335 | The calls into Windows (kernel32, through an extern block), the driver's buffers and flags (`mn_addr`), the numbers they share |
+| `kron.kr`, `kron_front.kr`, `kron_back.kr` | 63 | The program: the parts it brings in, and `main` |
+| `web_host.kr` | 20 | `web/kron_web.js` as one text, carried by the compiler (made by `web/make_host.kr`) |
 
 Beside the compiler: `web/kron_web.js` (941 lines, the host of the web
 target), `web/kron_serve.kr` (a web server in Kron) and 21 standard library

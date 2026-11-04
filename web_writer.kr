@@ -1,6 +1,7 @@
 kron_program
 kron_domain web_writer;
 kron_imports
+acquire_domain "include/main_defs.kr";
 kron_definitions
 
 // =========================================================================
@@ -9,8 +10,8 @@ kron_definitions
 //
 // It was web_write_host in main.asm, and it is here now, byte for byte the
 // same; main_out.kr calls it directly. The page and the names are here;
-// main.asm keeps the output's name (mn_addr) and the host's script
-// (include/web_host.inc, made by web/make_host.kr).
+// the output's name is main_buf.kr's (mn_addr), the host's script
+// web_host.kr's (made by web/make_host.kr).
 // =========================================================================
 
 extern "kronc" {
@@ -19,8 +20,6 @@ extern "kronc" {
     fn ww_host_js() -> i64;
     fn ww_host_js_size() -> i64;
 }
-
-const A_OUT_BIN_NAME: i64 = 10;       // mn_addr: the output's name
 
 var ww_html: [u8; 512];               // NAME.html
 var ww_js: [u8; 512];                 // DIR/kron_web.js
