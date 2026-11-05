@@ -1252,6 +1252,22 @@ replaces, checked file by file before it is delivered.
     suite on every target, the command lines, the assembler's tests and
     the programs that must be refused. It builds itself in about three
     seconds.
+- The repository without the assembly (04-11-2026, Gerson: GitHub still
+  showed 82% assembly). What was left was not the compiler: files made by
+  it and by old tools, kept by mistake. Gone: every `NAME_kr.asm` and
+  `.fused.asm`, `ref_asm/` (COMPAREASM.ps1 makes it again with -Capture),
+  `tests/self/` and `tests/diffgen/` (the last checks of the assembly
+  compiler against NASM), `tests/pe/` (a test run's output),
+  `kernel_demo.asm` and `kernel_program.asm` (what `--bare` and
+  BUILDOS.bat write), `test_math_jasm.asm`, `test_rawwarn.asm`, `zz_t2.asm`.
+  What stays is assembly on purpose, and none of it is the compiler: the
+  inputs kasm and karm are tested with (`kasm*.asm`, `test_scope.asm`,
+  `test_kasmfix.asm`, `arm_*.s`) and the boot code of the bare-metal demo
+  (`mbr.asm`, 16-bit real mode, `boot.asm`, `kernel.asm`), which no
+  compiler writes. `.gitattributes` keeps them out of GitHub's count of
+  languages, and `.gitignore` keeps what the build and the tests make out
+  of the repository. GitHub does not know Kron, so it counts no `.kr`
+  file: the bar shows the rest (the web host in JavaScript, the scripts).
 
 ## Texts lent to a call (20-10-2026, Gerson: found while writing an engine in Kron)
 
@@ -1636,3 +1652,68 @@ called `text_free` itself.
   unsafe happens, the old pool had the same limit. Positioned
   read (`loadfile` reads whole files), AVX, `exp`/`sqrt` and low-precision
   numbers stay pending, as in the table above.
+
+## Found writing the engine (04-11-2026, Gerson)
+
+- A call of seven or more arguments with another call among them lost
+  eight bytes of stack a stack argument, every time it ran: the count of
+  stack arguments was one global, and the call among the arguments set it
+  for its own. The outer call now counts its own after its arguments.
+  `s7.kr` fell with code 127; test: `test_args7`.
+- `s.items[i]` on a field that is a list, a map or a slice: the parser
+  skipped the brackets after a field, so the read gave the list itself and
+  `s.items[i] = v` replaced the list with v. A struct's fields of those
+  types are noted when the struct is read, and `s.items[i]` is the call
+  `v[i]` is (`list_get`, `list_set`...). Brackets after another field are
+  an error now, not skipped. Tests: `test_listfield`, `test_fieldindex_bad`.
+- `task_for` in a program with hooks (functions kept as values): the
+  thread check took any call through a function value as able to reach
+  every function whose address is taken, so std_shader's globals, reached
+  from the engine's hooks, counted as touched by a thread. A call through a
+  function value now reaches only the functions used as values with the
+  same shape (as many arguments, reals where it has reals); a call to an
+  address (`call p(...)`, `c_call`) still reaches them all. A hook with the
+  job's shape -- one integer -- still counts, as it could be the job. Test:
+  `test_taskhooks`.
+- std_net: `net_udp_open_shared` / `net_udp_open_shared_on` set
+  SO_REUSEADDR before the bind, so several sockets take one port;
+  `net_udp_try_recv` gives a datagram if one is there and -1 at once if
+  not; `net_nonblocking(sock, on)` (ioctlsocket FIONBIO on Windows, fcntl
+  O_NONBLOCK on Linux). Test: `test_udp_shared`.
+
+## The engine's library, items 5 to 7 (04-11-2026)
+
+- Sound: buses (submixes) 1..7 mix into the master; each has its volume, a
+  low-pass, an echo and a Freeverb reverb (8 combs and 4 all-passes a side,
+  tuned for the device's rate). `audio_seek`/`audio_position` work on loaded
+  sounds and streams; a library that streams adds a seek hook
+  (`au_add_seekhook`, two at most) as it adds a refill hook (four at most).
+  `audio_hrtf(1)`: a voice in space reaches each ear at its own time
+  (Woodworth's delay), the far ear through the head's shadow (a low-pass)
+  and quieter -- no measured HRTF tables.
+- Ogg: decoder contexts, so `vorbis_open` and four streams decode at once.
+- MP3: a port of minimp3 (CC0), Layer III only, in Kron (std_mp3.kr). Its
+  tables are text parsed once. It matches minimp3 within one step; gapless
+  from the Xing/Info frame and the encoder's delay and padding.
+- Video: a port of pl_mpeg (MIT): MPEG-1 video, MP2 sound, the program
+  stream (std_video.kr). MPEG-1 because it is a decoder small enough to be
+  Kron and has no patents; the pictures match pl_mpeg's byte for byte. The
+  file is read whole; one film at a time.
+- GPU: instance buffers are freed with `gpu_instances_free`; instances and
+  render targets work on WebGPU and Metal too. A target's depth is copied
+  after its pass into a texture of floats (r32float, or r16float where the
+  card cannot filter 32-bit floats; R32Float on Metal), read as Vulkan reads
+  its D32 depth. WebGPU was checked against Vulkan (lavapipe) by replaying
+  the page's messages in Chromium (SwiftShader): the same pixels. Metal is
+  written to its documentation and compiled, not run here.
+- Compute shaders: KSL `buffer name: T;` (float, vec2, vec4) and
+  `compute { }`, with `index` and `count`; 64 runs a group. The buffers
+  are instance buffers, so what a compute shader writes is drawn as
+  instances directly. SPIR-V 1.0 (storage buffers as BufferBlock), WGSL
+  and MSL; `gpu_run` waits for the card (Vulkan, Metal) or goes before the
+  next frame (WebGPU, which cannot read a buffer back).
+- Touches: `window_touches` and the rest, up to 10 fingers, from
+  WM_POINTER (Windows 8+), the page's touch events, Android's pointers and
+  the iOS host's `kron_app_touch_id`. The first finger still moves the
+  mouse. X11 has none yet (it would need XInput2).
+- XR is not written: OpenXR and WebXR need a headset to be tested against.

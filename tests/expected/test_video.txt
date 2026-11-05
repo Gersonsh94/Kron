@@ -1,0 +1,15 @@
+ok    160 x 120
+ok    25 pictures a second, 2000 ms
+ok    it has sound
+ok    50 pictures
+ok    pictures 0, 1, 12, 25 and 49: what the reference decoder gives
+ok    and none after the last
+ok    moved to 1000 ms: picture 25
+ok    back to 480 ms: picture 12
+ok    at 500 ms: still picture 12
+ok    at 1990 ms: picture 49
+ok    at 40 ms, going back: picture 1
+ok    the sound is 88704 frames, as the reference's
+ok    and as loud (1953)
+ok    its voice's position goes to the end
+ok    video_sound after a seek starts at 1000 ms

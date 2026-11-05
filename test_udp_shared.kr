@@ -1,0 +1,47 @@
+kron_program
+kron_domain test_udp_shared;
+kron_imports
+acquire_domain "std_net.kr";
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: UDP that does not wait, and a port two sockets share.
+//
+// net_udp_try_recv says -1 at once when nothing is there and gives a
+// datagram when one is; net_nonblocking leaves a socket working;
+// net_udp_open_shared lets two sockets take the same port.
+//
+// Expected output: -1, 4, ping, 1, -1, 1, 1
+// =========================================================================
+
+var buf: [u8; 64];
+
+fn main() -> i64 {
+    var a: i64 = net_udp_open_on(127, 0, 0, 1, 47821);
+    var b: i64 = net_udp_open_on(127, 0, 0, 1, 47822);
+    print(net_udp_try_recv(b, &buf, 64));        // -1: nothing, no wait
+    net_udp_send(a, 127, 0, 0, 1, 47822, "ping", 4);
+    net_wait(b, 2000);
+    var n: i64 = net_udp_try_recv(b, &buf, 64);
+    print(n);                                      // 4
+    var t: text = text_new();
+    var i: i64 = 0;
+    while i < n {
+        text_add_char(t, buf[i]);
+        i = i + 1;
+    }
+    say(t);                                        // ping
+    print(net_nonblocking(b, 1));                  // 1
+    print(net_udp_try_recv(b, &buf, 64));          // -1
+    // two sockets on one port
+    var s1: i64 = net_udp_open_shared_on(127, 0, 0, 1, 47823);
+    var s2: i64 = net_udp_open_shared_on(127, 0, 0, 1, 47823);
+    print(s1 != s2);                               // 1
+    print(failed() == 0);                          // 1
+    net_close(s1);
+    net_close(s2);
+    net_close(a);
+    net_close(b);
+    return 0;
+}

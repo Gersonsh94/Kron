@@ -1,0 +1,66 @@
+kron_program
+kron_domain test_listfield;
+kron_imports
+acquire_domain "std_list.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: a list kept in a struct's field, indexed: b.items[i] reads it and
+// b.items[i] = v writes it, through a variable, a global and a pointer.
+// The brackets after a field used to be skipped, so the read gave the
+// list itself and the write replaced it.
+//
+// Expected output: 2 7 8 42 42 2 3 99 12 5 5 14 1 40, one a line
+// =========================================================================
+
+struct Bag {
+    n: i64;
+    items: list<i64>;
+    w: i64;
+}
+
+var g: Bag;
+
+fn fill(b: ptr<Bag>) -> i64 {
+    b.items = list_new();
+    var i: i64 = 0;
+    while i < 5 {
+        list_add(b.items, 10 + i);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    var b: Bag;
+    b.n = 3;
+    b.w = 99;
+    b.items = list_new();
+    list_add(b.items, 7);
+    list_add(b.items, 8);
+    print(list_len(b.items));      // 2
+    print(b.items[0]);             // 7
+    print(b.items[1]);             // 8
+    b.items[1] = 42;
+    print(b.items[1]);             // 42
+    print(list_get(b.items, 1));   // 42
+    print(list_len(b.items));      // 2
+    print(b.n);                    // 3
+    print(b.w);                    // 99
+    fill(&g);
+    print(g.items[2]);             // 12
+    g.items[2] = 5;
+    print(g.items[2]);             // 5
+    print(list_len(g.items));      // 5
+    var p: ptr<Bag> = &g;
+    print(p.items[4]);             // 14
+    p.items[4] = 1;
+    print(list_get(g.items, 4));   // 1
+    var s: i64 = 0;
+    var i: i64 = 0;
+    while i < list_len(g.items) {
+        s = s + g.items[i];
+        i = i + 1;
+    }
+    print(s);                      // 10+11+5+13+1 = 40
+}

@@ -14,11 +14,13 @@ REM                                frames of 2000 cubes each. The cube is
 REM                                saved in tests\tmp\gpu_cube.bmp.
 REM     tests\gpu\gpu_target.kr    render targets: a picture drawn into,
 REM                                then read as colour and as depth (shadow
-REM                                maps). Vulkan only, for now.
+REM                                maps).
 REM     tests\gpu\gpu_mip.kr       mipmaps: a fine checkerboard drawn small
 REM                                comes out grey, not black and white
 REM     tests\gpu\gpu_bc.kr        BC1 (compressed) textures: four colours on
 REM                                a 64 x 64 picture come out right
+REM     tests\gpu\gpu_compute.kr   compute shaders: 1000 particles moved by the
+REM                                card, read back, then drawn as instances
 REM     tests\gpu\gpu_inst.kr      instanced drawing: one square four times in
 REM                                one draw, each with its place and colour
 REM     tests\gpu\gpu_window.kr    three seconds of a sphere and a cube in a
@@ -62,6 +64,7 @@ call :gputest gpu_target
 call :gputest gpu_mip
 call :gputest gpu_bc
 call :gputest gpu_inst
+call :gputest gpu_compute
 call :gputest gpu_window
 call :gputest gpu_devices
 

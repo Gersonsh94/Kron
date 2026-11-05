@@ -1533,6 +1533,13 @@ fn prs_struct() -> ptr<Ast> {
                 return 0;
             }
             tail.col = prs_vtag_col();
+            // a list, a map or a slice: s.field[i] is a call, as v[i] is
+            par_coll_field = 1;
+            if par_last_is_slice != 0 {
+                par_slice_add(f.data);
+            }
+            par_coll_of_vtag(f.data);
+            par_coll_field = 0;
         }
         if prs_ct() == TOK_SEMICOLON {
             prs_adv();

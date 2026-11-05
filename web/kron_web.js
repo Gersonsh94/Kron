@@ -45,7 +45,7 @@ const ENOENT = 2, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EACCES = 13,
 
 // the events the page sends (shared ring, 8 ints each)
 const EV_KEY_DOWN = 1, EV_KEY_UP = 2, EV_MOVE = 3, EV_DOWN = 4, EV_UP = 5,
-      EV_WHEEL = 6, EV_CLOSE = 7, EV_CHAR = 8, EV_DELTA = 9;
+      EV_WHEEL = 6, EV_CLOSE = 7, EV_CHAR = 8, EV_DELTA = 9, EV_TOUCH = 10;
 const PAD_INTS = 4 * 32;            // four gamepads: 16 buttons, 6 axes (x 10000)
 const RING_SLOTS = 1024;            // events
 const RING_INTS = 8;
@@ -384,10 +384,16 @@ class Kron {
       case 1201: return this.gpuProgram(a, b, c, d, e, f);
       case 1202: return this.gpuMesh(a, b, c, d);
       case 1203: return this.gpuTexture(a, b, c);
-      case 1204: return this.gpuBegin(a);
+      case 1204: return this.gpuBegin(a, b);
       case 1205: return this.gpuDraw(a, b, c, d, e, f);
       case 1206: return this.gpuEnd();
       case 1207: return this.gpuClose();
+      case 1208: return this.gpuInstNew(a);
+      case 1209: return this.gpuInstWrite(a, b, c, d);
+      case 1210: return this.gpuInstFree(a);
+      case 1211: return this.gpuTarget(a, b);
+      case 1212: return this.gpuCompute(a, b, c);
+      case 1213: return this.gpuRun(a, b, c, d, e);
       // ---- sound: WebAudio, played by the page (std_audio.kr) ---------------
       case 1210: return this.audioOpen(a);
       case 1211: return this.audioWrite(a, b);
@@ -745,17 +751,20 @@ class Kron {
     this.gpuSend({ kind: 'gpu-tex', id, w, h, data }, IS_NODE ? [] : [data.buffer]);
     return id;
   }
-  gpuBegin(p) {
+  // a frame, or with target a render target's pass (gpuTarget's number)
+  gpuBegin(p, target) {
     const dv = this.dv();
     const clear = [0, 1, 2, 3].map(i => dv.getFloat32(p + i * 4, true));
-    this.gpuFrame = { clear, draws: [], u: [] };
+    this.gpuFrame = { clear, draws: [], u: [], target: target || 0 };
     return 1;
   }
+  // tp: the four textures, then the instance buffer (0 none) and how many
   gpuDraw(pipe, mesh, count, up, usize, tp) {
     if (!this.gpuFrame) return 0;
     const dv = this.dv();
     const tex = [0, 1, 2, 3].map(i => Number(dv.getBigInt64(tp + i * 8, true)));
-    this.gpuFrame.draws.push({ pipe, mesh, count, tex, u: this.gpuFrame.u.length, usize });
+    const inst = Number(dv.getBigInt64(tp + 32, true)), ninst = Number(dv.getBigInt64(tp + 40, true));
+    this.gpuFrame.draws.push({ pipe, mesh, count, tex, inst, ninst, u: this.gpuFrame.u.length, usize });
     this.gpuFrame.u.push(usize > 0 ? this.bytes(up, usize) : new Uint8Array(0));
     return 1;
   }
@@ -764,7 +773,8 @@ class Kron {
     if (!f) return 0;
     this.gpuFrame = null;
     // one frame on its way at a time: wait for the page to draw the last
-    if (this.shared && !IS_NODE) {
+    // (a target's pass goes on ahead: the frame after it waits)
+    if (this.shared && !IS_NODE && !f.target) {
       const ctl = this.shared.ctl;
       if (Atomics.load(ctl, 7) !== 0) Atomics.wait(ctl, 7, 1, 250);
       Atomics.store(ctl, 7, 1);
@@ -780,6 +790,43 @@ class Kron {
   gpuClose() {
     this.gpuSend({ kind: 'gpu-close' });
     return 1;
+  }
+  // instance buffers: the program keeps the values, and sends them again
+  // when it changed them, before the frame that draws them
+  gpuInstNew(size) {
+    const id = ++this.gpuIds;
+    this.gpuSend({ kind: 'gpu-inst-new', id, size });
+    return id;
+  }
+  gpuInstWrite(id, p, n, at) {
+    const data = this.bytes(p, n);
+    this.gpuSend({ kind: 'gpu-inst', id, data, at: at || 0 }, IS_NODE ? [] : [data.buffer]);
+    return 1;
+  }
+  // compute shaders: made once, run between frames on instance buffers
+  gpuCompute(src, n, nbuf) {
+    const wgsl = this.decoder.decode(this.bytes(src, n));
+    const id = ++this.gpuIds;
+    this.gpuSend({ kind: 'gpu-cprog', id, wgsl, nbuf });
+    return id;
+  }
+  gpuRun(pipe, count, up, usize, bp) {
+    const dv = this.dv();
+    const bufs = [0, 1, 2, 3].map(i => Number(dv.getBigInt64(bp + i * 8, true)));
+    const u = this.bytes(up, usize);
+    this.gpuSend({ kind: 'gpu-run', pipe, count, u, bufs }, IS_NODE ? [] : [u.buffer]);
+    return 1;
+  }
+  gpuInstFree(id) {
+    this.gpuSend({ kind: 'gpu-inst-free', id });
+    return 1;
+  }
+  // a render target: its colour is texture id, its depth texture id + 1
+  gpuTarget(w, h) {
+    const id = this.gpuIds + 1;
+    this.gpuIds += 2;
+    this.gpuSend({ kind: 'gpu-target', id, w, h });
+    return id;
   }
 
   // ---- gamepads: what the page read last, 23 values from index b ---------
@@ -824,6 +871,8 @@ class KronGPU {
     this.pipes = new Map();
     this.meshes = new Map();
     this.texs = new Map();
+    this.insts = new Map();
+    this.targets = new Map();
     this.ubuf = null;
     this.ubufSize = 0;
   }
@@ -831,7 +880,10 @@ class KronGPU {
     if (!this.gpu) return false;
     const adapter = await this.gpu.requestAdapter();
     if (!adapter) return false;
-    this.device = await adapter.requestDevice();
+    // a target's depth is read as a texture of floats, filtered when the
+    // card can (float32-filterable), else at half precision
+    this.f32f = adapter.features.has('float32-filterable');
+    this.device = await adapter.requestDevice({ requiredFeatures: this.f32f ? ['float32-filterable'] : [] });
     this.w = w; this.h = h;
     if (canvas) {
       this.ctx = canvas.getContext('webgpu');
@@ -862,13 +914,22 @@ class KronGPU {
     }
     const g1 = d.createBindGroupLayout({ entries: e1 });
     const fmt = ['', 'float32', 'float32x2', 'float32x3', 'float32x4'];
-    let off = 0;
-    const attributes = m.comps.map((c, i) => { const a = { shaderLocation: i, offset: off, format: fmt[c] }; off += c * 4; return a; });
+    // the corners' inputs from buffer 0; the last ninst, the instances',
+    // from buffer 1, once an instance
+    const ninst = (m.flags >> 8) & 255, nv = m.comps.length - ninst;
+    let off = 0, ioff = 0;
+    const attributes = [], iattributes = [];
+    m.comps.forEach((c, i) => {
+      if (i < nv) { attributes.push({ shaderLocation: i, offset: off, format: fmt[c] }); off += c * 4; }
+      else { iattributes.push({ shaderLocation: i, offset: ioff, format: fmt[c] }); ioff += c * 4; }
+    });
+    const buffers = attributes.length ? [{ arrayStride: off, attributes }] : [];
+    if (iattributes.length) buffers.push({ arrayStride: ioff, stepMode: 'instance', attributes: iattributes });
     const blend = (m.flags & 4) ? { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
                                      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } : undefined;
     const pipe = d.createRenderPipeline({
       layout: d.createPipelineLayout({ bindGroupLayouts: [g0, g1] }),
-      vertex: { module, entryPoint: 'vs_main', buffers: attributes.length ? [{ arrayStride: off, attributes }] : [] },
+      vertex: { module, entryPoint: 'vs_main', buffers },
       fragment: { module, entryPoint: 'fs_main', targets: [{ format: this.format, blend }] },
       primitive: { topology: 'triangle-list', cullMode: (m.flags & 1) ? 'back' : 'none', frontFace: 'ccw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!(m.flags & 2),
@@ -891,6 +952,84 @@ class KronGPU {
     this.device.queue.writeTexture({ texture: t }, m.data, { bytesPerRow: m.w * 4 }, [m.w, m.h]);
     this.texs.set(m.id, t.createView());
   }
+  instNew(m) {
+    this.insts.set(m.id, { buf: this.device.createBuffer({ size: Math.max(16, (m.size + 3) & ~3),
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }) });
+  }
+  inst(m) {
+    const b = this.insts.get(m.id);
+    if (b && m.data.length >= 4) this.device.queue.writeBuffer(b.buf, m.at || 0, m.data.buffer, m.data.byteOffset, m.data.length & ~3);
+  }
+  computeProgram(m) {
+    const d = this.device;
+    const module = d.createShaderModule({ code: m.wgsl });
+    const g0 = d.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: 'uniform' } }] });
+    const e1 = [];
+    for (let k = 0; k < m.nbuf; k++) e1.push({ binding: k, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
+    const g1 = d.createBindGroupLayout({ entries: e1 });
+    const pipe = d.createComputePipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [g0, g1] }),
+      compute: { module, entryPoint: 'cs_main' } });
+    this.pipes.set(m.id, { cpipe: pipe, g0, g1, nbuf: m.nbuf });
+  }
+  // a run: its uniforms in a buffer of their own, 64 items a group
+  run(m) {
+    const d = this.device, p = this.pipes.get(m.pipe);
+    if (!p) return;
+    const size = Math.max(16, (m.u.length + 15) & ~15);
+    const ub = d.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const staging = new Uint8Array(size);
+    staging.set(m.u);
+    d.queue.writeBuffer(ub, 0, staging);
+    const entries = [];
+    for (let k = 0; k < p.nbuf; k++) {
+      const b = this.insts.get(m.bufs[k]);
+      if (!b) { ub.destroy(); return; }
+      entries.push({ binding: k, resource: { buffer: b.buf } });
+    }
+    const enc = d.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(p.cpipe);
+    pass.setBindGroup(0, d.createBindGroup({ layout: p.g0, entries: [{ binding: 0, resource: { buffer: ub } }] }));
+    pass.setBindGroup(1, d.createBindGroup({ layout: p.g1, entries }));
+    pass.dispatchWorkgroups(Math.ceil(m.count / 64));
+    pass.end();
+    d.queue.submit([enc.finish()]);
+  }
+  instFree(m) {
+    const b = this.insts.get(m.id);
+    if (b) { b.buf.destroy(); this.insts.delete(m.id); }
+  }
+  // a render target: colour in the frame's format (the programs' pipelines
+  // draw into it), depth as the frame's, and the depth copied after each
+  // pass into a texture of floats a shader can sample, as Vulkan's
+  makeTarget(m) {
+    const d = this.device;
+    const col = d.createTexture({ size: [m.w, m.h], format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const dep = d.createTexture({ size: [m.w, m.h], format: 'depth24plus',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const dfmt = this.f32f ? 'r32float' : 'r16float';
+    const dcopy = d.createTexture({ size: [m.w, m.h], format: dfmt,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    if (!this.dpipe) {
+      const module = d.createShaderModule({ code:
+        '@group(0) @binding(0) var dt: texture_depth_2d;\n' +
+        '@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {\n' +
+        '    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));\n' +
+        '    return vec4<f32>(p[i], 0.0, 1.0);\n}\n' +
+        '@fragment fn fs(@builtin(position) q: vec4<f32>) -> @location(0) vec4<f32> {\n' +
+        '    return vec4<f32>(textureLoad(dt, vec2<i32>(q.xy), 0), 0.0, 0.0, 1.0);\n}\n' });
+      this.dpipe = d.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: dfmt }] },
+        primitive: { topology: 'triangle-list' } });
+    }
+    const dgroup = d.createBindGroup({ layout: this.dpipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: dep.createView() }] });
+    this.targets.set(m.id, { col, cview: col.createView(), dview: dep.createView(), dcopy, dgroup, w: m.w, h: m.h });
+    this.texs.set(m.id, col.createView());
+    this.texs.set(m.id + 1, dcopy.createView());
+  }
   frame(f) {
     const d = this.device;
     // every draw's uniforms, 256 bytes apart (more for big blocks)
@@ -905,11 +1044,14 @@ class KronGPU {
     f.draws.forEach((dr, i) => { if (dr.usize > 0) staging.set(f.u[dr.u], at[i]); });
     if (size > 0) d.queue.writeBuffer(this.ubuf, 0, staging, 0, size);
     const enc = d.createCommandEncoder();
-    const view = this.ctx ? this.ctx.getCurrentTexture().createView() : this.target.createView();
+    const tg = f.target ? this.targets.get(f.target) : null;
+    if (f.target && !tg) return Promise.resolve();
+    const view = tg ? tg.cview : this.ctx ? this.ctx.getCurrentTexture().createView() : this.target.createView();
     const pass = enc.beginRenderPass({
       colorAttachments: [{ view, clearValue: { r: f.clear[0], g: f.clear[1], b: f.clear[2], a: f.clear[3] },
                            loadOp: 'clear', storeOp: 'store' }],
-      depthStencilAttachment: { view: this.depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
+      depthStencilAttachment: { view: tg ? tg.dview : this.depth.createView(), depthClearValue: 1,
+                                depthLoadOp: 'clear', depthStoreOp: 'store' }
     });
     f.draws.forEach((dr, i) => {
       const p = this.pipes.get(dr.pipe), mesh = this.meshes.get(dr.mesh);
@@ -932,9 +1074,22 @@ class KronGPU {
       pass.setBindGroup(1, g);
       pass.setVertexBuffer(0, mesh.v);
       pass.setIndexBuffer(mesh.i, 'uint32');
-      pass.drawIndexed(dr.count);
+      if (dr.inst) {
+        const ib = this.insts.get(dr.inst);
+        if (!ib) return;
+        pass.setVertexBuffer(1, ib.buf);
+        pass.drawIndexed(dr.count, dr.ninst);
+      } else pass.drawIndexed(dr.count);
     });
     pass.end();
+    if (tg) {
+      const dp = enc.beginRenderPass({ colorAttachments: [{ view: tg.dcopy.createView(), loadOp: 'clear',
+        clearValue: { r: 1, g: 0, b: 0, a: 1 }, storeOp: 'store' }] });
+      dp.setPipeline(this.dpipe);
+      dp.setBindGroup(0, tg.dgroup);
+      dp.draw(3);
+      dp.end();
+    }
     d.queue.submit([enc.finish()]);
     return d.queue.onSubmittedWorkDone();
   }
@@ -1103,6 +1258,8 @@ if (IS_PAGE) {
   }
 
   window.KronWeb = {
+    // what draws the 3D, for a page that replays a recorded program (tests)
+    KronGPU,
     async start(opts) {
       await isolate();
       const canvas = typeof opts.canvas === 'string' ? document.querySelector(opts.canvas) : opts.canvas;
@@ -1163,6 +1320,16 @@ if (IS_PAGE) {
         canvas.addEventListener('mousedown', e => { canvas.focus(); const [x, y] = pos(e); send(EV_DOWN, e.button, x, y, mods(e)); e.preventDefault(); });
         window.addEventListener('mouseup', e => { const [x, y] = pos(e); send(EV_UP, e.button, x, y, mods(e)); });
         canvas.addEventListener('contextmenu', e => e.preventDefault());
+        // each finger: 1 down, 2 move, 3 up, with its number (the browser
+        // still makes the first one a mouse for the left button)
+        canvas.style.touchAction = 'none';
+        const touch = (phase) => (e) => {
+          for (const t of e.changedTouches) { const [x, y] = pos(t); send(EV_TOUCH, phase, t.identifier | 0, x, y); }
+        };
+        canvas.addEventListener('touchstart', touch(1), { passive: true });
+        canvas.addEventListener('touchmove', touch(2), { passive: true });
+        canvas.addEventListener('touchend', touch(3), { passive: true });
+        canvas.addEventListener('touchcancel', touch(3), { passive: true });
         canvas.addEventListener('wheel', e => { send(EV_WHEEL, e.deltaY < 0 ? 1 : -1, mods(e)); e.preventDefault(); }, { passive: false });
         let pastePending = null;
         canvas.addEventListener('keydown', e => {
@@ -1250,6 +1417,12 @@ if (IS_PAGE) {
         else if (m.kind === 'gpu-prog') { if (gpu3d) try { gpu3d.program(m); } catch (e) { say('WebGPU: ' + e + '\n'); } }
         else if (m.kind === 'gpu-mesh') { if (gpu3d) gpu3d.mesh(m); }
         else if (m.kind === 'gpu-tex') { if (gpu3d) gpu3d.texture(m); }
+        else if (m.kind === 'gpu-inst-new') { if (gpu3d) gpu3d.instNew(m); }
+        else if (m.kind === 'gpu-inst') { if (gpu3d) gpu3d.inst(m); }
+        else if (m.kind === 'gpu-inst-free') { if (gpu3d) gpu3d.instFree(m); }
+        else if (m.kind === 'gpu-cprog') { if (gpu3d) try { gpu3d.computeProgram(m); } catch (e) { say('WebGPU: ' + e + '\n'); } }
+        else if (m.kind === 'gpu-run') { if (gpu3d) gpu3d.run(m); }
+        else if (m.kind === 'gpu-target') { if (gpu3d) try { gpu3d.makeTarget(m); } catch (e) { say('WebGPU: ' + e + '\n'); } }
         else if (m.kind === 'gpu-frame') {
           const done = () => { if (ctl) { Atomics.store(ctl, 7, 0); Atomics.notify(ctl, 7); } };
           if (gpu3d) gpu3d.frame(m.frame).then(done, done); else done();

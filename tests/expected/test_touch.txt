@@ -1,0 +1,16 @@
+ok    no fingers at first
+ok    two fingers down
+ok    the first: its number and place
+ok    the second
+ok    both came down in this frame
+ok    the next frame: neither is new
+ok    the second moved
+ok    the first did not
+ok    a move of a finger that is not down changes nothing
+ok    one lifted, one came down
+ok    the second is first now, the new one after it
+ok    and only the new one began
+ok    down again: the same finger, moved
+ok    ten fingers at most
+ok    all taken: none left, ten ended
+ok    and the next frame counts from 0

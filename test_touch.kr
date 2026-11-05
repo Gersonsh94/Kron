@@ -1,0 +1,64 @@
+kron_program
+kron_domain test_touch;
+kron_imports
+acquire_domain "std_window.kr";
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: the fingers on a window (window_touches and the rest), fed through
+// win_touch as each system's touches are -- no screen needed: two fingers
+// down, one moved, the first lifted, a third down, all taken away.
+// =========================================================================
+
+fn yes(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok { text_add(t, "ok    "); } else { text_add(t, "FAIL  "); }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn main() -> i64 {
+    yes(window_touches() == 0, "no fingers at first");
+    // a frame: two fingers come down
+    win_new_frame();
+    win_touch(1, 7, 10, 20);
+    win_touch(1, 9, 100, 200);
+    yes(window_touches() == 2, "two fingers down");
+    yes(window_touch_id(0) == 7 && window_touch_x(0) == 10 && window_touch_y(0) == 20, "the first: its number and place");
+    yes(window_touch_id(1) == 9 && window_touch_x(1) == 100 && window_touch_y(1) == 200, "the second");
+    yes(window_touch_began(0) == 1 && window_touch_began(1) == 1, "both came down in this frame");
+    // the next: the second moves
+    win_new_frame();
+    win_touch(2, 9, 110, 190);
+    yes(window_touch_began(0) == 0 && window_touch_began(1) == 0, "the next frame: neither is new");
+    yes(window_touch_x(1) == 110 && window_touch_y(1) == 190, "the second moved");
+    yes(window_touch_x(0) == 10, "the first did not");
+    win_touch(2, 5, 1, 1);
+    yes(window_touches() == 2, "a move of a finger that is not down changes nothing");
+    // the first lifted, a third down in the same frame
+    win_new_frame();
+    win_touch(3, 7, 10, 20);
+    win_touch(1, 3, 50, 60);
+    yes(window_touches() == 2 && window_touches_ended() == 1, "one lifted, one came down");
+    yes(window_touch_id(0) == 9 && window_touch_id(1) == 3, "the second is first now, the new one after it");
+    yes(window_touch_began(0) == 0 && window_touch_began(1) == 1, "and only the new one began");
+    // the same finger down twice is still one
+    win_touch(1, 3, 55, 65);
+    yes(window_touches() == 2 && window_touch_x(1) == 55, "down again: the same finger, moved");
+    // ten at most
+    var i: i64 = 0;
+    while i < 12 {
+        win_touch(1, 100 + i, i, i);
+        i = i + 1;
+    }
+    yes(window_touches() == 10, "ten fingers at most");
+    // the system takes them all (a call, the app put away)
+    win_new_frame();
+    win_touch(4, 0, 0, 0);
+    yes(window_touches() == 0 && window_touches_ended() == 10, "all taken: none left, ten ended");
+    win_new_frame();
+    yes(window_touches_ended() == 0, "and the next frame counts from 0");
+    return 0;
+}

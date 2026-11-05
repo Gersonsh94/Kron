@@ -1,0 +1,40 @@
+kron_program
+kron_domain test_taskhooks;
+kron_imports
+acquire_domain "std_gpu.kr";
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: task_for in a program with hooks: functions kept as values that
+// touch globals which are not shared (shader_compile does). The call
+// through the job reaches only the functions of its own shape (one
+// integer), so hooks of other shapes are not code that runs in a thread,
+// and the program compiles.
+//
+// Expected output: 499500
+// =========================================================================
+
+shared var total: i64;
+var hooks: [i64; 4];
+
+fn on_frame(dt: f64) -> i64 {
+    return shader_compile("x");
+}
+
+fn on_key(k: i64, down: i64) -> i64 {
+    return shader_compile("y");
+}
+
+fn main() {
+    var h1: fn(f64) -> i64 = on_frame;
+    var h2: fn(i64, i64) -> i64 = on_key;
+    lock_init(1);
+    task_for(1000, fn(i: i64) -> i64 {
+        lock_take(1);
+        total = total + i;
+        lock_give(1);
+        return 0;
+    });
+    print(total);
+}

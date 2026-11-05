@@ -31,7 +31,7 @@ final class KronViewController: UIViewController, UIKeyInput {
         super.viewDidLoad()
         view.backgroundColor = .black
         view.layer.magnificationFilter = .linear
-        view.isMultipleTouchEnabled = false
+        view.isMultipleTouchEnabled = true
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -78,13 +78,32 @@ final class KronViewController: UIViewController, UIKeyInput {
         CATransaction.commit()
     }
 
-    // a touch, in the picture's pixels
+    // the touches, in the picture's pixels: each finger with a number of its
+    // own while it stays down (window_touch_id); the first one down is also
+    // the mouse's left button
+    private var touchIds: [ObjectIdentifier: Int32] = [:]
+    private var nextTouchId: Int32 = 1
+    private var primary: ObjectIdentifier?
     private func send(_ phase: Int32, _ touches: Set<UITouch>) {
-        guard let t = touches.first else { return }
-        let p = t.location(in: view)
-        let x = Double(p.x / view.bounds.width) * Double(pictureWidth)
-        let y = Double(p.y / view.bounds.height) * Double(pictureHeight)
-        kron_app_touch(phase, x, y)
+        for t in touches {
+            let key = ObjectIdentifier(t)
+            var id = touchIds[key] ?? 0
+            if id == 0 {
+                id = nextTouchId
+                nextTouchId += 1
+                touchIds[key] = id
+            }
+            let p = t.location(in: view)
+            let x = Double(p.x / view.bounds.width) * Double(pictureWidth)
+            let y = Double(p.y / view.bounds.height) * Double(pictureHeight)
+            kron_app_touch_id(phase, id, x, y)
+            if phase == 1 && primary == nil { primary = key }
+            if primary == key { kron_app_touch(phase, x, y) }
+            if phase == 3 {
+                touchIds[key] = nil
+                if primary == key { primary = nil }
+            }
+        }
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { send(1, touches) }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { send(2, touches) }

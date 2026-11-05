@@ -1,0 +1,144 @@
+kron_program
+kron_domain test_audiobus;
+kron_imports
+acquire_domain "std_vorbis.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: buses with effects of their own, the live reverb, seeking, the
+// head (audio_hrtf) and several Ogg files at once, on the mixer without a
+// device (audio_open_silent, audio_render).
+// =========================================================================
+
+var buf: i64;
+
+fn side(i: i64, c: i64) -> i64 { return au_le16(buf + i * 4 + c * 2); }
+
+fn rms(a: i64, b: i64, c: i64) -> i64 {
+    var s: f64 = 0.0;
+    var i: i64 = a;
+    while i < b {
+        var x: f64 = side(i, c) as f64;
+        s = s + x * x;
+        i = i + 1;
+    }
+    return fsqrt(s / ((b - a) as f64)) as i64;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn yes(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok { text_add(t, "ok    "); } else { text_add(t, "FAIL  "); }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn main() -> i64 {
+    audio_open_silent(48000);
+    buf = hp_alloc(96000 * 4 + 8);
+    var sine: i64 = audio_synth(AU_SINE, 1000.0, 1000, 0.5, 0, 0);
+    // 1. a bus at half volume: the voice on it half as loud
+    var v: i64 = audio_play(sine, 1.0, 1);
+    audio_render(buf, 4800);
+    var full: i64 = rms(0, 4800, 0);
+    var b: i64 = audio_bus_new();
+    yes(b == 1, "the first bus is 1");
+    audio_set_bus(v, b);
+    audio_bus_volume(b, 0.5);
+    audio_render(buf, 4800);
+    var half: i64 = rms(0, 4800, 0);
+    yes(iabs(half * 2 - full) < 40, "a bus at half volume: the voice half as loud");
+    // 2. the bus's low-pass: a 6000 Hz square mostly gone
+    audio_bus_volume(b, 1.0);
+    audio_stop(v);
+    var sq: i64 = audio_synth(AU_SQUARE, 6000.0, 500, 0.5, 0, 0);
+    v = audio_play(sq, 1.0, 0);
+    audio_render(buf, 4800);
+    var open_sq: i64 = rms(100, 4800, 0);
+    audio_stop(v);
+    v = audio_play(sq, 1.0, 0);
+    audio_set_bus(v, b);
+    audio_bus_lowpass(b, 300.0);
+    audio_render(buf, 4800);
+    yes(rms(100, 4800, 0) * 10 < open_sq, "the bus's low-pass keeps under a tenth of the square");
+    audio_stop(v);
+    audio_bus_lowpass(b, 0.0);
+    // 3. the bus's echo, and the master's left alone
+    var click: i64 = audio_synth(AU_SQUARE, 10.0, 1, 1.0, 0, 0);
+    audio_bus_echo(b, 10, 0.0, 0.5);
+    v = audio_play(click, 1.0, 0);
+    audio_set_bus(v, b);
+    audio_render(buf, 1000);
+    yes(side(0, 0) > 30000 && iabs(side(480, 0) * 2 - side(0, 0)) < 4, "the bus's echo: half the click, 480 frames later");
+    var w: i64 = audio_play(click, 1.0, 0);
+    audio_render(buf, 1000);
+    yes(side(0, 0) > 30000 && side(480, 0) == 0, "a voice on the master has no echo");
+    audio_bus_echo(b, 10, 0.0, 0.0);
+    // 4. the reverb: a click rings on after it, and dies away
+    audio_reverb(b, 0.8, 0.3, 0.5);
+    v = audio_play(click, 1.0, 0);
+    audio_set_bus(v, b);
+    audio_render(buf, 48000);
+    var tail1: i64 = rms(4800, 9600, 0);
+    var tail2: i64 = rms(38400, 43200, 0);
+    yes(tail1 > 20, "the reverb: the room rings on after the click");
+    yes(tail2 < tail1, "and dies away");
+    audio_reverb(b, 0.8, 0.3, 0.0);
+    audio_render(buf, 48000);
+    audio_render(buf, 4800);
+    yes(rms(0, 4800, 0) == 0, "with mix 0 the room is gone");
+    // 5. seeking a sound, and where it is
+    var ramp: i64 = audio_synth(AU_SAW, 1.0, 1000, 1.0, 0, 0);
+    v = audio_play(ramp, 1.0, 0);
+    audio_render(buf, 480);
+    yes(audio_position(v) == 10, "10 ms played");
+    audio_seek(v, 500);
+    yes(audio_position(v) == 500, "seeking to 500 ms");
+    audio_render(buf, 1);
+    yes(iabs(side(0, 0)) < 200, "and the saw is half way: near 0");
+    audio_stop(v);
+    // 6. the head: a voice to the right reaches the left ear later and duller
+    audio_listener(0.0, 0.0, 0.0, 0.0, 0.0, -1.0);
+    audio_set_distance(1.0, 100.0);
+    audio_hrtf(1);
+    v = audio_play(click, 1.0, 0);
+    audio_set_position(v, 1.0, 0.0, 0.0);
+    audio_render(buf, 200);
+    var first_r: i64 = -1;
+    var first_l: i64 = -1;
+    var i: i64 = 0;
+    while i < 200 {
+        if first_r < 0 && side(i, 1) > 1000 { first_r = i; }
+        if first_l < 0 && side(i, 0) > 1000 { first_l = i; }
+        i = i + 1;
+    }
+    yes(first_r == 0, "the head: the right ear first");
+    yes(first_l > 20 && first_l < 40, "the left ear about 0.6 ms later");
+    audio_hrtf(0);
+    // 7. two Ogg files streamed at once, and one loaded whole besides:
+    // each the same as when it plays alone
+    v = audio_stream_ogg("tests/audio/vorbis_sine.ogg", 1.0, 0);
+    audio_render(buf, 24000);
+    var alone: i64 = rms(0, 24000, 0);
+    audio_stop(v);
+    audio_render(buf, 100);
+    var v1: i64 = audio_stream_ogg("tests/audio/vorbis_sine.ogg", 1.0, 0);
+    var v2: i64 = audio_stream_ogg("tests/audio/vorbis_clicks.ogg", 0.0, 0);
+    var whole: i64 = audio_load_ogg("tests/audio/vorbis_mono.ogg");
+    audio_render(buf, 24000);
+    yes(audio_playing(v1) == 1 && audio_playing(v2) == 1, "two Ogg streams playing at once");
+    yes(iabs(rms(0, 24000, 0) - alone) < 3, "the first sounds as it does alone");
+    yes(whole > 0, "and a third file loaded whole meanwhile");
+    // 8. seeking a stream
+    audio_seek(v1, 200);
+    yes(audio_position(v1) == 200, "the stream moved to 200 ms");
+    audio_render(buf, 4800);
+    yes(audio_position(v1) == 300 && rms(0, 4800, 0) > 1000, "and plays on from there");
+    audio_close();
+    return 0;
+}

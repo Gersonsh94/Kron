@@ -43,6 +43,7 @@ fn cg_run(root: ptr<Ast>) -> i64 {
     fn_count = 0;
     gs_count = 0;
     ce_count = 0;
+    ie_count = 0;
     cg_ext_count = 0;
     cg_ext_any = 0;
     cg_has_exp = 0;
@@ -207,8 +208,10 @@ fn cg_walk_top(p: ptr<Ast>) -> i64 {
 // first access to a global that is not shared. After the last function,
 // cg_thread_check works out which functions can run in a thread -- the ones
 // passed to thread_start and all they call -- and returns the offending
-// access, if any. An indirect call could go anywhere: once reachable code
-// makes one, every function whose address is taken is reachable too.
+// access, if any. A call to an address could go anywhere: once reachable
+// code makes one, every function whose address is taken is reachable too. A
+// call through a fn value reaches only the functions used as values that
+// take the same arguments: as many, the reals where its reals are.
 // =========================================================================
 
 // a global's name, its access noted
@@ -267,11 +270,60 @@ fn cg_note_addr(f: i64) -> i64 {
     return 0;
 }
 
-// the current function makes an indirect call
+// the current function makes an indirect call to an address: it could be
+// any function whose address is taken
 fn cg_note_indirect() -> i64 {
     if cg_cur_fn >= 0 {
         cg_qs(&fn_indir, cg_cur_fn, 1);
     }
+    return 0;
+}
+
+// the shape of a call or of a function: how many arguments, and which of
+// them are reals (a bit each)
+fn cg_shape(n: i64, reals: i64) -> i64 {
+    return n | (reals << 8);
+}
+
+// the shape a function takes
+fn cg_fn_key(f: i64) -> i64 {
+    var fnode: ptr<Ast> = cg_q(&fn_nodes, f);
+    var p: ptr<Ast> = 0;
+    var n: i64 = 0;
+    var reals: i64 = 0;
+    if fnode == 0 {
+        return -1;
+    }
+    p = fnode.left;
+    while p != 0 {
+        if n < 48 && (p.col & 1) != 0 {
+            reals = reals | (1 << n);
+        }
+        n += 1;
+        p = p.right;
+    }
+    return cg_shape(n, reals);
+}
+
+// the current function calls through a fn value: only a function used as
+// a value, of the same shape, can be what it calls
+fn cg_note_indirect_val(c: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var n: i64 = 0;
+    var reals: i64 = 0;
+    if cg_cur_fn < 0 || ie_count >= CG_MAX_EDGES {
+        return 0;
+    }
+    while a != 0 {
+        if n < 48 && cg_expr_is_float(a.left) != 0 {
+            reals = reals | (1 << n);
+        }
+        n += 1;
+        a = a.right;
+    }
+    cg_qs(&ie_from, ie_count, cg_cur_fn);
+    cg_qs(&ie_key, ie_count, cg_shape(n, reals));
+    ie_count += 1;
     return 0;
 }
 
@@ -322,6 +374,23 @@ fn cg_thread_check() -> i64 {
                     if cg_q(&fn_addr, j) != 0 && cg_q(&fn_reach, j) == 0 {
                         cg_qs(&fn_reach, j, 1);
                         changed = 1;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < ie_count {
+            fr = cg_q(&ie_from, i);
+            if cg_q(&fn_reach, fr) != 0 {
+                j = 0;
+                while j < n {
+                    if cg_q(&fn_asval, j) != 0 && cg_q(&fn_reach, j) == 0 {
+                        if cg_fn_key(j) == cg_q(&ie_key, i) {
+                            cg_qs(&fn_reach, j, 1);
+                            changed = 1;
+                        }
                     }
                     j += 1;
                 }

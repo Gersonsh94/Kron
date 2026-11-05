@@ -1,0 +1,33 @@
+kron_program
+kron_domain test_args7;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: a call of seven or more arguments with another call among them.
+// The arguments from the seventh on go on the stack; the call among them
+// used to make the outer call forget them, so the stack lost eight bytes
+// a call and what had been pushed before came back wrong.
+//
+// Expected output: 520036600000, 133
+// =========================================================================
+
+fn seven(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7;
+}
+
+fn two(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn main() {
+    var i: i64 = 0;
+    var t: i64 = 0;
+    while i < 200000 {
+        t = t + seven(1, 2, 3, 4, 5, two(i), 7);
+        t = t + seven(two(1), 2, 3, 4, 5, 6, two(i));
+        i = i + 1;
+    }
+    print(t);
+    print(seven(1, 2, 3, 4, 5, 6, two(3)));
+}

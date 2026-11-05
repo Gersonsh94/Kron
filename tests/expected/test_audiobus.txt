@@ -1,0 +1,18 @@
+ok    the first bus is 1
+ok    a bus at half volume: the voice half as loud
+ok    the bus's low-pass keeps under a tenth of the square
+ok    the bus's echo: half the click, 480 frames later
+ok    a voice on the master has no echo
+ok    the reverb: the room rings on after the click
+ok    and dies away
+ok    with mix 0 the room is gone
+ok    10 ms played
+ok    seeking to 500 ms
+ok    and the saw is half way: near 0
+ok    the head: the right ear first
+ok    the left ear about 0.6 ms later
+ok    two Ogg streams playing at once
+ok    the first sounds as it does alone
+ok    and a third file loaded whole meanwhile
+ok    the stream moved to 200 ms
+ok    and plays on from there

@@ -23,7 +23,10 @@ kron_definitions
 //                                              none is new; 32 bits a pixel,
 //                                              blue first in memory
 //               kron_app_touch(phase, x, y)    1 down, 2 move, 3 up; pixels
-//                                              of the picture
+//                                              of the picture (the mouse)
+//               kron_app_touch_id(phase, id, x, y)
+//                                              each finger, by its number
+//                                              (window_touches)
 //               kron_app_key(key, ch)          a key (window_key's codes), the
 //                                              character typed (0 none)
 //               kron_app_wants_keyboard()      1 while a box to type in
@@ -158,6 +161,10 @@ fn export kron_app_frame(dst: i64, bytes: i64) -> i64 {
 }
 
 fn app_event(kind: i64, x: i64, y: i64) -> i64 {
+    return app_event4(kind, x, y, 0);
+}
+
+fn app_event4(kind: i64, x: i64, y: i64, extra: i64) -> i64 {
     lock_take(30);
     var next: i64 = (app_ev_tail + 1) & 63;
     if next != app_ev_head {
@@ -165,6 +172,7 @@ fn app_event(kind: i64, x: i64, y: i64) -> i64 {
         app_ev[i] = kind;
         app_ev[i + 1] = x;
         app_ev[i + 2] = y;
+        app_ev[i + 3] = extra;
         app_ev_tail = next;
     }
     lock_give(30);
@@ -173,6 +181,11 @@ fn app_event(kind: i64, x: i64, y: i64) -> i64 {
 
 fn export kron_app_touch(phase: i32, x: f64, y: f64) {
     app_event(phase as i64, x as i64, y as i64);
+}
+
+// one finger: 6 down, 7 move, 8 up in the host's queue
+fn export kron_app_touch_id(phase: i32, id: i32, x: f64, y: f64) {
+    app_event4(5 + phase as i64, x as i64, y as i64, id as i64);
 }
 
 fn export kron_app_key(key: i32, ch: i32) {

@@ -19,6 +19,23 @@ kron_definitions
 // std_gpu.kr does it on its own when a program asks for a shader; the
 // functions here are for looking at the result.
 //
+// A compute shader has no triangles: it runs once for each item of its
+// buffers (gpu_compute, gpu_run), say a particle each, many at a time:
+//
+//     buffer pos: vec4;              // the buffers it reads and writes,
+//     buffer vel: vec4;              // in the order gpu_run is given them
+//     uniform { dt: float; }
+//     compute {
+//         let i = index;             // this run's item: 0, 1, 2 ... (a float)
+//         vel[i] = vel[i] + vec4(0.0, -9.8 * dt, 0.0, 0.0);
+//         pos[i] = pos[i] + vel[i] * dt;
+//     }
+//
+// A buffer holds floats, vec2s or vec4s, read and written as name[i]; index
+// runs from 0 to count - 1, and count (a float, in the uniforms of its own)
+// is how many items gpu_run was asked for. A compute shader has buffers,
+// uniforms and its compute { } part only.
+//
 //     uniform {                      // values the program sets per draw
 //         mvp: mat4;
 //         light: vec3;
@@ -58,7 +75,9 @@ kron_definitions
 //     shader_compile(source)            a shader, or a fail with the line
 //     shader_wgsl(s)  shader_msl(s)     the translations, as texts
 //     shader_spirv(s, stage)            the words of a SPIR-V module, a
-//                                       list<i64>; stage 0 vertex, 1 fragment
+//                                       list<i64>; stage 0 vertex, 1 fragment,
+//                                       2 compute
+//     shader_is_compute(s)  shader_buffers(s)  shader_buffer_type(s, i)
 //     shader_uniform_size(s)            bytes of the uniform block
 //     shader_uniform_offset(s, name)    where a uniform is in it, -1 none
 //     shader_uniform_type(s, name)      SH_FLOAT ... SH_MAT4
@@ -95,6 +114,7 @@ const NK_BLOCK: i64 = 24;
 const NK_LIST: i64 = 25;
 const NK_DISCARD: i64 = 26;
 const NK_FOR: i64 = 27;
+const NK_INDEX: i64 = 28;          // a buffer's item: name[e] (compute)
 
 // what a name is
 const RS_UNI: i64 = 1;
@@ -106,6 +126,7 @@ const RS_COLOR: i64 = 6;
 const RS_FRAG: i64 = 7;
 const RS_TEX: i64 = 8;
 const RS_LOOP: i64 = 9;
+const RS_INDEX: i64 = 10;          // index (compute)
 
 // ---------------------------------------------------- compiler state ---
 var sh_src: i64;
@@ -136,6 +157,9 @@ var in_type: i64;
 var in_ninst: i64;                 // how many of the inputs are per instance (the last ones)
 var vy_name: i64;
 var vy_type: i64;
+var bf_name: i64;      // the buffers (compute)
+var bf_type: i64;
+var sh_cs: i64;        // the compute block, -1 for none
 var sh_vs: i64;        // the vertex block
 var sh_fs: i64;        // the fragment block
 var sh_stage: i64;     // 0 vertex, 1 fragment, while checking
@@ -155,6 +179,8 @@ var pr_uoff: i64;
 var pr_intype: i64;
 var pr_ninst: i64;
 var pr_ntex: i64;
+var pr_cs: i64;        // 1 for a compute shader
+var pr_bftype: i64;    // its buffers' types
 var pr_ready: i64;
 
 fn sh_error() -> text {
@@ -399,6 +425,12 @@ fn sh_primary() -> i64 {
 
 fn sh_postfix() -> i64 {
     var e: i64 = sh_primary();
+    if tk_is("[") && list_get(nk, e) == NK_NAME && !sh_bad() {
+        tk_next();
+        var ix: i64 = sh_expr();
+        tk_expect("]");
+        e = node(NK_INDEX, ix, -1, -1, list_get(ntx, e));
+    }
     while tk_is(".") && !sh_bad() {
         tk_next();
         var s: i64 = tk_name();
@@ -566,8 +598,14 @@ fn sh_stmt() -> i64 {
         tk_expect(";");
         return node(NK_DISCARD, -1, -1, -1, 0);
     }
-    // name = e;  name op= e;
+    // name = e;  name op= e;  buffer[i] = e;  buffer[i] op= e;
     var target: i64 = tk_name();
+    var at: i64 = -1;
+    if tk_is("[") {
+        tk_next();
+        at = sh_expr();
+        tk_expect("]");
+    }
     var op: i64 = 0;
     if tk_is("+=") { op = "+"; }
     if tk_is("-=") { op = "-"; }
@@ -582,9 +620,12 @@ fn sh_stmt() -> i64 {
     tk_expect(";");
     if op != 0 {
         var lhs: i64 = node(NK_NAME, -1, -1, -1, target);
+        if at != -1 {
+            lhs = node(NK_INDEX, at, -1, -1, target);
+        }
         val = node(NK_BIN, lhs, val, -1, op);
     }
-    return node(NK_SET, val, -1, -1, target);
+    return node(NK_SET, val, -1, at, target);
 }
 
 fn sh_find_text(l: i64, t: i64) -> i64 {
@@ -666,6 +707,22 @@ fn sh_program() -> i64 {
             }
             list_add(vy_type, vt);
             tk_expect(";");
+        } else if tk_is("buffer") {
+            tk_next();
+            list_add(bf_name, tk_name());
+            tk_expect(":");
+            var bt: i64 = sh_parse_type();
+            if bt != SH_FLOAT && bt != SH_VEC2 && bt != SH_VEC4 && !sh_bad() {
+                sh_fail("a buffer holds floats, vec2s or vec4s");
+            }
+            list_add(bf_type, bt);
+            tk_expect(";");
+            if list_len(bf_name) > 4 && !sh_bad() {
+                sh_fail("a compute shader has 4 buffers at most");
+            }
+        } else if tk_is("compute") {
+            tk_next();
+            sh_cs = sh_block();
         } else if tk_is("vertex") {
             tk_next();
             sh_vs = sh_block();
@@ -673,8 +730,27 @@ fn sh_program() -> i64 {
             tk_next();
             sh_fs = sh_block();
         } else {
-            sh_fail("expected uniform, texture, in, instance, var, vertex or fragment");
+            sh_fail("expected uniform, texture, in, instance, var, buffer, vertex, fragment or compute");
         }
+    }
+    if sh_cs != -1 && !sh_bad() {
+        if sh_vs != -1 || sh_fs != -1 || list_len(in_name) > 0 || list_len(vy_name) > 0 || list_len(tx_name) > 0 {
+            sh_fail("a compute shader has buffers, uniforms and compute { } only");
+        }
+        if list_len(bf_name) == 0 && !sh_bad() {
+            sh_fail("a compute shader works on buffers: declare one, buffer name: vec4;");
+        }
+        // count: how many items this run is for, after the program's uniforms
+        off = (off + 3) / 4 * 4;
+        list_add(u_name, "count");
+        list_add(u_type, SH_FLOAT);
+        list_add(u_off, off);
+        off = off + 4;
+        u_size = (off + 15) / 16 * 16;
+        return 0;
+    }
+    if list_len(bf_name) > 0 && !sh_bad() {
+        sh_fail("buffers are for compute shaders: compute { } is their part");
     }
     u_size = (off + 15) / 16 * 16;
     if sh_vs == -1 && !sh_bad() {
@@ -775,6 +851,14 @@ fn sh_resolve(nd: i64, write: i64) -> i64 {
         list_set(nty, nd, list_get(vy_type, i));
         return 1;
     }
+    if text_same(t, "index") && sh_stage == 2 {
+        if write == 1 {
+            return sh_fail_at(nd, "index is the item this run is for: it cannot be written");
+        }
+        list_set(nres, nd, RS_INDEX);
+        list_set(nty, nd, SH_FLOAT);
+        return 1;
+    }
     if text_same(t, "position") && sh_stage == 0 {
         list_set(nres, nd, RS_POS);
         list_set(nty, nd, SH_VEC4);
@@ -786,7 +870,10 @@ fn sh_resolve(nd: i64, write: i64) -> i64 {
         return 1;
     }
     if write == 1 {
-        return sh_fail_at(nd, "this cannot be written: a var, position (vertex) or color (fragment) can");
+        return sh_fail_at(nd, "this cannot be written: a var, position (vertex), color (fragment) or a buffer's item (compute) can");
+    }
+    if sh_find_text(bf_name, t) != -1 {
+        return sh_fail_at(nd, "a buffer is read an item at a time: name[i]");
     }
     i = sh_find_text(u_name, t);
     if i != -1 {
@@ -986,6 +1073,9 @@ fn sh_check_expr(nd: i64) -> i64 {
         }
         return 1;
     }
+    if k == NK_INDEX {
+        return sh_check_index(nd);
+    }
     if k == NK_NEG {
         sh_check_expr(list_get(na, nd));
         var t: i64 = list_get(nty, list_get(na, nd));
@@ -1089,6 +1179,24 @@ fn sh_declare(name: i64, decl: i64) -> i64 {
     return 1;
 }
 
+// name[i]: an item of a buffer, i a float (the item's number)
+fn sh_check_index(nd: i64) -> i64 {
+    var b: i64 = sh_find_text(bf_name, list_get(ntx, nd));
+    if b == -1 {
+        var m: text = "only a buffer is read as name[i], and this is none: ";
+        text_add(m, list_get(ntx, nd));
+        return sh_fail_at(nd, m);
+    }
+    sh_check_expr(list_get(na, nd));
+    if sh_bad() { return 0; }
+    if list_get(nty, list_get(na, nd)) != SH_FLOAT {
+        return sh_fail_at(nd, "an item's number is a float: name[index]");
+    }
+    list_set(nidx, nd, b);
+    list_set(nty, nd, list_get(bf_type, b));
+    return 1;
+}
+
 fn sh_check_stmt(s: i64) -> i64 {
     var k: i64 = list_get(nk, s);
     if k == NK_LET {
@@ -1112,10 +1220,18 @@ fn sh_check_stmt(s: i64) -> i64 {
         return sh_declare(list_get(ntx, s), s);
     }
     if k == NK_SET {
-        var tgt: i64 = node(NK_NAME, -1, -1, -1, list_get(ntx, s));
-        list_set(nline, tgt, list_get(nline, s));
-        list_set(nb, s, tgt);
-        sh_resolve(tgt, 1);
+        var tgt: i64 = 0;
+        if list_get(nc, s) != -1 {
+            tgt = node(NK_INDEX, list_get(nc, s), -1, -1, list_get(ntx, s));
+            list_set(nline, tgt, list_get(nline, s));
+            list_set(nb, s, tgt);
+            sh_check_index(tgt);
+        } else {
+            tgt = node(NK_NAME, -1, -1, -1, list_get(ntx, s));
+            list_set(nline, tgt, list_get(nline, s));
+            list_set(nb, s, tgt);
+            sh_resolve(tgt, 1);
+        }
         sh_check_expr(list_get(na, s));
         if sh_bad() { return 0; }
         if list_get(nty, tgt) != list_get(nty, list_get(na, s)) {
@@ -1146,7 +1262,7 @@ fn sh_check_stmt(s: i64) -> i64 {
         return 1;
     }
     if k == NK_DISCARD {
-        if sh_stage == 0 {
+        if sh_stage != 1 {
             return sh_fail_at(s, "discard is for the fragment part");
         }
         return 1;
@@ -1240,6 +1356,8 @@ fn tb_expr(e: i64) -> i64 {
             text_add(sh_out, "fin.pos_");
         } else if r == RS_LOOP {
             tb_num(list_get_real(sh_loopv, list_get(nidx, e)));
+        } else if r == RS_INDEX {
+            text_add(sh_out, "kidx_");
         } else {
             text_add(sh_out, t);
             text_add(sh_out, "_");
@@ -1256,6 +1374,17 @@ fn tb_expr(e: i64) -> i64 {
         text_add(sh_out, "(!");
         tb_expr(list_get(na, e));
         text_add(sh_out, ")");
+        return 0;
+    }
+    if k == NK_INDEX {
+        text_add(sh_out, list_get(ntx, e));
+        if sh_msl == 1 {
+            text_add(sh_out, "_b[uint(");
+        } else {
+            text_add(sh_out, "_b[u32(");
+        }
+        tb_expr(list_get(na, e));
+        text_add(sh_out, ")]");
         return 0;
     }
     if k == NK_SWZ {
@@ -1453,6 +1582,88 @@ fn tb_stmt(s: i64) -> i64 {
     return 0;
 }
 
+// the uniforms' struct, as WGSL (also a compute shader's)
+fn sh_wgsl_uniforms() -> i64 {
+    var i: i64 = 0;
+    if list_len(u_name) > 0 {
+        text_add(sh_out, "struct U {\n");
+        while i < list_len(u_name) {
+            text_add(sh_out, "    ");
+            if list_get(u_type, i) == SH_VEC3 {
+                text_add(sh_out, "@size(16) ");
+            }
+            text_add(sh_out, list_get(u_name, i));
+            text_add(sh_out, ": ");
+            text_add(sh_out, tb_type(list_get(u_type, i)));
+            text_add(sh_out, ",\n");
+            i = i + 1;
+        }
+        text_add(sh_out, "};\n@group(0) @binding(0) var<uniform> u: U;\n");
+    }
+    return 0;
+}
+
+// a compute shader in WGSL: 64 runs a group, one an item, those past count
+// doing nothing
+fn sh_gen_wgsl_cs() -> text {
+    sh_msl = 0;
+    sh_out = text_new();
+    sh_ind = 1;
+    sh_wgsl_uniforms();
+    var i: i64 = 0;
+    while i < list_len(bf_name) {
+        text_add(sh_out, "@group(1) @binding(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ") var<storage, read_write> ");
+        text_add(sh_out, list_get(bf_name, i));
+        text_add(sh_out, "_b: array<");
+        text_add(sh_out, tb_type(list_get(bf_type, i)));
+        text_add(sh_out, ">;\n");
+        i = i + 1;
+    }
+    text_add(sh_out, "@compute @workgroup_size(64)\nfn cs_main(@builtin(global_invocation_id) gid_: vec3<u32>) {\n");
+    text_add(sh_out, "    let kidx_: f32 = f32(gid_.x);\n    if (kidx_ >= u.count) { return; }\n");
+    sh_stage = 2;
+    tb_block(sh_cs);
+    text_add(sh_out, "}\n");
+    return sh_out;
+}
+
+// and in MSL: the uniforms at buffer 0, the buffers from 1
+fn sh_gen_msl_cs() -> text {
+    sh_msl = 1;
+    sh_out = text_new();
+    sh_ind = 1;
+    text_add(sh_out, "#include <metal_stdlib>\nusing namespace metal;\nstruct U {\n");
+    var i: i64 = 0;
+    while i < list_len(u_name) {
+        text_add(sh_out, "    ");
+        text_add(sh_out, tb_type(list_get(u_type, i)));
+        text_add(sh_out, " ");
+        text_add(sh_out, list_get(u_name, i));
+        text_add(sh_out, ";\n");
+        i = i + 1;
+    }
+    text_add(sh_out, "};\nkernel void cs_main(constant U& u [[buffer(0)]]");
+    i = 0;
+    while i < list_len(bf_name) {
+        text_add(sh_out, ", device ");
+        text_add(sh_out, tb_type(list_get(bf_type, i)));
+        text_add(sh_out, "* ");
+        text_add(sh_out, list_get(bf_name, i));
+        text_add(sh_out, "_b [[buffer(");
+        text_add_int(sh_out, i + 1);
+        text_add(sh_out, ")]]");
+        i = i + 1;
+    }
+    text_add(sh_out, ", uint gid_ [[thread_position_in_grid]]) {\n");
+    text_add(sh_out, "    const float kidx_ = float(gid_);\n    if (kidx_ >= u.count) { return; }\n");
+    sh_stage = 2;
+    tb_block(sh_cs);
+    text_add(sh_out, "}\n");
+    return sh_out;
+}
+
 fn sh_gen_wgsl() -> text {
     sh_msl = 0;
     sh_out = text_new();
@@ -1621,6 +1832,8 @@ var sv_frag: i64;
 var sv_iface: i64;     // the interface of the entry point
 var sv_term: i64;      // the current block ended (discard)
 var sv_declid: i64;    // a let's value or a var's variable, by node
+var sv_buf: i64;       // a compute shader's buffers' variables
+var sv_kidx: i64;      // its index, as a float
 
 fn sv_id() -> i64 {
     var i: i64 = sv_next;
@@ -1721,6 +1934,27 @@ fn sv_type(t: i64) -> i64 {
         var img: i64 = sv_type(9);
         id = sv_id();
         sv_i2(sv_types, 27, id, img);
+    } else if t == 11 {
+        id = sv_id();
+        sv_i3(sv_types, 21, id, 32, 0);         // uint
+    } else if t == 12 {
+        var ut: i64 = sv_type(11);
+        id = sv_id();
+        sv_i3(sv_types, 23, id, ut, 3);         // uvec3
+    } else if t > 20 && t < 30 {
+        // a buffer's items: a run-time array of type t - 20
+        var et: i64 = sv_type(t - 20);
+        id = sv_id();
+        sv_i2(sv_types, 29, id, et);
+        sv_i3(sv_deco, 71, id, 6, sh_size(t - 20));
+    } else if t > 30 && t < 40 {
+        // a buffer: a block of one member, those items (SPIR-V 1.0's storage
+        // buffer is a BufferBlock in the Uniform class)
+        var at: i64 = sv_type(t - 10);
+        id = sv_id();
+        sv_i2(sv_types, 30, id, at);
+        sv_i2(sv_deco, 71, id, 3);
+        sv_i4(sv_deco, 72, id, 0, 35, 0);
     }
     map_iset(sv_tcache, t, id);
     return id;
@@ -1819,7 +2053,24 @@ fn sv_ext(t: i64, inst: i64, args: i64) -> i64 {
     return id;
 }
 
+// a buffer's item: buffer[uint(i)]
+fn sv_index_ptr(e: i64) -> i64 {
+    var t: i64 = list_get(nty, e);
+    var fi: i64 = sv_expr(list_get(na, e));
+    var ui: i64 = sv_id();
+    sv_i3(sv_body, 109, sv_type(11), ui, fi);      // OpConvertFToU
+    var ac: i64 = sv_id();
+    sv_op(sv_body, 65, 6);
+    list_add(sv_body, sv_ptr(2, t));
+    list_add(sv_body, ac);
+    list_add(sv_body, list_get(sv_buf, list_get(nidx, e)));
+    list_add(sv_body, sv_iconst(0));
+    list_add(sv_body, ui);
+    return ac;
+}
+
 fn sv_name_ptr(e: i64) -> i64 {
+    if list_get(nk, e) == NK_INDEX { return sv_index_ptr(e); }
     var r: i64 = list_get(nres, e);
     var i: i64 = list_get(nidx, e);
     if r == RS_IN { return list_get(sv_in, i); }
@@ -1837,10 +2088,16 @@ fn sv_expr(e: i64) -> i64 {
     if k == NK_NUM {
         return sv_const(list_get_real(nnum, e));
     }
+    if k == NK_INDEX {
+        return sv_load(t, sv_index_ptr(e));
+    }
     if k == NK_NAME {
         var r: i64 = list_get(nres, e);
         if r == RS_LOOP {
             return sv_const(list_get_real(sh_loopv, list_get(nidx, e)));
+        }
+        if r == RS_INDEX {
+            return sv_kidx;
         }
         if r == RS_UNI {
             var ac: i64 = sv_id();
@@ -2163,6 +2420,21 @@ fn sv_module(stage: i64) -> i64 {
         sv_i3(sv_deco, 71, sv_ubo, 34, 0);
         sv_i3(sv_deco, 71, sv_ubo, 33, 0);
     }
+    sv_buf = list_new();
+    var gid: i64 = 0;
+    if stage == 2 {
+        i = 0;
+        while i < list_len(bf_name) {
+            var bv: i64 = sv_var(2, 30 + list_get(bf_type, i));
+            list_add(sv_buf, bv);
+            sv_i3(sv_deco, 71, bv, 34, 1);
+            sv_i3(sv_deco, 71, bv, 33, i);
+            i = i + 1;
+        }
+        gid = sv_var(1, 12);
+        list_add(sv_iface, gid);
+        sv_i3(sv_deco, 71, gid, 11, 28);      // GlobalInvocationId
+    }
     i = 0;
     while i < list_len(tx_name) {
         var tv: i64 = sv_var(0, 10);
@@ -2195,7 +2467,7 @@ fn sv_module(stage: i64) -> i64 {
         sv_pos = sv_var(3, SH_VEC4);
         list_add(sv_iface, sv_pos);
         sv_i3(sv_deco, 71, sv_pos, 11, 0);
-    } else {
+    } else if stage == 1 {
         sv_col = sv_var(3, SH_VEC4);
         list_add(sv_iface, sv_col);
         sv_i3(sv_deco, 71, sv_col, 30, 0);
@@ -2219,13 +2491,36 @@ fn sv_module(stage: i64) -> i64 {
         list_add(sv_types, zero);
         sv_i2(sv_body, 62, sv_col, z4);
     }
-    if stage == 0 {
-        sv_block(sh_vs);
-    } else {
-        sv_block(sh_fs);
-    }
-    if sv_term == 0 {
+    if stage == 2 {
+        // index = float(gid.x); the body runs when index < count
+        var g3: i64 = sv_load(12, gid);
+        var gx: i64 = sv_id();
+        sv_i4(sv_body, 81, sv_type(11), gx, g3, 0);
+        sv_kidx = sv_id();
+        sv_i3(sv_body, 112, sv_type(SH_FLOAT), sv_kidx, gx);   // OpConvertUToF
+        var cn: i64 = sv_id();
+        var ci: i64 = list_len(u_name) - 1;
+        sv_i4(sv_body, 65, sv_ptr(2, SH_FLOAT), cn, sv_ubo, sv_iconst(ci));
+        var cv: i64 = sv_load(SH_FLOAT, cn);
+        var inside: i64 = sv_bin(184, SH_BOOL, sv_kidx, cv);
+        var lbody: i64 = sv_id();
+        var lend: i64 = sv_id();
+        sv_i2(sv_body, 247, lend, 0);
+        sv_i3(sv_body, 250, inside, lbody, lend);
+        sv_label(lbody);
+        sv_block(sh_cs);
+        sv_i1(sv_body, 249, lend);
+        sv_label(lend);
         sv_op(sv_body, 253, 1);
+    } else {
+        if stage == 0 {
+            sv_block(sh_vs);
+        } else {
+            sv_block(sh_fs);
+        }
+        if sv_term == 0 {
+            sv_op(sv_body, 253, 1);
+        }
     }
     // the module, section by section
     var m: i64 = list_new();
@@ -2241,6 +2536,7 @@ fn sv_module(stage: i64) -> i64 {
     sv_i2(m, 14, 0, 1);               // Logical GLSL450
     var model: i64 = 0;
     if stage == 1 { model = 4; }
+    if stage == 2 { model = 5; }          // GLCompute
     sv_op(m, 15, 3 + sv_str_words("main") + list_len(sv_iface));
     list_add(m, model);
     list_add(m, main_id);
@@ -2252,6 +2548,9 @@ fn sv_module(stage: i64) -> i64 {
     }
     if stage == 1 {
         sv_i2(m, 16, main_id, 7);     // OriginUpperLeft
+    }
+    if stage == 2 {
+        sv_i5(m, 16, main_id, 17, 64, 1, 1);    // LocalSize 64 1 1
     }
     sh_append(m, sv_deco);
     // the function's type before the function
@@ -2305,6 +2604,9 @@ fn sh_reset() -> i64 {
     in_ninst = 0;
     vy_name = list_new();
     vy_type = list_new();
+    bf_name = list_new();
+    bf_type = list_new();
+    sh_cs = -1;
     sh_vs = -1;
     sh_fs = -1;
     if pr_ready == 0 {
@@ -2319,6 +2621,8 @@ fn sh_reset() -> i64 {
         pr_intype = list_new();
         pr_ninst = list_new();
         pr_ntex = list_new();
+        pr_cs = list_new();
+        pr_bftype = list_new();
         pr_ready = 1;
     }
     return 0;
@@ -2334,11 +2638,17 @@ fn shader_compile(source: i64) -> i64 {
     sh_src = source;
     sh_lex(source);
     sh_program();
-    if !sh_bad() {
-        sh_check_stage(sh_vs, 0);
-    }
-    if !sh_bad() {
-        sh_check_stage(sh_fs, 1);
+    if sh_cs != -1 {
+        if !sh_bad() {
+            sh_check_stage(sh_cs, 2);
+        }
+    } else {
+        if !sh_bad() {
+            sh_check_stage(sh_vs, 0);
+        }
+        if !sh_bad() {
+            sh_check_stage(sh_fs, 1);
+        }
     }
     if sh_bad() {
         fail "the shader has an error" hint "shader_error() says what and on which line";
@@ -2351,10 +2661,23 @@ fn shader_compile(source: i64) -> i64 {
         list_add(sv_declid, 0);
         i = i + 1;
     }
-    list_add(pr_wgsl, sh_gen_wgsl());
-    list_add(pr_msl, sh_gen_msl());
-    list_add(pr_vs, sv_module(0));
-    list_add(pr_fs, sv_module(1));
+    if sh_cs != -1 {
+        list_add(pr_wgsl, sh_gen_wgsl_cs());
+        list_add(pr_msl, sh_gen_msl_cs());
+        list_add(pr_vs, sv_module(2));
+        list_add(pr_fs, list_new());
+    } else {
+        list_add(pr_wgsl, sh_gen_wgsl());
+        list_add(pr_msl, sh_gen_msl());
+        list_add(pr_vs, sv_module(0));
+        list_add(pr_fs, sv_module(1));
+    }
+    if sh_cs != -1 {
+        list_add(pr_cs, 1);
+    } else {
+        list_add(pr_cs, 0);
+    }
+    list_add(pr_bftype, bf_type);
     list_add(pr_usize, u_size);
     list_add(pr_uname, u_name);
     list_add(pr_utype, u_type);
@@ -2388,7 +2711,7 @@ fn shader_msl(s: i64) -> text {
 fn shader_spirv(s: i64, stage: i64) -> i64 {
     var i: i64 = sh_check(s) - 1;
     if i < 0 { return list_new(); }
-    if stage == 0 {
+    if stage == 0 || stage == 2 {
         return list_get(pr_vs, i);
     }
     return list_get(pr_fs, i);
@@ -2439,4 +2762,24 @@ fn shader_textures(s: i64) -> i64 {
     var i: i64 = sh_check(s) - 1;
     if i < 0 { return 0; }
     return list_get(pr_ntex, i);
+}
+
+// 1 for a compute shader (buffer, compute { }), 0 for one that draws
+fn shader_is_compute(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(pr_cs, i);
+}
+
+// a compute shader's buffers, and the type of each (SH_FLOAT SH_VEC2 SH_VEC4)
+fn shader_buffers(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_len(list_get(pr_bftype, i));
+}
+
+fn shader_buffer_type(s: i64, k: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(list_get(pr_bftype, i), k);
 }

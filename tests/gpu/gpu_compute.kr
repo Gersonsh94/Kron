@@ -1,0 +1,161 @@
+kron_program
+kron_domain gpu_compute;
+kron_imports
+acquire_domain "std_gpu.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: compute shaders. 1000 particles moved by the card, ten steps
+// of a compute shader on two instance buffers (place and speed), read back
+// and checked against the same sums made here; a run for fewer items than
+// a buffer holds leaves the others as they were; then the particles drawn
+// as instances, straight from the buffer the card wrote. Run by
+// GPUTESTS.bat; the exit code is the number of checks that failed. (On the
+// web the buffers stay on the card and the frame in the page: the program
+// only draws there.)
+// =========================================================================
+
+var failures: i64;
+const W: i64 = 64;
+const H: i64 = 64;
+const N: i64 = 1000;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x; }
+    return x;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+fn check_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, what: i64) -> i64 {
+    var c: i64 = gpu_pixel(x, y);
+    var ok: i64 = 1;
+    if iabs(channel(c, 0) - r) > 8 || iabs(channel(c, 1) - g) > 8 || iabs(channel(c, 2) - b) > 8 { ok = 0; }
+    var t: text = text_add(text_new(), what);
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 1));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 2));
+    text_add(t, ")");
+    return report(ok, t);
+}
+
+fn main() -> i64 {
+    say("GPU compute test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    var step: i64 = gpu_compute("buffer pos: vec4;\nbuffer vel: vec4;\nuniform { dt: float; g: vec3; }\ncompute {\n    let i = index;\n    vel[i] += vec4(g, 0.0) * dt;\n    pos[i] = pos[i] + vel[i] * dt;\n}\n");
+    report(step > 0, "a compute shader with two buffers compiles");
+    var pos: i64 = gpu_instances(N, 4);
+    var vel: i64 = gpu_instances(N, 4);
+    var i: i64 = 0;
+    while i < N {
+        var x: f64 = (i % 40) as f64 * 0.05 - 1.0;
+        gpu_instance_put(pos, i, x, 0.0, 0.0, 1.0);
+        gpu_instance_put(vel, i, 0.0, 1.0 + (i as f64) * 0.001, 0.0, 0.0);
+        i = i + 1;
+    }
+    gpu_set_float(step, "dt", 0.05);
+    gpu_set_vec3(step, "g", v3(0.0, -2.0, 0.0));
+    var k: i64 = 0;
+    while k < 10 {
+        gpu_run(step, N, pos, vel, 0, 0);
+        k = k + 1;
+    }
+    if gpu_backend() == 3 { return web_part(step, pos, vel); }
+    // the same ten steps here, in f32 as the card does them
+    var worst: f64 = 0.0;
+    var a: [f32; 2];
+    i = 0;
+    while i < N {
+        a[0] = 0.0;                         // y
+        a[1] = 1.0 + (i as f64) * 0.001;    // its speed
+        k = 0;
+        while k < 10 {
+            a[1] = a[1] + -2.0 * 0.05;
+            a[0] = a[0] + a[1] * 0.05;
+            k = k + 1;
+        }
+        var d: f64 = fabs(gpu_instance_get(pos, i, 1) - a[0]);
+        if d > worst { worst = d; }
+        d = fabs(gpu_instance_get(vel, i, 1) - a[1]);
+        if d > worst { worst = d; }
+        i = i + 1;
+    }
+    report(worst < 0.0001, "ten steps of 1000 particles on the card: what the same sums give here");
+    report(fabs(gpu_instance_get(pos, 999, 0) - ((999 % 40) as f64 * 0.05 - 1.0)) < 0.0001, "and the x of each is left as it was");
+    // a run for 10 items: the 11th is not touched
+    var only: i64 = gpu_compute("buffer v: float;\ncompute {\n    v[index] = index * 2.0 + count;\n}\n");
+    var fl: i64 = gpu_instances(64, 1);
+    i = 0;
+    while i < 64 {
+        gpu_instance_put(fl, i, -1.0, 0.0, 0.0, 0.0);
+        i = i + 1;
+    }
+    gpu_run(only, 10, fl, 0, 0, 0);
+    report(gpu_instance_get(fl, 0, 0) == 10.0 && gpu_instance_get(fl, 9, 0) == 28.0, "index and count: item 9 of 10 is 9 * 2 + 10");
+    report(gpu_instance_get(fl, 10, 0) == -1.0 && gpu_instance_get(fl, 63, 0) == -1.0, "the items past count are as they were");
+    draw_them(step, pos, vel);
+    var y: i64 = ((1.0 - gpu_instance_get(pos, 0, 1)) * 32.0) as i64;
+    check_pixel(1, y, 255, 128, 0, "drawn from the buffer the card wrote: the first particle");
+    check_pixel(32, y + 12, 0, 0, 0, "and nothing below them");
+    gpu_instances_free(pos);
+    gpu_instances_free(vel);
+    gpu_instances_free(fl);
+    if failures == 0 {
+        say("GPU compute test: all passed");
+    } else {
+        say("GPU compute test: some checks failed");
+    }
+    return failures;
+}
+
+fn web_part(step: i64, pos: i64, vel: i64) -> i64 {
+    draw_them(step, pos, vel);
+    say("GPU compute test: drawn in the page");
+    return 0;
+}
+
+// the particles drawn where the card left them: a small square each
+fn draw_them(step: i64, pos: i64, vel: i64) -> i64 {
+    var src: text = "in pos: vec3;\ninstance at: vec4;\nvertex {\n position = vec4(pos.x + at.x, pos.y + at.y, 0.5, 1.0);\n}\nfragment {\n color = vec4(1.0, 0.5, 0.0, 1.0);\n}\n";
+    var prog: i64 = gpu_shader(src);
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    list_add_real(v, -0.02); list_add_real(v, -0.02); list_add_real(v, 0.0);
+    list_add_real(v, 0.02); list_add_real(v, -0.02); list_add_real(v, 0.0);
+    list_add_real(v, 0.02); list_add_real(v, 0.02); list_add_real(v, 0.0);
+    list_add_real(v, -0.02); list_add_real(v, 0.02); list_add_real(v, 0.0);
+    list_add(ix, 0); list_add(ix, 1); list_add(ix, 2);
+    list_add(ix, 0); list_add(ix, 2); list_add(ix, 3);
+    var sq: i64 = gpu_mesh_lists(v, 3, ix);
+    // one more step, then the frame: the y of all is about 0.43 now, above
+    // the middle (pixel row 64 * (1 - 0.43) / 2 = 18)
+    gpu_run(step, N, pos, vel, 0, 0);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_instanced(prog, sq, 0, pos, N);
+    gpu_end();
+    return 1;
+}

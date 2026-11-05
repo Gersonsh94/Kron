@@ -44,6 +44,14 @@ kron_definitions
 //     gpu_draw_textures(prog, mesh, t0, t1, t2, t3)
 //     gpu_instances(max, floats_per_instance)     a buffer of instances
 //     gpu_instance_put(ib, i, x, y, z, w)  gpu_instance_list(ib, list)
+//     gpu_instances_free(ib)            its memory given back to the card
+//     gpu_instance_get(ib, i, k)        float k of instance i (Vulkan, Metal)
+//     gpu_compute(source)               a compute shader (KSL, std_shader.kr)
+//     gpu_run(cs, count, b0, b1, b2, b3)
+//                                       it runs once for each of count items
+//                                       of instance buffers b0.. (0 for none
+//                                       after the last): GPU particles, the
+//                                       buffers then drawn as instances
 //     gpu_draw_instanced(prog, mesh, tex, ib, count)
 //                                       count copies in one draw; the shader
 //                                       reads each one's 'instance' inputs
@@ -80,6 +88,7 @@ var gp_shader: i64;       // the std_shader number
 var gp_usize: i64;        // bytes of its uniform block
 var gp_stride: i64;       // bytes per vertex it takes
 var gp_istride: i64;      // bytes per instance it takes, 0 for none
+var gp_cs: i64;           // 1 for a compute shader
 var gp_ntex: i64;
 var gp_pipe: i64;         // backend objects
 var gp_set: i64;
@@ -114,6 +123,7 @@ var gr_dtex: i64;         // its depth, as a texture number
 // this frame
 var gpu_in_frame: i64;
 var gpu_in_target: i64;   // 1 between gpu_begin_target and gpu_end_target
+var gpu_target_now: i64;  // and which, from 0
 var gpu_draws: i64;
 // instance buffers (gpu_instances): host-visible, written by the CPU
 var gi_buf: i64;
@@ -121,6 +131,9 @@ var gi_mem: i64;
 var gi_map: i64;
 var gi_cap: i64;         // instances it holds
 var gi_floats: i64;      // floats an instance
+var gi_hi: i64;          // WebGPU: the instances written, sent before a draw
+var gi_dirty: i64;       // WebGPU: 1 when written since they were sent
+var gi_lo: i64;          // WebGPU: the first instance written since
 var gpu_inst_buf: i64;    // the draw being made: its instance buffer, 0 none
 var gpu_inst_count: i64;
 
@@ -129,11 +142,15 @@ fn gpu_lists() -> i64 {
     gp_usize = list_new();
     gp_stride = list_new();
     gp_istride = list_new();
+    gp_cs = list_new();
     gi_buf = list_new();
     gi_mem = list_new();
     gi_map = list_new();
     gi_cap = list_new();
     gi_floats = list_new();
+    gi_hi = list_new();
+    gi_dirty = list_new();
+    gi_lo = list_new();
     gp_ntex = list_new();
     gp_pipe = list_new();
     gp_set = list_new();
@@ -184,6 +201,8 @@ extern "vulkan-1.dll", "libvulkan.so.1", "libvulkan.so" {
     fn vkGetBufferMemoryRequirements(dev: i64, buf: i64, out: i64);
     fn vkBindBufferMemory(dev: i64, buf: i64, mem: i64, off: u64) -> i32;
     fn vkMapMemory(dev: i64, mem: i64, off: u64, size: u64, flags: u32, out: i64) -> i32;
+    fn vkDestroyBuffer(dev: i64, buf: i64, alloc: i64);
+    fn vkFreeMemory(dev: i64, mem: i64, alloc: i64);
     fn vkCreateRenderPass(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
     fn vkCreateFramebuffer(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
     fn vkCreateShaderModule(dev: i64, info: i64, alloc: i64, out: i64) -> i32;
@@ -218,6 +237,8 @@ extern "vulkan-1.dll", "libvulkan.so.1", "libvulkan.so" {
     fn vkCmdCopyBuffer(cmd: i64, src: i64, dst: i64, n: u32, regions: i64);
     fn vkCmdPipelineBarrier(cmd: i64, src: u32, dst: u32, flags: u32, nmem: u32, mem: i64, nbuf: u32, buf: i64, nimg: u32, img: i64);
     fn vkCmdBlitImage(cmd: i64, src: i64, slayout: u32, dst: i64, dlayout: u32, n: u32, regions: i64, filter: u32);
+    fn vkCreateComputePipelines(dev: i64, cache: i64, count: u32, infos: i64, alloc: i64, out: i64) -> i32;
+    fn vkCmdDispatch(cmd: i64, x: u32, y: u32, z: u32);
 }
 
 var vk_inst: i64;
@@ -256,6 +277,12 @@ var vk_out: [i64; 64];
 var vk_res: i64;
 var vk_tpass: i64;        // the render pass render targets are drawn in
 var gpu_bc_on: i64;       // 1 when the card makes BC (compressed) textures
+var vk_cs_layout0: i64;   // compute: set 0 the uniforms, set 1 four buffers
+var vk_cs_layout1: i64;
+var vk_cs_layout: i64;
+var vk_cs_pool: i64;
+var vk_cs_ubo: i64;
+var vk_cs_ubo_map: i64;
 
 // a zeroed run of n bytes of vk_s, aligned to 8
 fn vs(n: i64) -> i64 {
@@ -1567,6 +1594,152 @@ fn vk_end_target() -> i64 {
     return vk_once_end();
 }
 
+// ---------------------------------------------------- Vulkan compute ---
+// made the first time a compute shader is: its layouts, a pool for the
+// sets of one run, and the buffer its uniforms go in
+fn vk_compute_setup() -> i64 {
+    if vk_cs_layout != 0 { return 1; }
+    vk_sn = 0;
+    var b0: i64 = vs(24);
+    w32(b0, 0, 0);
+    w32(b0, 4, 6);                      // a uniform buffer
+    w32(b0, 8, 1);
+    w32(b0, 12, 32);                    // the compute stage
+    var l0: i64 = vs(32);
+    w32(l0, 0, 32);
+    w32(l0, 20, 1);
+    w64(l0, 24, b0);
+    raw { vk_res = vkCreateDescriptorSetLayout(vk_dev, l0, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorSetLayout") { return 0; }
+    vk_cs_layout0 = vk_got(0);
+    var b1: i64 = vs(24 * 4);
+    var i: i64 = 0;
+    while i < 4 {
+        w32(b1, i * 24, i);
+        w32(b1, i * 24 + 4, 7);         // a storage buffer
+        w32(b1, i * 24 + 8, 1);
+        w32(b1, i * 24 + 12, 32);
+        i = i + 1;
+    }
+    var l1: i64 = vs(32);
+    w32(l1, 0, 32);
+    w32(l1, 20, 4);
+    w64(l1, 24, b1);
+    raw { vk_res = vkCreateDescriptorSetLayout(vk_dev, l1, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorSetLayout") { return 0; }
+    vk_cs_layout1 = vk_got(0);
+    var sl: i64 = vs(16);
+    w64(sl, 0, vk_cs_layout0);
+    w64(sl, 8, vk_cs_layout1);
+    var pli: i64 = vs(48);
+    w32(pli, 0, 30);
+    w32(pli, 20, 2);
+    w64(pli, 24, sl);
+    raw { vk_res = vkCreatePipelineLayout(vk_dev, pli, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreatePipelineLayout") { return 0; }
+    vk_cs_layout = vk_got(0);
+    var ps: i64 = vs(16);
+    w32(ps, 0, 6);
+    w32(ps, 4, 1);
+    w32(ps, 8, 7);
+    w32(ps, 12, 4);
+    var dp: i64 = vs(40);
+    w32(dp, 0, 33);
+    w32(dp, 20, 2);
+    w32(dp, 24, 2);
+    w64(dp, 32, ps);
+    raw { vk_res = vkCreateDescriptorPool(vk_dev, dp, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateDescriptorPool") { return 0; }
+    vk_cs_pool = vk_got(0);
+    if vk_buffer(GPU_MAX_UNIFORM, 16, 6) == 0 { return 0; }
+    vk_cs_ubo = vk_out[2];
+    vk_cs_ubo_map = vk_map(vk_out[3]);
+    if vk_cs_ubo_map == 0 { return 0; }
+    return 1;
+}
+
+fn vk_compute_program(sh: i64) -> i64 {
+    if vk_compute_setup() == 0 { return 0; }
+    var cmod: i64 = vk_module(shader_spirv(sh, 2));
+    if cmod == 0 { return 0; }
+    vk_sn = 0;
+    var st: i64 = vs(48);
+    w32(st, 0, 18);
+    w32(st, 20, 32);
+    w64(st, 24, cmod);
+    raw { w64(st, 32, "main"); }
+    var ci: i64 = vs(96);
+    w32(ci, 0, 29);
+    raw { hp_copy(ci + 24, st, 48); }
+    w64(ci, 72, vk_cs_layout);
+    w32(ci, 88, 0 - 1);
+    raw { vk_res = vkCreateComputePipelines(vk_dev, 0, 1, ci, 0, vk_slot(0)); }
+    if !vk_check(vk_res, "vkCreateComputePipelines") { return 0; }
+    return vk_got(0);
+}
+
+// the run, to its end: b0 .. b3 the buffers' places in the lists, -1 none
+fn vk_run(prog: i64, count: i64, b0: i64, b1: i64, b2: i64, b3: i64) -> i64 {
+    vk_sn = 0;
+    var size: i64 = list_get(gp_usize, prog);
+    raw { hp_copy(vk_cs_ubo_map, &gp_ublock[0] + prog * GPU_MAX_UNIFORM, size); }
+    raw { vk_res = vkResetDescriptorPool(vk_dev, vk_cs_pool, 0); }
+    var lays: i64 = vs(16);
+    w64(lays, 0, vk_cs_layout0);
+    w64(lays, 8, vk_cs_layout1);
+    var dai: i64 = vs(40);
+    w32(dai, 0, 34);
+    w64(dai, 16, vk_cs_pool);
+    w32(dai, 24, 2);
+    w64(dai, 32, lays);
+    var sets: i64 = vs(16);
+    raw { vk_res = vkAllocateDescriptorSets(vk_dev, dai, sets); }
+    if !vk_check(vk_res, "vkAllocateDescriptorSets") { return 0; }
+    // the uniforms, then the four buffers (the first again where none)
+    var infos: i64 = vs(24 * 5);
+    var writes: i64 = vs(64 * 5);
+    w64(infos, 0, vk_cs_ubo);
+    w64(infos, 16, size);
+    w32(writes, 0, 35);
+    w64(writes, 16, r64(sets, 0));
+    w32(writes, 32, 1);
+    w32(writes, 36, 6);
+    w64(writes, 48, infos);
+    var bs: [i64; 4];
+    bs[0] = b0; bs[1] = b1; bs[2] = b2; bs[3] = b3;
+    var k: i64 = 0;
+    while k < 4 {
+        var b: i64 = bs[k];
+        if b < 0 { b = b0; }
+        var q: i64 = infos + (k + 1) * 24;
+        w64(q, 0, list_get(gi_buf, b));
+        w64(q, 16, list_get(gi_cap, b) * list_get(gi_floats, b) * 4);
+        var wr: i64 = writes + (k + 1) * 64;
+        w32(wr, 0, 35);
+        w64(wr, 16, r64(sets, 8));
+        w32(wr, 24, k);
+        w32(wr, 32, 1);
+        w32(wr, 36, 7);
+        w64(wr, 48, q);
+        k = k + 1;
+    }
+    raw { vkUpdateDescriptorSets(vk_dev, 5, writes, 0, 0); }
+    if vk_once_begin() == 0 { return 0; }
+    var groups: i64 = (count + 63) / 64;
+    raw {
+        vkCmdBindPipeline(vk_cmd, 1, list_get(gp_pipe, prog));
+        vkCmdBindDescriptorSets(vk_cmd, 1, vk_cs_layout, 0, 2, sets, 0, 0);
+        vkCmdDispatch(vk_cmd, groups, 1, 1);
+    }
+    // what it wrote, for the draws, the runs and the program after
+    var mb: i64 = vs(24);
+    w32(mb, 0, 46);
+    w32(mb, 16, 64);
+    w32(mb, 20, 4 | 32 | 64 | 8192);
+    raw { vkCmdPipelineBarrier(vk_cmd, 2048, 4 | 2048 | 16384, 0, 1, mb, 0, 0, 0, 0); }
+    return vk_once_end();
+}
+
 fn vk_close() -> i64 {
     raw { vk_res = vkDeviceWaitIdle(vk_dev); }
     return 1;
@@ -1646,10 +1819,10 @@ fn gpu_shader(source: i64) -> i64 {
     if usize > GPU_MAX_UNIFORM {
         fail "the shader's uniforms take more than 2048 bytes" hint "use fewer, or a texture for big tables";
     }
-    var ninst: i64 = shader_instance_inputs(sh);
-    if ninst > 0 && gpu_kind != 1 {
-        fail "instance inputs are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
+    if shader_is_compute(sh) {
+        fail "this is a compute shader" hint "gpu_compute makes it, gpu_run runs it";
     }
+    var ninst: i64 = shader_instance_inputs(sh);
     var istride: i64 = 0;
     var k: i64 = shader_inputs(sh) - ninst;
     while k < shader_inputs(sh) {
@@ -1657,6 +1830,7 @@ fn gpu_shader(source: i64) -> i64 {
         k = k + 1;
     }
     list_add(gp_shader, sh);
+    list_add(gp_cs, 0);
     list_add(gp_usize, usize);
     list_add(gp_ntex, shader_textures(sh));
     list_add(gp_istride, istride);
@@ -1863,6 +2037,9 @@ fn gpu_draw_textures(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -
     }
     var p: i64 = gpu_prog(prog);
     if p == 0 { return 0; }
+    if list_get(gp_cs, p - 1) == 1 {
+        fail "a compute shader does not draw" hint "gpu_run runs it";
+    }
     if mesh < 1 || mesh > list_len(gm_count) {
         fail "no such mesh" hint "use what gpu_mesh gave";
     }
@@ -1880,24 +2057,40 @@ fn gpu_draw_textures(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -
 // ---------------------------------------------------------- instances ---
 // A buffer of up to max instances, floats_per_instance floats each: what a
 // shader's 'instance' inputs take, in their order. Written by the program
-// (gpu_instance_put, gpu_instance_list) outside a frame; Vulkan only, for now.
+// (gpu_instance_put, gpu_instance_list) outside a frame. On Vulkan and Metal
+// the card reads the memory they are written in; WebGPU is sent what was
+// written before the first draw after.
 fn gpu_instances(max: i64, floats_per_instance: i64) -> i64 {
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
-    }
-    if gpu_kind != 1 {
-        fail "instances are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
     }
     gpu_outside_frame();
     if max < 1 || floats_per_instance < 1 || floats_per_instance > 64 || max * floats_per_instance > 16777216 {
         fail "an instance buffer of this size cannot be made" hint "1 to 64 floats an instance, 16M floats at most";
     }
     var bytes: i64 = max * floats_per_instance * 4;
-    vk_sn = 0;
-    if vk_buffer(bytes, 128, 6) == 0 { return 0; }
-    var buf: i64 = vk_out[2];
-    var mem: i64 = vk_out[3];
-    var map: i64 = vk_map(mem);
+    var buf: i64 = 0;
+    var mem: i64 = 0;
+    var map: i64 = 0;
+    if gpu_kind == 1 {
+        vk_sn = 0;
+        if vk_buffer(bytes, 128 | 32, 6) == 0 { return 0; }
+        buf = vk_out[2];
+        mem = vk_out[3];
+        map = vk_map(mem);
+    } else if gpu_kind == 3 {
+        map = hp_alloc(bytes + 8);
+        raw { buf = syscall(1208, bytes); }
+        if buf <= 0 {
+            fail "the browser refused the instance buffer" hint "its console says why";
+        }
+    } else {
+        buf = mt_buffer_new(bytes);
+        if buf == 0 {
+            fail "Metal refused the instance buffer" hint "a smaller one";
+        }
+        map = oc0(buf, "contents");
+    }
     if map == 0 { return 0; }
     hp_zero(map, bytes);
     list_add(gi_buf, buf);
@@ -1905,13 +2098,49 @@ fn gpu_instances(max: i64, floats_per_instance: i64) -> i64 {
     list_add(gi_map, map);
     list_add(gi_cap, max);
     list_add(gi_floats, floats_per_instance);
+    list_add(gi_hi, 0);
+    list_add(gi_dirty, 0);
+    list_add(gi_lo, 0);
     return list_len(gi_buf);
 }
 
-fn gpu_inst_check(ib: i64) -> i64 {
+// the buffer's memory, on the card and here, given back; its number is no
+// use after. Outside a frame: the frames before are drawn by then.
+fn gpu_instances_free(ib: i64) -> i64 {
+    var k: i64 = gpu_inst_check(ib);
+    var buf: i64 = list_get(gi_buf, k);
+    if gpu_kind == 1 {
+        var mem: i64 = list_get(gi_mem, k);
+        raw {
+            vkDestroyBuffer(vk_dev, buf, 0);
+            vkFreeMemory(vk_dev, mem, 0);
+        }
+    } else if gpu_kind == 3 {
+        raw { syscall(1210, buf); }
+        hp_release(list_get(gi_map, k));
+    } else {
+        oc0(buf, "release");
+    }
+    list_set(gi_buf, k, 0);
+    list_set(gi_mem, k, 0);
+    list_set(gi_map, k, 0);
+    list_set(gi_cap, k, 0);
+    return 1;
+}
+
+// a buffer of gpu_instances not freed: its place in the lists
+fn gpu_inst_live(ib: i64) -> i64 {
     if ib < 1 || ib > list_len(gi_buf) {
         fail "no such instance buffer" hint "use what gpu_instances gave";
     }
+    if list_get(gi_cap, ib - 1) == 0 {
+        fail "this instance buffer was freed" hint "gpu_instances makes another";
+    }
+    return ib - 1;
+}
+
+fn gpu_inst_check(ib: i64) -> i64 {
+    gpu_inst_live(ib);
     if gpu_in_frame == 1 {
         fail "instances are written outside a frame" hint "before gpu_begin: the frame's draws read them when it ends";
     }
@@ -1926,6 +2155,7 @@ fn gpu_instance_put(ib: i64, i: i64, x: f64, y: f64, z: f64, w: f64) -> i64 {
     }
     var nf: i64 = list_get(gi_floats, k);
     var p: i64 = list_get(gi_map, k) + i * nf * 4;
+    gpu_inst_wrote(k, i, i + 1);
     wf32(p, 0, x);
     if nf > 1 { wf32(p, 4, y); }
     if nf > 2 { wf32(p, 8, z); }
@@ -1946,14 +2176,150 @@ fn gpu_instance_list(ib: i64, values: i64) -> i64 {
         wf32(p, i * 4, list_get_real(values, i));
         i = i + 1;
     }
+    var nf: i64 = list_get(gi_floats, k);
+    gpu_inst_wrote(k, 0, (n + nf - 1) / nf);
     return n;
+}
+
+// instances lo .. hi - 1 written: what WebGPU is sent before the buffer is
+// next drawn or run
+fn gpu_inst_wrote(k: i64, lo: i64, hi: i64) -> i64 {
+    if list_get(gi_dirty, k) == 0 {
+        list_set(gi_lo, k, lo);
+        list_set(gi_hi, k, hi);
+        list_set(gi_dirty, k, 1);
+        return 0;
+    }
+    if lo < list_get(gi_lo, k) { list_set(gi_lo, k, lo); }
+    if hi > list_get(gi_hi, k) { list_set(gi_hi, k, hi); }
+    return 0;
+}
+
+// WebGPU: what the program wrote since, sent before the card reads it
+fn wg_inst_sync(k: i64) -> i64 {
+    if list_get(gi_dirty, k) == 0 { return 0; }
+    var nf: i64 = list_get(gi_floats, k);
+    var lo: i64 = list_get(gi_lo, k);
+    var p: i64 = list_get(gi_map, k) + lo * nf * 4;
+    var n: i64 = (list_get(gi_hi, k) - lo) * nf * 4;
+    raw { syscall(1209, list_get(gi_buf, k), p, n, lo * nf * 4); }
+    list_set(gi_dirty, k, 0);
+    return 1;
+}
+
+// float k of instance i, as the card left it after gpu_run (or as written).
+// Vulkan and Metal: the card and the program share the memory; the browser
+// keeps WebGPU's on the card.
+fn gpu_instance_get(ib: i64, i: i64, k: i64) -> f64 {
+    var b: i64 = gpu_inst_check(ib);
+    if gpu_kind == 3 {
+        fail "on the web a buffer is read by the card only" hint "draw it, or read it on Vulkan or Metal";
+    }
+    if i < 0 || i >= list_get(gi_cap, b) || k < 0 || k >= list_get(gi_floats, b) {
+        fail "no such instance or float" hint "from 0 to the buffer's size minus one, and to its floats minus one";
+    }
+    var a: [f32; 1];
+    var p: i64 = list_get(gi_map, b) + (i * list_get(gi_floats, b) + k) * 4;
+    raw { poke32(&a, peek32(p)); }
+    return a[0];
+}
+
+// ---------------------------------------------------------- compute ---
+// A compute shader (std_shader.kr: buffer, compute { }) runs on the card
+// once an item, 64 at a time, on instance buffers: a buffer it writes is
+// drawn by gpu_draw_instanced after, without coming back to the program.
+fn gpu_compute(source: i64) -> i64 {
+    if gpu_on == 0 {
+        fail "the GPU is not open" hint "gpu_open first";
+    }
+    gpu_outside_frame();
+    if list_len(gp_shader) >= 256 {
+        fail "too many shaders" hint "256 at most";
+    }
+    var sh: i64 = shader_compile(source);
+    if sh == 0 {
+        say(shader_error());
+        fail "the shader has an error" hint "the line above says where";
+    }
+    if shader_is_compute(sh) == 0 {
+        fail "this shader draws: it has no compute { } part" hint "gpu_shader makes it";
+    }
+    var usize: i64 = shader_uniform_size(sh);
+    if usize > GPU_MAX_UNIFORM {
+        fail "the shader's uniforms take more than 2048 bytes" hint "use fewer, or a buffer for big tables";
+    }
+    list_add(gp_shader, sh);
+    list_add(gp_cs, 1);
+    list_add(gp_usize, usize);
+    list_add(gp_ntex, 0);
+    list_add(gp_istride, 0);
+    list_add(gp_stride, 0 - 1);
+    list_add(gp_set, 0);
+    var pipe: i64 = 0;
+    if gpu_kind == 1 {
+        pipe = vk_compute_program(sh);
+    } else if gpu_kind == 3 {
+        pipe = wg_compute_program(sh);
+    } else {
+        pipe = mt_compute_program(sh);
+    }
+    if pipe == 0 { return 0; }
+    list_add(gp_pipe, pipe);
+    return list_len(gp_shader);
+}
+
+// count runs of compute shader cs, each on its item of the buffers b0 ..
+// b3 (the shader's buffers, in their order; 0 for those it has not). The
+// card is done when this returns (on the web: before the next frame).
+fn gpu_run(cs: i64, count: i64, b0: i64, b1: i64, b2: i64, b3: i64) -> i64 {
+    var p: i64 = gpu_prog(cs);
+    if list_get(gp_cs, p - 1) == 0 {
+        fail "this shader draws" hint "gpu_draw draws it; gpu_run runs a compute shader";
+    }
+    gpu_outside_frame();
+    var sh: i64 = list_get(gp_shader, p - 1);
+    var nb: i64 = shader_buffers(sh);
+    if count < 0 || count > 16777216 {
+        fail "a run is for 0 to 16M items" hint "count is how many";
+    }
+    var bufs: [i64; 4];
+    bufs[0] = b0; bufs[1] = b1; bufs[2] = b2; bufs[3] = b3;
+    var k: i64 = 0;
+    while k < 4 {
+        if k < nb {
+            if bufs[k] == 0 {
+                fail "the shader has more buffers than were given" hint "one instance buffer for each of its buffer declarations";
+            }
+            var b: i64 = gpu_inst_check(bufs[k]);
+            if list_get(gi_floats, b) != sh_comps(shader_buffer_type(sh, k)) {
+                fail "a buffer's floats an item are not what the shader declares" hint "1 for a float, 2 a vec2, 4 a vec4";
+            }
+            if count > list_get(gi_cap, b) {
+                fail "more items than a buffer holds" hint "make it larger with gpu_instances";
+            }
+            bufs[k] = b;
+        } else {
+            if bufs[k] != 0 {
+                fail "more buffers were given than the shader has" hint "0 for those after its last";
+            }
+            bufs[k] = 0 - 1;
+        }
+        k = k + 1;
+    }
+    if count == 0 { return 1; }
+    // count, in the uniforms of its own the shader has
+    var off: i64 = (p - 1) * GPU_MAX_UNIFORM + shader_uniform_offset(sh, "count");
+    var c: [f32; 1];
+    c[0] = count as f64;
+    raw { poke32(&gp_ublock[0] + off, peek32(&c)); }
+    if gpu_kind == 1 { return vk_run(p - 1, count, bufs[0], bufs[1], bufs[2], bufs[3]); }
+    if gpu_kind == 3 { return wg_run(p - 1, count, bufs[0], bufs[1], bufs[2], bufs[3]); }
+    return mt_run(p - 1, count, bufs[0], bufs[1], bufs[2], bufs[3]);
 }
 
 // count instances of mesh, each with its values from buffer ib
 fn gpu_draw_instanced(prog: i64, mesh: i64, tex: i64, ib: i64, count: i64) -> i64 {
-    if ib < 1 || ib > list_len(gi_buf) {
-        fail "no such instance buffer" hint "use what gpu_instances gave";
-    }
+    gpu_inst_live(ib);
     var p: i64 = gpu_prog(prog);
     if p == 0 { return 0; }
     if list_get(gp_istride, p - 1) == 0 {
@@ -2014,19 +2380,47 @@ fn gpu_end() -> i64 {
 // A target is a picture the frame is not: draw into it between
 // gpu_begin_target and gpu_end_target, then read it as a texture in
 // the frame (or in another target) that comes after. Its depth is kept
-// too, for shadow maps. Vulkan only, for now.
+// too, for shadow maps: a texture of floats, 0 near to 1 far, in its red.
 fn gpu_target(w: i64, h: i64) -> i64 {
     if gpu_on == 0 {
         fail "the GPU is not open" hint "gpu_open first";
     }
     gpu_outside_frame();
-    if gpu_kind != 1 {
-        fail "render targets are on Vulkan only, for now" hint "Metal and WebGPU do not have them yet";
-    }
     if w <= 0 || h <= 0 || w * h > 4194304 {
         fail "a target of this size cannot be made" hint "from 1 x 1 to 2048 x 2048";
     }
-    return vk_target_make(w, h);
+    if gpu_kind == 1 { return vk_target_make(w, h); }
+    if gpu_kind == 3 { return wg_target_make(w, h); }
+    return mt_target_make(w, h);
+}
+
+// a target of WebGPU or Metal, kept: c and d its colour and depth as
+// textures (what the backend reads them by), fb what it draws it by
+fn gpu_target_add(w: i64, h: i64, c: i64, d: i64, fb: i64) -> i64 {
+    list_add(gr_w, w);
+    list_add(gr_h, h);
+    list_add(gr_cimg, c);
+    list_add(gr_cmem, 0);
+    list_add(gr_cview, c);
+    list_add(gr_dimg, d);
+    list_add(gr_dmem, 0);
+    list_add(gr_dview, d);
+    list_add(gr_fb, fb);
+    list_add(gt_img, c);
+    list_add(gt_mem, 0);
+    list_add(gt_view, c);
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    list_add(gt_lay, 0);
+    list_add(gr_ctex, list_len(gt_w));
+    list_add(gt_img, d);
+    list_add(gt_mem, 0);
+    list_add(gt_view, d);
+    list_add(gt_w, w);
+    list_add(gt_h, h);
+    list_add(gt_lay, 0);
+    list_add(gr_dtex, list_len(gt_w));
+    return list_len(gr_w);
 }
 
 // the colour of a target, as a texture for gpu_draw
@@ -2058,8 +2452,11 @@ fn gpu_begin_target(t: i64, clear: Vec4) -> i64 {
     }
     gpu_in_frame = 1;
     gpu_in_target = 1;
+    gpu_target_now = t - 1;
     gpu_draws = 0;
-    return vk_begin_target(t - 1, clear);
+    if gpu_kind == 1 { return vk_begin_target(t - 1, clear); }
+    if gpu_kind == 3 { return wg_begin_target(t - 1, clear); }
+    return mt_begin_target(t - 1, clear);
 }
 
 fn gpu_end_target() -> i64 {
@@ -2068,7 +2465,9 @@ fn gpu_end_target() -> i64 {
     }
     gpu_in_target = 0;
     gpu_in_frame = 0;
-    return vk_end_target();
+    if gpu_kind == 1 { return vk_end_target(); }
+    if gpu_kind == 3 { return wg_end(); }
+    return mt_end_target();
 }
 
 // a pixel of the last frame: 0xRRGGBB
@@ -2220,7 +2619,14 @@ fn wg_program(sh: i64, usize: i64) -> i64 {
         off = off + sh_comps(t) * 4;
         i = i + 1;
     }
-    var flags: i64 = gpu_cull_on | (gpu_depth_on << 1) | (gpu_blend_on << 2);
+    // the last ninst inputs are the instances': not in a corner's bytes
+    var ninst: i64 = shader_instance_inputs(sh);
+    i = nin - ninst;
+    while i < nin {
+        off = off - sh_comps(shader_input_type(sh, i)) * 4;
+        i = i + 1;
+    }
+    var flags: i64 = gpu_cull_on | (gpu_depth_on << 1) | (gpu_blend_on << 2) | (ninst << 8);
     var r: i64 = 0;
     raw { r = syscall(1201, text_cstr(src), text_len(src), &fmts, nin, usize, flags); }
     if r <= 0 {
@@ -2263,13 +2669,42 @@ fn wg_begin(clear: Vec4) -> i64 {
     c[1] = clear.y;
     c[2] = clear.z;
     c[3] = clear.w;
-    raw { vk_res = syscall(1204, &c); }
+    raw { vk_res = syscall(1204, &c, 0); }
     return 1;
 }
 
+fn wg_begin_target(i: i64, clear: Vec4) -> i64 {
+    var c: [f32; 4];
+    c[0] = clear.x;
+    c[1] = clear.y;
+    c[2] = clear.z;
+    c[3] = clear.w;
+    raw { vk_res = syscall(1204, &c, list_get(gr_fb, i)); }
+    return 1;
+}
+
+// the page makes the target: its colour is texture r, its depth r + 1
+fn wg_target_make(w: i64, h: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = syscall(1211, w, h); }
+    if r <= 0 {
+        fail "the browser refused the target" hint "its console says why";
+    }
+    return gpu_target_add(w, h, r, r + 1, r);
+}
+
 fn wg_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
-    var tex: [i64; 4];
+    // the four textures, then the instances: their buffer (0 none), how many
+    var tex: [i64; 6];
     tex[0] = t0; tex[1] = t1; tex[2] = t2; tex[3] = t3;
+    tex[4] = 0;
+    tex[5] = 0;
+    if gpu_inst_buf > 0 {
+        var k: i64 = gpu_inst_buf - 1;
+        wg_inst_sync(k);
+        tex[4] = list_get(gi_buf, k);
+        tex[5] = gpu_inst_count;
+    }
     var k: i64 = 0;
     while k < 4 {
         if tex[k] <= 0 || tex[k] > list_len(gt_view) { tex[k] = gpu_white; }
@@ -2286,6 +2721,34 @@ fn wg_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
 
 fn wg_end() -> i64 {
     raw { vk_res = syscall(1206); }
+    return 1;
+}
+
+fn wg_compute_program(sh: i64) -> i64 {
+    var src: text = shader_wgsl(sh);
+    var r: i64 = 0;
+    raw { r = syscall(1212, text_cstr(src), text_len(src), shader_buffers(sh)); }
+    if r <= 0 {
+        fail "the browser refused the compute shader" hint "its console says why";
+    }
+    return r;
+}
+
+fn wg_run(prog: i64, count: i64, b0: i64, b1: i64, b2: i64, b3: i64) -> i64 {
+    var ids: [i64; 4];
+    var bs: [i64; 4];
+    bs[0] = b0; bs[1] = b1; bs[2] = b2; bs[3] = b3;
+    var k: i64 = 0;
+    while k < 4 {
+        ids[k] = 0;
+        if bs[k] >= 0 {
+            wg_inst_sync(bs[k]);
+            ids[k] = list_get(gi_buf, bs[k]);
+        }
+        k = k + 1;
+    }
+    var size: i64 = list_get(gp_usize, prog);
+    raw { vk_res = syscall(1213, list_get(gp_pipe, prog), count, &gp_ublock[0] + prog * GPU_MAX_UNIFORM, size, &ids); }
     return 1;
 }
 
@@ -2328,6 +2791,7 @@ var mt_flags: i64;
 var mt_vbuf: i64;
 var mt_ibuf: i64;
 var mt_tex: i64;
+var mt_copy_pipe: i64;     // a target's depth copied into a texture of floats
 
 fn mt_sel(name: i64) -> i64 {
     var s: i64 = 0;
@@ -2369,6 +2833,11 @@ fn oc5(o: i64, name: i64, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
     raw { r = c_call(mt_send, o, mt_sel(name), a, b, c, d, e); }
     return r;
 }
+fn oc6(o: i64, name: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    var r: i64 = 0;
+    raw { r = c_call(mt_send, o, mt_sel(name), a, b, c, d, e, f); }
+    return r;
+}
 // an NSString from a text
 fn mt_str(t: i64) -> i64 {
     var c: i64 = 0;
@@ -2378,6 +2847,11 @@ fn mt_str(t: i64) -> i64 {
 // element k of an array property: [[o name] objectAtIndexedSubscript:k]
 fn mt_at(o: i64, name: i64, k: i64) -> i64 {
     return oc1(oc0(o, name), "objectAtIndexedSubscript:", k);
+}
+
+// a buffer of bytes the CPU and the card share (instances)
+fn mt_buffer_new(bytes: i64) -> i64 {
+    return oc2(mt_dev, "newBufferWithLength:options:", bytes, 0);
 }
 
 fn mt_texture_new(w: i64, h: i64, format: i64, usage: i64, storage: i64) -> i64 {
@@ -2465,21 +2939,37 @@ fn mt_program(sh: i64, usize: i64) -> i64 {
         oc1(ca, "setDestinationAlphaBlendFactor:", 5);
     }
     oc1(pd, "setDepthAttachmentPixelFormat:", 252);
+    // the corners' inputs from buffer 0; the instances' (the last ninst)
+    // from buffer 2, once an instance (buffer 1 is the uniforms)
     var vd: i64 = oc0(mt_cls("MTLVertexDescriptor"), "vertexDescriptor");
     var nin: i64 = shader_inputs(sh);
+    var ninst: i64 = shader_instance_inputs(sh);
     var off: i64 = 0;
+    var ioff: i64 = 0;
     var i: i64 = 0;
     while i < nin {
         var t: i64 = shader_input_type(sh, i);
         var at: i64 = mt_at(vd, "attributes", i);
         oc1(at, "setFormat:", 27 + sh_comps(t));
-        oc1(at, "setOffset:", off);
-        oc1(at, "setBufferIndex:", 0);
-        off = off + sh_comps(t) * 4;
+        if i < nin - ninst {
+            oc1(at, "setOffset:", off);
+            oc1(at, "setBufferIndex:", 0);
+            off = off + sh_comps(t) * 4;
+        } else {
+            oc1(at, "setOffset:", ioff);
+            oc1(at, "setBufferIndex:", 2);
+            ioff = ioff + sh_comps(t) * 4;
+        }
         i = i + 1;
     }
     if nin > 0 {
         oc1(mt_at(vd, "layouts", 0), "setStride:", off);
+        if ninst > 0 {
+            var il: i64 = mt_at(vd, "layouts", 2);
+            oc1(il, "setStride:", ioff);
+            oc1(il, "setStepFunction:", 2);        // per instance
+            oc1(il, "setStepRate:", 1);
+        }
         oc1(pd, "setVertexDescriptor:", vd);
     }
     var err2: [i64; 1];
@@ -2524,10 +3014,15 @@ fn mt_texture(src: i64, w: i64, h: i64) -> i64 {
 }
 
 fn mt_begin(clear: Vec4) -> i64 {
+    return mt_pass(mt_target, mt_depthtex, 0, clear);
+}
+
+// a pass into colour col and depth dep, kept when keep (a target's)
+fn mt_pass(col: i64, dep: i64, keep: i64, clear: Vec4) -> i64 {
     mt_cb = oc0(mt_queue, "commandBuffer");
     var rp: i64 = oc0(mt_cls("MTLRenderPassDescriptor"), "renderPassDescriptor");
     var ca: i64 = mt_at(rp, "colorAttachments", 0);
-    oc1(ca, "setTexture:", mt_target);
+    oc1(ca, "setTexture:", col);
     oc1(ca, "setLoadAction:", 2);
     oc1(ca, "setStoreAction:", 1);
     var r: f64 = clear.x;
@@ -2536,9 +3031,9 @@ fn mt_begin(clear: Vec4) -> i64 {
     var a: f64 = clear.w;
     raw { c_call(mt_send, ca, mt_sel("setClearColor:"), r, g, b, a); }
     var da: i64 = oc0(rp, "depthAttachment");
-    oc1(da, "setTexture:", mt_depthtex);
+    oc1(da, "setTexture:", dep);
     oc1(da, "setLoadAction:", 2);
-    oc1(da, "setStoreAction:", 0);
+    oc1(da, "setStoreAction:", keep);
     var one: f64 = 1.0;
     raw { c_call(mt_send, da, mt_sel("setClearDepth:"), one); }
     mt_enc = oc1(mt_cb, "renderCommandEncoderWithDescriptor:", rp);
@@ -2576,8 +3071,77 @@ fn mt_draw(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64) -> i64 {
         oc2(mt_enc, "setFragmentSamplerState:atIndex:", mt_sampler, k);
         k = k + 1;
     }
+    if gpu_inst_buf > 0 {
+        oc3(mt_enc, "setVertexBuffer:offset:atIndex:", list_get(gi_buf, gpu_inst_buf - 1), 0, 2);
+        oc6(mt_enc, "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:",
+            3, list_get(gm_count, mesh), 1, list_get(gm_ibuf, mesh), 0, gpu_inst_count);
+        return 1;
+    }
     oc5(mt_enc, "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:",
         3, list_get(gm_count, mesh), 1, list_get(gm_ibuf, mesh), 0);
+    return 1;
+}
+
+// a target: colour as the frame's (the programs' pipelines draw into it),
+// depth as the frame's, kept, and a texture of floats the depth is copied
+// into after each pass, which a shader samples as it does on Vulkan
+fn mt_target_make(w: i64, h: i64) -> i64 {
+    if mt_copy_pipe == 0 {
+        var src: text = text_new();
+        text_add(src, "#include <metal_stdlib>\nusing namespace metal;\n");
+        text_add(src, "struct VO { float4 p [[position]]; };\n");
+        text_add(src, "vertex VO vs_copy(uint i [[vertex_id]]) {\n");
+        text_add(src, "    float2 q[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };\n");
+        text_add(src, "    VO o; o.p = float4(q[i], 0.0, 1.0); return o;\n}\n");
+        text_add(src, "fragment float4 fs_copy(VO v [[stage_in]], depth2d<float> d [[texture(0)]]) {\n");
+        text_add(src, "    return float4(d.read(uint2(v.p.xy)), 0.0, 0.0, 1.0);\n}\n");
+        var err: [i64; 1];
+        var lib: i64 = 0;
+        raw { lib = oc3(mt_dev, "newLibraryWithSource:options:error:", mt_str(src), 0, &err); }
+        if lib == 0 {
+            fail "Metal refused the depth copy" hint "update the system";
+        }
+        var pd: i64 = oc0(oc0(mt_cls("MTLRenderPipelineDescriptor"), "alloc"), "init");
+        oc1(pd, "setVertexFunction:", oc1(lib, "newFunctionWithName:", mt_str("vs_copy")));
+        oc1(pd, "setFragmentFunction:", oc1(lib, "newFunctionWithName:", mt_str("fs_copy")));
+        oc1(mt_at(pd, "colorAttachments", 0), "setPixelFormat:", 55);     // R32Float
+        var err2: [i64; 1];
+        raw { mt_copy_pipe = oc2(mt_dev, "newRenderPipelineStateWithDescriptor:error:", pd, &err2); }
+        if mt_copy_pipe == 0 {
+            fail "Metal refused the depth copy" hint "update the system";
+        }
+    }
+    var col: i64 = mt_texture_new(w, h, 80, 1 | 4, 2);
+    var dep: i64 = mt_texture_new(w, h, 252, 1 | 4, 2);
+    var dcopy: i64 = mt_texture_new(w, h, 55, 1 | 4, 2);
+    if col == 0 || dep == 0 || dcopy == 0 {
+        fail "Metal refused the target" hint "a smaller one";
+    }
+    var t: i64 = gpu_target_add(w, h, col, dcopy, col);
+    list_set(gr_dimg, t - 1, dep);
+    return t;
+}
+
+fn mt_begin_target(i: i64, clear: Vec4) -> i64 {
+    return mt_pass(list_get(gr_cimg, i), list_get(gr_dimg, i), 1, clear);
+}
+
+// the target's pass ends; its depth goes into the texture a shader reads.
+// The frame's command buffer, made after, runs after this one.
+fn mt_end_target() -> i64 {
+    oc0(mt_enc, "endEncoding");
+    var rp: i64 = oc0(mt_cls("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    var ca: i64 = mt_at(rp, "colorAttachments", 0);
+    var i: i64 = gpu_target_now;
+    oc1(ca, "setTexture:", list_get(gr_dview, i));
+    oc1(ca, "setLoadAction:", 0);
+    oc1(ca, "setStoreAction:", 1);
+    var enc: i64 = oc1(mt_cb, "renderCommandEncoderWithDescriptor:", rp);
+    oc1(enc, "setRenderPipelineState:", mt_copy_pipe);
+    oc2(enc, "setFragmentTexture:atIndex:", list_get(gr_dimg, i), 0);
+    oc3(enc, "drawPrimitives:vertexStart:vertexCount:", 3, 0, 3);
+    oc0(enc, "endEncoding");
+    oc0(mt_cb, "commit");
     return 1;
 }
 
@@ -2588,6 +3152,57 @@ fn mt_end() -> i64 {
     mt_region[0] = 0; mt_region[1] = 0; mt_region[2] = 0;
     mt_region[3] = gpu_w; mt_region[4] = gpu_h; mt_region[5] = 1;
     raw { oc4(mt_target, "getBytes:bytesPerRow:fromRegion:mipmapLevel:", &gpu_read[0], gpu_w * 4, &mt_region, 0); }
+    return 1;
+}
+
+fn mt_compute_program(sh: i64) -> i64 {
+    var err: [i64; 1];
+    var lib: i64 = 0;
+    raw { lib = oc3(mt_dev, "newLibraryWithSource:options:error:", mt_str(shader_msl(sh)), 0, &err); }
+    if lib == 0 {
+        if err[0] != 0 {
+            var d: i64 = oc0(err[0], "localizedDescription");
+            var cs: i64 = oc0(d, "UTF8String");
+            raw { say(text_from_bytes(cs, str_len0(cs))); }
+        }
+        fail "Metal refused the compute shader" hint "the line above says why";
+    }
+    var f: i64 = oc1(lib, "newFunctionWithName:", mt_str("cs_main"));
+    var err2: [i64; 1];
+    var ps: i64 = 0;
+    raw { ps = oc2(mt_dev, "newComputePipelineStateWithFunction:error:", f, &err2); }
+    if ps == 0 {
+        fail "Metal refused the compute shader" hint "update the system";
+    }
+    return ps;
+}
+
+// the run, to its end. MTLSize is three words: past 16 bytes, ARM64 hands
+// a struct over by its address.
+fn mt_run(prog: i64, count: i64, b0: i64, b1: i64, b2: i64, b3: i64) -> i64 {
+    var cb: i64 = oc0(mt_queue, "commandBuffer");
+    var enc: i64 = oc0(cb, "computeCommandEncoder");
+    oc1(enc, "setComputePipelineState:", list_get(gp_pipe, prog));
+    var u: i64 = 0;
+    raw { u = &gp_ublock[0] + prog * GPU_MAX_UNIFORM; }
+    oc3(enc, "setBytes:length:atIndex:", u, list_get(gp_usize, prog), 0);
+    var bs: [i64; 4];
+    bs[0] = b0; bs[1] = b1; bs[2] = b2; bs[3] = b3;
+    var k: i64 = 0;
+    while k < 4 {
+        if bs[k] >= 0 {
+            oc3(enc, "setBuffer:offset:atIndex:", list_get(gi_buf, bs[k]), 0, k + 1);
+        }
+        k = k + 1;
+    }
+    var groups: [i64; 3];
+    groups[0] = (count + 63) / 64; groups[1] = 1; groups[2] = 1;
+    var each: [i64; 3];
+    each[0] = 64; each[1] = 1; each[2] = 1;
+    raw { oc2(enc, "dispatchThreadgroups:threadsPerThreadgroup:", &groups, &each); }
+    oc0(enc, "endEncoding");
+    oc0(cb, "commit");
+    oc0(cb, "waitUntilCompleted");
     return 1;
 }
 

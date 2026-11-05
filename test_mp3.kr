@@ -1,0 +1,109 @@
+kron_program
+kron_domain test_mp3;
+kron_imports
+acquire_domain "std_mp3.kr";
+acquire_domain "std_vorbis.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: MP3 decoded in Kron. Three files (MPEG-1 stereo at 44100, MPEG-2
+// mono at 22050, clicks at 32000, which takes short blocks): their sizes,
+// and each channel's loudness, which the reference decoder (minimp3) matches
+// within a step; then one streamed, the same frames as decoded whole; one moved with
+// audio_seek; an MP3 and an Ogg stream playing at once.
+// =========================================================================
+
+var buf: i64;
+
+fn side(i: i64, c: i64) -> i64 { return au_le16(buf + i * 4 + c * 2); }
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn yes(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok { text_add(t, "ok    "); } else { text_add(t, "FAIL  "); }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn show(path: i64) -> i64 {
+    mp3_open(path);
+    var t: text = text_new();
+    text_add(t, path);
+    text_add(t, ": channels ");
+    text_add_int(t, mp3_channels());
+    text_add(t, " rate ");
+    text_add_int(t, mp3_rate());
+    text_add(t, " length ");
+    text_add_int(t, mp3_length());
+    say(t);
+    var frames: i64 = 0;
+    var q0: f64 = 0.0;
+    var q1: f64 = 0.0;
+    var n: i64 = mp3_next();
+    while n >= 0 {
+        var i: i64 = 0;
+        while i < n {
+            var x0: f64 = mp3_sample(0, i) * 32768.0;
+            var x1: f64 = mp3_sample(1, i) * 32768.0;
+            q0 = q0 + x0 * x0;
+            q1 = q1 + x1 * x1;
+            i = i + 1;
+        }
+        frames = frames + n;
+        n = mp3_next();
+    }
+    print(frames);
+    // each side's loudness (root mean square, in i16 steps): the
+    // reference decoder gives the same, within a step
+    print(fsqrt(q0 / (frames as f64)) as i64);
+    print(fsqrt(q1 / (frames as f64)) as i64);
+    return 0;
+}
+
+fn main() -> i64 {
+    say("MP3 decode test");
+    show("tests/audio/mp3_sine.mp3");
+    show("tests/audio/mp3_mono22.mp3");
+    show("tests/audio/mp3_clicks32.mp3");
+    audio_open_silent(48000);
+    buf = hp_alloc(96000 * 4 + 8);
+    // streamed: the same frames as decoded whole, give or take one
+    mp3_open("tests/audio/mp3_sine.mp3");
+    var whole, nwhole = mp3_to_stereo(48000);
+    var v: i64 = audio_stream_mp3("tests/audio/mp3_sine.mp3", 1.0, 0);
+    audio_render(buf, 48000);
+    var worst: i64 = 0;
+    var i: i64 = 0;
+    while i < 48000 {
+        var d: i64 = iabs(side(i, 0) - au_le16(whole + i * 4));
+        if d > worst { worst = d; }
+        i = i + 1;
+    }
+    yes(worst == 0, "streamed, the same frames as decoded whole");
+    // moved: from 1500 ms on
+    audio_seek(v, 1500);
+    yes(audio_position(v) == 1500, "moved to 1500 ms");
+    audio_render(buf, 4800);
+    worst = 0;
+    i = 0;
+    while i < 4800 {
+        var d2: i64 = iabs(side(i, 0) - au_le16(whole + (72000 + i) * 4));
+        if d2 > worst { worst = d2; }
+        i = i + 1;
+    }
+    yes(worst == 0, "and plays what is there");
+    audio_render(buf, 48000);
+    yes(audio_playing(v) == 0, "it ends where the file does");
+    // with an Ogg stream at the same time
+    var a: i64 = audio_stream_mp3("tests/audio/mp3_sine.mp3", 1.0, 1);
+    var b: i64 = audio_stream_ogg("tests/audio/vorbis_sine.ogg", 1.0, 1);
+    audio_render(buf, 96000);
+    yes(audio_playing(a) == 1 && audio_playing(b) == 1, "an MP3 and an Ogg stream at once, looping");
+    audio_close();
+    return 0;
+}

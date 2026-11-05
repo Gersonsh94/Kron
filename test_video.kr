@@ -1,0 +1,98 @@
+kron_program
+kron_domain test_video;
+kron_imports
+acquire_domain "std_video.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: an MPEG-1 film (tests/video/film.mpg: 160 x 120, 25 pictures a
+// second, two seconds, I, P and B pictures, MP2 sound at 44100) decoded in
+// Kron. Each picture's bytes summed, as the reference decoder (pl_mpeg)
+// gives them; moved with video_seek and video_frame_at; its sound played
+// through a silent device, as loud as the reference's.
+// =========================================================================
+
+var buf: i64;
+
+fn yes(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok { text_add(t, "ok    "); } else { text_add(t, "FAIL  "); }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+// the red, green and blue bytes of the last picture, summed
+fn picture_sum() -> i64 {
+    var img: i64 = video_image();
+    lock_take(HP_LOCK);
+    var q: i64 = im_pixels(img) + 16;
+    lock_give(HP_LOCK);
+    var n: i64 = video_width() * video_height();
+    var s: i64 = 0;
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            s = s + peek8(q + i * 4) + peek8(q + i * 4 + 1) + peek8(q + i * 4 + 2);
+            i = i + 1;
+        }
+    }
+    return s;
+}
+
+fn main() -> i64 {
+    video_open("tests/video/film.mpg");
+    yes(video_width() == 160 && video_height() == 120, "160 x 120");
+    yes(video_fps() == 25.0 && video_length() == 2000, "25 pictures a second, 2000 ms");
+    yes(video_has_sound() == 1, "it has sound");
+    var sums: [i64; 50];
+    var n: i64 = 0;
+    while video_next() {
+        if n < 50 { sums[n] = picture_sum(); }
+        n = n + 1;
+    }
+    yes(n == 50, "50 pictures");
+    yes(sums[0] == 7285755 && sums[1] == 7282340 && sums[12] == 7280364 && sums[25] == 7201882 && sums[49] == 7221358,
+        "pictures 0, 1, 12, 25 and 49: what the reference decoder gives");
+    yes(video_next() == 0, "and none after the last");
+    // seek: to 1000 ms, picture 25
+    video_seek(1000);
+    yes(video_time() == 1000 && picture_sum() == sums[25], "moved to 1000 ms: picture 25");
+    video_seek(480);
+    yes(video_time() == 480 && picture_sum() == sums[12], "back to 480 ms: picture 12");
+    yes(video_frame_at(500) == 0, "at 500 ms: still picture 12");
+    yes(video_frame_at(1990) == 1 && video_time() == 1960 && picture_sum() == sums[49], "at 1990 ms: picture 49");
+    yes(video_frame_at(40) == 1 && video_time() == 40 && picture_sum() == sums[1], "at 40 ms, going back: picture 1");
+    // the sound: as many frames as the reference's, as loud
+    audio_open_silent(44100);
+    video_seek(0);
+    var v: i64 = video_sound(1.0);
+    buf = hp_alloc(1000 * 4 + 8);
+    var got: i64 = 0;
+    var q: f64 = 0.0;
+    var played: i64 = 0;
+    while audio_playing(v) && got < 200000 {
+        audio_update();
+        audio_render(buf, 1000);
+        var i: i64 = 0;
+        while i < 1000 {
+            var x: f64 = au_le16(buf + i * 4) as f64;
+            q = q + x * x;
+            i = i + 1;
+        }
+        if audio_playing(v) { played = audio_position(v); }
+        got = got + 1000;
+    }
+    var rms: i64 = fsqrt(q / 88704.0) as i64;
+    yes(got >= 88704 && got < 90000, "the sound is 88704 frames, as the reference's");
+    yes(rms >= 1952 && rms <= 1954, "and as loud (1953)");
+    yes(played > 1900, "its voice's position goes to the end");
+    // from the middle: the sound starts where the picture is
+    video_seek(1000);
+    v = video_sound(1.0);
+    yes(audio_position(v) == 1000, "video_sound after a seek starts at 1000 ms");
+    audio_stop(v);
+    video_close();
+    audio_close();
+    return 0;
+}

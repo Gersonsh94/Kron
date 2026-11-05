@@ -33,6 +33,16 @@ kron_definitions
 //                                         window_show: up positive, down negative
 //   window_right_down()  window_right_pressed()   the right button
 //   window_ctrl()  window_shift()         1 while the key is held
+//   window_touches()                      fingers on the window now (up to 10)
+//   window_touch_id(i)                    finger i's number, the same while it
+//                                         stays down (i from 0)
+//   window_touch_x(i)  window_touch_y(i)  where it is, in the picture's pixels
+//   window_touch_began(i)                 1 when it came down during the last
+//                                         window_show
+//   window_touches_ended()                fingers lifted during it
+//                                         (Windows 8 and later, the web,
+//                                         Android, iOS; the first finger is
+//                                         also the mouse's left button)
 //   window_clip_set(address, n)           n bytes of UTF-8 text to the
 //                                         clipboard, for other programs too
 //   window_clip_get()                     the clipboard's text: the address
@@ -118,6 +128,15 @@ var w32_set_cursor: i64;
 var w32_client_screen: i64;
 var w32_foreground: i64;
 var w32_show_cursor: i64;
+var w32_s2c: i64;                    // ScreenToClient
+// the fingers on the window, in the order they came down
+const WIN_TOUCHES: i64 = 10;
+var tch_n: i64;
+var tch_id: [i64; 10];
+var tch_x: [i64; 10];
+var tch_y: [i64; 10];
+var tch_new: [i64; 10];
+var tch_lifted: i64;
 
 // Windows
 var win_hwnd: i64;
@@ -197,6 +216,8 @@ extern "libandroid.so" {
     fn AMotionEvent_getAction(event: i64) -> i32;
     fn AMotionEvent_getX(event: i64, index: u64) -> f32;
     fn AMotionEvent_getY(event: i64, index: u64) -> f32;
+    fn AMotionEvent_getPointerCount(event: i64) -> u64;
+    fn AMotionEvent_getPointerId(event: i64, index: u64) -> i32;
     fn AKeyEvent_getAction(event: i64) -> i32;
     fn AKeyEvent_getKeyCode(event: i64) -> i32;
     fn AKeyEvent_getMetaState(event: i64) -> i32;
@@ -409,6 +430,57 @@ fn window_wheel() -> i64 { return win_wheel; }
 fn window_right_down() -> i64 { return win_rdown; }
 fn window_right_pressed() -> i64 { return win_rpresses; }
 
+// ------------------------------------------------------------ touches ---
+fn window_touches() -> i64 { return tch_n; }
+
+fn win_touch_at(i: i64) -> i64 {
+    if i < 0 || i >= tch_n {
+        fail "no such finger" hint "from 0 to window_touches() minus one";
+    }
+    return i;
+}
+
+fn window_touch_id(i: i64) -> i64 { return tch_id[win_touch_at(i)]; }
+fn window_touch_x(i: i64) -> i64 { return tch_x[win_touch_at(i)]; }
+fn window_touch_y(i: i64) -> i64 { return tch_y[win_touch_at(i)]; }
+fn window_touch_began(i: i64) -> i64 { return tch_new[win_touch_at(i)]; }
+fn window_touches_ended() -> i64 { return tch_lifted; }
+
+// what every system's touches come down to: phase 1 a finger down, 2 it
+// moved, 3 it went up, 4 all of them gone (the system took them)
+fn win_touch(phase: i64, id: i64, x: i64, y: i64) -> i64 {
+    if phase == 4 {
+        tch_lifted = tch_lifted + tch_n;
+        tch_n = 0;
+        return 1;
+    }
+    var k: i64 = 0;
+    while k < tch_n && tch_id[k] != id {
+        k = k + 1;
+    }
+    if k == tch_n {
+        if phase != 1 || tch_n == WIN_TOUCHES { return 0; }
+        tch_id[k] = id;
+        tch_new[k] = 1;
+        tch_n = tch_n + 1;
+    }
+    if phase == 3 {
+        while k + 1 < tch_n {
+            tch_id[k] = tch_id[k + 1];
+            tch_x[k] = tch_x[k + 1];
+            tch_y[k] = tch_y[k + 1];
+            tch_new[k] = tch_new[k + 1];
+            k = k + 1;
+        }
+        tch_n = tch_n - 1;
+        tch_lifted = tch_lifted + 1;
+        return 1;
+    }
+    tch_x[k] = x;
+    tch_y[k] = y;
+    return 1;
+}
+
 fn window_ctrl() -> i64 {
     if (win_kmods & 4) != 0 { return 1; }
     if win_is_linux() {
@@ -530,13 +602,7 @@ fn window_open(width: i64, height: i64, title: i64) -> i64 {
 
 fn window_show() -> i64 {
     if win_open_now == 0 { return 0; }
-    win_kmods = 0;
-    win_presses = 0;
-    win_releases = 0;
-    win_wheel = 0;
-    win_rpresses = 0;
-    win_dx = 0;
-    win_dy = 0;
+    win_new_frame();
     if app_mode != 0 {
         app_show();
     } else if win_is_web() {
@@ -547,6 +613,24 @@ fn window_show() -> i64 {
         w32_show();
     }
     return win_open_now;
+}
+
+// what counts presses, steps and fingers from one window_show to the next
+fn win_new_frame() -> i64 {
+    win_kmods = 0;
+    win_presses = 0;
+    win_releases = 0;
+    win_wheel = 0;
+    win_rpresses = 0;
+    win_dx = 0;
+    win_dy = 0;
+    tch_lifted = 0;
+    var t: i64 = 0;
+    while t < tch_n {
+        tch_new[t] = 0;
+        t = t + 1;
+    }
+    return 0;
 }
 
 fn window_close() -> i64 {
@@ -619,6 +703,7 @@ fn w32_open(title: i64) -> i64 {
         w32_gunlock = dll_proc(kernel32, "GlobalUnlock");
         w32_to_wide = dll_proc(kernel32, "MultiByteToWideChar");
         w32_from_wide = dll_proc(kernel32, "WideCharToMultiByte");
+        w32_s2c = dll_proc(user32, "ScreenToClient");
 
         var hinst: i64 = call modh(0);
         // the window class: its messages go straight to DefWindowProcA, so
@@ -717,6 +802,11 @@ fn w32_show() -> i64 {
             } else if m == 0x20A {
                 // the wheel: 120 per notch, in the high half of wParam
                 win_wheel = win_wheel + w32_signed16((wp >> 16) & 0xFFFF) / 120;
+            } else if m >= 0x245 && m <= 0x247 {
+                w32_pointer(m, wp, lp);
+            } else if m == 0x24C {
+                // WM_POINTERCAPTURECHANGED: the finger is no longer ours
+                win_touch(3, wp & 0xFFFF, 0, 0);
             }
             // TranslateMessage turns key presses into characters (WM_CHAR),
             // which come back through this same loop
@@ -732,6 +822,27 @@ fn w32_show() -> i64 {
         w32_capture_frame();
     }
     return 1;
+}
+
+// WM_POINTERUPDATE, WM_POINTERDOWN, WM_POINTERUP (Windows 8 and later): a
+// finger or a pen -- the mouse sends them only to a program that asks
+// (EnableMouseInPointer), which this one does not. Where on the screen it
+// is, made a place in the window. DefWindowProcA turns the first finger
+// into the left button too.
+fn w32_pointer(m: i64, wp: i64, lp: i64) -> i64 {
+    var id: i64 = wp & 0xFFFF;
+    var pt: [i32; 2];
+    pt[0] = w32_signed16(lp & 0xFFFF) as i32;
+    pt[1] = w32_signed16((lp >> 16) & 0xFFFF) as i32;
+    raw {
+        if w32_s2c != 0 {
+            win_ignore = call w32_s2c(win_hwnd, &pt);
+        }
+    }
+    var phase: i64 = 2;
+    if m == 0x246 { phase = 1; }
+    if m == 0x247 { phase = 3; }
+    return win_touch(phase, id, pt[0] as i64, pt[1] as i64);
 }
 
 fn w32_signed16(v: i64) -> i64 {
@@ -1869,6 +1980,9 @@ fn web_show() -> i64 {
             } else if t == 9 {
                 win_dx = win_dx + web_ev[1];
                 win_dy = win_dy + web_ev[2];
+            } else if t == 10 {
+                // a finger: phase, its number, where
+                win_touch(web_ev[1], web_ev[2], web_ev[3], web_ev[4]);
             }
         } else {
             more = 0;
@@ -2023,6 +2137,7 @@ fn and_input() -> i64 {
                 var fy: f64 = AMotionEvent_getY(ev, 0);
                 win_mx = ((fx * (win_w as f64)) / (app_screen_w as f64)) as i64;
                 win_my = ((fy * (win_h as f64)) / (app_screen_h as f64)) as i64;
+                and_touches(ev, AMotionEvent_getAction(ev));
                 if act == 0 {
                     win_down = 1;
                     win_presses = win_presses + 1;
@@ -2044,6 +2159,38 @@ fn and_input() -> i64 {
         }
     }
     lock_give(30);
+    return 1;
+}
+
+// Android: each finger of a motion event. The action says which one came
+// down or went up (its index in the bits above the low eight); the others
+// moved.
+fn and_touches(ev: i64, action: i64) -> i64 {
+    var act: i64 = action & 255;
+    var which: i64 = (action >> 8) & 255;
+    if act == 3 {
+        return win_touch(4, 0, 0, 0);        // cancelled: all are gone
+    }
+    var n: i64 = 0;
+    raw { n = AMotionEvent_getPointerCount(ev); }
+    var p: i64 = 0;
+    while p < n {
+        var id: i64 = 0;
+        var fx: f64 = 0.0;
+        var fy: f64 = 0.0;
+        raw {
+            id = AMotionEvent_getPointerId(ev, p);
+            fx = AMotionEvent_getX(ev, p);
+            fy = AMotionEvent_getY(ev, p);
+        }
+        var x: i64 = ((fx * (win_w as f64)) / (app_screen_w as f64)) as i64;
+        var y: i64 = ((fy * (win_h as f64)) / (app_screen_h as f64)) as i64;
+        var phase: i64 = 2;
+        if p == which && (act == 0 || act == 5) { phase = 1; }
+        if p == which && (act == 1 || act == 6) { phase = 3; }
+        win_touch(phase, id, x, y);
+        p = p + 1;
+    }
     return 1;
 }
 
@@ -2136,6 +2283,8 @@ fn host_input() -> i64 {
             win_push_key(x);
         } else if kind == 5 {
             win_push_char(x);
+        } else if kind >= 6 && kind <= 8 {
+            win_touch(kind - 5, app_ev[i + 3], x, y);
         }
         app_ev_head = (app_ev_head + 1) & 63;
     }

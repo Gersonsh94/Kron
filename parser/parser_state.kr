@@ -75,6 +75,11 @@ var par_gcoll_toks: [i64; 256];    // the globals
 var par_gcoll_kind: [i64; 256];
 var par_gcoll_stok: [i64; 256];
 var par_gcoll_n: i64;
+var par_fcoll_toks: [i64; 256];    // struct fields that are a list, a map or a slice
+var par_fcoll_kind: [i64; 256];
+var par_fcoll_stok: [i64; 256];
+var par_fcoll_n: i64;
+var par_coll_field: i64;           // 1: par_coll_add files a struct's field
 var par_coll_stok: i64;            // S of the entry made / found last
 var par_fi_stok: i64;
 

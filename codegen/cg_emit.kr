@@ -1155,7 +1155,7 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
         return cg_call_extern(n);            // a function of a system library
     }
     if kind == 1 {
-        cg_note_indirect();
+        cg_note_indirect_val(n);             // before the record joins the arguments
         cg_fnval_args(n);                    // the record goes along, last
     }
     cg_note_call(n.data);                    // for the thread check
@@ -1180,7 +1180,10 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
     }
     rm = cg_arg_reals(n, f);
     cg_check_real_args(n, f);
+    // the stack arguments of this call: counted here, after its arguments,
+    // since a call among them sets extra_args for its own
     cg_e_call_args(n, lit, fr, rm);
+    var ex: i64 = cg_count_list(n.right) - 6;
     cg_sret_pend = sv;
     emit_cstr("    sub rsp, 32\n");
     kt_flush();
@@ -1196,9 +1199,9 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
     }
     emit_cstr("    add rsp, 32\n");
     // the stack arguments dropped
-    if extra_args != 0 {
+    if ex > 0 {
         emit_cstr("    add rsp, ");
-        emit_u32(extra_args << 3);
+        emit_u32(ex << 3);
         emit_cstr("\n");
     }
     if nf != 0 {

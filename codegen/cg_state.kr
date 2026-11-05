@@ -272,7 +272,10 @@ var fn_gtok: [i64; 4096];                // first access to a non-shared global
 var fn_root: [i64; 4096];                // passed to thread_start
 var fn_addr: [i64; 4096];                // its address is taken
 var fn_asval: [i64; 4096];               // used as a value: needs its __fnrec_
-var fn_indir: [i64; 4096];               // it makes an indirect call
+var fn_indir: [i64; 4096];               // it makes an indirect call to any address
+var ie_count: i64;                        // its calls through a fn value:
+var ie_from: [i64; 65536];                // who calls,
+var ie_key: [i64; 65536];                 // and the shape of the call (cg_fn_key)
 var fn_reach: [i64; 4096];               // can run in a thread
 var ce_count: i64;
 var ce_from: [i64; 65536];

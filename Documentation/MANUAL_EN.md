@@ -346,7 +346,11 @@ fn main() {
 | `cpu_count()` | processors available |
 
 A function that runs in a thread, or anything it calls, may only touch
-`shared` globals and constants. The compiler checks this.
+`shared` globals and constants. The compiler checks this. A call through a
+function value (`task_for`'s job, a hook) can reach only the functions used
+as values that take the same arguments -- as many, with the reals in the
+same places -- so a hook of another shape is not code that runs in a
+thread.
 
 Channels (`std_chan.kr`) pass values between threads without touching locks:
 
@@ -463,7 +467,12 @@ fn main() {
   value they start empty; `[a, b, c]` makes a list. `l[i]` and `m[key]` read
   and write; `for x in l { }` walks a list (`break` and `continue` work);
   `print` shows the whole collection.
-- Struct fields, parameters, results and globals can be of these types.
+- Struct fields, parameters, results and globals can be of these types. A
+  field that is a list, a map or a slice is indexed as a variable is:
+  `b.items[i]` reads and `b.items[i] = v` writes, through a variable, a
+  global or a `ptr<S>`. A field starts at 0: give it `list_new()` (or
+  `map_new()`) before using it. Brackets after any other field are an
+  error.
 
 Texts, lists and maps are **handles**: one `i64` that names the object and
 is checked on every use. An index out of range, a key that is not there, a
@@ -690,7 +699,7 @@ brings in what it imports itself, each one once.
 | `std_mem.kr` | `mem_copy` `mem_set` `mem_zero` `mem_compare` `mem_move` ... |
 | `std_arena.kr` | arenas and slices |
 | `std_chan.kr` | channels between threads |
-| `std_net.kr` | TCP: `net_listen` `net_accept` `net_connect` `net_send` `net_recv` `net_close`, on Windows and Linux |
+| `std_net.kr` | TCP: `net_listen` `net_accept` `net_connect` `net_send` `net_recv` `net_close`; UDP: `net_udp_open` `net_udp_open_shared` (a port other sockets use too) `net_udp_send` `net_udp_recv` `net_udp_try_recv` (never waits: -1 when nothing is there) `net_udp_broadcast`; `net_wait`, `net_nonblocking`; on Windows and Linux |
 | `std_random.kr` | `rnd_seed` `rnd_int` `rnd_uniform` `rnd_normal` ... |
 | `std_stats.kr` | mean, variance, median, percentiles, correlation, linear regression |
 | `std_vec3.kr` | 3D vectors, rotations, projection |
@@ -936,14 +945,21 @@ on unless `gpu_blend(0)` turns it off for the shaders made after;
 
 | Module | What it has |
 |---|---|
-| `std_gpu.kr` | `gpu_open` `gpu_shader` `gpu_mesh` `gpu_mesh_lists` `gpu_cube` `gpu_plane` `gpu_sphere` `gpu_texture` `gpu_begin` `gpu_set_mat4/vec4/vec3/vec2/float` `gpu_draw` `gpu_draw_textures` `gpu_end` `gpu_pixel` `gpu_save_bmp` `gpu_close` |
+| `std_gpu.kr` | `gpu_open` `gpu_shader` `gpu_mesh` `gpu_mesh_lists` `gpu_cube` `gpu_plane` `gpu_sphere` `gpu_texture` `gpu_begin` `gpu_set_mat4/vec4/vec3/vec2/float` `gpu_draw` `gpu_draw_textures` `gpu_end` `gpu_pixel` `gpu_save_bmp` `gpu_close`; instances: `gpu_instances` `gpu_instance_put` `gpu_instance_list` `gpu_instance_get` `gpu_instances_free` `gpu_draw_instanced`; render targets: `gpu_target` `gpu_target_texture` `gpu_target_depth` `gpu_begin_target` `gpu_end_target`; compute: `gpu_compute` `gpu_run` |
 | `std_shader.kr` | KSL, the shader language, translated to SPIR-V, MSL and WGSL |
 | `std_math3d.kr` | `Vec2` `Vec3` `Vec4` `Quat` `Mat4` and their functions: `m4_perspective` `m4_look_at` `m4_trs` `q_slerp` ... |
 | `std_image.kr` | PNG, BMP and baseline JPEG; `image_from_bytes` |
-| `std_audio.kr` | `audio_open` `audio_load_wav` `audio_tone` `audio_play` `audio_stop` `audio_set_volume` `audio_set_pan` `audio_update` |
+| `std_audio.kr` | `audio_open` `audio_load_wav` `audio_tone` `audio_play` `audio_stop` `audio_set_volume` `audio_set_pan` `audio_update`; buses (submixes) with their own effects: `audio_bus_new` `audio_set_bus` `audio_bus_volume` `audio_bus_lowpass` `audio_bus_echo` `audio_reverb`; `audio_seek` `audio_position`; `audio_hrtf(1)`: voices placed in space heard as through a head |
+| `std_vorbis.kr` | Ogg Vorbis: `audio_load_ogg`, `audio_stream_ogg` (four streams at once, each with `audio_seek`) |
+| `std_mp3.kr` | MP3 (MPEG-1, 2 and 2.5 Layer III): `mp3_open` `mp3_next` `mp3_sample` `audio_load_mp3` `audio_stream_mp3`, gapless |
+| `std_video.kr` | MPEG-1 films with MP2 sound (`.mpg`): `video_open` `video_next` `video_frame_at` `video_seek` `video_image` `video_sound` |
 | `std_gamepad.kr` | `gamepad_poll` `gamepad_connected` `gamepad_button` `gamepad_pressed` `gamepad_axis`, Xbox layout |
 | `std_json.kr` | `json_parse` and the functions that read what it gives |
-| `std_window.kr` | also: `window_key_down(k)` (a key held now), `window_mouse_capture(1)` with `window_mouse_dx/dy` |
+| `std_window.kr` | also: `window_key_down(k)` (a key held now), `window_mouse_capture(1)` with `window_mouse_dx/dy`; fingers: `window_touches` `window_touch_id/x/y` `window_touch_began` `window_touches_ended` (Windows 8+, the web, Android, iOS) |
+
+Instances, render targets and compute shaders work on all three systems:
+Vulkan, Metal and WebGPU. On the web the card keeps what a compute shader
+writes: `gpu_instance_get` reads it back on Vulkan and Metal only.
 
 ### KSL: shaders in Kron's style
 
@@ -974,9 +990,29 @@ and uv make eight a corner, which is what `gpu_cube` and `gpu_sphere` give;
 `list<i64>`. `shader_error()` says what is wrong in a shader and on
 which line.
 
+`instance offset: vec4;` after the `in` lines is read once an instance,
+from the buffer `gpu_draw_instanced` is given. A compute shader works on
+those buffers instead of drawing, one run an item, many at a time:
+
+```
+buffer pos: vec4;
+buffer vel: vec4;
+uniform { dt: float; }
+compute {
+    vel[index] += vec4(0.0, -9.8, 0.0, 0.0) * dt;
+    pos[index] = pos[index] + vel[index] * dt;
+}
+```
+
+`gpu_run(cs, count, pos, vel, 0, 0)` runs it for `count` items (`index`
+goes from 0 to `count - 1`; `count` is there to read too); the same `pos`
+buffer is then drawn as instances, without coming back to the program.
+
 ### What is not here
 
 Kron gives the program the graphics card, the sound and the controllers.
+Virtual and augmented reality (OpenXR, WebXR) are not in the standard
+library yet: they need a headset to be written and tested against.
 What a game builds on them -- a game loop, collisions, scene graphs, model
 formats -- belongs to libraries written in Kron, outside the language and
 its standard library.

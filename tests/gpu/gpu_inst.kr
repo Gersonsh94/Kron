@@ -8,8 +8,9 @@ kron_definitions
 // GPU test: instanced drawing. One small square, drawn four times in one
 // draw, each instance with its own offset and colour from an instance
 // buffer: one in each quarter of the frame, nothing in the middle. Then two
-// instances written from a list. Run by GPUTESTS.bat; the exit code is the
-// number of checks that failed.
+// instances written from a list; then buffers freed: 300 of 4 MB made and
+// freed one after another, and one made after them drawn. Run by
+// GPUTESTS.bat; the exit code is the number of checks that failed.
 // =========================================================================
 
 var failures: i64;
@@ -104,6 +105,27 @@ fn main() -> i64 {
     check_pixel(32, 32, 255, 0, 0, "instance 0 moved to the middle");
     check_pixel(48, 16, 0, 255, 0, "instance 1 still top right");
     check_pixel(16, 48, 0, 0, 0, "instance 2 not drawn");
+    // freed: the card's memory comes back (300 of 4 MB kept would be 1.2 GB)
+    gpu_instances_free(ib);
+    var made: i64 = 0;
+    while made < 300 {
+        var big: i64 = gpu_instances(131072, 8);
+        if big == 0 { made = 1000; }
+        gpu_instance_put(big, 131071, 1.0, 2.0, 3.0, 4.0);
+        gpu_instances_free(big);
+        made = made + 1;
+    }
+    report(made == 300, "300 buffers of 4 MB made and freed");
+    var ib2: i64 = gpu_instances(2, 8);
+    var two: i64 = list_new();
+    list_add_real(two, 0.5); list_add_real(two, -0.5); list_add_real(two, 0.0); list_add_real(two, 0.0);
+    list_add_real(two, 1.0); list_add_real(two, 1.0); list_add_real(two, 0.0); list_add_real(two, 1.0);
+    gpu_instance_list(ib2, two);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_instanced(prog, sq, 0, ib2, 1);
+    gpu_end();
+    check_pixel(48, 48, 255, 255, 0, "a buffer made after them: bottom right, yellow");
+    check_pixel(16, 16, 0, 0, 0, "and nothing where the freed one drew");
     if failures == 0 {
         say("GPU instancing test: all passed");
     } else {

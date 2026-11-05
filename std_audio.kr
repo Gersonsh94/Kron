@@ -53,6 +53,23 @@ kron_definitions
 //                                       when it has played what is there
 //     audio_stream_play(s, volume)      a voice playing it
 //     (std_vorbis: audio_stream_ogg(path, volume, loop))
+// Buses: groups of voices with effects of their own, mixed into the master
+// (bus 0, where every voice goes unless told otherwise):
+//     audio_bus_new()                   a bus: 1 to 7
+//     audio_set_bus(voice, bus)         the voice plays through it
+//     audio_bus_volume(bus, v)  audio_bus_lowpass(bus, hz)
+//     audio_bus_echo(bus, delay_ms, feedback, mix)   bus 0: audio_echo
+//     audio_reverb(bus, room, damp, mix)
+//                                       a room around the bus, live: room
+//                                       0 small .. 1 a hall, damp 0 bright
+//                                       .. 1 dull, mix 0 off .. 1 all room
+// Where a voice is:
+//     audio_seek(voice, ms)             a sound, or an Ogg stream, from ms
+//     audio_position(voice)             ms played from the start
+// Heads: audio_hrtf(1) places the voices in space for headphones -- each
+// ear hears a voice to its side first and the other ear later and duller,
+// as a head does (the time and the shadow between the ears); 0 back to
+// the plain left and right.
 // Without a device, for tests and for writing sound to a file:
 //     audio_open_silent(rate)  audio_render(address, frames)
 //
@@ -116,10 +133,52 @@ var au_st_read: [i64; 16];               // frames taken and put, from the start
 var au_st_write: [i64; 16];
 var au_st_end: [i64; 16];
 var au_st_n: i64;
-// what refills streams, called by audio_update and audio_render: std_vorbis
+// what refills streams, called by audio_update and audio_render: std_vorbis,
+// std_mp3 (four at most)
 var au_hook: fn(i64) -> i64;
-var au_hook_on: i64;
+var au_hook1: fn(i64) -> i64;
+var au_hook2: fn(i64) -> i64;
+var au_hook3: fn(i64) -> i64;
+var au_hook_on: i64;                     // how many are set
+var au_gen: i64;                         // audio_open's count: streams made before belong to an older one
 var au_noise: i64 = 22222;
+// buses: 0 the master; voices go to bus 0 unless audio_set_bus
+const AU_BUSES: i64 = 8;
+var au_v_bus: [i64; 64];
+var au_bus_n: i64;                       // buses made: 1 .. au_bus_n
+var au_bus_vol: [i64; 8];                // 0 .. 256
+var au_bus_buf: [i32; 16384];            // a chunk, both sides, each bus
+var au_bus_lp: [i64; 8];                 // as a voice's: 65536 off
+var au_bus_lpl: [i64; 8];
+var au_bus_lpr: [i64; 8];
+var au_be_buf: [i32; 2688000];           // the echoes of buses 1 .. 7, 2 s each
+var au_be_len: [i64; 8];
+var au_be_pos: [i64; 8];
+var au_be_fb: [i64; 8];
+var au_be_mix: [i64; 8];
+// reverb, a bus at a time (Freeverb's design: eight combs and four
+// all-passes a side)
+var au_rv_on: [i64; 8];
+var au_rv_fb: [f64; 8];
+var au_rv_d1: [f64; 8];
+var au_rv_d2: [f64; 8];
+var au_rv_wet: [f64; 8];
+var au_rv_buf: [f64; 983040];            // 122880 a bus
+var au_rv_len: [i64; 192];               // 24 filters a bus: 8 + 8 combs, 4 + 4 all-passes
+var au_rv_at: [i64; 192];                // where each starts in au_rv_buf
+var au_rv_i: [i64; 192];
+var au_rv_st: [f64; 128];                // the combs' filter stores, 16 a bus
+// seeking: what std_vorbis does for its streams
+var au_st_base: [i64; 16];               // frames of the file before what the ring holds
+var au_seekhook: fn(i64, i64) -> i64;    // each answers 1 for a stream of its own
+var au_seekhook1: fn(i64, i64) -> i64;
+var au_seekhook_on: i64;
+// heads
+var au_hrtf: i64;
+var au_v_pan: [f64; 64];                 // the side a placed voice is on: -1 .. 1
+var au_v_ring: [i32; 4096];              // 64 frames of each voice, for the far ear
+var au_v_rpos: [i64; 64];
+var au_v_far: [i64; 64];                 // the far ear's low-pass
 
 const AU_SINE: i64 = 0;
 const AU_SQUARE: i64 = 1;
@@ -188,6 +247,7 @@ fn audio_open(rate: i64) -> i64 {
         fail "no such sample rate" hint "48000 or 44100";
     }
     au_rate = rate;
+    au_gen = au_gen + 1;
     au_snd_addr = list_new();
     au_snd_frames = list_new();
     var ok: i64 = 0;
@@ -529,6 +589,15 @@ fn au_voice_clear(i: i64) -> i64 {
     au_v_lpl[i] = 0;
     au_v_lpr[i] = 0;
     au_v_3d[i] = 0;
+    au_v_bus[i] = 0;
+    au_v_pan[i] = 0.0;
+    au_v_rpos[i] = 0;
+    au_v_far[i] = 0;
+    var r: i64 = 0;
+    while r < 64 {
+        au_v_ring[i * 64 + r] = 0;
+        r = r + 1;
+    }
     return 0;
 }
 
@@ -556,6 +625,13 @@ fn au_place(v: i64) -> i64 {
     if rl > 0.0 && hd > 0.000001 {
         pan = (dx * rx + dz * rz) / (rl * hd);
     }
+    au_v_pan[v] = pan;
+    if au_hrtf == 1 {
+        // both ears at the distance's volume: the head gives the side
+        au_v_left[v] = (g * 256.0) as i64;
+        au_v_right[v] = au_v_left[v];
+        return 0;
+    }
     var l: f64 = 1.0 - pan;
     if l > 1.0 { l = 1.0; }
     var r: f64 = 1.0 + pan;
@@ -580,6 +656,15 @@ fn au_mix(n: i64) -> i64 {
         au_mixbuf[i] = 0;
         i = i + 1;
     }
+    var bz: i64 = 1;
+    while bz <= au_bus_n {
+        i = 0;
+        while i < n * 2 {
+            au_bus_buf[bz * 2048 + i] = 0;
+            i = i + 1;
+        }
+        bz = bz + 1;
+    }
     var v: i64 = 0;
     while v < AU_VOICES {
         var s: i64 = au_v_sound[v];
@@ -600,6 +685,32 @@ fn au_mix(n: i64) -> i64 {
             var lp: i64 = au_v_lp[v];
             var vl: i64 = au_v_vol[v] * au_v_left[v] / 256;
             var vr: i64 = au_v_vol[v] * au_v_right[v] / 256;
+            var bus: i64 = au_v_bus[v];
+            // the head: the far ear later, by the time sound takes round
+            // it, duller, and a little fainter
+            var hd: i64 = 0;
+            var ha: i64 = 65536;
+            var hg: i64 = 256;
+            var hside: i64 = 0;
+            if au_hrtf == 1 && au_v_3d[v] == 1 {
+                var p: f64 = au_v_pan[v];
+                if p < 0.0 {
+                    p = 0.0 - p;
+                    hside = -1;
+                } else {
+                    hside = 1;
+                }
+                var th: f64 = fasin(p);
+                var itd: f64 = 0.0875 / 343.0 * (th + fsin(th));
+                hd = (itd * (au_rate as f64) + 0.5) as i64;
+                if hd > 63 { hd = 63; }
+                var fc: f64 = 20000.0 - 18500.0 * p;
+                var w: f64 = 6.283185307179586 * fc;
+                ha = (w / ((au_rate as f64) + w) * 65536.0) as i64;
+                if ha < 1 { ha = 1; }
+                if ha > 65536 { ha = 65536; }
+                hg = 256 - ((p * 64.0) as i64);
+            }
             var k: i64 = 0;
             while k < n {
                 var l: i64 = 0;
@@ -649,8 +760,29 @@ fn au_mix(n: i64) -> i64 {
                         l = au_v_lpl[v];
                         r = au_v_lpr[v];
                     }
-                    au_mixbuf[k * 2] = au_mixbuf[k * 2] + l * vl / 256;
-                    au_mixbuf[k * 2 + 1] = au_mixbuf[k * 2 + 1] + r * vr / 256;
+                    if hside != 0 {
+                        var m: i64 = (l + r) / 2;
+                        var rp: i64 = au_v_rpos[v];
+                        au_v_ring[v * 64 + rp] = m;
+                        var old: i64 = au_v_ring[v * 64 + ((rp - hd + 64) % 64)];
+                        au_v_rpos[v] = (rp + 1) % 64;
+                        au_v_far[v] = au_v_far[v] + (old - au_v_far[v]) * ha / 65536;
+                        var far: i64 = au_v_far[v] * hg / 256;
+                        if hside > 0 {
+                            l = far;
+                            r = m;
+                        } else {
+                            l = m;
+                            r = far;
+                        }
+                    }
+                    if bus == 0 {
+                        au_mixbuf[k * 2] = au_mixbuf[k * 2] + l * vl / 256;
+                        au_mixbuf[k * 2 + 1] = au_mixbuf[k * 2 + 1] + r * vr / 256;
+                    } else {
+                        au_bus_buf[bus * 2048 + k * 2] = au_bus_buf[bus * 2048 + k * 2] + l * vl / 256;
+                        au_bus_buf[bus * 2048 + k * 2 + 1] = au_bus_buf[bus * 2048 + k * 2 + 1] + r * vr / 256;
+                    }
                     if st == 0 {
                         frac = frac + step;
                         pos = pos + frac / 65536;
@@ -663,6 +795,17 @@ fn au_mix(n: i64) -> i64 {
             au_v_frac[v] = frac;
         }
         v = v + 1;
+    }
+    // the buses, each with its effects, into the master
+    var b: i64 = 1;
+    while b <= au_bus_n {
+        au_bus_effects(b, n);
+        i = 0;
+        while i < n * 2 {
+            au_mixbuf[i] = au_mixbuf[i] + au_bus_buf[b * 2048 + i] * au_bus_vol[b] / 256;
+            i = i + 1;
+        }
+        b = b + 1;
     }
     // the echo, on everything
     if au_echo_len > 0 {
@@ -684,6 +827,10 @@ fn au_mix(n: i64) -> i64 {
             if au_echo_pos >= au_echo_len { au_echo_pos = 0; }
             i = i + 1;
         }
+    }
+    // the master's room
+    if au_rv_on[0] == 1 {
+        au_reverb_run(0, n, 0);
     }
     i = 0;
     while i < n * 2 {
@@ -748,6 +895,334 @@ fn audio_echo(delay_ms: i64, feedback: f64, mix: f64) -> i64 {
     au_echo_mix = (fclamp(mix, 0.0, 1.0) * 256.0) as i64;
     au_echo_len = len;
     if au_echo_mix == 0 { au_echo_len = 0; }
+    return 1;
+}
+
+// -------------------------------------------------------------------- buses ---
+fn audio_bus_new() -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if au_bus_n >= AU_BUSES - 1 {
+        fail "too many buses" hint "7 at most, besides the master";
+    }
+    au_bus_n = au_bus_n + 1;
+    var b: i64 = au_bus_n;
+    au_bus_vol[b] = 256;
+    au_bus_lp[b] = 65536;
+    au_bus_lpl[b] = 0;
+    au_bus_lpr[b] = 0;
+    au_be_len[b] = 0;
+    au_rv_on[b] = 0;
+    return b;
+}
+
+fn au_bus(b: i64) -> i64 {
+    if b < 0 || b > au_bus_n {
+        fail "no such bus" hint "0 the master, or what audio_bus_new gave";
+    }
+    return b;
+}
+
+fn audio_set_bus(v: i64, b: i64) -> i64 {
+    au_bus(b);
+    var i: i64 = au_voice(v);
+    if i >= 0 { au_v_bus[i] = b; }
+    return 0;
+}
+
+fn audio_bus_volume(b: i64, volume: f64) -> i64 {
+    if au_bus(b) == 0 {
+        fail "the master has no volume of its own" hint "set the voices', or a bus's";
+    }
+    au_bus_vol[b] = (fclamp(volume, 0.0, 4.0) * 256.0) as i64;
+    return 0;
+}
+
+fn audio_bus_lowpass(b: i64, hz: f64) -> i64 {
+    if au_bus(b) == 0 {
+        fail "the master has no low-pass" hint "put the voices on a bus";
+    }
+    if hz <= 0.0 {
+        au_bus_lp[b] = 65536;
+        return 0;
+    }
+    var w: f64 = 6.283185307179586 * hz;
+    var a: f64 = w / ((au_rate as f64) + w);
+    au_bus_lp[b] = (a * 65536.0) as i64;
+    if au_bus_lp[b] < 1 { au_bus_lp[b] = 1; }
+    if au_bus_lp[b] > 65536 { au_bus_lp[b] = 65536; }
+    return 0;
+}
+
+fn audio_bus_echo(b: i64, delay_ms: i64, feedback: f64, mix: f64) -> i64 {
+    if au_bus(b) == 0 {
+        return audio_echo(delay_ms, feedback, mix);
+    }
+    if delay_ms < 1 || delay_ms > 2000 {
+        fail "no such delay" hint "from 1 to 2000 milliseconds";
+    }
+    var len: i64 = au_rate * delay_ms / 1000;
+    if len > 192000 { len = 192000; }
+    if len < 1 { len = 1; }
+    var base: i64 = (b - 1) * 384000;
+    var i: i64 = 0;
+    while i < len * 2 {
+        au_be_buf[base + i] = 0;
+        i = i + 1;
+    }
+    au_be_pos[b] = 0;
+    au_be_fb[b] = (fclamp(feedback, 0.0, 0.95) * 256.0) as i64;
+    au_be_mix[b] = (fclamp(mix, 0.0, 1.0) * 256.0) as i64;
+    au_be_len[b] = len;
+    if au_be_mix[b] == 0 { au_be_len[b] = 0; }
+    return 1;
+}
+
+// a bus's low-pass, echo and room, on its chunk
+fn au_bus_effects(b: i64, n: i64) -> i64 {
+    var o: i64 = b * 2048;
+    var i: i64 = 0;
+    var lp: i64 = au_bus_lp[b];
+    if lp < 65536 {
+        while i < n {
+            au_bus_lpl[b] = au_bus_lpl[b] + (au_bus_buf[o + i * 2] - au_bus_lpl[b]) * lp / 65536;
+            au_bus_lpr[b] = au_bus_lpr[b] + (au_bus_buf[o + i * 2 + 1] - au_bus_lpr[b]) * lp / 65536;
+            au_bus_buf[o + i * 2] = au_bus_lpl[b];
+            au_bus_buf[o + i * 2 + 1] = au_bus_lpr[b];
+            i = i + 1;
+        }
+    }
+    var len: i64 = au_be_len[b];
+    if len > 0 {
+        var base: i64 = (b - 1) * 384000;
+        i = 0;
+        while i < n {
+            var c: i64 = 0;
+            while c < 2 {
+                var at: i64 = base + au_be_pos[b] * 2 + c;
+                var dly: i64 = au_be_buf[at];
+                var x0: i64 = au_bus_buf[o + i * 2 + c];
+                au_bus_buf[o + i * 2 + c] = x0 + dly * au_be_mix[b] / 256;
+                var back: i64 = x0 + dly * au_be_fb[b] / 256;
+                if back > 1048576 { back = 1048576; }
+                if back < -1048576 { back = -1048576; }
+                au_be_buf[at] = back;
+                c = c + 1;
+            }
+            au_be_pos[b] = au_be_pos[b] + 1;
+            if au_be_pos[b] >= len { au_be_pos[b] = 0; }
+            i = i + 1;
+        }
+    }
+    if au_rv_on[b] == 1 {
+        au_reverb_run(b, n, o);
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------- reverb ---
+// Freeverb's tunings, for 44100 frames a second; the right side 23 longer
+fn au_rv_tune(k: i64) -> i64 {
+    if k == 0 { return 1116; }
+    if k == 1 { return 1188; }
+    if k == 2 { return 1277; }
+    if k == 3 { return 1356; }
+    if k == 4 { return 1422; }
+    if k == 5 { return 1491; }
+    if k == 6 { return 1557; }
+    if k == 7 { return 1617; }
+    if k == 8 { return 556; }
+    if k == 9 { return 441; }
+    if k == 10 { return 341; }
+    return 225;
+}
+
+fn audio_reverb(b: i64, room: f64, damp: f64, mix: f64) -> i64 {
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    au_bus(b);
+    if mix <= 0.0 {
+        au_rv_on[b] = 0;
+        return 1;
+    }
+    var at: i64 = b * 122880;
+    var f: i64 = 0;
+    while f < 24 {
+        // 0..7 the left combs, 8..15 the right ones, 16..19 and 20..23 the
+        // all-passes of each side
+        var k: i64 = f % 8;
+        var side: i64 = (f / 8) % 2;
+        if f >= 16 {
+            k = 8 + (f - 16) % 4;
+            side = (f - 16) / 4;
+        }
+        var len: i64 = (au_rv_tune(k) + side * 23) * au_rate / 44100;
+        if len < 1 { len = 1; }
+        au_rv_len[b * 24 + f] = len;
+        au_rv_at[b * 24 + f] = at;
+        au_rv_i[b * 24 + f] = 0;
+        var j: i64 = 0;
+        while j < len {
+            au_rv_buf[at + j] = 0.0;
+            j = j + 1;
+        }
+        at = at + len;
+        f = f + 1;
+    }
+    var c: i64 = 0;
+    while c < 16 {
+        au_rv_st[b * 16 + c] = 0.0;
+        c = c + 1;
+    }
+    au_rv_fb[b] = fclamp(room, 0.0, 1.0) * 0.28 + 0.7;
+    au_rv_d1[b] = fclamp(damp, 0.0, 1.0) * 0.4;
+    au_rv_d2[b] = 1.0 - au_rv_d1[b];
+    au_rv_wet[b] = fclamp(mix, 0.0, 1.0) * 3.0;
+    au_rv_on[b] = 1;
+    return 1;
+}
+
+// one side's room: the eight combs side by side, the four all-passes after
+fn au_rv_side(b: i64, side: i64, x: f64) -> f64 {
+    var out: f64 = 0.0;
+    var c: i64 = 0;
+    var fb: f64 = au_rv_fb[b];
+    var d1: f64 = au_rv_d1[b];
+    var d2: f64 = au_rv_d2[b];
+    while c < 8 {
+        var f: i64 = b * 24 + side * 8 + c;
+        var at: i64 = au_rv_at[f] + au_rv_i[f];
+        var y: f64 = au_rv_buf[at];
+        var s: i64 = b * 16 + side * 8 + c;
+        au_rv_st[s] = y * d2 + au_rv_st[s] * d1;
+        au_rv_buf[at] = x + au_rv_st[s] * fb;
+        au_rv_i[f] = au_rv_i[f] + 1;
+        if au_rv_i[f] >= au_rv_len[f] { au_rv_i[f] = 0; }
+        out = out + y;
+        c = c + 1;
+    }
+    var a: i64 = 0;
+    while a < 4 {
+        var g: i64 = b * 24 + 16 + side * 4 + a;
+        var at2: i64 = au_rv_at[g] + au_rv_i[g];
+        var bo: f64 = au_rv_buf[at2];
+        var o2: f64 = bo - out;
+        au_rv_buf[at2] = out + bo * 0.5;
+        out = o2;
+        au_rv_i[g] = au_rv_i[g] + 1;
+        if au_rv_i[g] >= au_rv_len[g] { au_rv_i[g] = 0; }
+        a = a + 1;
+    }
+    return out;
+}
+
+// the room of bus b on n frames, added to them; bus 0 runs on the master
+fn au_reverb_run(b: i64, n: i64, o: i64) -> i64 {
+    var wet: f64 = au_rv_wet[b];
+    var i: i64 = 0;
+    while i < n {
+        var l: i64 = 0;
+        var r: i64 = 0;
+        if b == 0 {
+            l = au_mixbuf[i * 2];
+            r = au_mixbuf[i * 2 + 1];
+        } else {
+            l = au_bus_buf[o + i * 2];
+            r = au_bus_buf[o + i * 2 + 1];
+        }
+        var x: f64 = ((l + r) as f64) * 0.015;
+        var ol: f64 = au_rv_side(b, 0, x) * wet;
+        var orr: f64 = au_rv_side(b, 1, x) * wet;
+        l = l + (ol as i64);
+        r = r + (orr as i64);
+        if b == 0 {
+            au_mixbuf[i * 2] = l;
+            au_mixbuf[i * 2 + 1] = r;
+        } else {
+            au_bus_buf[o + i * 2] = l;
+            au_bus_buf[o + i * 2 + 1] = r;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------- positions ---
+fn audio_seek(v: i64, ms: i64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i < 0 { return 0; }
+    if ms < 0 { ms = 0; }
+    var frame: i64 = ms * au_rate / 1000;
+    var st: i64 = au_v_stream[i];
+    if st != 0 {
+        var done: i64 = 0;
+        if au_seekhook_on > 0 {
+            var f: fn(i64, i64) -> i64 = au_seekhook;
+            done = f(st, frame);
+        }
+        if done == 0 && au_seekhook_on > 1 {
+            var f1: fn(i64, i64) -> i64 = au_seekhook1;
+            done = f1(st, frame);
+        }
+        if done == 0 {
+            fail "this stream cannot go back or ahead" hint "a stream of std_vorbis or std_mp3 can; one written by the program is the program's to move";
+        }
+        return 1;
+    }
+    var frames: i64 = list_get(au_snd_frames, au_v_sound[i] - 1);
+    if frame >= frames {
+        if au_v_loop[i] == 1 && frames > 0 {
+            frame = frame % frames;
+        } else {
+            frame = frames;
+        }
+    }
+    au_v_pos[i] = frame;
+    au_v_frac[i] = 0;
+    return 1;
+}
+
+fn audio_position(v: i64) -> i64 {
+    var i: i64 = au_voice(v);
+    if i < 0 { return 0; }
+    var st: i64 = au_v_stream[i];
+    if st != 0 {
+        return (au_st_base[st - 1] + au_st_read[st - 1]) * 1000 / au_rate;
+    }
+    return au_v_pos[i] * 1000 / au_rate;
+}
+
+// a stream begun again at frame of its source: what it held is dropped
+fn au_stream_restart(s: i64, frame: i64) -> i64 {
+    var k: i64 = au_stream(s);
+    au_st_read[k] = 0;
+    au_st_write[k] = 0;
+    au_st_end[k] = 0;
+    au_st_base[k] = frame;
+    return 0;
+}
+
+fn au_add_seekhook(f: fn(i64, i64) -> i64) -> i64 {
+    if au_seekhook_on == 0 { au_seekhook = f; }
+    if au_seekhook_on == 1 { au_seekhook1 = f; }
+    if au_seekhook_on < 2 { au_seekhook_on = au_seekhook_on + 1; }
+    return 0;
+}
+
+// ---------------------------------------------------------------------- heads ---
+fn audio_hrtf(on: i64) -> i64 {
+    if on != 0 {
+        au_hrtf = 1;
+    } else {
+        au_hrtf = 0;
+    }
+    var v: i64 = 0;
+    while v < AU_VOICES {
+        if au_v_sound[v] != 0 && au_v_3d[v] == 1 { au_place(v); }
+        v = v + 1;
+    }
     return 1;
 }
 
@@ -858,6 +1333,7 @@ fn audio_stream_new(frames: i64) -> i64 {
     au_st_read[k] = 0;
     au_st_write[k] = 0;
     au_st_end[k] = 0;
+    au_st_base[k] = 0;
     au_st_n = au_st_n + 1;
     return k + 1;
 }
@@ -922,17 +1398,33 @@ fn audio_stream_play(s: i64, volume: f64) -> i64 {
     fail "too many sounds playing at once" hint "64 at most: stop some";
 }
 
-// what refills streams before each mix (std_vorbis sets it)
-fn au_set_hook(f: fn(i64) -> i64) -> i64 {
-    au_hook = f;
-    au_hook_on = 1;
+// what refills streams before each mix: each library that streams adds
+// its own, once
+fn au_add_hook(f: fn(i64) -> i64) -> i64 {
+    if au_hook_on == 0 { au_hook = f; }
+    if au_hook_on == 1 { au_hook1 = f; }
+    if au_hook_on == 2 { au_hook2 = f; }
+    if au_hook_on == 3 { au_hook3 = f; }
+    if au_hook_on < 4 { au_hook_on = au_hook_on + 1; }
     return 0;
 }
 
 fn au_run_hook() -> i64 {
-    if au_hook_on == 1 {
+    if au_hook_on > 0 {
         var f: fn(i64) -> i64 = au_hook;
         f(0);
+    }
+    if au_hook_on > 1 {
+        var f1: fn(i64) -> i64 = au_hook1;
+        f1(0);
+    }
+    if au_hook_on > 2 {
+        var f2: fn(i64) -> i64 = au_hook2;
+        f2(0);
+    }
+    if au_hook_on > 3 {
+        var f3: fn(i64) -> i64 = au_hook3;
+        f3(0);
     }
     return 0;
 }
@@ -947,6 +1439,7 @@ fn audio_open_silent(rate: i64) -> i64 {
         fail "no such sample rate" hint "48000 or 44100";
     }
     au_rate = rate;
+    au_gen = au_gen + 1;
     au_snd_addr = list_new();
     au_snd_frames = list_new();
     au_kind = 0;
@@ -1098,9 +1591,11 @@ fn aq_update() -> i64 {
 
 fn audio_close() -> i64 {
     if au_on == 0 { return 0; }
-    au_hook_on = 0;
     au_st_n = 0;
     au_echo_len = 0;
+    au_bus_n = 0;
+    au_rv_on[0] = 0;
+    au_hrtf = 0;
     if au_kind == 0 {
         au_on = 0;
         return 1;

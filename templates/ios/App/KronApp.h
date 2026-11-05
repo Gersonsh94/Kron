@@ -10,6 +10,8 @@ int32_t kron_app_start(int32_t width, int32_t height);
 int64_t kron_app_frame(void *dst, int64_t bytes);
 // 1 down, 2 move, 3 up; x and y in the picture's pixels
 void kron_app_touch(int32_t phase, double x, double y);
+// each finger: 1 down, 2 move, 3 up; id its number while it stays down
+void kron_app_touch_id(int32_t phase, int32_t id, double x, double y);
 // a key (8 backspace, 13 enter, 27 escape, the arrows 37-40) and/or the
 // character typed; 0 for none
 void kron_app_key(int32_t key, int32_t ch);

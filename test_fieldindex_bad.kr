@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_fieldindex_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST (must be refused): a field indexed that is not a list, a map or a
+// slice. Its brackets used to be skipped without a word.
+// =========================================================================
+
+struct P {
+    x: i64;
+}
+
+fn main() {
+    var p: P;
+    p.x = 3;
+    print(p.x[0]);
+}

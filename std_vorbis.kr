@@ -31,8 +31,11 @@ kron_definitions
 //                             a voice playing the file as it is decoded,
 //                             half a second ahead: music without the whole
 //                             file in memory. audio_update keeps it going.
-//                             One at a time, and not with audio_load_ogg
-//                             while it plays (the decoder is one).
+//                             Four at a time, with audio_load_ogg and
+//                             vorbis_open as well: each file keeps its
+//                             decoder's state, and they take turns.
+//                             audio_seek moves it, audio_position says
+//                             where it is.
 //
 // Vorbis I as its specification gives it: codebooks, floor 1, residues 0,
 // 1 and 2, channel coupling, the inverse MDCT (through a complex FFT of the
@@ -74,6 +77,19 @@ fn vb_falloc(n: i64) -> i64 {
     return at;
 }
 
+// the contexts of the files open (vc_use, below)
+const VC_N: i64 = 5;
+const VC_WORDS: i64 = 240000;
+var vc_blk: [i64; 5];               // each context's block of the heap, made once
+var vc_used: [i64; 5];              // 1 once the context holds a file
+var vc_cur: i64;                    // the context the decoder holds now
+var vc_pstart: [i64; 5];            // its part of the pools
+var vc_pend: [i64; 5];
+var vc_fstart: [i64; 5];
+var vc_fend: [i64; 5];
+var vb_tab0: i64;                   // the block sizes vb_tables was made for
+var vb_tab1: i64;
+
 // streaming (audio_stream_ogg, at the end)
 var vs_on: i64;
 var vs_stream: i64;          // std_audio's stream it fills, made once
@@ -85,6 +101,8 @@ var vs_last: i64;            // 1 once the file has no more packets
 var vs_o: i64;               // frames given to the stream since it started
 var vs_base: i64;            // the frame of the file (looped on) vs_src starts at
 var vs_buf: i64;             // 1024 stereo i16 frames, for the stream
+var vs_hooked: i64;          // the refill and the seek handed to std_audio
+var vs_gen: i64;             // the audio_open its stream was made under
 
 // --------------------------------------------------------- the bit reader ---
 // bits come lowest first in each byte; past the end of the packet a read
@@ -575,8 +593,9 @@ fn vb_read_headers() -> i64 {
     }
     vb_read(24);
     vb_read(24);
-    vb_in = 0;
-    vb_fn = 0;
+    vc_pool_base();
+    vc_pstart[vc_cur] = vb_in;
+    vc_fstart[vc_cur] = vb_fn;
     cb_n = vb_read(8) + 1;
     var i: i64 = 0;
     while i < cb_n {
@@ -652,6 +671,144 @@ var post_c: [f64; 16384];       // and after it, t < N: 8192 a size
 var post_s: [f64; 16384];
 var slope: [f64; 8192];         // a window's rise over N/2
 var brev: [i64; 16384];         // bit reversal of N
+
+// ----------------------------------------------------- one file at a time ---
+// The decoder is one set of tables; each file open keeps its own copy of
+// what is the file's -- its setup, where it is, the overlap of its last
+// block, its stream -- in a context, and takes the decoder in turn.
+// Context 0 is vorbis_open's and audio_load_ogg's, 1 to 4 the streams'.
+
+fn vc_copy(dst: i64, src: i64, n: i64) -> i64 {
+    var i: i64 = 0;
+    raw {
+        while i < n {
+            poke(dst + i * 8, peek(src + i * 8));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// the context's words to (dir 0) or from (dir 1) the decoder's globals
+fn vc_xfer(c: i64, dir: i64) -> i64 {
+    var b: i64 = vc_blk[c];
+    var sc: [i64; 40];
+    if dir == 0 {
+        sc[0] = vb_ch; sc[1] = vb_rate; sc[2] = vb_bs0; sc[3] = vb_bs1;
+        sc[4] = vb_total; sc[5] = vb_next_pk; sc[6] = vb_done; sc[7] = cb_n;
+        sc[8] = fl_n; sc[9] = rs_n; sc[10] = mp_n; sc[11] = md_n;
+        sc[12] = vb_prevn; sc[13] = vb_outn; sc[14] = vb_in; sc[15] = vb_fn;
+        sc[16] = og_buf; sc[17] = og_size; sc[18] = og_at; sc[19] = og_len;
+        sc[20] = og_gran; sc[21] = og_serial; sc[22] = vs_on; sc[23] = vs_stream;
+        sc[24] = vs_voice; sc[25] = vs_loop; sc[26] = vs_n; sc[27] = vs_last;
+        sc[28] = vs_o; sc[29] = vs_base; sc[30] = vs_buf; sc[31] = vs_gen;
+        vc_copy(b, &sc, 40);
+    } else {
+        vc_copy(&sc, b, 40);
+        vb_ch = sc[0]; vb_rate = sc[1]; vb_bs0 = sc[2]; vb_bs1 = sc[3];
+        vb_total = sc[4]; vb_next_pk = sc[5]; vb_done = sc[6]; cb_n = sc[7];
+        fl_n = sc[8]; rs_n = sc[9]; mp_n = sc[10]; md_n = sc[11];
+        vb_prevn = sc[12]; vb_outn = sc[13]; vb_in = sc[14]; vb_fn = sc[15];
+        og_buf = sc[16]; og_size = sc[17]; og_at = sc[18]; og_len = sc[19];
+        og_gran = sc[20]; og_serial = sc[21]; vs_on = sc[22]; vs_stream = sc[23];
+        vs_voice = sc[24]; vs_loop = sc[25]; vs_n = sc[26]; vs_last = sc[27];
+        vs_o = sc[28]; vs_base = sc[29]; vs_buf = sc[30]; vs_gen = sc[31];
+    }
+    var at: i64 = b + 40 * 8;
+    at = vc_part(at, &cb_dims, 256, dir);
+    at = vc_part(at, &cb_entries, 256, dir);
+    at = vc_part(at, &cb_tree, 256, dir);
+    at = vc_part(at, &cb_single, 256, dir);
+    at = vc_part(at, &cb_vq, 256, dir);
+    at = vc_part(at, &fl_parts, 64, dir);
+    at = vc_part(at, &fl_pclass, 2048, dir);
+    at = vc_part(at, &fl_cdim, 1024, dir);
+    at = vc_part(at, &fl_csub, 1024, dir);
+    at = vc_part(at, &fl_cmaster, 1024, dir);
+    at = vc_part(at, &fl_subbooks, 8192, dir);
+    at = vc_part(at, &fl_mult, 64, dir);
+    at = vc_part(at, &fl_nv, 64, dir);
+    at = vc_part(at, &fl_x, fl_n * 256, dir);
+    at = vc_part(at, &fl_lo, fl_n * 256, dir);
+    at = vc_part(at, &fl_hi, fl_n * 256, dir);
+    at = vc_part(at, &fl_order, fl_n * 256, dir);
+    at = vc_part(at, &rs_type, 64, dir);
+    at = vc_part(at, &rs_begin, 64, dir);
+    at = vc_part(at, &rs_end, 64, dir);
+    at = vc_part(at, &rs_psize, 64, dir);
+    at = vc_part(at, &rs_ncls, 64, dir);
+    at = vc_part(at, &rs_cbook, 64, dir);
+    at = vc_part(at, &rs_books, rs_n * 512, dir);
+    at = vc_part(at, &mp_submaps, 64, dir);
+    at = vc_part(at, &mp_ncoup, 64, dir);
+    at = vc_part(at, &mp_mag, mp_n * 256, dir);
+    at = vc_part(at, &mp_ang, mp_n * 256, dir);
+    at = vc_part(at, &mp_mux, 512, dir);
+    at = vc_part(at, &mp_sfloor, 1024, dir);
+    at = vc_part(at, &mp_sres, 1024, dir);
+    at = vc_part(at, &md_block, 64, dir);
+    at = vc_part(at, &md_map, 64, dir);
+    at = vc_part(at, &vb_prev, vb_ch * 8192, dir);
+    at = vc_part(at, &vs_src, vs_n * 2, dir);
+    return 0;
+}
+
+// n words of one array to or from the block at at: where the next go
+fn vc_part(at: i64, arr: i64, n: i64, dir: i64) -> i64 {
+    if dir == 0 {
+        vc_copy(at, arr, n);
+    } else {
+        vc_copy(arr, at, n);
+    }
+    return at + n * 8;
+}
+
+// the decoder given to context c: the one it holds put away first
+fn vc_use(c: i64) -> i64 {
+    if c == vc_cur { return 0; }
+    var k: i64 = 0;
+    while k < VC_N {
+        if vc_blk[k] == 0 {
+            vc_blk[k] = hp_alloc(VC_WORDS * 8);
+            if vc_blk[k] == 0 {
+                fail "no memory for an Ogg file's decoder" hint "fewer files at once";
+            }
+        }
+        k = k + 1;
+    }
+    if vc_used[vc_cur] == 1 {
+        vc_xfer(vc_cur, 0);
+    }
+    vc_cur = c;
+    if vc_used[c] == 1 {
+        vc_xfer(c, 1);
+        if vb_tab0 != vb_bs0 || vb_tab1 != vb_bs1 {
+            vb_tables(0, vb_bs0);
+            vb_tables(1, vb_bs1);
+            vb_tab0 = vb_bs0;
+            vb_tab1 = vb_bs1;
+        }
+    }
+    return 0;
+}
+
+// where the pools are free for the file context c is opening: after the
+// setups of the other contexts that hold one
+fn vc_pool_base() -> i64 {
+    var ib: i64 = 0;
+    var fb: i64 = 0;
+    var k: i64 = 0;
+    while k < VC_N {
+        if k != vc_cur && vc_used[k] == 1 {
+            if vc_pend[k] > ib { ib = vc_pend[k]; }
+            if vc_fend[k] > fb { fb = vc_fend[k]; }
+        }
+        k = k + 1;
+    }
+    vb_in = ib;
+    vb_fn = fb;
+    return 0;
+}
 
 fn vb_tables(s: i64, n: i64) -> i64 {
     var h: i64 = n / 2;
@@ -1031,6 +1188,12 @@ fn vb_residue(r: i64, nch: i64, n2: i64) -> i64 {
 
 // the next audio packet: the frames it gives (0 for the first), -1 at the end
 fn vorbis_next() -> i64 {
+    vc_use(0);
+    return vb_next();
+}
+
+// the next packet of the file the decoder holds
+fn vb_next() -> i64 {
     while vb_next_pk < ogg_count() {
         var got: i64 = vb_packet(vb_next_pk);
         vb_next_pk = vb_next_pk + 1;
@@ -1484,6 +1647,12 @@ fn vb_inv_db_init() -> i64 {
 
 // ------------------------------------------------------------- the front ---
 fn vorbis_open(path: i64) -> i64 {
+    vc_use(0);
+    return vb_open(path);
+}
+
+// the file at path into the context the decoder holds
+fn vb_open(path: i64) -> i64 {
     if ogg_open(path) == 0 {
         fail "this Ogg file could not be read" hint "check the path, and that it is an .ogg";
     }
@@ -1491,8 +1660,13 @@ fn vorbis_open(path: i64) -> i64 {
         fail "this Ogg file has no Vorbis in it" hint "it needs its three headers";
     }
     vb_read_headers();
+    vc_pend[vc_cur] = vb_in;
+    vc_fend[vc_cur] = vb_fn;
+    vc_used[vc_cur] = 1;
     vb_tables(0, vb_bs0);
     vb_tables(1, vb_bs1);
+    vb_tab0 = vb_bs0;
+    vb_tab1 = vb_bs1;
     vb_inv_db_init();
     vb_total = 0;
     var i: i64 = 0;
@@ -1507,14 +1681,24 @@ fn vorbis_open(path: i64) -> i64 {
     return 1;
 }
 
-fn vorbis_channels() -> i64 { return vb_ch; }
+fn vorbis_channels() -> i64 {
+    vc_use(0);
+    return vb_ch;
+}
 
-fn vorbis_rate() -> i64 { return vb_rate; }
+fn vorbis_rate() -> i64 {
+    vc_use(0);
+    return vb_rate;
+}
 
-fn vorbis_length() -> i64 { return vb_total; }
+fn vorbis_length() -> i64 {
+    vc_use(0);
+    return vb_total;
+}
 
 // sample i of channel c of the last packet, about -1 to 1
 fn vorbis_sample(c: i64, i: i64) -> f64 {
+    vc_use(0);
     if c < 0 || c >= vb_ch || i < 0 || i >= vb_outn {
         fail "no such sample" hint "a channel below vorbis_channels(), i below what vorbis_next gave";
     }
@@ -1566,6 +1750,7 @@ fn vb_side(i: i64, side: i64) -> f64 {
 // the file open, decoded from where it is to its end, as stereo i16 frames
 // at rate: the block of the heap and how many frames it holds
 fn vorbis_to_stereo(rate: i64) -> (i64, i64) {
+    vc_use(0);
     if rate < 8000 || rate > 192000 {
         fail "no such sample rate" hint "48000 or 44100";
     }
@@ -1577,7 +1762,7 @@ fn vorbis_to_stereo(rate: i64) -> (i64, i64) {
         fail "no memory for the sound" hint "a shorter one";
     }
     var have: i64 = 0;
-    var n: i64 = vorbis_next();
+    var n: i64 = vb_next();
     while n >= 0 {
         var i: i64 = 0;
         while i < n && have < nin {
@@ -1593,7 +1778,7 @@ fn vorbis_to_stereo(rate: i64) -> (i64, i64) {
             have = have + 1;
             i = i + 1;
         }
-        n = vorbis_next();
+        n = vb_next();
     }
     if have == 0 {
         hp_release(src);
@@ -1632,9 +1817,6 @@ fn audio_load_ogg(path: i64) -> i64 {
     if au_on == 0 {
         fail "the sound is not open" hint "audio_open first";
     }
-    if vs_on == 1 {
-        fail "an Ogg stream is playing" hint "audio_stop it first: the decoder is one";
-    }
     vorbis_open(path);
     var p, frames = vorbis_to_stereo(au_rate);
     return au_add_sound(p, frames);
@@ -1653,20 +1835,21 @@ fn vb_rewind() -> i64 {
 
 // the frames of the next packet into vs_src; 0 when the file has no more
 fn vs_more() -> i64 {
-    var n: i64 = vorbis_next();
+    var n: i64 = vb_next();
     while n == 0 {
-        n = vorbis_next();
+        n = vb_next();
     }
     if n < 0 && vs_loop == 1 {
         vb_rewind();
-        n = vorbis_next();
+        n = vb_next();
         while n == 0 {
-            n = vorbis_next();
+            n = vb_next();
         }
     }
     if n < 0 { return 0; }
     // what is behind the position goes
     var k: i64 = vs_o * vb_rate / au_rate - vs_base;
+    if k > vs_n { k = vs_n; }           // after a seek: all of it behind
     if k > 0 {
         var i: i64 = 0;
         while i < (vs_n - k) * 2 {
@@ -1686,8 +1869,23 @@ fn vs_more() -> i64 {
     return 1;
 }
 
-// as much as the stream has room for, at the device's rate
+// every stream playing, each in its turn
 fn vs_fill(arg: i64) -> i64 {
+    var made: i64 = 0;
+    var c: i64 = 1;
+    while c < VC_N {
+        if vc_used[c] == 1 {
+            vc_use(c);
+            made = made + vs_fill_one();
+        }
+        c = c + 1;
+    }
+    return made;
+}
+
+// as much as the stream of the context the decoder holds has room for, at
+// the device's rate
+fn vs_fill_one() -> i64 {
     if vs_on == 0 { return 0; }
     if vs_voice != 0 && audio_playing(vs_voice) == 0 {
         vs_on = 0;                   // stopped: nothing more to decode
@@ -1745,23 +1943,101 @@ fn vs_fill(arg: i64) -> i64 {
     return made;
 }
 
+// the stream st from frame (at the device's rate): the decoder from the
+// last page that ends before it, what comes before it decoded and dropped
+fn vs_seek(st: i64, frame: i64) -> i64 {
+    var c: i64 = 1;
+    var found: i64 = 0;
+    while c < VC_N && found == 0 {
+        if vc_used[c] == 1 {
+            vc_use(c);
+            if vs_stream == st { found = c; }
+        }
+        c = c + 1;
+    }
+    if found == 0 { return 0; }
+    var t: i64 = frame * vb_rate / au_rate;
+    if vb_total > 0 && t >= vb_total {
+        if vs_loop == 1 {
+            t = t % vb_total;
+            frame = t * au_rate / vb_rate;
+        } else {
+            t = vb_total;
+        }
+    }
+    // the last packet whose page ends at or before t
+    var best: i64 = -1;
+    var gbest: i64 = 0;
+    var i: i64 = 3;
+    while i < ogg_count() {
+        var g: i64 = ogg_granule(i);
+        if g >= 0 && g <= t {
+            best = i;
+            gbest = g;
+        }
+        i = i + 1;
+    }
+    if best < 0 {
+        vb_rewind();
+        gbest = 0;
+    } else {
+        // decoded first only for its overlap: the frames after it begin at
+        // its granule position
+        vb_next_pk = best;
+        vb_done = gbest;
+        vb_prevn = 0;
+        vb_outn = 0;
+    }
+    au_stream_restart(st, frame);
+    vs_o = frame;
+    vs_base = gbest;
+    vs_n = 0;
+    vs_last = 0;
+    vs_on = 1;
+    vs_fill_one();
+    return 1;
+}
+
 // a voice playing the Ogg Vorbis file at path as it is decoded
 fn audio_stream_ogg(path: i64, volume: f64, looping: i64) -> i64 {
     if au_on == 0 {
         fail "the sound is not open" hint "audio_open first";
     }
-    if vs_on == 1 && vs_voice != 0 && audio_playing(vs_voice) == 1 {
-        fail "an Ogg stream is playing already" hint "one at a time: audio_stop it first";
+    // a context whose stream has ended or was stopped, else one not used
+    var c: i64 = 0;
+    var k: i64 = 1;
+    while k < VC_N && c == 0 {
+        if vc_used[k] == 0 {
+            c = k;
+        } else {
+            vc_use(k);
+            if vs_on == 0 || vs_voice == 0 || audio_playing(vs_voice) == 0 {
+                vs_on = 0;
+                c = k;
+            }
+        }
+        k = k + 1;
     }
-    vorbis_open(path);
-    if vs_stream == 0 {
-        vs_stream = audio_stream_new(au_rate / 2);
-        vs_buf = hp_alloc(1024 * 4 + 8);
+    if c == 0 {
+        fail "four Ogg streams are playing already" hint "audio_stop one first, or load a short sound whole with audio_load_ogg";
     }
-    var k: i64 = vs_stream - 1;
-    au_st_read[k] = 0;
-    au_st_write[k] = 0;
-    au_st_end[k] = 0;
+    vc_use(c);
+    var st: i64 = 0;
+    var buf: i64 = 0;
+    if vc_used[c] == 1 && vs_gen == au_gen {
+        st = vs_stream;
+        buf = vs_buf;
+    }
+    vc_used[c] = 0;                  // its part of the pools is free again
+    vb_open(path);
+    if st == 0 {
+        st = audio_stream_new(au_rate / 2);
+        buf = hp_alloc(1024 * 4 + 8);
+    }
+    vs_stream = st;
+    vs_buf = buf;
+    vs_gen = au_gen;
+    au_stream_restart(vs_stream, 0);
     vs_o = 0;
     vs_base = 0;
     vs_n = 0;
@@ -1769,8 +2045,13 @@ fn audio_stream_ogg(path: i64, volume: f64, looping: i64) -> i64 {
     vs_loop = looping;
     vs_voice = 0;
     vs_on = 1;
-    au_set_hook(vs_fill);
-    vs_fill(0);
+    if vs_hooked == 0 {
+        au_add_hook(vs_fill);
+        au_add_seekhook(vs_seek);
+        vs_hooked = 1;
+    }
+    vs_fill_one();
     vs_voice = audio_stream_play(vs_stream, volume);
     return vs_voice;
 }
+

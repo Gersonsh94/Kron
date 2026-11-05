@@ -1,0 +1,2115 @@
+kron_program
+kron_domain std_video;
+kron_imports
+acquire_domain "std_audio.kr";
+acquire_domain "std_image.kr";
+acquire_domain "std_file.kr";
+kron_definitions
+
+// =========================================================================
+// Kron standard library -- video: MPEG-1 films (.mpg), picture and sound.
+//
+// The decoders are a port of pl_mpeg (Dominic Szablewski, MIT licence, see
+// THIRD_PARTY.md):
+// MPEG-1 video (I, P and B pictures), MPEG-1 Layer II sound (MP2), and the
+// MPEG program stream that carries both. Any tool makes such a file, ffmpeg
+// for one:
+//
+//     ffmpeg -i film.mp4 -c:v mpeg1video -q:v 4 -c:a mp2 -b:a 192k film.mpg
+//
+// A raw MPEG-1 video stream (.m1v) opens too, without sound.
+//
+//     video_open(path)            1, or a fail with the reason
+//     video_width()  video_height()  video_fps()
+//     video_length()              the film's length in ms
+//     video_has_sound()           1 when it has sound
+//     video_next()                the next picture, in the order they are
+//                                 shown: 1, 0 after the last
+//     video_time()                the time of the picture decoded last, ms
+//     video_frame_at(ms)          the pictures up to the one shown at ms
+//                                 decoded: 1 when the picture changed
+//     video_seek(ms)              to the picture at ms (or the one before)
+//     video_image()               the last picture, a std_image picture
+//                                 (window, gpu_texture); the same picture
+//                                 each time, drawn over by the next
+//     video_sound(volume)         its sound played from the time of the last
+//                                 picture, through std_audio: the voice
+//     video_close()
+//
+// A film with its sound:
+//
+//     video_open("intro.mpg");
+//     var v: i64 = video_sound(1.0);
+//     while window_show() && audio_playing(v) {
+//         if video_frame_at(audio_position(v)) {
+//             draw video_image() ...
+//         }
+//     }
+//
+// One film is open at a time. The file is read whole when it opens.
+// =========================================================================
+
+// ------------------------------------------------------------ the file ---
+var vd_on: i64;
+var vd_file: i64;
+var vd_size: i64;
+var vd_ves: i64;           // the video's stream, gathered from the packets
+var vd_vlen: i64;
+var vd_aes: i64;           // the sound's
+var vd_alen: i64;
+// the bit readers: 0 the video's stream, 1 the sound's
+var br_p: [i64; 2];
+var br_n: [i64; 2];        // bytes
+var br_bit: [i64; 2];
+
+// ------------------------------------------------------------- tables ---
+// the VLC tables of pl_mpeg, one after another: their first entries
+const VL_MBA: i64 = 0;
+const VL_MBT_I: i64 = 80;
+const VL_MBT_P: i64 = 84;
+const VL_MBT_B: i64 = 98;
+const VL_CBP: i64 = 120;
+const VL_MOTION: i64 = 246;
+const VL_DCTL: i64 = 314;
+const VL_DCTC: i64 = 332;
+const VL_COEFF: i64 = 350;
+const VL_N: i64 = 574;
+var vl_i: [i64; 574];
+var vl_v: [i64; 574];
+var vt_zigzag: [i64; 64];
+var vt_intra: [i64; 64];
+var vt_nonintra: [i64; 64];
+var vt_premul: [i64; 64];
+var vt_rate: [f64; 16];
+var vt_window: [f64; 512];
+var vt_srate: [i64; 8];
+var vt_brate: [i64; 28];
+var vt_sfbase: [i64; 3];
+var vt_lut1: [i64; 32];
+var vt_lut2: [i64; 9];
+var vt_lut3: [i64; 96];
+var vt_lut4: [i64; 96];
+var vt_qtab: [i64; 51];
+var vt_ready: i64;
+var vt_pos: i64;
+
+fn vt_num(t: i64) -> f64 {
+    var c: i64 = 0;
+    raw { c = peek8(t + vt_pos); }
+    while c == 32 {
+        vt_pos = vt_pos + 1;
+        raw { c = peek8(t + vt_pos); }
+    }
+    var neg: i64 = 0;
+    if c == 45 {
+        neg = 1;
+        vt_pos = vt_pos + 1;
+    }
+    var v: f64 = 0.0;
+    var scale: f64 = 1.0;
+    var frac: i64 = 0;
+    var go: i64 = 1;
+    while go == 1 {
+        raw { c = peek8(t + vt_pos); }
+        if c >= 48 && c <= 57 {
+            if frac == 1 {
+                scale = scale / 10.0;
+                v = v + ((c - 48) as f64) * scale;
+            } else {
+                v = v * 10.0 + ((c - 48) as f64);
+            }
+            vt_pos = vt_pos + 1;
+        } else if c == 46 {
+            frac = 1;
+            vt_pos = vt_pos + 1;
+        } else {
+            go = 0;
+        }
+    }
+    if c == 101 {
+        vt_pos = vt_pos + 1;
+        var eneg: i64 = 0;
+        raw { c = peek8(t + vt_pos); }
+        if c == 45 {
+            eneg = 1;
+            vt_pos = vt_pos + 1;
+        }
+        var e: i64 = 0;
+        raw { c = peek8(t + vt_pos); }
+        while c >= 48 && c <= 57 {
+            e = e * 10 + c - 48;
+            vt_pos = vt_pos + 1;
+            raw { c = peek8(t + vt_pos); }
+        }
+        while e > 0 {
+            if eneg == 1 { v = v / 10.0; } else { v = v * 10.0; }
+            e = e - 1;
+        }
+    }
+    if neg == 1 { return 0.0 - v; }
+    return v;
+}
+
+fn vt_fill_i(arr: i64, t: i64, n: i64) -> i64 {
+    vt_pos = 0;
+    var i: i64 = 0;
+    while i < n {
+        var v: i64 = vt_num(t) as i64;
+        raw { poke(arr + i * 8, v); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn vt_fill_f(arr: i64, t: i64, n: i64) -> i64 {
+    vt_pos = 0;
+    var one: [f64; 1];
+    var i: i64 = 0;
+    while i < n {
+        one[0] = vt_num(t);
+        raw { poke(arr + i * 8, peek(&one)); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn vt_init() -> i64 {
+    if vt_ready == 1 { return 0; }
+    vt_fill_i(&vl_i, vt_text_vl_index(), VL_N);
+    vt_fill_i(&vl_v, vt_text_vl_value(), VL_N);
+    vt_fill_i(&vt_zigzag, vt_text_zigzag(), 64);
+    vt_fill_i(&vt_intra, vt_text_intra_q(), 64);
+    vt_fill_i(&vt_nonintra, vt_text_nonintra_q(), 64);
+    vt_fill_i(&vt_premul, vt_text_premul(), 64);
+    vt_fill_f(&vt_rate, vt_text_rate(), 16);
+    vt_fill_f(&vt_window, vt_text_window(), 512);
+    vt_fill_i(&vt_srate, vt_text_srate(), 8);
+    vt_fill_i(&vt_brate, vt_text_brate(), 28);
+    vt_fill_i(&vt_sfbase, vt_text_sfbase(), 3);
+    vt_fill_i(&vt_lut1, vt_text_lut1(), 32);
+    vt_fill_i(&vt_lut2, vt_text_lut2(), 9);
+    vt_fill_i(&vt_lut3, vt_text_lut3(), 96);
+    vt_fill_i(&vt_lut4, vt_text_lut4(), 96);
+    vt_fill_i(&vt_qtab, vt_text_qtab(), 51);
+    vt_ready = 1;
+    return 0;
+}
+
+// ------------------------------------------------------- bit readers ---
+// a byte of the file or of a stream
+fn vd_b(p: i64) -> i64 {
+    var c: i64 = 0;
+    raw { c = peek8(p); }
+    return c;
+}
+
+fn br_has(r: i64, bits: i64) -> i64 {
+    return br_bit[r] + bits <= br_n[r] * 8;
+}
+
+// count bits (up to 32), the first one highest; 0 past the end
+fn br_read(r: i64, count: i64) -> i64 {
+    var bi: i64 = br_bit[r];
+    if bi + count > br_n[r] * 8 {
+        return 0;
+    }
+    var p: i64 = br_p[r] + (bi >> 3);
+    var v: i64 = 0;
+    raw {
+        v = (peek8(p) << 32) | (peek8(p + 1) << 24) | (peek8(p + 2) << 16) | (peek8(p + 3) << 8) | peek8(p + 4);
+    }
+    br_bit[r] = bi + count;
+    return (v >> (40 - (bi & 7) - count)) & ((1 << count) - 1);
+}
+
+fn br_skip(r: i64, count: i64) -> i64 {
+    if br_has(r, count) { br_bit[r] = br_bit[r] + count; }
+    return 0;
+}
+
+fn br_align(r: i64) -> i64 {
+    br_bit[r] = ((br_bit[r] + 7) >> 3) << 3;
+    return 0;
+}
+
+fn br_skip_bytes(r: i64, v: i64) -> i64 {
+    br_align(r);
+    var n: i64 = 0;
+    while br_has(r, 8) && vd_b(br_p[r] + (br_bit[r] >> 3)) == v {
+        br_bit[r] = br_bit[r] + 8;
+        n = n + 1;
+    }
+    return n;
+}
+
+// the next start code (00 00 01 xx): xx, the reader after it; -1 at the end
+fn br_next_start(r: i64) -> i64 {
+    br_align(r);
+    var i: i64 = br_bit[r] >> 3;
+    var p: i64 = br_p[r];
+    var n: i64 = br_n[r];
+    while i + 5 <= n {
+        if vd_b(p + i + 2) > 1 {
+            i = i + 3;
+        } else if vd_b(p + i) == 0 && vd_b(p + i + 1) == 0 && vd_b(p + i + 2) == 1 {
+            br_bit[r] = (i + 4) << 3;
+            return vd_b(p + i + 3);
+        } else {
+            i = i + 1;
+        }
+    }
+    br_bit[r] = n << 3;
+    return -1;
+}
+
+fn br_find_start(r: i64, code: i64) -> i64 {
+    var c: i64 = br_next_start(r);
+    while c != code && c != -1 {
+        c = br_next_start(r);
+    }
+    return c;
+}
+
+fn br_peek_nonzero(r: i64, bits: i64) -> i64 {
+    if !br_has(r, bits) { return 0; }
+    var v: i64 = br_read(r, bits);
+    br_bit[r] = br_bit[r] - bits;
+    return v != 0;
+}
+
+// a value of a VLC table starting at base
+fn br_vlc(r: i64, base: i64) -> i64 {
+    var idx: i64 = 0;
+    var k: i64 = 0;
+    var go: i64 = 1;
+    while go == 1 {
+        k = base + idx + br_read(r, 1);
+        idx = vl_i[k];
+        if idx <= 0 { go = 0; }
+    }
+    return vl_v[k];
+}
+
+// ------------------------------------------------------------- video ---
+const PIC_I: i64 = 1;
+const PIC_P: i64 = 2;
+const PIC_B: i64 = 3;
+const START_SEQUENCE: i64 = 179;   // 0xB3
+const START_PICTURE: i64 = 0;
+const START_EXTENSION: i64 = 181;  // 0xB5
+const START_USER: i64 = 178;       // 0xB2
+const START_GOP: i64 = 184;        // 0xB8
+
+var vv_fps: f64;
+var vv_time: f64;          // seconds, of the next picture given
+var vv_frames: i64;        // pictures given
+var vv_w: i64;
+var vv_h: i64;
+var vv_mbw: i64;
+var vv_mbh: i64;
+var vv_mbsize: i64;
+var vv_lw: i64;            // the planes' sizes: luma, chroma
+var vv_lh: i64;
+var vv_cw: i64;
+var vv_ch: i64;
+var vv_start: i64;
+var vv_ptype: i64;
+var vv_fw_full: i64;       // motion: forward and backward
+var vv_fw_rsize: i64;
+var vv_fw_h: i64;
+var vv_fw_v: i64;
+var vv_fw_set: i64;
+var vv_bw_full: i64;
+var vv_bw_rsize: i64;
+var vv_bw_h: i64;
+var vv_bw_v: i64;
+var vv_bw_set: i64;
+var vv_has_seq: i64;
+var vv_qscale: i64;
+var vv_slice_begin: i64;
+var vv_mba: i64;
+var vv_row: i64;
+var vv_col: i64;
+var vv_mbtype: i64;
+var vv_intra: i64;
+var vv_dc: [i64; 3];
+var vv_data: i64;          // the three frames' planes
+var vv_y: [i64; 3];        // each frame's planes, by its number
+var vv_cr: [i64; 3];
+var vv_cb: [i64; 3];
+var vv_cur: i64;           // which frame is which: current, forward, backward
+var vv_fwd: i64;
+var vv_bwd: i64;
+var vv_block: [i64; 64];
+var vv_iq: [i64; 64];
+var vv_nq: [i64; 64];
+var vv_has_ref: i64;
+var vv_out: i64;           // the frame given last, -1 none
+var vv_skip_b: i64;        // after a seek: B pictures until a second reference
+
+fn vv_clamp(n: i64) -> i64 {
+    if n > 255 { return 255; }
+    if n < 0 { return 0; }
+    return n;
+}
+
+fn vv_seq_header() -> i64 {
+    if !br_has(0, 64 + 2 * 64 * 8) { return 0; }
+    var w: i64 = br_read(0, 12);
+    var h: i64 = br_read(0, 12);
+    if w <= 0 || h <= 0 { return 0; }
+    br_skip(0, 4);                          // the pixels' aspect
+    vv_fps = vt_rate[br_read(0, 4)];
+    br_skip(0, 18 + 1 + 10 + 1);
+    var i: i64 = 0;
+    if br_read(0, 1) == 1 {
+        while i < 64 {
+            vv_iq[vt_zigzag[i]] = br_read(0, 8);
+            i = i + 1;
+        }
+    } else {
+        while i < 64 {
+            vv_iq[i] = vt_intra[i];
+            i = i + 1;
+        }
+    }
+    i = 0;
+    if br_read(0, 1) == 1 {
+        while i < 64 {
+            vv_nq[vt_zigzag[i]] = br_read(0, 8);
+            i = i + 1;
+        }
+    } else {
+        while i < 64 {
+            vv_nq[i] = vt_nonintra[i];
+            i = i + 1;
+        }
+    }
+    if vv_has_seq == 1 {
+        // a sequence header again (each group of pictures may have one):
+        // the size is the first one's
+        return 1;
+    }
+    if w > 4096 || h > 4096 {
+        fail "this film is too large" hint "4096 x 4096 at most";
+    }
+    vv_w = w;
+    vv_h = h;
+    vv_mbw = (w + 15) >> 4;
+    vv_mbh = (h + 15) >> 4;
+    vv_mbsize = vv_mbw * vv_mbh;
+    vv_lw = vv_mbw << 4;
+    vv_lh = vv_mbh << 4;
+    vv_cw = vv_mbw << 3;
+    vv_ch = vv_mbh << 3;
+    var lsize: i64 = vv_lw * vv_lh;
+    var csize: i64 = vv_cw * vv_ch;
+    var fsize: i64 = lsize + 2 * csize;
+    vv_data = hp_alloc(fsize * 3 + 64);
+    if vv_data == 0 {
+        fail "no memory for the film's pictures" hint "a smaller film";
+    }
+    hp_zero(vv_data, fsize * 3);
+    var k: i64 = 0;
+    while k < 3 {
+        vv_y[k] = vv_data + fsize * k;
+        vv_cr[k] = vv_y[k] + lsize;
+        vv_cb[k] = vv_cr[k] + csize;
+        k = k + 1;
+    }
+    vv_cur = 0;
+    vv_fwd = 1;
+    vv_bwd = 2;
+    vv_has_seq = 1;
+    return 1;
+}
+
+fn vv_has_header() -> i64 {
+    if vv_has_seq == 1 { return 1; }
+    if vv_start != START_SEQUENCE {
+        vv_start = br_find_start(0, START_SEQUENCE);
+    }
+    if vv_start == -1 { return 0; }
+    return vv_seq_header();
+}
+
+// the next picture in the order they are shown: 1 with vv_out its frame
+fn vv_decode() -> i64 {
+    if vv_has_header() == 0 { return 0; }
+    var got: i64 = -1;
+    while got == -1 {
+        if vv_start != START_PICTURE {
+            vv_start = br_find_start(0, START_PICTURE);
+            if vv_start == -1 {
+                // the end: the last reference picture is still to be shown
+                if vv_has_ref == 1 && (vv_ptype == PIC_I || vv_ptype == PIC_P) {
+                    vv_has_ref = 0;
+                    got = vv_bwd;
+                } else {
+                    return 0;
+                }
+            }
+        }
+        if got == -1 {
+            if vv_picture() == 1 {
+                if vv_ptype == PIC_B {
+                    got = vv_cur;
+                } else if vv_has_ref == 1 {
+                    got = vv_fwd;
+                } else {
+                    vv_has_ref = 1;
+                }
+            }
+        }
+    }
+    vv_out = got;
+    vv_frames = vv_frames + 1;
+    vv_time = (vv_frames as f64) / vv_fps;
+    return 1;
+}
+
+// a picture: 1 when it was decoded (0: skipped, or not one to decode)
+fn vv_picture() -> i64 {
+    br_skip(0, 10);
+    vv_ptype = br_read(0, 3);
+    br_skip(0, 16);
+    if vv_ptype <= 0 || vv_ptype > PIC_B {
+        vv_start = br_next_start(0);
+        return 0;
+    }
+    if vv_ptype == PIC_B && vv_skip_b == 1 {
+        vv_start = br_next_start(0);
+        return 0;
+    }
+    if vv_ptype == PIC_P || vv_ptype == PIC_B {
+        vv_fw_full = br_read(0, 1);
+        var fc: i64 = br_read(0, 3);
+        if fc == 0 {
+            vv_start = br_next_start(0);
+            return 0;
+        }
+        vv_fw_rsize = fc - 1;
+    }
+    if vv_ptype == PIC_B {
+        vv_bw_full = br_read(0, 1);
+        var bc: i64 = br_read(0, 3);
+        if bc == 0 {
+            vv_start = br_next_start(0);
+            return 0;
+        }
+        vv_bw_rsize = bc - 1;
+    }
+    var temp: i64 = vv_fwd;
+    if vv_ptype == PIC_I || vv_ptype == PIC_P {
+        vv_fwd = vv_bwd;
+    }
+    vv_start = br_next_start(0);
+    while vv_start == START_EXTENSION || vv_start == START_USER {
+        vv_start = br_next_start(0);
+    }
+    var going: i64 = 1;
+    while going == 1 && vv_start >= 1 && vv_start <= 175 {
+        vv_slice(vv_start);
+        if vv_mba >= vv_mbsize - 1 {
+            going = 0;
+        } else {
+            vv_start = br_next_start(0);
+        }
+    }
+    if going == 0 {
+        vv_start = br_next_start(0);
+    }
+    if vv_ptype == PIC_I || vv_ptype == PIC_P {
+        vv_bwd = vv_cur;
+        vv_cur = temp;
+        if vv_skip_b == 1 && vv_has_ref == 1 { vv_skip_b = 0; }
+    }
+    return 1;
+}
+
+fn vv_reset_dc() -> i64 {
+    vv_dc[0] = 128;
+    vv_dc[1] = 128;
+    vv_dc[2] = 128;
+    return 0;
+}
+
+fn vv_slice(sl: i64) -> i64 {
+    vv_slice_begin = 1;
+    vv_mba = (sl - 1) * vv_mbw - 1;
+    vv_fw_h = 0;
+    vv_fw_v = 0;
+    vv_bw_h = 0;
+    vv_bw_v = 0;
+    vv_reset_dc();
+    vv_qscale = br_read(0, 5);
+    while br_read(0, 1) == 1 {
+        br_skip(0, 8);
+    }
+    var go: i64 = 1;
+    while go == 1 {
+        vv_macroblock();
+        if vv_mba >= vv_mbsize - 1 || br_peek_nonzero(0, 23) == 0 { go = 0; }
+    }
+    return 0;
+}
+
+fn vv_macroblock() -> i64 {
+    var inc: i64 = 0;
+    var t: i64 = br_vlc(0, VL_MBA);
+    while t == 34 {
+        t = br_vlc(0, VL_MBA);
+    }
+    while t == 35 {
+        inc = inc + 33;
+        t = br_vlc(0, VL_MBA);
+    }
+    inc = inc + t;
+    if vv_slice_begin == 1 {
+        vv_slice_begin = 0;
+        vv_mba = vv_mba + inc;
+    } else {
+        if vv_mba + inc >= vv_mbsize { return 0; }
+        if inc > 1 {
+            vv_reset_dc();
+            if vv_ptype == PIC_P {
+                vv_fw_h = 0;
+                vv_fw_v = 0;
+            }
+        }
+        while inc > 1 {
+            vv_mba = vv_mba + 1;
+            vv_row = vv_mba / vv_mbw;
+            vv_col = vv_mba % vv_mbw;
+            vv_predict();
+            inc = inc - 1;
+        }
+        vv_mba = vv_mba + 1;
+    }
+    vv_row = vv_mba / vv_mbw;
+    vv_col = vv_mba % vv_mbw;
+    if vv_col >= vv_mbw || vv_row >= vv_mbh || vv_row < 0 { return 0; }
+    var base: i64 = VL_MBT_I;
+    if vv_ptype == PIC_P { base = VL_MBT_P; }
+    if vv_ptype == PIC_B { base = VL_MBT_B; }
+    vv_mbtype = br_vlc(0, base);
+    vv_intra = vv_mbtype & 1;
+    vv_fw_set = (vv_mbtype & 8) != 0;
+    vv_bw_set = (vv_mbtype & 4) != 0;
+    if (vv_mbtype & 16) != 0 {
+        vv_qscale = br_read(0, 5);
+    }
+    if vv_intra == 1 {
+        vv_fw_h = 0;
+        vv_fw_v = 0;
+        vv_bw_h = 0;
+        vv_bw_v = 0;
+    } else {
+        vv_reset_dc();
+        vv_motion_vectors();
+        vv_predict();
+    }
+    var cbp: i64 = 0;
+    if (vv_mbtype & 2) != 0 {
+        cbp = br_vlc(0, VL_CBP);
+    } else if vv_intra == 1 {
+        cbp = 63;
+    }
+    var block: i64 = 0;
+    var mask: i64 = 32;
+    while block < 6 {
+        if (cbp & mask) != 0 {
+            vv_decode_block(block);
+        }
+        mask = mask >> 1;
+        block = block + 1;
+    }
+    return 0;
+}
+
+fn vv_motion_vectors() -> i64 {
+    if vv_fw_set == 1 {
+        vv_fw_h = vv_motion_vector(vv_fw_rsize, vv_fw_h);
+        vv_fw_v = vv_motion_vector(vv_fw_rsize, vv_fw_v);
+    } else if vv_ptype == PIC_P {
+        vv_fw_h = 0;
+        vv_fw_v = 0;
+    }
+    if vv_bw_set == 1 {
+        vv_bw_h = vv_motion_vector(vv_bw_rsize, vv_bw_h);
+        vv_bw_v = vv_motion_vector(vv_bw_rsize, vv_bw_v);
+    }
+    return 0;
+}
+
+fn vv_motion_vector(rsize: i64, motion0: i64) -> i64 {
+    var fscale: i64 = 1 << rsize;
+    var mcode: i64 = br_vlc(0, VL_MOTION);
+    var d: i64 = 0;
+    if mcode != 0 && fscale != 1 {
+        var r: i64 = br_read(0, rsize);
+        var am: i64 = mcode;
+        if am < 0 { am = 0 - am; }
+        d = ((am - 1) << rsize) + r + 1;
+        if mcode < 0 { d = 0 - d; }
+    } else {
+        d = mcode;
+    }
+    var motion: i64 = motion0 + d;
+    if motion > (fscale << 4) - 1 {
+        motion = motion - (fscale << 5);
+    } else if motion < 0 - (fscale << 4) {
+        motion = motion + (fscale << 5);
+    }
+    return motion;
+}
+
+fn vv_predict() -> i64 {
+    var fh: i64 = vv_fw_h;
+    var fv: i64 = vv_fw_v;
+    if vv_fw_full == 1 {
+        fh = fh << 1;
+        fv = fv << 1;
+    }
+    if vv_ptype == PIC_B {
+        var bh: i64 = vv_bw_h;
+        var bv: i64 = vv_bw_v;
+        if vv_bw_full == 1 {
+            bh = bh << 1;
+            bv = bv << 1;
+        }
+        if vv_fw_set == 1 {
+            vv_copy_mb(vv_fwd, fh, fv, 0);
+            if vv_bw_set == 1 {
+                vv_copy_mb(vv_bwd, bh, bv, 1);
+            }
+        } else {
+            vv_copy_mb(vv_bwd, bh, bv, 0);
+        }
+    } else {
+        vv_copy_mb(vv_fwd, fh, fv, 0);
+    }
+    return 0;
+}
+
+// C's / on ints: toward 0
+fn vv_half(x: i64) -> i64 {
+    if x < 0 { return 0 - ((0 - x) / 2); }
+    return x / 2;
+}
+
+fn vv_copy_mb(s: i64, mh: i64, mv: i64, interp: i64) -> i64 {
+    vv_process_mb(vv_y[s], vv_y[vv_cur], mh, mv, 16, interp);
+    vv_process_mb(vv_cr[s], vv_cr[vv_cur], vv_half(mh), vv_half(mv), 8, interp);
+    vv_process_mb(vv_cb[s], vv_cb[vv_cur], vv_half(mh), vv_half(mv), 8, interp);
+    return 0;
+}
+
+// a block of size bs from s at the motion's place into d (averaged with
+// what d has when interp)
+fn vv_process_mb(s: i64, d: i64, mh: i64, mv: i64, bs: i64, interp: i64) -> i64 {
+    var dw: i64 = vv_mbw * bs;
+    var hp: i64 = mh >> 1;
+    var vp: i64 = mv >> 1;
+    var oh: i64 = mh & 1;
+    var ov: i64 = mv & 1;
+    var si: i64 = ((vv_row * bs) + vp) * dw + (vv_col * bs) + hp;
+    var di: i64 = (vv_row * dw + vv_col) * bs;
+    var maxa: i64 = dw * (vv_mbh * bs - bs + 1) - bs;
+    if si < 0 || si > maxa || di > maxa { return 0; }
+    var scan: i64 = dw - bs;
+    var y: i64 = 0;
+    var mode: i64 = (interp << 2) | (oh << 1) | ov;
+    raw {
+        var sp: i64 = s + si;
+        var dp: i64 = d + di;
+        while y < bs {
+            var x: i64 = 0;
+            while x < bs {
+                var v: i64 = 0;
+                var m: i64 = mode & 3;
+                if m == 0 {
+                    v = peek8(sp);
+                } else if m == 1 {
+                    v = (peek8(sp) + peek8(sp + dw) + 1) >> 1;
+                } else if m == 2 {
+                    v = (peek8(sp) + peek8(sp + 1) + 1) >> 1;
+                } else {
+                    v = (peek8(sp) + peek8(sp + 1) + peek8(sp + dw) + peek8(sp + dw + 1) + 2) >> 2;
+                }
+                if mode >= 4 {
+                    v = (peek8(dp) + v + 1) >> 1;
+                }
+                poke8(dp, v);
+                sp = sp + 1;
+                dp = dp + 1;
+                x = x + 1;
+            }
+            sp = sp + scan;
+            dp = dp + scan;
+            y = y + 1;
+        }
+    }
+    return 0;
+}
+
+fn vv_decode_block(block: i64) -> i64 {
+    var n: i64 = 0;
+    var qintra: i64 = vv_intra;
+    if vv_intra == 1 {
+        var plane: i64 = 0;
+        if block > 3 { plane = block - 3; }
+        var pred: i64 = vv_dc[plane];
+        var dbase: i64 = VL_DCTL;
+        if plane > 0 { dbase = VL_DCTC; }
+        var dsize: i64 = br_vlc(0, dbase);
+        if dsize > 0 {
+            var diff: i64 = br_read(0, dsize);
+            if (diff & (1 << (dsize - 1))) != 0 {
+                vv_block[0] = pred + diff;
+            } else {
+                vv_block[0] = pred + ((0 - (1 << dsize)) | (diff + 1));
+            }
+        } else {
+            vv_block[0] = pred;
+        }
+        vv_dc[plane] = vv_block[0];
+        vv_block[0] = vv_block[0] << 8;
+        n = 1;
+    }
+    var level: i64 = 0;
+    var go: i64 = 1;
+    while go == 1 {
+        var run: i64 = 0;
+        var coeff: i64 = br_vlc(0, VL_COEFF) & 65535;
+        if coeff == 1 && n > 0 && br_read(0, 1) == 0 {
+            go = 0;
+        } else {
+            if coeff == 65535 {
+                run = br_read(0, 6);
+                level = br_read(0, 8);
+                if level == 0 {
+                    level = br_read(0, 8);
+                } else if level == 128 {
+                    level = br_read(0, 8) - 256;
+                } else if level > 128 {
+                    level = level - 256;
+                }
+            } else {
+                run = coeff >> 8;
+                level = coeff & 255;
+                if br_read(0, 1) == 1 {
+                    level = 0 - level;
+                }
+            }
+            n = n + run;
+            if n < 0 || n >= 64 { return 0; }
+            var dz: i64 = vt_zigzag[n];
+            n = n + 1;
+            level = level * 2;
+            if qintra == 0 {
+                if level < 0 { level = level - 1; } else { level = level + 1; }
+            }
+            var q: i64 = vv_nq[dz];
+            if qintra == 1 { q = vv_iq[dz]; }
+            level = (level * vv_qscale * q) >> 4;
+            if (level & 1) == 0 {
+                if level > 0 { level = level - 1; } else { level = level + 1; }
+            }
+            if level > 2047 { level = 2047; }
+            if level < -2048 { level = -2048; }
+            vv_block[dz] = level * vt_premul[dz];
+        }
+    }
+    // the block's place in its plane
+    var d: i64 = 0;
+    var dw: i64 = 0;
+    var di: i64 = 0;
+    if block < 4 {
+        d = vv_y[vv_cur];
+        dw = vv_lw;
+        di = (vv_row * vv_lw + vv_col) << 4;
+        if (block & 1) != 0 { di = di + 8; }
+        if (block & 2) != 0 { di = di + (vv_lw << 3); }
+    } else {
+        d = vv_cb[vv_cur];
+        if block == 5 { d = vv_cr[vv_cur]; }
+        dw = vv_cw;
+        di = ((vv_row * vv_lw) << 2) + (vv_col << 3);
+    }
+    var scan: i64 = dw - 8;
+    var y: i64 = 0;
+    var x: i64 = 0;
+    var si: i64 = 0;
+    if n == 1 {
+        // the DC alone: one value for the whole block
+        var v: i64 = (vv_block[0] + 128) >> 8;
+        vv_block[0] = 0;
+        raw {
+            var dp: i64 = d + di;
+            while y < 8 {
+                x = 0;
+                while x < 8 {
+                    if qintra == 1 {
+                        poke8(dp, vv_clamp(v));
+                    } else {
+                        poke8(dp, vv_clamp(peek8(dp) + v));
+                    }
+                    dp = dp + 1;
+                    x = x + 1;
+                }
+                dp = dp + scan;
+                y = y + 1;
+            }
+        }
+        return 0;
+    }
+    vv_idct();
+    raw {
+        var dp2: i64 = d + di;
+        while y < 8 {
+            x = 0;
+            while x < 8 {
+                if qintra == 1 {
+                    poke8(dp2, vv_clamp(vv_block[si]));
+                } else {
+                    poke8(dp2, vv_clamp(peek8(dp2) + vv_block[si]));
+                }
+                vv_block[si] = 0;
+                si = si + 1;
+                dp2 = dp2 + 1;
+                x = x + 1;
+            }
+            dp2 = dp2 + scan;
+            y = y + 1;
+        }
+    }
+    return 0;
+}
+
+fn vv_idct() -> i64 {
+    var i: i64 = 0;
+    while i < 8 {
+        var b1: i64 = vv_block[32 + i];
+        var b3: i64 = vv_block[16 + i] + vv_block[48 + i];
+        var b4: i64 = vv_block[40 + i] - vv_block[24 + i];
+        var tmp1: i64 = vv_block[8 + i] + vv_block[56 + i];
+        var tmp2: i64 = vv_block[24 + i] + vv_block[40 + i];
+        var b6: i64 = vv_block[8 + i] - vv_block[56 + i];
+        var b7: i64 = tmp1 + tmp2;
+        var m0: i64 = vv_block[i];
+        var x4: i64 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
+        var x0: i64 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
+        var x1: i64 = m0 - b1;
+        var x2: i64 = (((vv_block[16 + i] - vv_block[48 + i]) * 362 + 128) >> 8) - b3;
+        var x3: i64 = m0 + b1;
+        var y3: i64 = x1 + x2;
+        var y4: i64 = x3 + b3;
+        var y5: i64 = x1 - x2;
+        var y6: i64 = x3 - b3;
+        var y7: i64 = 0 - x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
+        vv_block[i] = b7 + y4;
+        vv_block[8 + i] = x4 + y3;
+        vv_block[16 + i] = y5 - x0;
+        vv_block[24 + i] = y6 - y7;
+        vv_block[32 + i] = y6 + y7;
+        vv_block[40 + i] = x0 + y5;
+        vv_block[48 + i] = y3 - x4;
+        vv_block[56 + i] = y4 - b7;
+        i = i + 1;
+    }
+    i = 0;
+    while i < 64 {
+        var c1: i64 = vv_block[4 + i];
+        var c3: i64 = vv_block[2 + i] + vv_block[6 + i];
+        var c4: i64 = vv_block[5 + i] - vv_block[3 + i];
+        var u1: i64 = vv_block[1 + i] + vv_block[7 + i];
+        var u2: i64 = vv_block[3 + i] + vv_block[5 + i];
+        var c6: i64 = vv_block[1 + i] - vv_block[7 + i];
+        var c7: i64 = u1 + u2;
+        var n0: i64 = vv_block[i];
+        var z4: i64 = ((c6 * 473 - c4 * 196 + 128) >> 8) - c7;
+        var z0: i64 = z4 - (((u1 - u2) * 362 + 128) >> 8);
+        var z1: i64 = n0 - c1;
+        var z2: i64 = (((vv_block[2 + i] - vv_block[6 + i]) * 362 + 128) >> 8) - c3;
+        var z3: i64 = n0 + c1;
+        var w3: i64 = z1 + z2;
+        var w4: i64 = z3 + c3;
+        var w5: i64 = z1 - z2;
+        var w6: i64 = z3 - c3;
+        var w7: i64 = 0 - z0 - ((c4 * 473 + c6 * 196 + 128) >> 8);
+        vv_block[i] = (c7 + w4 + 128) >> 8;
+        vv_block[1 + i] = (z4 + w3 + 128) >> 8;
+        vv_block[2 + i] = (w5 - z0 + 128) >> 8;
+        vv_block[3 + i] = (w6 - w7 + 128) >> 8;
+        vv_block[4 + i] = (w6 + w7 + 128) >> 8;
+        vv_block[5 + i] = (z0 + w5 + 128) >> 8;
+        vv_block[6 + i] = (w3 - z4 + 128) >> 8;
+        vv_block[7 + i] = (w4 - c7 + 128) >> 8;
+        i = i + 8;
+    }
+    return 0;
+}
+
+// frame f into the picture, B G R A (BT.601), two rows and columns at once
+fn vv_to_bgra(f: i64, dst: i64) -> i64 {
+    var cols: i64 = vv_w >> 1;
+    var rows: i64 = vv_h >> 1;
+    var yw: i64 = vv_lw;
+    var cw: i64 = vv_cw;
+    var stride: i64 = vv_w * 4;
+    var py: i64 = vv_y[f];
+    var pcr: i64 = vv_cr[f];
+    var pcb: i64 = vv_cb[f];
+    var row: i64 = 0;
+    raw {
+        while row < rows {
+            var ci: i64 = row * cw;
+            var yi: i64 = row * 2 * yw;
+            var di: i64 = row * 2 * stride;
+            var col: i64 = 0;
+            while col < cols {
+                var cr: i64 = peek8(pcr + ci) - 128;
+                var cb: i64 = peek8(pcb + ci) - 128;
+                var r: i64 = (cr * 104597) >> 16;
+                var g: i64 = (cb * 25674 + cr * 53278) >> 16;
+                var b: i64 = (cb * 132201) >> 16;
+                var k: i64 = 0;
+                while k < 4 {
+                    var yo: i64 = 0;
+                    var dof: i64 = 0;
+                    if k == 1 { yo = 1; dof = 4; }
+                    if k == 2 { yo = yw; dof = stride; }
+                    if k == 3 { yo = yw + 1; dof = stride + 4; }
+                    var yy: i64 = ((peek8(py + yi + yo) - 16) * 76309) >> 16;
+                    var q: i64 = dst + di + dof;
+                    poke8(q, vv_clamp(yy + b));
+                    poke8(q + 1, vv_clamp(yy - g));
+                    poke8(q + 2, vv_clamp(yy + r));
+                    poke8(q + 3, 255);
+                    k = k + 1;
+                }
+                ci = ci + 1;
+                yi = yi + 2;
+                di = di + 8;
+                col = col + 1;
+            }
+            row = row + 1;
+        }
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------- sound ---
+// MPEG-1 Layer II: 1152 samples a frame, two channels (mono doubled)
+var va_rate: i64;          // samples a second, 0 before a header
+var va_srate_i: i64;
+var va_brate_i: i64;
+var va_mode: i64;
+var va_bound: i64;
+var va_vpos: i64;
+var va_next: i64;          // bytes of the frame whose header was read
+var va_has_header: i64;
+var va_alloc: [i64; 64];   // [ch][sb]: the quantizer's place in vt_qtab + 1, 0 none
+var va_sfi: [i64; 64];
+var va_sf: [i64; 192];     // [ch][sb][3]
+var va_sample: [i64; 192];
+var va_d: [f64; 1024];
+var va_v: [f64; 2048];     // [ch][1024]
+var va_u: [f64; 32];
+var va_out: [f64; 2304];   // a frame's samples, interleaved, -1 .. 1
+var va_samples: i64;       // samples decoded since the start
+
+fn va_reset() -> i64 {
+    va_vpos = 0;
+    va_next = 0;
+    va_has_header = 0;
+    va_samples = 0;
+    var i: i64 = 0;
+    while i < 2048 {
+        va_v[i] = 0.0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < 512 {
+        va_d[i] = vt_window[i];
+        va_d[i + 512] = vt_window[i];
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn va_find_sync() -> i64 {
+    var i: i64 = br_bit[1] >> 3;
+    var p: i64 = br_p[1];
+    while i < br_n[1] - 1 {
+        if vd_b(p + i) == 255 && (vd_b(p + i + 1) & 254) == 252 {
+            br_bit[1] = ((i + 1) << 3) + 3;
+            return 1;
+        }
+        i = i + 1;
+    }
+    br_bit[1] = (i + 1) << 3;
+    return 0;
+}
+
+// a frame's header: the bytes of its data, 0 when there is none
+fn va_header() -> i64 {
+    if !br_has(1, 48) { return 0; }
+    br_skip_bytes(1, 0);
+    var sync: i64 = br_read(1, 11);
+    if sync != 2047 && va_find_sync() == 0 { return 0; }
+    var version: i64 = br_read(1, 2);
+    var layer: i64 = br_read(1, 2);
+    var crc: i64 = 1 - br_read(1, 1);
+    if version != 3 || layer != 2 { return 0; }
+    var bi: i64 = br_read(1, 4) - 1;
+    if bi > 13 || bi < 0 { return 0; }
+    var si: i64 = br_read(1, 2);
+    if si == 3 { return 0; }
+    var padding: i64 = br_read(1, 1);
+    br_skip(1, 1);
+    var mode: i64 = br_read(1, 2);
+    if va_has_header == 1 && (va_brate_i != bi || va_srate_i != si || va_mode != mode) {
+        return 0;
+    }
+    va_brate_i = bi;
+    va_srate_i = si;
+    va_mode = mode;
+    va_has_header = 1;
+    va_rate = vt_srate[si];
+    if mode == 1 {
+        va_bound = (br_read(1, 2) + 1) << 2;
+    } else {
+        br_skip(1, 2);
+        va_bound = 32;
+        if mode == 3 { va_bound = 0; }
+    }
+    br_skip(1, 4);
+    if crc == 1 { br_skip(1, 16); }
+    var size: i64 = (144000 * vt_brate[bi] / va_rate) + padding;
+    if crc == 1 { return size - 6; }
+    return size - 4;
+}
+
+// the next frame into va_out: 1, 0 at the end
+fn va_decode() -> i64 {
+    if va_next == 0 {
+        if !br_has(1, 48) { return 0; }
+        va_next = va_header();
+    }
+    if va_next == 0 || !br_has(1, va_next << 3) { return 0; }
+    va_frame();
+    va_next = 0;
+    va_samples = va_samples + 1152;
+    return 1;
+}
+
+fn va_read_alloc(sb: i64, tab3: i64) -> i64 {
+    var tab4: i64 = vt_lut3[tab3 * 32 + sb];
+    var q: i64 = vt_lut4[(tab4 & 15) * 16 + br_read(1, tab4 >> 4)];
+    return q;
+}
+
+fn va_frame() -> i64 {
+    var tab1: i64 = 1;
+    if va_mode == 3 { tab1 = 0; }
+    var tab2: i64 = vt_lut1[tab1 * 16 + va_brate_i];
+    var tab3: i64 = vt_lut2[tab2 * 3 + va_srate_i];
+    var sblimit: i64 = tab3 & 63;
+    tab3 = tab3 >> 6;
+    if va_bound > sblimit { va_bound = sblimit; }
+    var sb: i64 = 0;
+    while sb < va_bound {
+        va_alloc[sb] = va_read_alloc(sb, tab3);
+        va_alloc[32 + sb] = va_read_alloc(sb, tab3);
+        sb = sb + 1;
+    }
+    sb = va_bound;
+    while sb < sblimit {
+        var a: i64 = va_read_alloc(sb, tab3);
+        va_alloc[sb] = a;
+        va_alloc[32 + sb] = a;
+        sb = sb + 1;
+    }
+    var channels: i64 = 2;
+    if va_mode == 3 { channels = 1; }
+    sb = 0;
+    while sb < sblimit {
+        var ch: i64 = 0;
+        while ch < channels {
+            if va_alloc[ch * 32 + sb] != 0 {
+                va_sfi[ch * 32 + sb] = br_read(1, 2);
+            }
+            ch = ch + 1;
+        }
+        if va_mode == 3 { va_sfi[32 + sb] = va_sfi[sb]; }
+        sb = sb + 1;
+    }
+    sb = 0;
+    while sb < sblimit {
+        var ch2: i64 = 0;
+        while ch2 < channels {
+            if va_alloc[ch2 * 32 + sb] != 0 {
+                var at: i64 = (ch2 * 32 + sb) * 3;
+                var info: i64 = va_sfi[ch2 * 32 + sb];
+                if info == 0 {
+                    va_sf[at] = br_read(1, 6);
+                    va_sf[at + 1] = br_read(1, 6);
+                    va_sf[at + 2] = br_read(1, 6);
+                } else if info == 1 {
+                    var s01: i64 = br_read(1, 6);
+                    va_sf[at] = s01;
+                    va_sf[at + 1] = s01;
+                    va_sf[at + 2] = br_read(1, 6);
+                } else if info == 2 {
+                    var s012: i64 = br_read(1, 6);
+                    va_sf[at] = s012;
+                    va_sf[at + 1] = s012;
+                    va_sf[at + 2] = s012;
+                } else {
+                    va_sf[at] = br_read(1, 6);
+                    var s12: i64 = br_read(1, 6);
+                    va_sf[at + 1] = s12;
+                    va_sf[at + 2] = s12;
+                }
+            }
+            ch2 = ch2 + 1;
+        }
+        if va_mode == 3 {
+            va_sf[(32 + sb) * 3] = va_sf[sb * 3];
+            va_sf[(32 + sb) * 3 + 1] = va_sf[sb * 3 + 1];
+            va_sf[(32 + sb) * 3 + 2] = va_sf[sb * 3 + 2];
+        }
+        sb = sb + 1;
+    }
+    var outpos: i64 = 0;
+    var part: i64 = 0;
+    while part < 3 {
+        var gr: i64 = 0;
+        while gr < 4 {
+            sb = 0;
+            while sb < va_bound {
+                va_read_samples(0, sb, part);
+                va_read_samples(1, sb, part);
+                sb = sb + 1;
+            }
+            sb = va_bound;
+            while sb < sblimit {
+                va_read_samples(0, sb, part);
+                va_sample[(32 + sb) * 3] = va_sample[sb * 3];
+                va_sample[(32 + sb) * 3 + 1] = va_sample[sb * 3 + 1];
+                va_sample[(32 + sb) * 3 + 2] = va_sample[sb * 3 + 2];
+                sb = sb + 1;
+            }
+            sb = sblimit;
+            while sb < 32 {
+                var z: i64 = 0;
+                while z < 3 {
+                    va_sample[sb * 3 + z] = 0;
+                    va_sample[(32 + sb) * 3 + z] = 0;
+                    z = z + 1;
+                }
+                sb = sb + 1;
+            }
+            var p: i64 = 0;
+            while p < 3 {
+                va_vpos = (va_vpos - 64) & 1023;
+                var c: i64 = 0;
+                while c < 2 {
+                    va_idct36(c, p, c * 1024 + va_vpos);
+                    va_synth(c, outpos);
+                    c = c + 1;
+                }
+                outpos = outpos + 32;
+                p = p + 1;
+            }
+            gr = gr + 1;
+        }
+        part = part + 1;
+    }
+    br_align(1);
+    return 0;
+}
+
+// the window over V into 32 samples of channel c, at outpos
+fn va_synth(c: i64, outpos: i64) -> i64 {
+    var i: i64 = 0;
+    while i < 32 {
+        va_u[i] = 0.0;
+        i = i + 1;
+    }
+    var vb: i64 = c * 1024;
+    var di: i64 = 512 - (va_vpos >> 1);
+    var vi: i64 = (va_vpos % 128) >> 1;
+    while vi < 1024 {
+        i = 0;
+        while i < 32 {
+            va_u[i] = va_u[i] + va_d[di] * va_v[vb + vi];
+            di = di + 1;
+            vi = vi + 1;
+            i = i + 1;
+        }
+        vi = vi + 128 - 32;
+        di = di + 64 - 32;
+    }
+    di = di - (512 - 32);
+    vi = (128 - 32 + 1024) - vi;
+    while vi < 1024 {
+        i = 0;
+        while i < 32 {
+            va_u[i] = va_u[i] + va_d[di] * va_v[vb + vi];
+            di = di + 1;
+            vi = vi + 1;
+            i = i + 1;
+        }
+        vi = vi + 128 - 32;
+        di = di + 64 - 32;
+    }
+    var j: i64 = 0;
+    while j < 32 {
+        va_out[((outpos + j) << 1) + c] = va_u[j] / -1090519040.0;
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn va_read_samples(ch: i64, sb: i64, part: i64) -> i64 {
+    var q: i64 = va_alloc[ch * 32 + sb];
+    var at: i64 = (ch * 32 + sb) * 3;
+    if q == 0 {
+        va_sample[at] = 0;
+        va_sample[at + 1] = 0;
+        va_sample[at + 2] = 0;
+        return 0;
+    }
+    var sf: i64 = va_sf[at + part];
+    if sf == 63 {
+        sf = 0;
+    } else {
+        var shift: i64 = sf / 3;
+        sf = (vt_sfbase[sf % 3] + ((1 << shift) >> 1)) >> shift;
+    }
+    var adj: i64 = vt_qtab[(q - 1) * 3];
+    var group: i64 = vt_qtab[(q - 1) * 3 + 1];
+    var bits: i64 = vt_qtab[(q - 1) * 3 + 2];
+    if group != 0 {
+        var val: i64 = br_read(1, bits);
+        va_sample[at] = val % adj;
+        val = val / adj;
+        va_sample[at + 1] = val % adj;
+        va_sample[at + 2] = val / adj;
+    } else {
+        va_sample[at] = br_read(1, bits);
+        va_sample[at + 1] = br_read(1, bits);
+        va_sample[at + 2] = br_read(1, bits);
+    }
+    var scale: i64 = 65536 / (adj + 1);
+    adj = ((adj + 1) >> 1) - 1;
+    var k: i64 = 0;
+    while k < 3 {
+        var v: i64 = (adj - va_sample[at + k]) * scale;
+        va_sample[at + k] = (v * (sf >> 12) + ((v * (sf & 4095) + 2048) >> 12)) >> 12;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// a sample of subband k, sub-block ss, of channel c (as a real)
+fn va_s(c: i64, k: i64, ss: i64) -> f64 {
+    return va_sample[(c * 32 + k) * 3 + ss] as f64;
+}
+// the 32-point DCT of sub-block ss of channel c into V at dp (pl_mpeg's
+// plm_audio_idct36, statement by statement)
+fn va_idct36(c: i64, ss: i64, dp: i64) -> i64 {
+    var t01: f64 = (va_s(c, 0, ss) + va_s(c, 31, ss));
+    var t02: f64 = (va_s(c, 0, ss) - va_s(c, 31, ss)) * 0.500602998235;
+    var t03: f64 = (va_s(c, 1, ss) + va_s(c, 30, ss));
+    var t04: f64 = (va_s(c, 1, ss) - va_s(c, 30, ss)) * 0.505470959898;
+    var t05: f64 = (va_s(c, 2, ss) + va_s(c, 29, ss));
+    var t06: f64 = (va_s(c, 2, ss) - va_s(c, 29, ss)) * 0.515447309923;
+    var t07: f64 = (va_s(c, 3, ss) + va_s(c, 28, ss));
+    var t08: f64 = (va_s(c, 3, ss) - va_s(c, 28, ss)) * 0.53104259109;
+    var t09: f64 = (va_s(c, 4, ss) + va_s(c, 27, ss));
+    var t10: f64 = (va_s(c, 4, ss) - va_s(c, 27, ss)) * 0.553103896034;
+    var t11: f64 = (va_s(c, 5, ss) + va_s(c, 26, ss));
+    var t12: f64 = (va_s(c, 5, ss) - va_s(c, 26, ss)) * 0.582934968206;
+    var t13: f64 = (va_s(c, 6, ss) + va_s(c, 25, ss));
+    var t14: f64 = (va_s(c, 6, ss) - va_s(c, 25, ss)) * 0.622504123036;
+    var t15: f64 = (va_s(c, 7, ss) + va_s(c, 24, ss));
+    var t16: f64 = (va_s(c, 7, ss) - va_s(c, 24, ss)) * 0.674808341455;
+    var t17: f64 = (va_s(c, 8, ss) + va_s(c, 23, ss));
+    var t18: f64 = (va_s(c, 8, ss) - va_s(c, 23, ss)) * 0.744536271002;
+    var t19: f64 = (va_s(c, 9, ss) + va_s(c, 22, ss));
+    var t20: f64 = (va_s(c, 9, ss) - va_s(c, 22, ss)) * 0.839349645416;
+    var t21: f64 = (va_s(c, 10, ss) + va_s(c, 21, ss));
+    var t22: f64 = (va_s(c, 10, ss) - va_s(c, 21, ss)) * 0.972568237862;
+    var t23: f64 = (va_s(c, 11, ss) + va_s(c, 20, ss));
+    var t24: f64 = (va_s(c, 11, ss) - va_s(c, 20, ss)) * 1.16943993343;
+    var t25: f64 = (va_s(c, 12, ss) + va_s(c, 19, ss));
+    var t26: f64 = (va_s(c, 12, ss) - va_s(c, 19, ss)) * 1.48416461631;
+    var t27: f64 = (va_s(c, 13, ss) + va_s(c, 18, ss));
+    var t28: f64 = (va_s(c, 13, ss) - va_s(c, 18, ss)) * 2.05778100995;
+    var t29: f64 = (va_s(c, 14, ss) + va_s(c, 17, ss));
+    var t30: f64 = (va_s(c, 14, ss) - va_s(c, 17, ss)) * 3.40760841847;
+    var t31: f64 = (va_s(c, 15, ss) + va_s(c, 16, ss));
+    var t32: f64 = (va_s(c, 15, ss) - va_s(c, 16, ss)) * 10.1900081235;
+    var t33: f64 = t01 + t31;
+    t31 = (t01 - t31) * 0.502419286188;
+    t01 = t03 + t29;
+    t29 = (t03 - t29) * 0.52249861494;
+    t03 = t05 + t27;
+    t27 = (t05 - t27) * 0.566944034816;
+    t05 = t07 + t25;
+    t25 = (t07 - t25) * 0.64682178336;
+    t07 = t09 + t23;
+    t23 = (t09 - t23) * 0.788154623451;
+    t09 = t11 + t21;
+    t21 = (t11 - t21) * 1.06067768599;
+    t11 = t13 + t19;
+    t19 = (t13 - t19) * 1.72244709824;
+    t13 = t15 + t17;
+    t17 = (t15 - t17) * 5.10114861869;
+    t15 = t33 + t13;
+    t13 = (t33 - t13) * 0.509795579104;
+    t33 = t01 + t11;
+    t01 = (t01 - t11) * 0.601344886935;
+    t11 = t03 + t09;
+    t09 = (t03 - t09) * 0.899976223136;
+    t03 = t05 + t07;
+    t07 = (t05 - t07) * 2.56291544774;
+    t05 = t15 + t03;
+    t15 = (t15 - t03) * 0.541196100146;
+    t03 = t33 + t11;
+    t11 = (t33 - t11) * 1.30656296488;
+    t33 = t05 + t03;
+    t05 = (t05 - t03) * 0.707106781187;
+    t03 = t15 + t11;
+    t15 = (t15 - t11) * 0.707106781187;
+    t03 = t03 + t15;
+    t11 = t13 + t07;
+    t13 = (t13 - t07) * 0.541196100146;
+    t07 = t01 + t09;
+    t09 = (t01 - t09) * 1.30656296488;
+    t01 = t11 + t07;
+    t07 = (t11 - t07) * 0.707106781187;
+    t11 = t13 + t09;
+    t13 = (t13 - t09) * 0.707106781187;
+    t11 = t11 + t13;
+    t01 = t01 + t11;
+    t11 = t11 + t07;
+    t07 = t07 + t13;
+    t09 = t31 + t17;
+    t31 = (t31 - t17) * 0.509795579104;
+    t17 = t29 + t19;
+    t29 = (t29 - t19) * 0.601344886935;
+    t19 = t27 + t21;
+    t21 = (t27 - t21) * 0.899976223136;
+    t27 = t25 + t23;
+    t23 = (t25 - t23) * 2.56291544774;
+    t25 = t09 + t27;
+    t09 = (t09 - t27) * 0.541196100146;
+    t27 = t17 + t19;
+    t19 = (t17 - t19) * 1.30656296488;
+    t17 = t25 + t27;
+    t27 = (t25 - t27) * 0.707106781187;
+    t25 = t09 + t19;
+    t19 = (t09 - t19) * 0.707106781187;
+    t25 = t25 + t19;
+    t09 = t31 + t23;
+    t31 = (t31 - t23) * 0.541196100146;
+    t23 = t29 + t21;
+    t21 = (t29 - t21) * 1.30656296488;
+    t29 = t09 + t23;
+    t23 = (t09 - t23) * 0.707106781187;
+    t09 = t31 + t21;
+    t31 = (t31 - t21) * 0.707106781187;
+    t09 = t09 + t31;
+    t29 = t29 + t09;
+    t09 = t09 + t23;
+    t23 = t23 + t31;
+    t17 = t17 + t29;
+    t29 = t29 + t25;
+    t25 = t25 + t09;
+    t09 = t09 + t27;
+    t27 = t27 + t23;
+    t23 = t23 + t19;
+    t19 = t19 + t31;
+    t21 = t02 + t32;
+    t02 = (t02 - t32) * 0.502419286188;
+    t32 = t04 + t30;
+    t04 = (t04 - t30) * 0.52249861494;
+    t30 = t06 + t28;
+    t28 = (t06 - t28) * 0.566944034816;
+    t06 = t08 + t26;
+    t08 = (t08 - t26) * 0.64682178336;
+    t26 = t10 + t24;
+    t10 = (t10 - t24) * 0.788154623451;
+    t24 = t12 + t22;
+    t22 = (t12 - t22) * 1.06067768599;
+    t12 = t14 + t20;
+    t20 = (t14 - t20) * 1.72244709824;
+    t14 = t16 + t18;
+    t16 = (t16 - t18) * 5.10114861869;
+    t18 = t21 + t14;
+    t14 = (t21 - t14) * 0.509795579104;
+    t21 = t32 + t12;
+    t32 = (t32 - t12) * 0.601344886935;
+    t12 = t30 + t24;
+    t24 = (t30 - t24) * 0.899976223136;
+    t30 = t06 + t26;
+    t26 = (t06 - t26) * 2.56291544774;
+    t06 = t18 + t30;
+    t18 = (t18 - t30) * 0.541196100146;
+    t30 = t21 + t12;
+    t12 = (t21 - t12) * 1.30656296488;
+    t21 = t06 + t30;
+    t30 = (t06 - t30) * 0.707106781187;
+    t06 = t18 + t12;
+    t12 = (t18 - t12) * 0.707106781187;
+    t06 = t06 + t12;
+    t18 = t14 + t26;
+    t26 = (t14 - t26) * 0.541196100146;
+    t14 = t32 + t24;
+    t24 = (t32 - t24) * 1.30656296488;
+    t32 = t18 + t14;
+    t14 = (t18 - t14) * 0.707106781187;
+    t18 = t26 + t24;
+    t24 = (t26 - t24) * 0.707106781187;
+    t18 = t18 + t24;
+    t32 = t32 + t18;
+    t18 = t18 + t14;
+    t26 = t14 + t24;
+    t14 = t02 + t16;
+    t02 = (t02 - t16) * 0.509795579104;
+    t16 = t04 + t20;
+    t04 = (t04 - t20) * 0.601344886935;
+    t20 = t28 + t22;
+    t22 = (t28 - t22) * 0.899976223136;
+    t28 = t08 + t10;
+    t10 = (t08 - t10) * 2.56291544774;
+    t08 = t14 + t28;
+    t14 = (t14 - t28) * 0.541196100146;
+    t28 = t16 + t20;
+    t20 = (t16 - t20) * 1.30656296488;
+    t16 = t08 + t28;
+    t28 = (t08 - t28) * 0.707106781187;
+    t08 = t14 + t20;
+    t20 = (t14 - t20) * 0.707106781187;
+    t08 = t08 + t20;
+    t14 = t02 + t10;
+    t02 = (t02 - t10) * 0.541196100146;
+    t10 = t04 + t22;
+    t22 = (t04 - t22) * 1.30656296488;
+    t04 = t14 + t10;
+    t10 = (t14 - t10) * 0.707106781187;
+    t14 = t02 + t22;
+    t02 = (t02 - t22) * 0.707106781187;
+    t14 = t14 + t02;
+    t04 = t04 + t14;
+    t14 = t14 + t10;
+    t10 = t10 + t02;
+    t16 = t16 + t04;
+    t04 = t04 + t08;
+    t08 = t08 + t14;
+    t14 = t14 + t28;
+    t28 = t28 + t10;
+    t10 = t10 + t20;
+    t20 = t20 + t02;
+    t21 = t21 + t16;
+    t16 = t16 + t32;
+    t32 = t32 + t04;
+    t04 = t04 + t06;
+    t06 = t06 + t08;
+    t08 = t08 + t18;
+    t18 = t18 + t14;
+    t14 = t14 + t30;
+    t30 = t30 + t28;
+    t28 = t28 + t26;
+    t26 = t26 + t10;
+    t10 = t10 + t12;
+    t12 = t12 + t20;
+    t20 = t20 + t24;
+    t24 = t24 + t02;
+    va_v[dp + 48] = 0.0 - t33;
+    va_v[dp + 49] = 0.0 - t21;
+    va_v[dp + 47] = va_v[dp + 49];
+    va_v[dp + 50] = 0.0 - t17;
+    va_v[dp + 46] = va_v[dp + 50];
+    va_v[dp + 51] = 0.0 - t16;
+    va_v[dp + 45] = va_v[dp + 51];
+    va_v[dp + 52] = 0.0 - t01;
+    va_v[dp + 44] = va_v[dp + 52];
+    va_v[dp + 53] = 0.0 - t32;
+    va_v[dp + 43] = va_v[dp + 53];
+    va_v[dp + 54] = 0.0 - t29;
+    va_v[dp + 42] = va_v[dp + 54];
+    va_v[dp + 55] = 0.0 - t04;
+    va_v[dp + 41] = va_v[dp + 55];
+    va_v[dp + 56] = 0.0 - t03;
+    va_v[dp + 40] = va_v[dp + 56];
+    va_v[dp + 57] = 0.0 - t06;
+    va_v[dp + 39] = va_v[dp + 57];
+    va_v[dp + 58] = 0.0 - t25;
+    va_v[dp + 38] = va_v[dp + 58];
+    va_v[dp + 59] = 0.0 - t08;
+    va_v[dp + 37] = va_v[dp + 59];
+    va_v[dp + 60] = 0.0 - t11;
+    va_v[dp + 36] = va_v[dp + 60];
+    va_v[dp + 61] = 0.0 - t18;
+    va_v[dp + 35] = va_v[dp + 61];
+    va_v[dp + 62] = 0.0 - t09;
+    va_v[dp + 34] = va_v[dp + 62];
+    va_v[dp + 63] = 0.0 - t14;
+    va_v[dp + 33] = va_v[dp + 63];
+    va_v[dp + 32] = 0.0 - t05;
+    va_v[dp + 0] = t05;
+    va_v[dp + 31] = 0.0 - t30;
+    va_v[dp + 1] = t30;
+    va_v[dp + 30] = 0.0 - t27;
+    va_v[dp + 2] = t27;
+    va_v[dp + 29] = 0.0 - t28;
+    va_v[dp + 3] = t28;
+    va_v[dp + 28] = 0.0 - t07;
+    va_v[dp + 4] = t07;
+    va_v[dp + 27] = 0.0 - t26;
+    va_v[dp + 5] = t26;
+    va_v[dp + 26] = 0.0 - t23;
+    va_v[dp + 6] = t23;
+    va_v[dp + 25] = 0.0 - t10;
+    va_v[dp + 7] = t10;
+    va_v[dp + 24] = 0.0 - t15;
+    va_v[dp + 8] = t15;
+    va_v[dp + 23] = 0.0 - t12;
+    va_v[dp + 9] = t12;
+    va_v[dp + 22] = 0.0 - t19;
+    va_v[dp + 10] = t19;
+    va_v[dp + 21] = 0.0 - t20;
+    va_v[dp + 11] = t20;
+    va_v[dp + 20] = 0.0 - t13;
+    va_v[dp + 12] = t13;
+    va_v[dp + 19] = 0.0 - t24;
+    va_v[dp + 13] = t24;
+    va_v[dp + 18] = 0.0 - t31;
+    va_v[dp + 14] = t31;
+    va_v[dp + 17] = 0.0 - t02;
+    va_v[dp + 15] = t02;
+    va_v[dp + 16] = 0.0;
+    return 0;
+}
+// the film's sound, streamed (video_sound)
+var vs_on: i64;
+var vs_stream: i64;
+var vs_voice: i64;
+var vs_gen: i64;
+var vs_hooked: i64;
+var vs_src: [f64; 4608];   // decoded samples not yet given, stereo, as i16
+var vs_n: i64;
+var vs_base: i64;          // the sample of the sound vs_src starts at
+var vs_o: i64;             // frames given to the stream since sample 0
+var vs_last: i64;
+var vs_buf: i64;
+
+// ------------------------------------------------------------ the film ---
+var vd_img: i64;           // the picture video_image gives
+var vd_pic: i64;           // the picture's time, ms; -1 none yet
+var vd_pts_v: f64;         // the first time stamps of the picture and of the
+var vd_pts_a: f64;         // sound, seconds: the sound starts this much later
+var vd_count: i64;         // pictures in the film
+var vd_pics: i64;          // each picture's place in the video stream: its
+var vd_ptype: i64;         // start code's, its type, the time it is shown at
+var vd_pshow: i64;         // (a number: pictures before it)
+var vd_afr: i64;           // each sound frame's place in the sound's stream
+
+// the time stamp of a packet (33 bits, 90 kHz) at p, seconds
+fn vd_time_at(p: i64) -> f64 {
+    var c: i64 = ((vd_b(p) >> 1) & 7) << 30;
+    c = c | (vd_b(p + 1) << 22) | ((vd_b(p + 2) >> 1) << 15);
+    c = c | (vd_b(p + 3) << 7) | (vd_b(p + 4) >> 1);
+    return (c as f64) / 90000.0;
+}
+
+// the program stream: the payloads of video 0xE0 and sound 0xC0 into
+// their streams, one after the other
+fn vd_demux() -> i64 {
+    var p: i64 = vd_file;
+    var n: i64 = vd_size;
+    var i: i64 = 0;
+    vd_pts_v = -1.0;
+    vd_pts_a = -1.0;
+    while i + 6 <= n {
+        if vd_b(p + i) != 0 || vd_b(p + i + 1) != 0 || vd_b(p + i + 2) != 1 {
+            i = i + 1;
+        } else {
+            var code: i64 = vd_b(p + i + 3);
+            if code == 186 {
+                // a pack header: MPEG-1's is 12 bytes, MPEG-2's 14 and stuffing
+                if (vd_b(p + i + 4) >> 6) == 1 {
+                    i = i + 14 + (vd_b(p + i + 13) & 7);
+                } else {
+                    i = i + 12;
+                }
+            } else if code == 185 {
+                i = i + 4;
+            } else if code >= 187 {
+                var len: i64 = (vd_b(p + i + 4) << 8) | vd_b(p + i + 5);
+                var at: i64 = i + 6;
+                var end: i64 = at + len;
+                if end > n { end = n; }
+                if code == 224 || code == 192 {
+                    // stuffing, the buffer's size, the time stamps
+                    while at < end && vd_b(p + at) == 255 { at = at + 1; }
+                    if at < end && (vd_b(p + at) >> 6) == 1 { at = at + 2; }
+                    var pts: f64 = -1.0;
+                    if at < end && (vd_b(p + at) >> 4) == 3 {
+                        pts = vd_time_at(p + at);
+                        at = at + 10;
+                    } else if at < end && (vd_b(p + at) >> 4) == 2 {
+                        pts = vd_time_at(p + at);
+                        at = at + 5;
+                    } else if at < end && (vd_b(p + at) >> 6) == 2 {
+                        // MPEG-2's header: its length is in its third byte
+                        if (vd_b(p + at + 1) & 128) != 0 { pts = vd_time_at(p + at + 3); }
+                        at = at + 3 + vd_b(p + at + 2);
+                    } else {
+                        at = at + 1;
+                    }
+                    if at < end {
+                        if code == 224 {
+                            if vd_pts_v < 0.0 { vd_pts_v = pts; }
+                            hp_copy(vd_ves + vd_vlen, p + at, end - at);
+                            vd_vlen = vd_vlen + end - at;
+                        } else {
+                            if vd_pts_a < 0.0 { vd_pts_a = pts; }
+                            hp_copy(vd_aes + vd_alen, p + at, end - at);
+                            vd_alen = vd_alen + end - at;
+                        }
+                    }
+                }
+                i = i + 6 + len;
+            } else {
+                i = i + 4;
+            }
+        }
+    }
+    return 1;
+}
+
+// where each picture starts, its type, and when it is shown (groups of
+// pictures number theirs from 0); where each sound frame starts
+fn vd_index() -> i64 {
+    vd_pics = list_new();
+    vd_ptype = list_new();
+    vd_pshow = list_new();
+    vd_afr = list_new();
+    br_p[0] = vd_ves;
+    br_n[0] = vd_vlen;
+    br_bit[0] = 0;
+    var gop: i64 = 0;
+    var seen: i64 = 0;
+    var c: i64 = br_next_start(0);
+    while c != -1 {
+        if c == START_GOP {
+            gop = seen;
+        } else if c == START_PICTURE {
+            var at: i64 = (br_bit[0] >> 3) - 4;
+            var tref: i64 = br_read(0, 10);
+            var t: i64 = br_read(0, 3);
+            list_add(vd_pics, at);
+            list_add(vd_ptype, t);
+            list_add(vd_pshow, gop + tref);
+            seen = seen + 1;
+        }
+        c = br_next_start(0);
+    }
+    vd_count = seen;
+    // the sound's frames: a header each, at a size the header gives
+    if vd_alen > 0 {
+        br_p[1] = vd_aes;
+        br_n[1] = vd_alen;
+        br_bit[1] = 0;
+        va_reset();
+        var go: i64 = 1;
+        while go == 1 {
+            // where the reader is before the header: decoding from there
+            // finds this frame again
+            var before: i64 = br_bit[1];
+            var size: i64 = va_header();
+            if size <= 0 || !br_has(1, size << 3) {
+                go = 0;
+            } else {
+                list_add(vd_afr, before);
+                br_bit[1] = br_bit[1] + (size << 3);
+            }
+        }
+    }
+    return 1;
+}
+
+fn vd_check() -> i64 {
+    if vd_on == 0 {
+        fail "no film is open" hint "video_open first";
+    }
+    return 1;
+}
+
+fn vv_restart() -> i64 {
+    br_p[0] = vd_ves;
+    br_n[0] = vd_vlen;
+    br_bit[0] = 0;
+    vv_start = -1;
+    vv_has_ref = 0;
+    vv_frames = 0;
+    vv_time = 0.0;
+    vv_skip_b = 0;
+    vv_ptype = 0;
+    vv_out = -1;
+    return 0;
+}
+
+fn video_open(path: i64) -> i64 {
+    vt_init();
+    if vd_on == 1 { video_close(); }
+    var f: i64 = file_open(path, "r");
+    if f == 0 {
+        fail "cannot read the film" hint "check the name";
+    }
+    var size: i64 = file_size(f);
+    vd_file = hp_alloc(size + 16);
+    vd_ves = hp_alloc(size + 16);
+    vd_aes = hp_alloc(size + 16);
+    if vd_file == 0 || vd_ves == 0 || vd_aes == 0 {
+        file_close(f);
+        fail "no memory for the film" hint "a shorter one";
+    }
+    file_read_at(f, 0, vd_file, size);
+    file_close(f);
+    vd_size = size;
+    vd_vlen = 0;
+    vd_alen = 0;
+    if size > 4 && vd_b(vd_file) == 0 && vd_b(vd_file + 1) == 0 && vd_b(vd_file + 2) == 1 && vd_b(vd_file + 3) == START_SEQUENCE {
+        // a video stream alone (.m1v)
+        hp_copy(vd_ves, vd_file, size);
+        vd_vlen = size;
+        vd_pts_v = 0.0;
+        vd_pts_a = 0.0;
+    } else {
+        vd_demux();
+    }
+    hp_zero(vd_ves + vd_vlen, 16);
+    hp_zero(vd_aes + vd_alen, 16);
+    vv_has_seq = 0;
+    vd_index();
+    vv_restart();
+    if vv_has_header() == 0 || vd_count == 0 {
+        fail "this is no MPEG-1 film" hint "an .mpg of MPEG-1 video (ffmpeg: -c:v mpeg1video -c:a mp2 -f mpeg)";
+    }
+    vv_restart();
+    if vd_img != 0 { image_free(vd_img); }
+    vd_img = image_new(vv_w, vv_h);
+    vd_pic = -1;
+    vd_on = 1;
+    return 1;
+}
+
+fn video_close() -> i64 {
+    if vd_on == 0 { return 0; }
+    if vs_voice != 0 { audio_stop(vs_voice); }
+    vs_on = 0;
+    hp_release(vd_file);
+    hp_release(vd_ves);
+    hp_release(vd_aes);
+    hp_release(vv_data);
+    vd_on = 0;
+    vv_has_seq = 0;
+    return 1;
+}
+
+fn video_width() -> i64 { vd_check(); return vv_w; }
+fn video_height() -> i64 { vd_check(); return vv_h; }
+fn video_fps() -> f64 { vd_check(); return vv_fps; }
+fn video_length() -> i64 {
+    vd_check();
+    return ((vd_count as f64) * 1000.0 / vv_fps) as i64;
+}
+fn video_has_sound() -> i64 {
+    vd_check();
+    return list_len(vd_afr) > 0;
+}
+fn video_time() -> i64 { vd_check(); return vd_pic; }
+
+// the next picture into video_image: 1, 0 after the last
+fn video_next() -> i64 {
+    vd_check();
+    var t: f64 = vv_time;
+    if vv_decode() == 0 { return 0; }
+    lock_take(HP_LOCK);
+    var q: i64 = im_pixels(vd_img);
+    lock_give(HP_LOCK);
+    vv_to_bgra(vv_out, q + 16);
+    vd_pic = (t * 1000.0) as i64;
+    return 1;
+}
+
+// the pictures up to the one shown at ms: 1 when the picture changed
+fn video_frame_at(ms: i64) -> i64 {
+    vd_check();
+    var changed: i64 = 0;
+    if ms < vd_pic {
+        video_seek(ms);
+        changed = 1;
+    }
+    var go: i64 = 1;
+    while go == 1 && (vv_time * 1000.0) <= (ms as f64) {
+        if video_next() == 1 {
+            changed = 1;
+        } else {
+            go = 0;
+        }
+    }
+    if vd_pic < 0 && video_next() == 1 { changed = 1; }
+    return changed;
+}
+
+// to the picture shown at ms: the reference picture before it decoded
+// first, then the ones after it to there
+fn video_seek(ms0: i64) -> i64 {
+    vd_check();
+    var ms: i64 = ms0;
+    if ms < 0 { ms = 0; }
+    var want: i64 = ((ms as f64) * vv_fps / 1000.0) as i64;
+    if want >= vd_count { want = vd_count - 1; }
+    // the last intra picture (in the stream's order) shown at or before it
+    var best: i64 = 0;
+    var k: i64 = 0;
+    while k < vd_count {
+        if list_get(vd_ptype, k) == PIC_I && list_get(vd_pshow, k) <= want {
+            best = k;
+        }
+        k = k + 1;
+    }
+    vv_restart();
+    if best > 0 {
+        br_bit[0] = (list_get(vd_pics, best) + 4) << 3;
+        vv_start = START_PICTURE;
+        vv_skip_b = 1;
+        vv_frames = list_get(vd_pshow, best);
+        vv_time = (vv_frames as f64) / vv_fps;
+    }
+    vd_pic = -1;
+    var go: i64 = 1;
+    while go == 1 {
+        if video_next() == 0 {
+            go = 0;
+        } else if (vv_time * 1000.0) > (ms as f64) {
+            go = 0;
+        }
+    }
+    return 1;
+}
+
+fn video_image() -> i64 {
+    vd_check();
+    if vd_pic < 0 { video_next(); }
+    return vd_img;
+}
+
+// ----------------------------------------------------------- its sound ---
+// a stream of std_audio, filled as it plays from the sound's frames,
+// made the device's rate
+
+fn vs_i16(x0: f64) -> f64 {
+    var x: f64 = x0 * 32767.0;
+    if x > 32767.0 { x = 32767.0; }
+    if x < -32768.0 { x = -32768.0; }
+    return (x as i64) as f64;
+}
+
+// the next sound frame into vs_src: 0 at the end
+fn vs_more() -> i64 {
+    if va_decode() == 0 { return 0; }
+    var k: i64 = vs_o * va_rate / au_rate - vs_base;
+    if k > vs_n { k = vs_n; }
+    if k > 0 {
+        var i: i64 = 0;
+        while i < (vs_n - k) * 2 {
+            vs_src[i] = vs_src[i + k * 2];
+            i = i + 1;
+        }
+        vs_n = vs_n - k;
+        vs_base = vs_base + k;
+    }
+    var j: i64 = 0;
+    while j < 1152 && vs_n < 2304 {
+        vs_src[vs_n * 2] = vs_i16(va_out[j * 2]);
+        vs_src[vs_n * 2 + 1] = vs_i16(va_out[j * 2 + 1]);
+        vs_n = vs_n + 1;
+        j = j + 1;
+    }
+    return 1;
+}
+
+fn vs_fill(arg: i64) -> i64 {
+    if vs_on == 0 { return 0; }
+    if vs_voice != 0 && audio_playing(vs_voice) == 0 {
+        vs_on = 0;
+        return 0;
+    }
+    var room: i64 = audio_stream_room(vs_stream);
+    var made: i64 = 0;
+    var inbuf: i64 = 0;
+    var going: i64 = 1;
+    var hz: i64 = va_rate;
+    while made < room && going == 1 {
+        var pos: i64 = vs_o * hz * 65536 / au_rate;
+        var k: i64 = (pos >> 16) - vs_base;
+        var k2: i64 = k + 1;
+        if k2 >= vs_n && vs_last == 0 {
+            if vs_more() == 0 { vs_last = 1; }
+        } else if vs_last == 1 && vs_o >= (vs_base + vs_n) * au_rate / hz {
+            going = 0;
+        } else {
+            if k2 >= vs_n { k2 = vs_n - 1; }
+            if k >= vs_n { k = vs_n - 1; }
+            if k < 0 { k = 0; }
+            if k2 < 0 { k2 = 0; }
+            var fr: i64 = pos & 65535;
+            var c: i64 = 0;
+            while c < 2 {
+                var a: i64 = vs_src[k * 2 + c] as i64;
+                var b: i64 = vs_src[k2 * 2 + c] as i64;
+                var v: i64 = a + (b - a) * fr / 65536;
+                raw { poke16(vs_buf + inbuf * 4 + c * 2, v); }
+                c = c + 1;
+            }
+            vs_o = vs_o + 1;
+            inbuf = inbuf + 1;
+            made = made + 1;
+            if inbuf == 1024 {
+                audio_stream_write(vs_stream, vs_buf, inbuf);
+                inbuf = 0;
+            }
+        }
+    }
+    if inbuf > 0 { audio_stream_write(vs_stream, vs_buf, inbuf); }
+    if going == 0 {
+        audio_stream_end(vs_stream);
+        vs_on = 0;
+    }
+    return made;
+}
+
+// the sound from frame (at the device's rate) of the film's time: the
+// frame before it decoded first, for the filter bank's history
+fn vs_from(frame0: i64) -> i64 {
+    var frame: i64 = frame0;
+    if frame < 0 { frame = 0; }
+    var t: i64 = frame * va_rate / au_rate;
+    var fi: i64 = t / 1152;
+    var nf: i64 = list_len(vd_afr);
+    br_p[1] = vd_aes;
+    br_n[1] = vd_alen;
+    va_reset();
+    if fi >= nf {
+        br_bit[1] = vd_alen * 8;
+    } else if fi > 0 {
+        br_bit[1] = list_get(vd_afr, fi - 1);
+        va_decode();
+    } else {
+        br_bit[1] = list_get(vd_afr, 0);
+    }
+    au_stream_restart(vs_stream, frame);
+    vs_o = frame;
+    vs_base = fi * 1152;
+    vs_n = 0;
+    vs_last = 0;
+    vs_on = 1;
+    return 1;
+}
+
+// st's position set (audio_seek): 1 when it is the film's
+fn vs_seek(st: i64, frame: i64) -> i64 {
+    if vd_on == 0 || st != vs_stream || vs_stream == 0 { return 0; }
+    vs_from(frame);
+    vs_fill(0);
+    return 1;
+}
+
+// the film's sound, from the time of the picture shown: its voice, 0 when
+// the film has none
+fn video_sound(volume: f64) -> i64 {
+    vd_check();
+    if au_on == 0 {
+        fail "the sound is not open" hint "audio_open first";
+    }
+    if list_len(vd_afr) == 0 { return 0; }
+    if vs_voice != 0 { audio_stop(vs_voice); }
+    vs_on = 0;
+    if vs_stream == 0 || vs_gen != au_gen {
+        vs_stream = audio_stream_new(au_rate / 2);
+        if vs_buf == 0 { vs_buf = hp_alloc(1024 * 4 + 8); }
+        vs_gen = au_gen;
+    }
+    if vs_hooked == 0 {
+        au_add_hook(vs_fill);
+        au_add_seekhook(vs_seek);
+        vs_hooked = 1;
+    }
+    var ms: i64 = vd_pic;
+    if ms < 0 { ms = 0; }
+    vs_voice = 0;
+    va_rate = vt_srate[va_srate_i];
+    vs_from(ms * au_rate / 1000);
+    vs_fill(0);
+    vs_voice = audio_stream_play(vs_stream, volume);
+    return vs_voice;
+}
+
+fn vt_text_vl_index() -> i64 {
+    return "2 0 4 6 8 10 0 0 12 14 0 0 16 18 0 0 20 22 24 26 28 30 32 34 36 38 0 0 -1 40 -1 42 44 46 0 0 0 0 0 0 48 50 52 54 56 58 60 62 64 -1 -1 66 68 70 72 74 76 78 0 0 0 0 0 0 0 -1 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 2 0 -1 0 2 0 4 0 6 0 8 10 12 0 0 0 -1 0 2 4 6 8 0 0 10 12 0 0 14 16 0 0 18 20 0 0 -1 0 0 0 2 4 6 8 10 12 14 16 18 20 22 24 26 0 28 30 32 34 36 38 40 42 44 46 0 0 0 0 48 50 52 54 56 58 60 62 0 0 0 0 0 0 0 0 0 0 0 0 64 66 68 70 72 74 76 78 80 82 84 86 0 0 0 0 88 90 92 94 96 98 100 102 104 106 108 110 112 114 116 118 0 0 0 0 0 0 0 0 -1 120 122 124 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2 0 4 6 8 10 0 0 12 14 0 0 16 18 0 0 20 22 24 26 -1 28 30 32 34 36 0 0 -1 38 40 42 0 0 0 0 0 0 44 46 48 50 52 54 56 58 60 62 64 66 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2 4 0 0 6 8 0 0 0 10 0 12 0 14 0 16 0 -1 2 4 0 0 0 6 0 8 0 10 0 12 0 14 0 16 0 -1 2 0 4 6 8 10 12 0 14 16 18 20 0 0 22 24 26 28 30 0 0 0 32 0 34 36 0 0 0 0 38 40 42 44 0 0 0 0 46 48 50 52 54 56 58 60 0 0 0 0 0 0 0 0 62 64 66 68 70 72 74 76 78 80 82 84 86 88 90 92 0 0 0 0 0 0 0 0 94 96 98 100 102 104 106 108 110 112 114 116 118 120 122 124 -1 126 128 130 132 134 136 138 140 142 144 146 148 150 152 154 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 156 158 160 162 164 166 168 170 172 174 176 178 180 182 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 184 186 188 190 192 194 196 198 200 202 204 206 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 208 210 212 214 216 218 220 222 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+}
+fn vt_text_vl_value() -> i64 {
+    return "0 1 0 0 0 0 3 2 0 0 5 4 0 0 7 6 0 0 0 0 0 0 0 0 0 0 9 8 0 0 0 0 0 0 15 14 13 12 11 10 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 21 20 19 18 17 16 35 0 0 34 33 32 31 30 29 28 27 26 25 24 23 22 0 1 0 17 0 10 0 2 0 8 0 0 0 18 26 1 0 17 0 0 0 0 12 14 0 0 4 6 0 0 8 10 0 0 30 1 0 17 22 26 0 0 0 0 0 0 0 0 0 0 0 0 0 60 0 0 0 0 0 0 0 0 0 0 32 16 8 4 0 0 0 0 0 0 0 0 62 2 61 1 56 52 44 28 40 20 48 12 0 0 0 0 0 0 0 0 0 0 0 0 63 3 36 24 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 34 18 10 6 33 17 9 5 0 0 0 0 58 54 46 30 57 53 45 29 38 26 37 25 43 23 51 15 42 22 50 14 41 21 49 13 35 19 11 7 39 27 59 55 47 31 0 0 0 0 0 0 1 -1 0 0 2 -2 0 0 3 -3 0 0 0 0 0 0 0 0 0 0 4 -4 0 0 0 0 7 -7 6 -6 5 -5 0 0 0 0 0 0 0 0 0 0 0 0 10 -10 9 -9 8 -8 16 -16 15 -15 14 -14 13 -13 12 -12 11 -11 0 0 1 2 0 0 0 3 4 0 5 0 6 0 7 0 8 0 0 0 0 1 2 0 3 0 4 0 5 0 6 0 7 0 8 0 0 1 0 0 0 0 0 257 0 0 0 0 2 513 0 0 0 0 0 3 1025 769 0 65535 0 0 1793 1537 258 1281 0 0 0 0 514 2305 4 2049 0 0 0 0 0 0 0 0 3329 6 3073 2817 770 259 5 2561 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4097 1282 7 515 260 3841 3585 1026 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 11 2050 1027 10 516 1794 5377 5121 9 4865 4609 261 771 8 1538 4353 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2562 2306 1283 772 517 263 262 15 14 13 12 6657 6401 6145 5889 5633 0 0 0 0 0 0 0 0 0 0 0 0 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 0 0 0 0 0 0 0 0 40 39 38 37 36 35 34 33 32 270 269 268 267 266 265 264 274 273 272 271 1539 4098 3842 3586 3330 3074 2818 7937 7681 7425 7169 6913";
+}
+fn vt_text_zigzag() -> i64 {
+    return "0 1 8 16 9 2 3 10 17 24 32 25 18 11 4 5 12 19 26 33 40 48 41 34 27 20 13 6 7 14 21 28 35 42 49 56 57 50 43 36 29 22 15 23 30 37 44 51 58 59 52 45 38 31 39 46 53 60 61 54 47 55 62 63";
+}
+fn vt_text_intra_q() -> i64 {
+    return "8 16 19 22 26 27 29 34 16 16 22 24 27 29 34 37 19 22 26 27 29 34 34 38 22 22 26 27 29 34 37 40 22 26 27 29 32 35 40 48 26 27 29 32 35 40 48 58 26 27 29 34 38 46 56 69 27 29 35 38 46 56 69 83";
+}
+fn vt_text_nonintra_q() -> i64 {
+    return "16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16";
+}
+fn vt_text_premul() -> i64 {
+    return "32 44 42 38 32 25 17 9 44 62 58 52 44 35 24 12 42 58 55 49 42 33 23 12 38 52 49 44 38 30 20 10 32 44 42 38 32 25 17 9 25 35 33 30 25 20 14 7 17 24 23 20 17 14 9 5 9 12 12 10 9 7 5 2";
+}
+fn vt_text_rate() -> i64 {
+    return "0.0 23.976 24.0 25.0 29.97 30.0 50.0 59.94 60.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0";
+}
+fn vt_text_window() -> i64 {
+    return "0.0 -0.5 -0.5 -0.5 -0.5 -0.5 -0.5 -1.0 -1.0 -1.0 -1.0 -1.5 -1.5 -2.0 -2.0 -2.5 -2.5 -3.0 -3.5 -3.5 -4.0 -4.5 -5.0 -5.5 -6.5 -7.0 -8.0 -8.5 -9.5 -10.5 -12.0 -13.0 -14.5 -15.5 -17.5 -19.0 -20.5 -22.5 -24.5 -26.5 -29.0 -31.5 -34.0 -36.5 -39.5 -42.5 -45.5 -48.5 -52.0 -55.5 -58.5 -62.5 -66.0 -69.5 -73.5 -77.0 -80.5 -84.5 -88.0 -91.5 -95.0 -98.0 -101.0 -104.0 106.5 109.0 111.0 112.5 113.5 114.0 114.0 113.5 112.0 110.5 107.5 104.0 100.0 94.5 88.5 81.5 73.0 63.5 53.0 41.5 28.5 14.5 -1.0 -18.0 -36.0 -55.5 -76.5 -98.5 -122.0 -147.0 -173.5 -200.5 -229.5 -259.5 -290.5 -322.5 -355.5 -389.5 -424.0 -459.5 -495.5 -532.0 -568.5 -605.0 -641.5 -678.0 -714.0 -749.0 -783.5 -817.0 -849.0 -879.5 -908.5 -935.0 -959.5 -981.0 -1000.5 -1016.0 -1028.5 -1037.5 -1042.5 -1043.5 -1040.0 -1031.5 1018.5 1000.0 976.0 946.5 911.0 869.5 822.0 767.5 707.0 640.0 565.5 485.0 397.0 302.5 201.0 92.5 -22.5 -144.0 -272.5 -407.0 -547.5 -694.0 -846.0 -1003.0 -1165.0 -1331.5 -1502.0 -1675.5 -1852.5 -2031.5 -2212.5 -2394.0 -2576.5 -2758.5 -2939.5 -3118.5 -3294.5 -3467.5 -3635.5 -3798.5 -3955.0 -4104.5 -4245.5 -4377.5 -4499.0 -4609.5 -4708.0 -4792.5 -4863.5 -4919.0 -4958.0 -4979.5 -4983.0 -4967.5 -4931.5 -4875.0 -4796.0 -4694.5 -4569.5 -4420.0 -4246.0 -4046.0 -3820.0 -3567.0 3287.0 2979.5 2644.0 2280.5 1888.0 1467.5 1018.5 541.0 35.0 -499.0 -1061.0 -1650.0 -2266.5 -2909.0 -3577.0 -4270.0 -4987.5 -5727.5 -6490.0 -7274.0 -8077.5 -8899.5 -9739.0 -10594.5 -11464.5 -12347.0 -13241.0 -14144.5 -15056.0 -15973.5 -16895.5 -17820.0 -18744.5 -19668.0 -20588.0 -21503.0 -22410.5 -23308.5 -24195.0 -25068.5 -25926.5 -26767.0 -27589.0 -28389.0 -29166.5 -29919.0 -30644.5 -31342.0 -32009.5 -32645.0 -33247.0 -33814.5 -34346.0 -34839.5 -35295.0 -35710.0 -36084.5 -36417.5 -36707.5 -36954.0 -37156.5 -37315.0 -37428.0 -37496.0 37519.0 37496.0 37428.0 37315.0 37156.5 36954.0 36707.5 36417.5 36084.5 35710.0 35295.0 34839.5 34346.0 33814.5 33247.0 32645.0 32009.5 31342.0 30644.5 29919.0 29166.5 28389.0 27589.0 26767.0 25926.5 25068.5 24195.0 23308.5 22410.5 21503.0 20588.0 19668.0 18744.5 17820.0 16895.5 15973.5 15056.0 14144.5 13241.0 12347.0 11464.5 10594.5 9739.0 8899.5 8077.5 7274.0 6490.0 5727.5 4987.5 4270.0 3577.0 2909.0 2266.5 1650.0 1061.0 499.0 -35.0 -541.0 -1018.5 -1467.5 -1888.0 -2280.5 -2644.0 -2979.5 3287.0 3567.0 3820.0 4046.0 4246.0 4420.0 4569.5 4694.5 4796.0 4875.0 4931.5 4967.5 4983.0 4979.5 4958.0 4919.0 4863.5 4792.5 4708.0 4609.5 4499.0 4377.5 4245.5 4104.5 3955.0 3798.5 3635.5 3467.5 3294.5 3118.5 2939.5 2758.5 2576.5 2394.0 2212.5 2031.5 1852.5 1675.5 1502.0 1331.5 1165.0 1003.0 846.0 694.0 547.5 407.0 272.5 144.0 22.5 -92.5 -201.0 -302.5 -397.0 -485.0 -565.5 -640.0 -707.0 -767.5 -822.0 -869.5 -911.0 -946.5 -976.0 -1000.0 1018.5 1031.5 1040.0 1043.5 1042.5 1037.5 1028.5 1016.0 1000.5 981.0 959.5 935.0 908.5 879.5 849.0 817.0 783.5 749.0 714.0 678.0 641.5 605.0 568.5 532.0 495.5 459.5 424.0 389.5 355.5 322.5 290.5 259.5 229.5 200.5 173.5 147.0 122.0 98.5 76.5 55.5 36.0 18.0 1.0 -14.5 -28.5 -41.5 -53.0 -63.5 -73.0 -81.5 -88.5 -94.5 -100.0 -104.0 -107.5 -110.5 -112.0 -113.5 -114.0 -114.0 -113.5 -112.5 -111.0 -109.0 106.5 104.0 101.0 98.0 95.0 91.5 88.0 84.5 80.5 77.0 73.5 69.5 66.0 62.5 58.5 55.5 52.0 48.5 45.5 42.5 39.5 36.5 34.0 31.5 29.0 26.5 24.5 22.5 20.5 19.0 17.5 15.5 14.5 13.0 12.0 10.5 9.5 8.5 8.0 7.0 6.5 5.5 5.0 4.5 4.0 3.5 3.5 3.0 2.5 2.5 2.0 2.0 1.5 1.5 1.0 1.0 1.0 1.0 0.5 0.5 0.5 0.5 0.5 0.5";
+}
+fn vt_text_srate() -> i64 {
+    return "44100 48000 32000 0 22050 24000 16000 0";
+}
+fn vt_text_brate() -> i64 {
+    return "32 48 56 64 80 96 112 128 160 192 224 256 320 384 8 16 24 32 40 48 56 64 80 96 112 128 144 160";
+}
+fn vt_text_sfbase() -> i64 {
+    return "33554432 26632170 21137968";
+}
+fn vt_text_lut1() -> i64 {
+    return "0 0 1 1 1 2 2 2 2 2 2 2 2 2 0 0 0 0 0 0 0 0 1 1 1 2 2 2 2 2 0 0";
+}
+fn vt_text_lut2() -> i64 {
+    return "8 8 12 91 91 91 94 91 94";
+}
+fn vt_text_lut3() -> i64 {
+    return "68 68 52 52 52 52 52 52 52 52 52 52 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 67 67 67 66 66 66 66 66 66 66 66 49 49 49 49 49 49 49 49 49 49 49 49 32 32 32 32 32 32 32 0 0 69 69 69 69 52 52 52 52 52 52 52 36 36 36 36 36 36 36 36 36 36 36 36 36 36 36 36 36 36 36 0 0";
+}
+fn vt_text_lut4() -> i64 {
+    return "0 1 2 17 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 3 4 5 6 17 0 0 0 0 0 0 0 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 17 0 1 3 5 6 7 8 9 10 11 12 13 14 15 16 17 0 1 2 4 5 6 7 8 9 10 11 12 13 14 15 17 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15";
+}
+fn vt_text_qtab() -> i64 {
+    return "3 1 5 5 1 7 7 0 3 9 1 10 15 0 4 31 0 5 63 0 6 127 0 7 255 0 8 511 0 9 1023 0 10 2047 0 11 4095 0 12 8191 0 13 16383 0 14 32767 0 15 65535 0 16";
+}

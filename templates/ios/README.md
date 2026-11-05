@@ -47,6 +47,7 @@ iPhones themselves.
 | `kron_app_start(w, h)`           | starts `main` in a thread of its own     |
 | `kron_app_frame(buffer, bytes)`  | the last picture `window_show` gave      |
 | `kron_app_touch(phase, x, y)`    | the mouse's left button                  |
+| `kron_app_touch_id(phase, id, x, y)` | `window_touches`, each finger        |
 | `kron_app_key(key, ch)`          | `window_key`, `window_char`              |
 | `kron_app_wants_keyboard()`      | a box to type in has the focus           |
 

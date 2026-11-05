@@ -18,11 +18,20 @@ kron_definitions
 // UDP: datagrams, for games and discovery on a LAN.
 //   net_udp_open(port)                 a UDP socket on every interface; 0 any port
 //   net_udp_open_on(a, b, c, d, port)  the same, on one address
+//   net_udp_open_shared(port)          a UDP socket on a port other sockets
+//   net_udp_open_shared_on(a, b, c, d, port)  may use too (SO_REUSEADDR):
+//                                      several programs, or an engine and its
+//                                      tools, all hearing the same broadcasts
 //   net_udp_send(sock, a, b, c, d, port, address, length)
 //                                      one datagram to a.b.c.d:port; bytes sent
 //   net_udp_recv(sock, address, capacity)
 //                                      one datagram: its bytes (cut to capacity),
 //                                      waiting for it if none is there
+//   net_udp_try_recv(sock, address, capacity)
+//                                      the same, never waiting: -1 when no
+//                                      datagram is there (a game's frame loop)
+//   net_nonblocking(sock, on)          1: every recv, send and accept of sock
+//                                      returns at once instead of waiting
 //   net_from_ip(i)  net_from_port()    who sent the last datagram received:
 //                                      octet i (0 to 3) of its address, its port
 //   net_udp_broadcast(sock, on)        1 lets it send to 255.255.255.255
@@ -62,6 +71,10 @@ const NET_SYS_RECVFROM: i64 = 45;
 const NET_SYS_BIND: i64 = 49;
 const NET_SYS_LISTEN: i64 = 50;
 const NET_SYS_SETSOCKOPT: i64 = 54;
+const NET_SYS_FCNTL: i64 = 72;
+const NET_F_GETFL: i64 = 3;
+const NET_F_SETFL: i64 = 4;
+const NET_O_NONBLOCK: i64 = 2048;
 const NET_SOL_SOCKET: i64 = 1;
 const NET_SO_REUSEADDR: i64 = 2;
 const NET_SO_BROADCAST: i64 = 6;
@@ -83,6 +96,7 @@ shared var p_recvfrom: i64;
 shared var p_poll: i64;
 shared var p_setsockopt: i64;
 shared var p_lasterr: i64;
+shared var p_ioctl: i64;
 shared var net_from: [i64; 2];         // the sender of the last datagram received
 shared var net_fromlen: [i64; 1];
 
@@ -146,6 +160,7 @@ fn net_init() -> i64 {
         p_poll = dll_proc(lib, "WSAPoll");
         p_setsockopt = dll_proc(lib, "setsockopt");
         p_lasterr = dll_proc(lib, "WSAGetLastError");
+        p_ioctl = dll_proc(lib, "ioctlsocket");
         r = call p_startup(514, &net_wsa);
     }
     r = net_int(r);
@@ -442,7 +457,38 @@ fn net_sys_poll(s: i64, ms: i64) -> i64 {
     return net_int(r);
 }
 
+// SO_REUSEADDR on s, before its bind: the port may be in use by other
+// sockets that set it too (Linux sets it at every bind already)
+fn net_sys_reuse(s: i64) -> i64 {
+    var r: i64 = 0;
+    var one: [i64; 1];
+    one[0] = 1;
+    if net_is_linux() {
+        raw {
+            r = syscall(NET_SYS_SETSOCKOPT, s, NET_SOL_SOCKET, NET_SO_REUSEADDR, &one, 4);
+        }
+        return net_linux(r);
+    }
+    // SOL_SOCKET 0xFFFF, SO_REUSEADDR 4 on Windows
+    raw {
+        r = call p_setsockopt(s, 65535, 4, &one, 4);
+    }
+    return net_int(r);
+}
+
 fn net_udp_open_on(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    return net_udp_open_how(a, b, c, d, port, 0);
+}
+
+fn net_udp_open_shared_on(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
+    return net_udp_open_how(a, b, c, d, port, 1);
+}
+
+fn net_udp_open_shared(port: i64) -> i64 {
+    return net_udp_open_how(0, 0, 0, 0, port, 1);
+}
+
+fn net_udp_open_how(a: i64, b: i64, c: i64, d: i64, port: i64, shared_port: i64) -> i64 {
     var s: i64 = 0;
     var addr: [i64; 2];
     net_init();
@@ -452,6 +498,12 @@ fn net_udp_open_on(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
     s = net_sys_udp();
     if s == -1 {
         fail "cannot make a UDP socket" hint "the system refused: too many open sockets?";
+    }
+    if shared_port != 0 {
+        if net_sys_reuse(s) == -1 {
+            net_sys_close(s);
+            fail "the port cannot be shared" hint "the system refused SO_REUSEADDR";
+        }
     }
     addr[0] = net_addr(a, b, c, d, port);
     addr[1] = 0;
@@ -496,6 +548,72 @@ fn net_udp_recv(sock: i64, address: i64, capacity: i64) -> i64 {
         fail "nothing could be received" hint "the socket may be closed";
     }
     return n;
+}
+
+// one datagram if one is there, never waiting: its bytes, or -1 when none is
+fn net_udp_try_recv(sock: i64, address: i64, capacity: i64) -> i64 {
+    while net_sys_poll(sock, 0) > 0 {
+        var n: i64 = net_sys_recvfrom(sock, address, capacity);
+        if n != -1 {
+            return n;
+        }
+        if net_is_linux() {
+            return -1;
+        }
+        var e: i64 = 0;
+        raw { e = call p_lasterr(); }
+        e = net_int(e);
+        if e == 10040 {
+            return capacity;                 // WSAEMSGSIZE: cut, as on Linux
+        }
+        if e == 10035 {
+            return -1;                       // WSAEWOULDBLOCK: nothing after all
+        }
+        if e != 10054 {
+            fail "nothing could be received" hint "the socket may be closed";
+        }
+        // WSAECONNRESET: an earlier datagram's port had nobody; look again
+    }
+    return -1;
+}
+
+// 1: the socket's calls return at once instead of waiting (a recv with
+// nothing there fails, as net_udp_try_recv would say -1); 0: they wait again
+fn net_nonblocking(sock: i64, on: i64) -> i64 {
+    var r: i64 = 0;
+    var fl: i64 = 0;
+    if net_is_linux() {
+        raw {
+            fl = syscall(NET_SYS_FCNTL, sock, NET_F_GETFL, 0);
+        }
+        if fl >= 0 {
+            if on != 0 {
+                fl = fl | NET_O_NONBLOCK;
+            } else {
+                fl = fl & ~NET_O_NONBLOCK;
+            }
+            raw {
+                r = syscall(NET_SYS_FCNTL, sock, NET_F_SETFL, fl);
+            }
+        }
+        r = net_linux(r);
+        if fl < 0 {
+            r = -1;
+        }
+    } else {
+        // ioctlsocket(s, FIONBIO, &arg): FIONBIO is 0x8004667E
+        var arg: [i64; 1];
+        arg[0] = 0;
+        if on != 0 { arg[0] = 1; }
+        raw {
+            r = call p_ioctl(sock, 2147772030, &arg);
+        }
+        r = net_int(r);
+    }
+    if r == -1 {
+        fail "the socket's waiting could not be changed" hint "the system refused: is it open?";
+    }
+    return 1;
 }
 
 // octet i (0 to 3) of the address of the last datagram's sender
