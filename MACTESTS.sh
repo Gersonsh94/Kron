@@ -9,7 +9,9 @@
 #       bash MACTESTS.sh test_map   only the ones named
 #
 #   Each runs from this folder, as on the other systems, and its output is
-#   compared with tests/expected/NAME.txt.
+#   compared with tests/expected/NAME.txt. The GPU tests (gpu_*) draw with
+#   Metal without a window; each prints its checks and passes when it exits
+#   with 0.
 #
 #   The programs are signed ad hoc, as a linker signs what it builds. A file
 #   that arrived through a browser or AirDrop carries the quarantine mark,
@@ -17,6 +19,7 @@
 # ===========================================================================
 
 cd "$(dirname "$0")" || exit 1
+mkdir -p tests/tmp
 OUT=tests/mac
 EXP=tests/expected
 
@@ -51,6 +54,23 @@ for N in $LIST; do
         SKIP=$((SKIP + 1))
         continue
     fi
+    case "$N" in
+    gpu_*)
+        chmod +x "$OUT/$N"
+        xattr -d com.apple.quarantine "$OUT/$N" 2>/dev/null
+        "./$OUT/$N" > "$OUT/$N.out" 2>&1
+        if [ $? -eq 0 ]; then
+            echo "  PASS  $N  (Metal)"
+            PASS=$((PASS + 1))
+        else
+            echo "  FAIL  $N  (Metal)"
+            grep -v "^  ok" "$OUT/$N.out" | head -20
+            FAIL=$((FAIL + 1))
+            FAILED="$FAILED $N"
+        fi
+        continue
+        ;;
+    esac
     if [ ! -f "$EXP/$N.txt" ]; then
         echo "  OMIT  $N  (no reference)"
         SKIP=$((SKIP + 1))

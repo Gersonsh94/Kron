@@ -8,3 +8,8 @@
 *.asm linguist-detectable=false
 *.s   linguist-detectable=false
 *.inc linguist-detectable=false
+
+# The macOS tests MACTESTS.bat builds (tests/mac): programs, kept byte for
+# byte (no line endings changed) and out of GitHub's count of languages.
+tests/mac/* -text -diff linguist-generated=true
+tests/mac/LIST.txt text

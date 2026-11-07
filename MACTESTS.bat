@@ -9,7 +9,10 @@ REM
 REM       bash MACTESTS.sh
 REM
 REM   runs each one and compares its output with the same references the
-REM   other suites use.
+REM   other suites use. The GPU tests of tests\gpu are built too: on the Mac
+REM   they draw with Metal, without a window, and pass when they exit with 0.
+REM   Copy the whole folder (MACTESTS.sh, tests\expected, tests\audio and
+REM   tests\video are needed there), not tests\mac alone.
 REM
 REM     MACTESTS.bat            build
 REM     MACTESTS.bat /c:PATH    with another compiler binary
@@ -40,7 +43,7 @@ set LIST=%LIST% test_unsigned test_rec test_bits test_cast test_aparam test_bool
 set LIST=%LIST% test_stream test_slit test_mat test_nest test_slitr test_manyp
 set LIST=%LIST% test_kwfield test_enum test_fail test_size test_ufield test_pcond
 set LIST=%LIST% test_simd test_load test_chain test_strlib test_bounds
-set LIST=%LIST% test_bounds2 test_break test_bounds3 test_raw test_arena_lib
+set LIST=%LIST% test_bounds2 test_break test_bounds3 test_raw test_arena_lib test_arena_big
 set LIST=%LIST% test_slice test_args test_thread test_chan test_tfail test_net
 set LIST=%LIST% test_fneg test_longstr
 set LIST=%LIST% test_packed
@@ -49,6 +52,7 @@ set LIST=%LIST% test_text test_list test_map test_files test_os
 set LIST=%LIST% test_libthreads
 set LIST=%LIST% test_exp_lit
 set LIST=%LIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
+set LIST=%LIST% test_audiobus test_mp3 test_video test_touch
 set LIST=%LIST% test_extern test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray test_ptrparam test_longfn test_gconst test_fcmpval test_realint test_textlend test_random_alone test_textown
 
 set /a BUILT=0
@@ -62,6 +66,8 @@ echo ============================================================
 echo.
 
 for %%T in (%LIST%) do call :macbuild %%T
+REM the GPU tests (Metal); gpu_bc is left out: compressed textures are Vulkan's
+for %%T in (gpu_basic gpu_target gpu_mip gpu_inst gpu_compute) do call :gpubuild %%T
 
 echo.
 echo ============================================================
@@ -84,5 +90,20 @@ if not exist "%OUT%\%N%" (
 )
 echo %N%>>"%OUT%\LIST.txt"
 echo   built %N%
+set /a BUILT+=1
+goto :eof
+
+:gpubuild
+set "N=%~1"
+if not exist "tests\gpu\%N%.kr" goto :eof
+if exist "%OUT%\%N%" del "%OUT%\%N%" >nul 2>&1
+"%JC%" "tests\gpu\%N%.kr" --target=macos -o "%OUT%\%N%" >"%OUT%\%N%.build" 2>&1
+if not exist "%OUT%\%N%" (
+    echo   FAIL  %N%  ^(does not build - see %OUT%\%N%.build^)
+    set /a FAIL+=1
+    goto :eof
+)
+echo %N%>>"%OUT%\LIST.txt"
+echo   built %N% ^(GPU, Metal^)
 set /a BUILT+=1
 goto :eof

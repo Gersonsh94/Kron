@@ -12,7 +12,11 @@ seed/kronc.prev.exe
 tests/tmp/
 tests/arm/
 tests/linux/
-tests/mac/
+# tests/mac is kept: MACTESTS.bat builds the macOS tests on Windows and the
+# Mac takes them from the repository (it has no compiler of its own). What
+# running them there writes is left out.
+tests/mac/*.out
+tests/mac/*.build
 tests/web/
 tests/pe/
 tests/*.log
