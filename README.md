@@ -61,7 +61,7 @@ krontools build main.kr --target=linux
 
 ![license](https://img.shields.io/github/license/Gersonsh94/Kron?style=flat-square)
 ![stars](https://img.shields.io/github/stars/Gersonsh94/Kron?style=flat-square)
-
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/Gersonsh94/badge.svg)](https://hub.xerj.org/contributors/Gersonsh94)
 ![self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen?style=flat-square)
 ![dependencies](https://img.shields.io/badge/dependencies-none-teal?style=flat-square)
 
