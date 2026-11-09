@@ -295,6 +295,31 @@ fn cg_e_vardecl(n: ptr<Ast>) -> i64 {
 
 // declared without a value: a list<T> or map<T> starts empty; anything else
 // starts at zero, as a global does (an array keeps what the frame held)
+// slots words of the frame from [rbp-off] up set to 0: one store each
+// for a few, a loop for more
+fn cg_zero_local(off: i64, slots: i64) -> i64 {
+    var j: i64 = 0;
+    if slots <= 8 {
+        while j < slots {
+            emit_cstr("    mov qword [rbp-");
+            emit_u32(off - (j << 3));
+            emit_cstr("], 0\n");
+            j += 1;
+        }
+        return 0;
+    }
+    var top: i64 = new_label();
+    emit_cstr("    lea rdx, [rbp-");
+    emit_u32(off);
+    emit_cstr("]\n    mov rcx, 0\n    mov rax, 0\n");
+    ir_ctl(IR_LABEL, top);
+    emit_cstr("    mov [rdx+rcx*8], rax\n    add rcx, 1\n    cmp rcx, ");
+    emit_u32(slots);
+    emit_cstr("\n");
+    ir_jcc(top, CC_B);
+    return 0;
+}
+
 fn cg_e_decl_noinit(n: ptr<Ast>, off: i64) -> i64 {
     var lk: i64 = (n.col >> 8) & 15;
     var t: ptr<Tok> = n.left;
@@ -312,7 +337,12 @@ fn cg_e_decl_noinit(n: ptr<Ast>, off: i64) -> i64 {
         }
     }
     if n.type_info != 0 {
-        return 0;
+        // an array starts at zero too: the stack is not always fresh (on
+        // macOS it holds what ran before main)
+        var keep: i64 = pending_estruct;
+        var nslots: i64 = cg_e_decl_slots(n);
+        pending_estruct = keep;
+        return cg_zero_local(off, nslots);
     }
     s = -1;
     if t != 0 {
@@ -857,8 +887,9 @@ fn cg_e_fail(n: ptr<Ast>) -> i64 {
     }
     kt_failcall();
     emit_cstr("    add rsp, 32\n");
-    emit_cstr("");
     emit_cstr("    xor rax, rax\n");
+    // a real function gives its 0 in xmm0
+    if cur_ret_float != 0 { emit_cstr("    xorps xmm0, xmm0\n"); }
     return ir_ctl(IR_JMPRET, cur_ret_id);
 }
 

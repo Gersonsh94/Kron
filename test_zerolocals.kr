@@ -1,0 +1,48 @@
+kron_program
+kron_domain test_zerolocals;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: a local declared without a value starts at 0 -- arrays too -- even
+// where the stack still holds what an earlier call left there (macOS starts
+// main on such a stack).
+// =========================================================================
+
+fn soil() -> i64 {
+    var junk: [i64; 64];
+    var i: i64 = 0;
+    while i < 64 { junk[i] = 243; i = i + 1; }
+    return junk[5];
+}
+
+fn after_text() -> i64 {
+    var none: text;
+    return text_len(none);
+}
+
+fn after_array() -> i64 {
+    var back: [u8; 8];
+    var big: [i64; 40];
+    return back[3] + big[30];
+}
+
+fn after_int() -> i64 {
+    var n: i64;
+    var x: f64;
+    return n + (x as i64);
+}
+
+fn main() {
+    var t: text = "hello";
+    print(text_len(t));
+    soil();
+    print(after_text());
+    soil();
+    print(after_array());
+    soil();
+    print(after_int());
+    print(failed());
+    return 0;
+}

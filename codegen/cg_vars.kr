@@ -212,6 +212,7 @@ fn cg_emit_bounds(count: i64) -> i64 {
     emit_cstr("    lea rcx, [rel __bounds_msg]\n    lea rdx, [rel __bounds_hint]\n    sub rsp, 32\n");
     kt_failcall();
     emit_cstr("    add rsp, 32\n    xor rax, rax\n");
+    if cur_ret_float != 0 { emit_cstr("    xorps xmm0, xmm0\n"); }
     ir_ctl(IR_JMPRET, cur_ret_id);
     ir_ctl(IR_LABEL, ok);
     return 0;

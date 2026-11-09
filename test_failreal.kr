@@ -1,0 +1,33 @@
+kron_program
+kron_domain test_failreal;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: a function that returns a real gives 0.0 when it fails -- by fail
+// or by a bounds check -- not what was left in the register before.
+// =========================================================================
+
+var cells: [f64; 4];
+
+fn ratio(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        fail "division by zero" hint "a divisor above 0";
+    }
+    return a / b;
+}
+
+fn cell(i: i64) -> f64 {
+    return cells[i] + 0.5;
+}
+
+fn main() {
+    cells[1] = 2.0;
+    print(ratio(3.0, 4.0));
+    print(ratio(1.0, 0.0));
+    print(failed());
+    print(cell(1));
+    print(cell(9));
+    print(failed());
+    return 0;
+}

@@ -1717,3 +1717,22 @@ called `text_free` itself.
   the iOS host's `kron_app_touch_id`. The first finger still moves the
   mouse. X11 has none yet (it would need XInput2).
 - XR is not written: OpenXR and WebXR need a headset to be tested against.
+
+## Fixed 08-11-2026
+
+- A function returning a real that failed -- a `fail`, or a bounds check
+  in it -- gave its caller whatever was last in xmm0, not 0.0: only rax was
+  cleared. Both ways out now clear xmm0 too when the function returns a
+  real. Found writing KRON_FOR_AI.md; test: `test_failreal`.
+- Two modules with a global of the same name stop the build at the
+  assembler (kasm) instead of saying which name it is: still to fix. Until
+  then each module's globals carry a prefix of their own.
+- The manual sorted a list of texts with `list_sort`, which orders the
+  numbers it holds (a text's handle): the example and the table now say
+  `text_sort`. Making `list_sort` of a `list<text>` call `text_sort` is
+  still to do.
+- An array declared in a function without a value was not set to 0: it
+  read as 0 only where the stack was fresh, as on Windows and Linux. On
+  macOS main starts on a stack that already holds what ran before it, and
+  `test_packed` read 243 for 0. An array's slots are now set to 0 where it
+  is declared (a few stores, or a loop). Test: `test_zerolocals`.

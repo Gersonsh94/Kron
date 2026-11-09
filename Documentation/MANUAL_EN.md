@@ -427,7 +427,7 @@ fn main() {
     }
 
     var words = text_split("pear apple fig", " ");
-    list_sort(words);
+    text_sort(words);                             // list_sort orders numbers
     print(words);                                 // ["apple", "fig", "pear"]
 
     var nums: list<i64> = [3, 1, 2];
@@ -498,7 +498,7 @@ Every call takes the library's lock, so threads can share them.
 | `list_new()` `list_free(l)` | `map_new()` `map_free(m)` |
 | `list_add(l, v)` `list_get(l, i)` `list_set(l, i, v)` | `map_set(m, key, v)` `map_get(m, key)` `map_get_or(m, key, other)` |
 | `list_len` `list_last` `list_pop` `list_insert(l, i, v)` `list_remove(l, i)` | `map_has` `map_remove` `map_len` `map_clear` |
-| `list_find(l, v)` `list_sort(l)` `list_reverse` `list_clear` `list_copy` | `map_keys(m)` `map_values(m)`, in the order the keys came |
+| `list_find(l, v)` `list_sort(l)` (numbers; a list of texts: `text_sort`) `list_reverse` `list_clear` `list_copy` | `map_keys(m)` `map_values(m)`, in the order the keys came |
 | `list_add_real` `list_get_real` `list_set_real` | `map_set_real` `map_get_real`, `map_iset` `map_iget` `map_ihas` `map_iremove` (integer keys) |
 
 ---
