@@ -1769,3 +1769,17 @@ called `text_free` itself.
 - Returning an array of the function's own frame gave its address, read
   after the frame was gone (a wrong value, silently). It is an error now,
   with the way out in its hint. Test: `test_arrret_bad`.
+- A job of task_for that wrote files did not compile in a program with
+  sound: the job is a call through a value of one integer, and std_audio's
+  refill hooks (vs_fill, ms_fill...) take one integer, so they counted as
+  code the job could run, and they touch the mixer's globals. Now the
+  compiler follows where a function's value goes: a function whose value
+  only goes, as it is, to parameters that are only stored in globals that
+  are not shared can never be called from a thread (no thread may read
+  those globals), so a call through a value in a thread does not reach
+  it. au_add_hook keeps its hook in such a global. A value that goes
+  anywhere else -- a shared global, a field, a list, a parameter that is
+  called or passed on -- still counts. Test: `test_jobfile`.
+- A call with fewer (or more) arguments than the function declares
+  compiled, the missing ones being whatever their registers held. It is
+  an error now. Test: `test_argcount_bad`.

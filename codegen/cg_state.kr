@@ -272,6 +272,17 @@ var fn_gtok: [i64; 4096];                // first access to a non-shared global
 var fn_root: [i64; 4096];                // passed to thread_start
 var fn_addr: [i64; 4096];                // its address is taken
 var fn_asval: [i64; 4096];               // used as a value: needs its __fnrec_
+// Where a function's value goes, for the thread check: a function whose
+// value only goes as an argument to parameters that are only stored in
+// globals that are not shared can never be called by code in a thread.
+var fn_vesc: [u8; 4096];                 // its value goes anywhere else
+var vu_count: i64;                       // values given as arguments:
+var vu_fn: [i64; 16384];                 // which function,
+var vu_to: [i64; 16384];                 // to which parameter: F * 8 + k
+var pe_esc: [u8; 32768];                 // parameter F * 8 + k used otherwise
+var cg_vd_nodes: [i64; 256];             // argument nodes being emitted as such
+var cg_vd_n: i64;
+var cg_par_store: i64;                   // a parameter being stored in such a global
 var fn_indir: [i64; 4096];               // it makes an indirect call to any address
 var ie_count: i64;                        // its calls through a fn value:
 var ie_from: [i64; 65536];                // who calls,

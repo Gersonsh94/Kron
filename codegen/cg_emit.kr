@@ -405,10 +405,19 @@ fn cg_e_assign(n: ptr<Ast>) -> i64 {
             return cg_e_assign_float(n);
         }
     }
+    // a parameter stored in a global that is not shared: its value goes
+    // nowhere a thread can reach
+    if l.node_type == AST_IDENTIFIER && r != 0 && r.node_type == AST_IDENTIFIER {
+        if cg_find_var_idx(l.data) == -1 && cg_global_shared(l.data) == 0 {
+            cg_par_store = r;
+        }
+    }
     cg_emit_for(r, cg_expr_vtag(l));         // "..." into a text is a text
+    cg_par_store = 0;
     if l.node_type != AST_IDENTIFIER {
         return 0;
     }
+    cg_par_store = 0;
     if cg_find_var_idx(l.data) != -1 {
         i = lo_find(l.data);
         if i != -1 {
@@ -650,12 +659,18 @@ fn cg_e_index(n: ptr<Ast>) -> i64 {
 fn cg_e_ident(n: ptr<Ast>) -> i64 {
     var f: i64 = 0;
     if cg_find_var_idx(n.data) != -1 {
+        if n != cg_par_store { cg_param_escapes(n.data); }
         return ir_ldloc(cg_find_var(n.data));
     }
     if cg_find_global(n.data) == -1 {
         f = cg_find_func(n.data);
         if f != -1 {
-            cg_note_addr(f);
+            if cg_vd_has(n) != 0 {
+                // an argument as it is: where it goes is noted already
+                if f < CG_MAX_FUNCS { cg_qs(&fn_addr, f, 1); }
+            } else {
+                cg_note_addr(f);
+            }
             cg_qs(&fn_asval, f, 1);
             emit_cstr("    lea rax, [rel __fnrec_");
             emit_tok(n.data);
@@ -1222,9 +1237,15 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
     }
     rm = cg_arg_reals(n, f);
     cg_check_real_args(n, f);
+    var vd0: i64 = cg_vd_n;
+    if kind == 0 && n.owner_type != FNVAL_MARK && f != -1 {
+        cg_check_arg_count(n, f);
+        cg_note_value_args(n, f);
+    }
     // the stack arguments of this call: counted here, after its arguments,
     // since a call among them sets extra_args for its own
     cg_e_call_args(n, lit, fr, rm);
+    cg_vd_n = vd0;
     var ex: i64 = cg_count_list(n.right) - 6;
     cg_sret_pend = sv;
     emit_cstr("    sub rsp, 32\n");

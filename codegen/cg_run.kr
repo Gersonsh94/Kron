@@ -266,6 +266,7 @@ fn cg_note_call(t: i64) -> i64 {
 fn cg_note_addr(f: i64) -> i64 {
     if f >= 0 && f < CG_MAX_FUNCS {
         cg_qs(&fn_addr, f, 1);
+        cg_qs8(&fn_vesc, f, 1);
     }
     return 0;
 }
@@ -305,12 +306,143 @@ fn cg_fn_key(f: i64) -> i64 {
     return cg_shape(n, reals);
 }
 
+// 1 for a global declared shared, 0 for one that is not, -1 for no global
+fn cg_global_shared(t: i64) -> i64 {
+    var i: i64 = 0;
+    while i < gs_count {
+        if tok_equal(t, cg_q(&gs_toks, i)) == 1 {
+            if cg_q(&gs_shared, i) != 0 { return 1; }
+            return 0;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// the parameter of the current function a name is, from 0; -1 for none
+fn cg_param_index(t: i64) -> i64 {
+    var fnode: ptr<Ast> = 0;
+    var p: ptr<Ast> = 0;
+    var k: i64 = 0;
+    if cg_cur_fn < 0 || cg_lam_cur != -1 { return -1; }
+    fnode = cg_q(&fn_nodes, cg_cur_fn);
+    if fnode == 0 { return -1; }
+    p = fnode.left;
+    while p != 0 {
+        if tok_equal(p.data, t) == 1 { return k; }
+        k += 1;
+        p = p.right;
+    }
+    return -1;
+}
+
+// a parameter of the current function read other than to be stored in a
+// global that is not shared
+fn cg_param_escapes(t: i64) -> i64 {
+    var k: i64 = cg_param_index(t);
+    if k >= 0 && k < 8 && cg_cur_fn < 4096 {
+        cg_qs8(&pe_esc, cg_cur_fn * 8 + k, 1);
+    }
+    return 0;
+}
+
+fn cg_qs8(base: i64, i: i64, v: i64) -> i64 {
+    raw { poke8(base + i, v); }
+    return 0;
+}
+
+fn cg_q8(base: i64, i: i64) -> i64 {
+    var v: i64 = 0;
+    raw { v = peek8(base + i); }
+    return v;
+}
+
+// 1 when node n is an argument being given as it is
+fn cg_vd_has(n: ptr<Ast>) -> i64 {
+    var i: i64 = 0;
+    while i < cg_vd_n {
+        if cg_q(&cg_vd_nodes, i) == n { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// a call of function f: each argument that is a function's name, noted as
+// going to f's parameter (and kept from counting as a value let loose)
+fn cg_note_value_args(c: ptr<Ast>, f: i64) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var k: i64 = 0;
+    var g: i64 = 0;
+    var e: ptr<Ast> = 0;
+    while a != 0 {
+        e = a.left;
+        if e != 0 && e.node_type == AST_IDENTIFIER && k < 8 {
+            if cg_find_var_idx(e.data) == -1 && cg_find_global(e.data) == -1 {
+                g = cg_find_func(e.data);
+                if g != -1 && vu_count < 16384 && cg_vd_n < 256 {
+                    cg_qs(&vu_fn, vu_count, g);
+                    cg_qs(&vu_to, vu_count, f * 8 + k);
+                    vu_count += 1;
+                    cg_qs(&cg_vd_nodes, cg_vd_n, e);
+                    cg_vd_n += 1;
+                }
+            }
+        }
+        k += 1;
+        a = a.right;
+    }
+    return 0;
+}
+
+// 1 when no call through a value in a thread can reach function j: its
+// value only went, as it is, to parameters only stored in globals that
+// are not shared
+fn cg_fn_contained(j: i64) -> i64 {
+    var i: i64 = 0;
+    var any: i64 = 0;
+    if cg_q8(&fn_vesc, j) != 0 { return 0; }
+    while i < vu_count {
+        if cg_q(&vu_fn, i) == j {
+            if cg_q8(&pe_esc, cg_q(&vu_to, i)) != 0 { return 0; }
+            any = 1;
+        }
+        i += 1;
+    }
+    return any;
+}
+
+// a call with another number of arguments than the function takes
+fn cg_check_arg_count(c: ptr<Ast>, f: i64) -> i64 {
+    var fnode: ptr<Ast> = cg_q(&fn_nodes, f);
+    var p: ptr<Ast> = 0;
+    var np: i64 = 0;
+    var na: i64 = cg_count_list(c.right);
+    if fnode == 0 { return 0; }
+    p = fnode.left;
+    while p != 0 {
+        np += 1;
+        p = p.right;
+    }
+    if na != np {
+        cg_err_tok = c.data;
+        if na < np {
+            cg_err_msg = "fewer arguments than the function takes: ";
+        } else {
+            cg_err_msg = "more arguments than the function takes: ";
+        }
+        cg_err_hint = "  hint: give it as many as its fn line declares, in their order\r\n";
+        cg_had_error = 1;
+    }
+    return 0;
+}
+
 // the current function calls through a fn value: only a function used as
 // a value, of the same shape, can be what it calls
 fn cg_note_indirect_val(c: ptr<Ast>) -> i64 {
     var a: ptr<Ast> = c.right;
     var n: i64 = 0;
     var reals: i64 = 0;
+    if c.data != 0 { cg_param_escapes(c.data); }   // a parameter called here
     if cg_cur_fn < 0 || ie_count >= CG_MAX_EDGES {
         return 0;
     }
@@ -420,6 +552,7 @@ fn cg_thread_check() -> i64 {
                 while j < n {
                     var cand: i64 = cg_q(&fn_asval, j);
                     if byaddr == 1 { cand = cg_q(&fn_addr, j); }
+                    if cand != 0 && cg_fn_contained(j) != 0 { cand = 0; }
                     if cand != 0 && cg_q(&fn_reach, j) == 0 {
                         if cg_fn_key(j) == key {
                             cg_qs(&fn_reach, j, 1);

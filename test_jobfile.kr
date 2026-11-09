@@ -1,0 +1,34 @@
+kron_program
+kron_domain test_jobfile;
+kron_imports
+acquire_domain "std_task.kr";
+acquire_domain "std_file.kr";
+acquire_domain "std_vorbis.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: a job of task_for that writes files, in a program with sound. The
+// sound's refill hooks are functions of the job's shape, but their values
+// only go to au_add_hook, which keeps them in globals that are not shared:
+// no job can call them, and the program compiles.
+// =========================================================================
+
+shared var written: i64;
+
+fn main() {
+    lock_init(0);
+    audio_open_silent(48000);
+    task_set_workers(2);
+    task_for(4, fn(i: i64) -> i64 {
+        var name: text = "tests/tmp/jobfile_" + i + ".txt";
+        file_write_all(name, "job " + i);
+        lock_take(0);
+        written = written + 1;
+        lock_give(0);
+        return 0;
+    });
+    print(written);                                   // 4
+    say(file_read_all("tests/tmp/jobfile_3.txt"));    // job 3
+    audio_close();
+    return 0;
+}

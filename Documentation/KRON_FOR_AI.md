@@ -201,7 +201,8 @@ it:
    elements does not fit on the stack.
 9. **A struct is a value**: assigning or passing it copies it. Use
    `ptr<S>` (`&s`) to change it in place.
-10. **Up to 16 parameters and 6 results** a function. An array of the
+10. **Up to 16 parameters and 6 results** a function, and a call gives
+    exactly as many arguments as the function declares. An array of the
     function's own cannot be returned (it ends with the function): return
     a struct that holds it, or fill an array the caller passes.
 11. **Everything in the code is in English**: names, comments, messages.
