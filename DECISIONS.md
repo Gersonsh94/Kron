@@ -1736,3 +1736,10 @@ called `text_free` itself.
   macOS main starts on a stack that already holds what ran before it, and
   `test_packed` read 243 for 0. An array's slots are now set to 0 where it
   is declared (a few stores, or a loop). Test: `test_zerolocals`.
+- Metal, first run on a Mac (Apple M4): textures had no mip levels (a fine
+  checkerboard drawn small came out black, not grey); they are now made
+  with all their levels, which the card fills with a blit, and the sampler
+  blends between levels, as on Vulkan. A drawing shader made after a
+  compute shader crashed: Metal's lists of pipelines go by the program's
+  number, and compute shaders did not take their place in them. Both
+  found by gpu_mip and gpu_compute.

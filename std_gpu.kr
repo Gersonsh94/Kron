@@ -2855,7 +2855,12 @@ fn mt_buffer_new(bytes: i64) -> i64 {
 }
 
 fn mt_texture_new(w: i64, h: i64, format: i64, usage: i64, storage: i64) -> i64 {
-    var d: i64 = oc4(mt_cls("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", format, w, h, 0);
+    return mt_texture_mips(w, h, format, usage, storage, 0);
+}
+
+// with mips 1: all its mip levels, down to 1 x 1
+fn mt_texture_mips(w: i64, h: i64, format: i64, usage: i64, storage: i64, mips: i64) -> i64 {
+    var d: i64 = oc4(mt_cls("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", format, w, h, mips);
     oc1(d, "setUsage:", usage);
     oc1(d, "setStorageMode:", storage);
     return oc1(mt_dev, "newTextureWithDescriptor:", d);
@@ -2886,6 +2891,7 @@ fn mt_open(w: i64, h: i64) -> i64 {
     oc1(sd, "setMagFilter:", 1);
     oc1(sd, "setSAddressMode:", 2);
     oc1(sd, "setTAddressMode:", 2);
+    oc1(sd, "setMipFilter:", 2);              // between mip levels, as Vulkan's sampler
     mt_sampler = oc1(mt_dev, "newSamplerStateWithDescriptor:", sd);
     var dd: i64 = oc0(oc0(mt_cls("MTLDepthStencilDescriptor"), "alloc"), "init");
     oc1(dd, "setDepthCompareFunction:", 1);
@@ -3000,13 +3006,20 @@ fn mt_mesh(vsrc: i64, vbytes: i64, isrc: i64, ibytes: i64) -> i64 {
 }
 
 fn mt_texture(src: i64, w: i64, h: i64) -> i64 {
-    var t: i64 = mt_texture_new(w, h, 80, 1, 0);
+    var t: i64 = mt_texture_mips(w, h, 80, 1, 0, 1);
     if t == 0 {
         fail "Metal refused the picture" hint "at most 16384 pixels a side";
     }
     mt_region[0] = 0; mt_region[1] = 0; mt_region[2] = 0;
     mt_region[3] = w; mt_region[4] = h; mt_region[5] = 1;
     raw { oc4(t, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", &mt_region, 0, src, w * 4); }
+    // the smaller levels made from it by the card, as Vulkan's blits do
+    var cb: i64 = oc0(mt_queue, "commandBuffer");
+    var bl: i64 = oc0(cb, "blitCommandEncoder");
+    oc1(bl, "generateMipmapsForTexture:", t);
+    oc0(bl, "endEncoding");
+    oc0(cb, "commit");
+    oc0(cb, "waitUntilCompleted");
     list_add(gt_img, t);
     list_add(gt_mem, 0);
     list_add(gt_view, t);
@@ -3174,6 +3187,9 @@ fn mt_compute_program(sh: i64) -> i64 {
     if ps == 0 {
         fail "Metal refused the compute shader" hint "update the system";
     }
+    // mt_pipe and mt_flags go by the program's number, compute ones too
+    list_add(mt_pipe, ps);
+    list_add(mt_flags, 0);
     return ps;
 }
 
