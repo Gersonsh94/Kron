@@ -178,24 +178,22 @@ it:
    modules are allowed (`module.name` picks one).
 4. **`text` needs `std_text.kr` imported** (or `std_map.kr`, which brings
    it). `list<T>` and `map<T>` need `std_list.kr` and `std_map.kr`.
-5. **Reserved words cannot name anything.** Besides the usual ones (`fn
-   var const if else while for in switch case default break continue
-   return struct enum true false shared raw fail hint as`), these are
-   reserved too, and are the ones that catch people:
+5. **Reserved words.** These cannot name anything: `fn var const if else
+   while for switch case default break continue return struct enum true
+   false raw fail as ptr extern sizeof failed print_fail print printc`
+   and the types (`i64 f64 bool text`...), the threads' and memory
+   built-ins (`thread_start lock_take peek poke dll_load`...) and the
+   header words (`kron_program`...).
 
-   `from` `in` `new` `delete` `null` `loop` `range` `slice` `stream`
-   `module` `import` `export` `public` `private` `call` `asm` `void` `boot`
-   `kernel` `driver` `loader` `power` `ring` `security` `scheduler` `epoch`
-   `packages` `deployment` `execution` `filesystem` `register8`
-   `register16` `register32` `register64` `mmu` `dma` `isr` `hmi` `trunc`
-   `prefetch` `invcache` `physical_ptr` `virtual_ptr` `aliased` `netkernel`
-   `inb` `outb` `mousex` `mousey` `rotl` `rotr`
-
-   and the built-ins: `print` `printc` `peek*` `poke*` `ticks`
-   `ticks_per_sec` `readkey` `beep` `savefile` `loadfile` `failed`
-   `print_fail` `thread_start` `thread_wait` `thread_yield` `lock_init`
-   `lock_take` `lock_give` `cpu_count` `target_os` `sizeof` `arg_count`
-   `arg_get`. The compiler says "expected an identifier, found 'from'".
+   Many other words are kept only where their construct stands and are
+   names everywhere else: `shared` (before `var`), `in` (in `for x in`),
+   `hint` (in `fail "..." hint "..."`), `slice` (before `<`), `stream`
+   and `void` (where a type goes), `loop` and `asm` (before `{`), `call`,
+   the built-ins written as calls (`outb inb trunc ticks beep readkey
+   savefile loadfile cpu_count target_os mousex`...), the system-model
+   module words (`ring kernel power driver security boot mmu`...) and
+   `from new delete null import module range epoch`. A program that
+   defines a function with such a name (`fn trunc(x: f64)`) calls its own.
 6. **No `++`, `--` or `?:`.** Write `i += 1` and an `if`.
 7. **Integer division truncates toward zero** (`-7 / 2` is `-3`). Write
    reals as reals when a real is wanted: `7.0 / 2.0`.
@@ -203,7 +201,9 @@ it:
    elements does not fit on the stack.
 9. **A struct is a value**: assigning or passing it copies it. Use
    `ptr<S>` (`&s`) to change it in place.
-10. **Up to 16 parameters and 4 results** a function.
+10. **Up to 16 parameters and 6 results** a function. An array of the
+    function's own cannot be returned (it ends with the function): return
+    a struct that holds it, or fill an array the caller passes.
 11. **Everything in the code is in English**: names, comments, messages.
 
 ## 8. The standard library

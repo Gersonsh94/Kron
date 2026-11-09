@@ -1743,3 +1743,29 @@ called `text_free` itself.
   compute shader crashed: Metal's lists of pipelines go by the program's
   number, and compute shaders did not take their place in them. Both
   found by gpu_mip and gpu_compute.
+
+## Found writing the engine, part 2 (09-11-2026, Gerson)
+
+- Soft keywords. Words the language keeps for one construct were reserved
+  everywhere: `ring`, `power`, `kernel` (the system model's modules),
+  `outb`, `trunc`, `ticks` (built-ins written as calls), `shared`, `in`,
+  `hint`, `slice`, `stream`, `loop`, `from`, `new`... Before parsing, each
+  such token that does not stand where its construct starts becomes a
+  name (par_soften in parser.kr): a module word only at file level,
+  before a name or `{`; a built-in only before `(`, and not when the
+  program defines a function of that name; `shared` only before `var`;
+  `in` only in `for x in`; `hint` only between a fail's two texts; and so
+  on. `ring` used as a name also no longer starts a module that swallowed
+  the lines after it, which is why its error was reported lines away.
+  Test: `test_softnames`.
+- Six results: a function gives up to six (it was four). The fifth and
+  sixth come back in r10 and r11; a result's type takes four bits of the
+  description, 12 meaning a real. Test: `test_results6`.
+- `call p(args)` in code that runs in a thread made every function whose
+  address is taken thread code. It now reaches only those that take as
+  many arguments, reals in the same places, as `call` through a fn value
+  already did. `c_call` (C code, which may call back anything) still
+  reaches them all. Test: `test_callshape`.
+- Returning an array of the function's own frame gave its address, read
+  after the frame was gone (a wrong value, silently). It is an error now,
+  with the way out in its hint. Test: `test_arrret_bad`.

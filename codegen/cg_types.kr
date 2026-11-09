@@ -442,24 +442,31 @@ fn cg_emit_print_tagged(v: ptr<Ast>, tag: i64) -> i64 {
 // of element per result from bit 8.
 // =========================================================================
 
+// result w's four bits of a description: kind, element << 2; 12 a real
+fn cg_multi_tag(desc: i64, w: i64) -> i64 {
+    return (cg_u32(desc) >> ((w * 4 + 4) & 31)) & 15;
+}
+
 // 1 when result w of a description is a real
 fn cg_multi_float(desc: i64, w: i64) -> i64 {
-    return (cg_u32(desc) >> ((w + 4) & 31)) & 1;
+    if cg_multi_tag(desc, w) == 12 { return 1; }
+    return 0;
 }
 
 // the type tag of result w
 fn cg_multi_vtag(desc: i64, w: i64) -> i64 {
-    var v: i64 = cg_u32(desc) >> ((w * 4 + 8) & 31);
+    var v: i64 = cg_multi_tag(desc, w);
+    if v == 12 { return 0; }
     return (((v >> 2) & 3) << 4) | (v & 3);
 }
 
 // return a, b, ...: each value as the result it is declared, pushed in
-// order, then popped into r9, r8, rdx, rax
+// order, then popped into r11, r10, r9, r8, rdx, rax
 fn cg_emit_return_multi(r: ptr<Ast>) -> i64 {
     var w: i64 = 0;
     var v: ptr<Ast> = r.right;
     var rest: ptr<Ast> = r.left;
-    while v != 0 && w < 4 {
+    while v != 0 && w < 6 {
         // a struct does not fit the registers the results go in: only its
         // address would go, and the caller would read it as a number
         if cg_arg_struct_id(v) != -1 {
@@ -485,6 +492,12 @@ fn cg_emit_return_multi(r: ptr<Ast>) -> i64 {
         } else {
             v = 0;
         }
+    }
+    if w >= 6 {
+        emit_cstr("    pop r11\n");
+    }
+    if w >= 5 {
+        emit_cstr("    pop r10\n");
     }
     if w >= 4 {
         emit_cstr("    pop r9\n");

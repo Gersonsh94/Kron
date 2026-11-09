@@ -521,6 +521,175 @@ fn par_make_assign(target: ptr<Ast>, value: ptr<Ast>) -> ptr<Ast> {
 // the program
 // =========================================================================
 
+// -------------------------------------------------------------------------
+// Soft keywords: words the language keeps for one construct -- a module of
+// the system model (ring, kernel, power...), a built-in called like a
+// function (outb, trunc, ticks...), shared before var, hint after a fail's
+// text... -- are names everywhere else. Before parsing, each such token
+// that does not stand where its construct starts becomes an identifier, so
+// 'var ring: i64', 'fn power(x: f64)' and 'p.shared' all work.
+// -------------------------------------------------------------------------
+var par_soft_fn: [u8; 1024];          // soft keywords a program defines as functions
+
+fn par_tk(i: i64) -> i64 {
+    if i < 0 || i >= par_token_count { return -1; }
+    var t: ptr<Tok> = par_tokens + i * PRS_TOK;
+    return t.kind;
+}
+
+fn par_tk_set(i: i64, k: i64) -> i64 {
+    var t: ptr<Tok> = par_tokens + i * PRS_TOK;
+    t.kind = k;
+    return 0;
+}
+
+// 1 for a module keyword of the system model (a declaration at file level)
+fn par_soft_module(k: i64) -> i64 {
+    if k >= KW_BOOT_SEQUENCE && k <= KW_SECURITY_RING { return 1; }
+    if k == KW_KRON3D_CONTEXT || k == KW_KRON_ISA || k == KW_EXECUTABLE_LOADER { return 1; }
+    if k >= KW_EXECUTION_MODEL && k <= KW_PACKAGE_MANAGER { return 1; }
+    return 0;
+}
+
+// 1 for a built-in written as a call: name(...)
+fn par_soft_call(k: i64) -> i64 {
+    if k == KW_OUTB || k == KW_INB || k == KW_TRUNC || k == KW_SAVEFILE || k == KW_READKEY { return 1; }
+    if k == KW_BEEP || k == KW_READMOUSE || k == KW_MOUSEX || k == KW_MOUSEY { return 1; }
+    if k == KW_TICKS || k == KW_TICKS_PER_SEC || k == KW_CPU_COUNT || k == KW_TARGET_OS { return 1; }
+    if k == KW_LOADFILE { return 1; }
+    return 0;
+}
+
+fn par_soft(k: i64) -> i64 {
+    if par_soft_module(k) != 0 || par_soft_call(k) != 0 { return 1; }
+    if k == KW_NULL || k == KW_NEW || k == KW_DELETE || k == KW_IMPORT || k == KW_FROM { return 1; }
+    if k == KW_MODULE || k == KW_ALIASED || k == KW_RANGE || k == KW_EPOCH { return 1; }
+    if k == KW_ROTL || k == KW_ROTR || k == KW_INVCACHE || k == KW_PREFETCH0 { return 1; }
+    if k == KW_GLOBAL_VISIBLE || k == KW_DOMAIN_ISOLATED || k == KW_INTER_CLUSTER_EXPORT { return 1; }
+    if k == KW_SHARED || k == KW_IN || k == KW_SLICE || k == KW_HINT || k == KW_VOID { return 1; }
+    if k == KW_STR || k == KW_ASM || k == KW_CALL || k == KW_LOOP { return 1; }
+    return 0;
+}
+
+// 1 when the token before i closes an operand: a name, a number, ) or ]
+fn par_soft_after_operand(i: i64) -> i64 {
+    var p: i64 = par_tk(i - 1);
+    if p == TOK_IDENTIFIER || p == TOK_INTEGER || p == TOK_HEX || p == TOK_FLOAT { return 1; }
+    if p == TOK_RPAREN || p == TOK_RBRACKET { return 1; }
+    return 0;
+}
+
+// 1 when the token after i starts an operand
+fn par_soft_before_operand(i: i64) -> i64 {
+    var n: i64 = par_tk(i + 1);
+    if n == TOK_IDENTIFIER || n == TOK_INTEGER || n == TOK_HEX || n == TOK_FLOAT || n == TOK_LPAREN { return 1; }
+    return 0;
+}
+
+// 1 when token i stands where a type goes: after ':', '->', '<', 'as', '['
+// or sizeof(, or in the list of a function type or of several results
+fn par_soft_type_spot(i: i64) -> i64 {
+    var p: i64 = par_tk(i - 1);
+    if p == TOK_COLON || p == TOK_ARROW || p == TOK_LT || p == KW_AS || p == TOK_LBRACKET { return 1; }
+    if p == TOK_LPAREN || p == TOK_COMMA {
+        // back to the '(' that opens the list: what stands before it
+        var j: i64 = i - 1;
+        var depth: i64 = 0;
+        while j >= 0 {
+            var k: i64 = par_tk(j);
+            if k == TOK_RPAREN { depth = depth + 1; }
+            if k == TOK_LPAREN {
+                if depth == 0 {
+                    var b: i64 = par_tk(j - 1);
+                    if b == KW_FN || b == TOK_ARROW || b == KW_SIZEOF { return 1; }
+                    return 0;
+                }
+                depth = depth - 1;
+            }
+            if k == TOK_SEMICOLON || k == TOK_LBRACE || k == TOK_RBRACE { return 0; }
+            j = j - 1;
+        }
+    }
+    return 0;
+}
+
+// 1 when soft keyword k at token i is its construct; depth: the braces
+// open around it
+fn par_soft_keep(i: i64, k: i64, depth: i64) -> i64 {
+    var p: i64 = par_tk(i - 1);
+    var n: i64 = par_tk(i + 1);
+    if par_soft_module(k) != 0 {
+        if depth != 0 { return 0; }
+        if p != -1 && p != TOK_SEMICOLON && p != TOK_RBRACE && p != KW_KRON_DEFINITIONS && p != KW_KRON_IMPORTS {
+            return 0;
+        }
+        return n == TOK_IDENTIFIER || n == TOK_LBRACE;
+    }
+    if par_soft_call(k) != 0 {
+        if p == KW_FN || p == TOK_DOT || par_soft_fn[k] != 0 { return 0; }
+        return n == TOK_LPAREN;
+    }
+    if k == KW_ROTL || k == KW_ROTR {
+        return par_soft_after_operand(i) != 0 && par_soft_before_operand(i) != 0;
+    }
+    if k == KW_INVCACHE || k == KW_PREFETCH0 {
+        if p == KW_FN || p == TOK_DOT || p == KW_VAR || p == KW_CONST || par_soft_fn[k] != 0 { return 0; }
+        if par_soft_after_operand(i) != 0 { return 0; }
+        return par_soft_before_operand(i);
+    }
+    if k == KW_EPOCH { return n == TOK_INTEGER && p == TOK_IDENTIFIER; }
+    if k == KW_GLOBAL_VISIBLE || k == KW_DOMAIN_ISOLATED || k == KW_INTER_CLUSTER_EXPORT {
+        return p == KW_FN;
+    }
+    if k == KW_SHARED { return n == KW_VAR; }
+    if k == KW_IN { return p == TOK_IDENTIFIER && par_tk(i - 2) == KW_FOR; }
+    if k == KW_SLICE { return n == TOK_LT; }
+    if k == KW_HINT { return p == TOK_STRING && n == TOK_STRING; }
+    if k == KW_VOID { return p == TOK_ARROW || p == TOK_COLON || p == TOK_LT; }
+    if k == KW_STR { return par_soft_type_spot(i); }
+    if k == KW_ASM || k == KW_LOOP { return n == TOK_LBRACE; }
+    if k == KW_CALL { return n == TOK_IDENTIFIER || n == TOK_LPAREN; }
+    return 0;                          // null new delete import from module aliased range
+}
+
+fn par_soften() -> i64 {
+    var i: i64 = 0;
+    var k: i64 = 0;
+    var depth: i64 = 0;
+    raw {
+        while i < 1024 {
+            poke8(&par_soft_fn[0] + i, 0);
+            i = i + 1;
+        }
+    }
+    // the soft keywords the program defines as functions: its calls are
+    // the program's then, not the built-in's
+    i = 0;
+    while i + 1 < par_token_count {
+        if par_tk(i) == KW_FN {
+            k = par_tk(i + 1);
+            if k == KW_GLOBAL_VISIBLE || k == KW_DOMAIN_ISOLATED || k == KW_INTER_CLUSTER_EXPORT {
+                k = par_tk(i + 2);
+            }
+            if k > 0 && k < 1024 && par_soft(k) != 0 { par_soft_fn[k] = 1; }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < par_token_count {
+        k = par_tk(i);
+        if k == TOK_LBRACE { depth = depth + 1; }
+        if k == TOK_RBRACE && depth > 0 { depth = depth - 1; }
+        if par_soft(k) != 0 {
+            if par_soft_keep(i, k, depth) == 0 {
+                par_tk_set(i, TOK_IDENTIFIER);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn prs_init(tokens: i64, count: i64, buf: i64, size: i64) -> i64 {
     if prs_ready == 0 {
         prs_names_init();
@@ -528,6 +697,7 @@ fn prs_init(tokens: i64, count: i64, buf: i64, size: i64) -> i64 {
     }
     par_tokens = tokens;
     par_token_count = count;
+    par_soften();
     par_ast_buf = buf;
     par_arena_ptr = buf;
     par_arena_end = buf + size;

@@ -223,7 +223,7 @@ var fn_nodes: [i64; 4096];
 var fn_ret_float: [i64; 4096];
 var fn_ret_vtag: [i64; 4096];
 var fn_ret_unsig: [i64; 4096];
-var fn_multi: [i64; 4096];               // count | reals << 4 | tags << 8
+var fn_multi: [i64; 4096];               // count | tags << 4 (12: a real)
 var cg_in_raw: i64;
 var cg_root: i64;
 var cg_err_tok: i64;                     // a type error found while emitting:

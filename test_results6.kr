@@ -1,0 +1,34 @@
+kron_program
+kron_domain test_results6;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: a function gives up to six results, integers, reals and texts
+// mixed, kept across a call that frees texts lent to it.
+// =========================================================================
+
+fn six(a: i64) -> (i64, f64, i64, text, i64, f64) {
+    return a, 1.5, a * 2, "five", a * 3, 6.25;
+}
+
+fn five(t: text) -> (i64, i64, i64, i64, i64) {
+    return text_len(t), 2, 3, 4, 5;
+}
+
+fn main() {
+    var a, b, c, d, e, f = six(10);
+    print(a);                    // 10
+    print(b);                    // 1.500000
+    print(c);                    // 20
+    print(d);                    // five
+    print(e);                    // 30
+    print(f);                    // 6.250000
+    var p, q, r, s, t = five("x" + 12);
+    print(p + q + r + s + t);    // 3 + 2 + 3 + 4 + 5 = 17
+    var _, _, _, _, last, real = six(1);
+    print(last);                 // 3
+    print(real);                 // 6.250000
+    return 0;
+}

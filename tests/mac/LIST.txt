@@ -96,6 +96,9 @@ test_video
 test_touch
 test_failreal
 test_zerolocals
+test_softnames
+test_results6
+test_callshape
 test_extern
 test_structval
 test_liststruct

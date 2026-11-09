@@ -233,10 +233,10 @@ fn prs_arg_list() -> i64 {
     return head;
 }
 
-// -> (T1, T2, ...), up to four, at its '('. par_multi = count | floats << 4
-// | tags << 8: bit 4+i says result i is a real; bits 8+4i..11+4i its type
-// tag in four bits (kind 0-3, element 0-2 << 2). The first type stays as
-// the one just parsed, so a single use of the call sees an ordinary result.
+// -> (T1, T2, ...), up to six, at its '('. par_multi = count | tags << 4:
+// bits 4+4i..7+4i are result i's type tag in four bits (kind 0-3, element
+// 0-2 << 2), and 12 (element 3) for a real. The first type stays as the
+// one just parsed, so a single use of the call sees an ordinary result.
 fn prs_multi_type() -> i64 {
     var count: i64 = 0;
     var packed: i64 = 0;
@@ -244,7 +244,8 @@ fn prs_multi_type() -> i64 {
     var tag: i64 = 0;
     prs_adv();                         // (
     while 1 == 1 {
-        if count >= 4 {
+        if count >= 6 {
+            par_custom_msg = "a function gives six results at most";
             return 0;
         }
         par_last_is_float = 0;
@@ -257,11 +258,11 @@ fn prs_multi_type() -> i64 {
             mt_first_float = par_last_is_float;
             first_vtag = par_last_vtag;
         }
-        if par_last_is_float != 0 {
-            packed = packed | ((16 << count) & 0xFFFFFFFF);
-        }
         tag = (par_last_vtag & 3) | ((((par_last_vtag & 0xFFFFFFFF) >> 4) & 3) << 2);
-        packed = packed | ((tag << (count * 4 + 8)) & 0xFFFFFFFF);
+        if par_last_is_float != 0 {
+            tag = 12;
+        }
+        packed = packed | ((tag << (count * 4 + 4)) & 0xFFFFFFFF);
         count += 1;
         if prs_ct() != TOK_COMMA {
             break;

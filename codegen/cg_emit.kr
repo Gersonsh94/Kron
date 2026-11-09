@@ -514,6 +514,17 @@ fn cg_e_assign_idx(n: ptr<Ast>) -> i64 {
 
 fn cg_e_return(n: ptr<Ast>) -> i64 {
     var r: ptr<Ast> = n.right;
+    // an array of this function's frame ends with it: what would go back
+    // is its address, read after the frame is gone
+    if r != 0 && r.node_type == AST_IDENTIFIER && r.data != 0 {
+        var ai: i64 = cg_find_var_idx(r.data);
+        if ai != -1 && cg_q(&var_arrlen, ai) != 0 && cg_q(&var_isref, ai) == 0 {
+            cg_err_tok = r.data;
+            cg_err_msg = "an array of the function's own cannot be returned: it ends with the function ";
+            cg_err_hint = "  hint: put it in a struct and return the struct (a struct is returned whole), or fill an array the caller passes\r\n";
+            cg_had_error = 1;
+        }
+    }
     if n.left != 0 && (cur_fn_multi & 7) >= 2 {
         cg_emit_return_multi(n);
     } else if r != 0 {
@@ -1361,7 +1372,7 @@ fn cg_e_call_indirect(n: ptr<Ast>) -> i64 {
     var cnt: i64 = cg_count_list(n.right);
     var a: ptr<Ast> = 0;
     var i: i64 = 0;
-    cg_note_indirect();                      // its target cannot be known
+    cg_note_indirect_addr(n);                // a function whose address is taken, of its shape
     cg_emit(n.left);
     emit_cstr("    push rax\n");
     // more than four: the fifth goes on at [rsp+32], above the shadow space

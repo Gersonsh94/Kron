@@ -327,6 +327,32 @@ fn cg_note_indirect_val(c: ptr<Ast>) -> i64 {
     return 0;
 }
 
+// the current function calls an address (call p(args)): a function whose
+// address is taken (&f) and that takes as many arguments, reals in the
+// same places. The key carries bit 60 to say so.
+const CG_IE_ADDR: i64 = 1152921504606846976;
+
+fn cg_note_indirect_addr(c: ptr<Ast>) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var n: i64 = 0;
+    var reals: i64 = 0;
+    if cg_cur_fn < 0 { return 0; }
+    if ie_count >= CG_MAX_EDGES {
+        return cg_note_indirect();
+    }
+    while a != 0 {
+        if n < 48 && cg_expr_is_float(a.left) != 0 {
+            reals = reals | (1 << n);
+        }
+        n += 1;
+        a = a.right;
+    }
+    cg_qs(&ie_from, ie_count, cg_cur_fn);
+    cg_qs(&ie_key, ie_count, cg_shape(n, reals) | CG_IE_ADDR);
+    ie_count += 1;
+    return 0;
+}
+
 // the first argument of thread_start: &fn starts a thread in fn; anything
 // computed could be any function
 fn cg_note_thread(a: ptr<Ast>) -> i64 {
@@ -384,10 +410,18 @@ fn cg_thread_check() -> i64 {
         while i < ie_count {
             fr = cg_q(&ie_from, i);
             if cg_q(&fn_reach, fr) != 0 {
+                var key: i64 = cg_q(&ie_key, i);
+                var byaddr: i64 = 0;
+                if (key & CG_IE_ADDR) != 0 {
+                    byaddr = 1;
+                    key = key - CG_IE_ADDR;
+                }
                 j = 0;
                 while j < n {
-                    if cg_q(&fn_asval, j) != 0 && cg_q(&fn_reach, j) == 0 {
-                        if cg_fn_key(j) == cg_q(&ie_key, i) {
+                    var cand: i64 = cg_q(&fn_asval, j);
+                    if byaddr == 1 { cand = cg_q(&fn_addr, j); }
+                    if cand != 0 && cg_q(&fn_reach, j) == 0 {
+                        if cg_fn_key(j) == key {
                             cg_qs(&fn_reach, j, 1);
                             changed = 1;
                         }

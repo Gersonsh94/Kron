@@ -222,7 +222,7 @@ fn area(w: f64, h: f64) -> f64 {
 
 ### Several results
 
-A function can give back up to four values:
+A function can give back up to six values:
 
 ```
 fn divide(a: i64, b: i64) -> (i64, i64) {
@@ -1082,7 +1082,7 @@ written out. A function outside it is named in
 | Limit | Value |
 |---|---|
 | Parameters per function | 16 |
-| Results per function | 4 |
+| Results per function | 6 |
 | Locks | 16 |
 | Thread stack (Linux, macOS, web) | 1 MB |
 

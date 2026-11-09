@@ -1,0 +1,69 @@
+kron_program
+kron_domain test_softnames;
+kron_imports
+acquire_domain "std_text.kr";
+kron_definitions
+
+// =========================================================================
+// TEST: words kept for one construct are names everywhere else. ring,
+// power, kernel (system-model modules), outb, trunc, ticks (built-ins
+// written as calls), shared, in, hint, slice, stream, loop, from, new...
+// as globals, locals, parameters, fields and functions -- and the
+// constructs themselves still work beside them.
+// =========================================================================
+
+struct Ring {
+    ring: i64;
+    shared: i64;
+    power: f64;
+    stream: i64;
+}
+
+var kernel: i64 = 7;
+shared var total: i64;
+
+fn trunc(x: f64) -> f64 {                   // the program's own trunc
+    return x - 0.5;
+}
+
+fn mix(from: i64, in: i64, new: i64) -> i64 {
+    return from * 100 + in * 10 + new;
+}
+
+fn outb(port: i64) -> i64 {                 // a function of the program
+    return port + 1;
+}
+
+fn main() {
+    var r: Ring;
+    r.ring = 3;
+    r.shared = 4;
+    r.power = 2.5;
+    r.stream = 6;
+    print(r.ring + r.shared + r.stream);    // 13
+    print(r.power);                          // 2.500000
+    var ring: i64 = 5;
+    var hint: i64 = 2;
+    var loop: i64 = 0;
+    var slice: i64 = 9;
+    print(ring * hint + slice);              // 19
+    print(kernel);                           // 7
+    print(trunc(3.0));                       // 2.500000: the program's
+    print(mix(1, 2, 3));                     // 123
+    print(outb(41));                         // 42
+    var ticks: i64 = 10;
+    var range: i64 = ticks + 1;
+    print(range);                            // 11
+    // the constructs beside them
+    var words: list<i64> = [1, 2, 3];
+    for w in words {
+        loop = loop + w;
+    }
+    print(loop);                             // 6
+    total = 5;
+    print(total);                            // 5
+    var s: stream = "abc";
+    print(s.len);                            // 3
+    if failed() { print_fail(); }
+    return 0;
+}

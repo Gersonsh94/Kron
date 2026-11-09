@@ -1,0 +1,52 @@
+kron_program
+kron_domain test_callshape;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST: code that runs in a thread and calls an address (call p(args))
+// reaches only the functions whose address is taken and that take as many
+// arguments: a function of another shape may touch a global that is not
+// shared, and the program compiles.
+// =========================================================================
+
+shared var acc: i64;
+var log_count: i64;                       // main's only: not shared
+
+fn add_one(x: i64) -> i64 {               // one argument: may run in a thread
+    lock_take(0);
+    acc = acc + x;
+    lock_give(0);
+    return 0;
+}
+
+fn note(a: i64, b: i64) -> i64 {          // two arguments: main's
+    log_count = log_count + a + b;
+    return 0;
+}
+
+shared var job: i64;
+
+fn worker(arg: i64) -> i64 {
+    var p: i64 = job;
+    var r: i64 = 0;
+    raw {
+        r = call p(arg);
+    }
+    return r;
+}
+
+fn main() {
+    lock_init(0);
+    var n: i64 = 0;
+    raw {
+        job = &add_one;
+        n = &note;
+        n = call n(2, 3);
+    }
+    var h: i64 = thread_start(worker, 5);
+    thread_wait(h);
+    print(acc);                           // 5
+    print(log_count);                     // 5
+    return 0;
+}

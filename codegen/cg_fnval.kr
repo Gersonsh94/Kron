@@ -27,10 +27,16 @@ fn cg_emit_multi(m: ptr<Ast>) -> i64 {
             desc = cg_q(&fn_multi, f);
         }
     }
-    cg_emit(c);                              // rax, rdx, r8, r9
+    cg_emit(c);                              // rax, rdx, r8, r9, r10, r11
     n = cg_chain_len(m.left);
-    if n > 4 {
-        n = 4;
+    if n > 6 {
+        n = 6;
+    }
+    if n >= 6 {
+        emit_cstr("    push r11\n");
+    }
+    if n >= 5 {
+        emit_cstr("    push r10\n");
     }
     if n >= 4 {
         emit_cstr("    push r9\n");

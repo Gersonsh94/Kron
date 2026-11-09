@@ -1,0 +1,20 @@
+kron_program
+kron_domain test_arrret_bad;
+kron_imports
+kron_definitions
+
+// =========================================================================
+// TEST (must be rejected): an array of the function's own frame returned:
+// only its address would go back, read after the frame is gone.
+// =========================================================================
+
+fn make() -> [i64; 3] {
+    var r: [i64; 3] = [4, 5, 6];
+    return r;
+}
+
+fn main() {
+    var b: [i64; 3] = make();
+    print(b[1]);
+    return 0;
+}
