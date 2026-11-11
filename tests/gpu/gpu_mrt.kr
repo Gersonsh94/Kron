@@ -1,0 +1,169 @@
+kron_program
+kron_domain gpu_mrt;
+kron_imports
+acquire_domain "std_gpu.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: what a deferred renderer is built from. A G-buffer of three
+// colours of 16-bit floats written in one pass (values above 1 and below 0
+// kept), read back by the frame with load (exact texels) and sample; a
+// shader of the wrong kind refused by a pass; a texture read by the vertex
+// part (sample_level); and a compute shader reading a target's colour.
+// Run by GPUTESTS.bat; the exit code is the number of checks that failed.
+// (On the web the frames stay in the page: the program only draws there.)
+// =========================================================================
+
+var failures: i64;
+var on_web: i64;
+const W: i64 = 64;
+const H: i64 = 64;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+fn check_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, tol: i64, what: i64) -> i64 {
+    if on_web == 1 { return 1; }
+    var c: i64 = gpu_pixel(x, y);
+    var ok: i64 = 1;
+    if iabs(channel(c, 0) - r) > tol || iabs(channel(c, 1) - g) > tol || iabs(channel(c, 2) - b) > tol { ok = 0; }
+    var t: text = text_add(text_new(), what);
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 1));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 2));
+    text_add(t, ")");
+    return report(ok, t);
+}
+
+// a square from (x0, y0) to (x1, y1) in screen space (-1..1): pos, uv
+fn quad(x0: f64, y0: f64, x1: f64, y1: f64) -> i64 {
+    var v: i64 = list_new();
+    var i: i64 = list_new();
+    list_add_real(v, x0); list_add_real(v, y0); list_add_real(v, 0.5); list_add_real(v, 0.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y0); list_add_real(v, 0.5); list_add_real(v, 1.0); list_add_real(v, 1.0);
+    list_add_real(v, x1); list_add_real(v, y1); list_add_real(v, 0.5); list_add_real(v, 1.0); list_add_real(v, 0.0);
+    list_add_real(v, x0); list_add_real(v, y1); list_add_real(v, 0.5); list_add_real(v, 0.0); list_add_real(v, 0.0);
+    list_add(i, 0); list_add(i, 1); list_add(i, 2);
+    list_add(i, 0); list_add(i, 2); list_add(i, 3);
+    return gpu_mesh_lists(v, 5, i);
+}
+
+fn main() -> i64 {
+    say("GPU G-buffer test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    if gpu_backend() == 3 { on_web = 1; }
+    var full: i64 = quad(-1.0, -1.0, 1.0, 1.0);
+
+    // 1. one pass, three colours of 16-bit floats
+    gpu_hdr(1);
+    var gb: i64 = gpu_shader("in pos: vec3;\nin uv: vec2;\nvar vuv: vec2;\nvertex {\n vuv = uv;\n position = vec4(pos, 1.0);\n}\nfragment {\n color = vec4(2.5, -1.0, 0.0, 1.0);\n color1 = vec4(0.25, 0.5, 0.75, 1.0);\n color2 = vec4(vuv, 0.0, 1.0);\n}\n");
+    gpu_hdr(0);
+    report(gb > 0, "a shader writing three colours, for hdr targets, compiles");
+    var g: i64 = gpu_target_ex(W, H, 3, 1);
+    report(g > 0, "a target of three hdr colours is made");
+    gpu_begin_target(g, color4(0, 0, 0, 0));
+    gpu_draw(gb, full, 0);
+    gpu_end_target();
+
+    // the frame reads them: load gives the texel as it is
+    var rd: i64 = gpu_shader("uniform { which: uint; }\ntexture g0;\ntexture g1;\ntexture g2;\nin pos: vec3;\nin uv: vec2;\nvar vuv: vec2;\nvertex {\n vuv = uv;\n position = vec4(pos, 1.0);\n}\nfragment {\n if which == 0u {\n  let c = load(g0, frag_coord.xy);\n  color = vec4(c.r / 4.0, 0.0 - c.g / 2.0, c.b, 1.0);\n } else if which == 1u {\n  color = sample(g1, vuv);\n } else {\n  color = vec4(load(g2, frag_coord.xy).rg, 0.0, 1.0);\n }\n}\n");
+    report(rd > 0, "a shader with a uint uniform and load compiles");
+    var t0: i64 = gpu_target_texture_at(g, 0);
+    var t1: i64 = gpu_target_texture_at(g, 1);
+    var t2: i64 = gpu_target_texture_at(g, 2);
+    report(t1 == t0 + 1 && t2 == t0 + 2 && gpu_target_depth(g) == t0 + 3, "its colours are textures one after another, then its depth");
+    gpu_set_uint(rd, "which", 0);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_textures(rd, full, t0, t1, t2, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 159, 128, 0, 2, "colour 0 kept 2.5 and -1.0: 2.5 / 4 and 1.0 / 2");
+    gpu_set_uint(rd, "which", 1);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_textures(rd, full, t0, t1, t2, 0);
+    gpu_end();
+    check_pixel(W / 2, H / 2, 64, 128, 191, 2, "colour 1, sampled");
+    gpu_set_uint(rd, "which", 2);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_textures(rd, full, t0, t1, t2, 0);
+    gpu_end();
+    check_pixel(8, 8, 34, 34, 0, 3, "colour 2: the place on the square, near the top left");
+    check_pixel(56, 56, 225, 225, 0, 3, "colour 2: near the bottom right");
+
+    // 2. the kind of a shader is the pass's, or the draw is refused
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw(gb, full, 0);
+    report(failed(), "a shader of three hdr colours does not draw in the frame");
+    gpu_end();
+    var g_other: i64 = gpu_target_ex(W, H, 3, 1);
+    gpu_begin_target(g_other, color4(0, 0, 0, 0));
+    gpu_draw_textures(rd, full, t0, t1, t2, 0);
+    report(failed(), "a shader of one colour does not draw in a target of three");
+    gpu_end_target();
+
+    // 3. the vertex part reads a texture: red 255 lifts the square by 1.0
+    var img: i64 = image_new(2, 2);
+    var y: i64 = 0;
+    while y < 2 {
+        var x: i64 = 0;
+        while x < 2 {
+            image_set(img, x, y, 0 - 16777216 + 16711680);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var height: i64 = gpu_texture(img);
+    var lift: i64 = gpu_shader("texture h;\nin pos: vec3;\nin uv: vec2;\nvertex {\n let up = sample_level(h, vec2(0.5, 0.5), 0.0).r;\n position = vec4(pos.x, pos.y + up, pos.z, 1.0);\n}\nfragment {\n color = vec4(0.0, 1.0, 0.0, 1.0);\n}\n");
+    report(lift > 0, "a vertex part with sample_level compiles");
+    var low: i64 = quad(-1.0, -1.0, 1.0, 0.0);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw(lift, low, height);
+    gpu_end();
+    check_pixel(W / 2, H / 4, 0, 255, 0, 2, "the bottom half's square, lifted by the texture, is in the top half");
+    check_pixel(W / 2, 3 * H / 4, 0, 0, 0, 2, "and the bottom half is empty");
+
+    // 4. a compute shader reads a target's colour (load and sample_level)
+    var cs: i64 = gpu_compute("texture gbuf;\nbuffer out: vec4;\ncompute {\n let x = index;\n let a = load(gbuf, vec2(x, 10.0));\n let b = sample_level(gbuf, vec2((x + 0.5) / 64.0, 0.5), 0.0);\n out[index] = vec4(a.r, a.g, b.r, b.g);\n}\n");
+    report(cs > 0, "a compute shader with a texture compiles");
+    var out: i64 = gpu_instances(64, 4);
+    gpu_run_textures(cs, 64, out, 0, 0, 0, t0, 0, 0, 0);
+    if on_web == 0 {
+        report(gpu_instance_get(out, 5, 0) == 2.5 && gpu_instance_get(out, 5, 1) == -1.0, "load in a compute shader: 2.5 and -1.0, exactly");
+        report(fabs(gpu_instance_get(out, 40, 2) - 2.5) < 0.01 && fabs(gpu_instance_get(out, 40, 3) + 1.0) < 0.01, "sample_level in a compute shader: the same");
+    }
+    gpu_instances_free(out);
+
+    if failures == 0 {
+        say("GPU G-buffer test: all passed");
+    } else {
+        say("GPU G-buffer test: some checks failed");
+    }
+    return failures;
+}

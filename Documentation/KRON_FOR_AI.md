@@ -222,7 +222,7 @@ used. Read that comment for the module the task needs, not the whole file.
 | network | `std_net.kr` (TCP, UDP) |
 | pictures | `std_image.kr` (PNG, JPEG, BMP) |
 | a window, keys, mouse, touches | `std_window.kr`; controls: `std_ui.kr` |
-| 3D, shaders, compute | `std_gpu.kr` `std_shader.kr` (KSL) |
+| 3D, shaders, compute | `std_gpu.kr` `std_shader.kr` (KSL); G-buffers, hdr, indirect draws: MANUAL_EN.md, "What a renderer is built from" |
 | sound | `std_audio.kr`; `std_vorbis.kr` (Ogg), `std_mp3.kr` (MP3) |
 | video | `std_video.kr` (MPEG-1 `.mpg`) |
 | controllers | `std_gamepad.kr` |

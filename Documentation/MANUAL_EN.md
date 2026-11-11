@@ -945,7 +945,7 @@ on unless `gpu_blend(0)` turns it off for the shaders made after;
 
 | Module | What it has |
 |---|---|
-| `std_gpu.kr` | `gpu_open` `gpu_shader` `gpu_mesh` `gpu_mesh_lists` `gpu_cube` `gpu_plane` `gpu_sphere` `gpu_texture` `gpu_begin` `gpu_set_mat4/vec4/vec3/vec2/float` `gpu_draw` `gpu_draw_textures` `gpu_end` `gpu_pixel` `gpu_save_bmp` `gpu_close`; instances: `gpu_instances` `gpu_instance_put` `gpu_instance_list` `gpu_instance_get` `gpu_instances_free` `gpu_draw_instanced`; render targets: `gpu_target` `gpu_target_texture` `gpu_target_depth` `gpu_begin_target` `gpu_end_target`; compute: `gpu_compute` `gpu_run` |
+| `std_gpu.kr` | `gpu_open` `gpu_shader` `gpu_mesh` `gpu_mesh_lists` `gpu_cube` `gpu_plane` `gpu_sphere` `gpu_texture` `gpu_begin` `gpu_set_mat4/vec4/vec3/vec2/float` `gpu_draw` `gpu_draw_textures` `gpu_end` `gpu_pixel` `gpu_save_bmp` `gpu_close`; instances: `gpu_instances` `gpu_instance_put` `gpu_instance_list` `gpu_instance_get` `gpu_instances_free` `gpu_draw_instanced`; render targets: `gpu_target` `gpu_target_texture` `gpu_target_depth` `gpu_begin_target` `gpu_end_target`; G-buffers and light above 1: `gpu_target_ex` `gpu_target_texture_at` `gpu_hdr`; compute: `gpu_compute` `gpu_run` `gpu_run_textures`; drawn from what the card wrote: `gpu_draw_indirect` `gpu_instance_put_uint` `gpu_instance_get_uint` `gpu_set_uint` |
 | `std_shader.kr` | KSL, the shader language, translated to SPIR-V, MSL and WGSL |
 | `std_math3d.kr` | `Vec2` `Vec3` `Vec4` `Quat` `Mat4` and their functions: `m4_perspective` `m4_look_at` `m4_trs` `q_slerp` ... |
 | `std_image.kr` | PNG, BMP and baseline JPEG; `image_from_bytes` |
@@ -982,7 +982,7 @@ fragment {
 }
 ```
 
-Types `float vec2 vec3 vec4 mat4 bool`; `let`, `var`, `if`, `for i in 0..4`,
+Types `float vec2 vec3 vec4 mat4 bool uint`; `let`, `var`, `if`, `for i in 0..4`,
 `discard`; the usual functions (`normalize dot cross mix clamp pow sin`...).
 A mesh's corners are floats in the order of the `in` lines: position, normal
 and uv make eight a corner, which is what `gpu_cube` and `gpu_sphere` give;
@@ -1007,6 +1007,73 @@ compute {
 `gpu_run(cs, count, pos, vel, 0, 0)` runs it for `count` items (`index`
 goes from 0 to `count - 1`; `count` is there to read too); the same `pos`
 buffer is then drawn as instances, without coming back to the program.
+An index past a buffer's last item reads and writes the last one: a shader
+never reaches memory outside its buffers.
+
+### What a renderer is built from
+
+Deferred lighting, light that bounces, geometry culled on the card: an
+engine writes these in Kron on a few pieces of the standard library.
+
+**Several colours, and light above 1.** `gpu_target_ex(w, h, colors, hdr)`
+is a target of 1 to 4 colours, of 8 bits a channel (`hdr` 0) or 16-bit
+floats (`hdr` 1, which keep 2.5 and -1.0 as they are), and a depth. Its
+shader writes `color`, `color1`, `color2`, `color3`; the shaders made after
+`gpu_hdr(1)` draw into hdr targets. A draw is refused when the shader's
+colours or format are not the pass's (the frame takes one colour of 8 bits).
+`gpu_target_texture_at(t, k)` is colour `k` as a texture.
+
+```
+gpu_hdr(1);
+var fill: i64 = gpu_shader(gbuffer_source);     // color = albedo, color1 = normal, ...
+gpu_hdr(0);
+var gbuf: i64 = gpu_target_ex(1280, 720, 3, 1);
+gpu_begin_target(gbuf, color4(0, 0, 0, 0));
+gpu_draw(fill, mesh, tex);                       // every mesh of the scene
+gpu_end_target();
+gpu_begin(color4(0, 0, 0, 255));                 // the light, once a pixel
+gpu_draw_textures(light, screen, gpu_target_texture_at(gbuf, 0),
+                  gpu_target_texture_at(gbuf, 1), gpu_target_depth(gbuf), 0);
+gpu_end();
+```
+
+**Reading textures anywhere.** `load(t, xy)` reads the texel at pixel `xy`
+as it is, without filtering (a G-buffer, a depth); `sample_level(t, uv,
+level)` samples one mip level. Both work in the vertex part, the fragment
+part and compute shaders (`sample` picks its level from the pixels around,
+and is for the fragment part only). A compute shader declares its textures
+like any shader, and `gpu_run_textures(cs, count, b0, b1, b2, b3, t0, t1,
+t2, t3)` gives them.
+
+**uints, atomics, indirect draws.** KSL has `uint` (`5u`, `uint(x)`,
+`float(u)`, `+ - * / %`, `& | ^ << >>`, comparisons, `min`, `max`) for
+uniforms, buffers and values. In a compute shader, `atomic_add(b[i], v)`,
+`atomic_min` and `atomic_max` change an item of a uint buffer that many
+runs share, and give what it held before:
+
+```
+buffer src: uint;              // the mesh's indices
+buffer dst: uint;              // the triangles kept
+buffer args: uint;             // index count, instance count, first index, 0, 0
+uniform { keep: uint; }
+compute {
+    let t = uint(index);       // a triangle
+    if ((keep >> (t / 2u)) & 1u) == 1u {
+        let at = atomic_add(args[0u], 3u);
+        dst[at] = src[t * 3u];
+        dst[at + 1u] = src[t * 3u + 1u];
+        dst[at + 2u] = src[t * 3u + 2u];
+    }
+}
+```
+
+`gpu_draw_indirect(prog, mesh, tex, ib, dst, args)` then draws the mesh's
+corners by the indices in `dst`, as many as `args` says, without the
+program reading either: the card decides what is drawn. `ib` is the
+instance buffer when the shader has instance inputs (0 when not), and `dst`
+0 takes the mesh's own indices. `gpu_instance_put_uint` writes a buffer's
+uints (a counter set to 0 before a run), `gpu_instance_get_uint` reads them
+back on Vulkan and Metal, `gpu_set_uint` sets a uint uniform.
 
 ### What is not here
 

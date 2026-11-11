@@ -391,7 +391,7 @@ class Kron {
       case 1208: return this.gpuInstNew(a);
       case 1209: return this.gpuInstWrite(a, b, c, d);
       case 1210: return this.gpuInstFree(a);
-      case 1211: return this.gpuTarget(a, b);
+      case 1211: return this.gpuTarget(a, b, c);
       case 1212: return this.gpuCompute(a, b, c);
       case 1213: return this.gpuRun(a, b, c, d, e);
       // ---- sound: WebAudio, played by the page (std_audio.kr) ---------------
@@ -758,13 +758,16 @@ class Kron {
     this.gpuFrame = { clear, draws: [], u: [], target: target || 0 };
     return 1;
   }
-  // tp: the four textures, then the instance buffer (0 none) and how many
+  // tp: the four textures, then the instance buffer (0 none) and how many,
+  // then for an indirect draw the indices' buffer (0 the mesh's) and the
+  // counts' (0 for a plain draw)
   gpuDraw(pipe, mesh, count, up, usize, tp) {
     if (!this.gpuFrame) return 0;
     const dv = this.dv();
     const tex = [0, 1, 2, 3].map(i => Number(dv.getBigInt64(tp + i * 8, true)));
     const inst = Number(dv.getBigInt64(tp + 32, true)), ninst = Number(dv.getBigInt64(tp + 40, true));
-    this.gpuFrame.draws.push({ pipe, mesh, count, tex, inst, ninst, u: this.gpuFrame.u.length, usize });
+    const ind = Number(dv.getBigInt64(tp + 48, true)), args = Number(dv.getBigInt64(tp + 56, true));
+    this.gpuFrame.draws.push({ pipe, mesh, count, tex, inst, ninst, ind, args, u: this.gpuFrame.u.length, usize });
     this.gpuFrame.u.push(usize > 0 ? this.bytes(up, usize) : new Uint8Array(0));
     return 1;
   }
@@ -804,28 +807,33 @@ class Kron {
     return 1;
   }
   // compute shaders: made once, run between frames on instance buffers
+  // nbuf: the buffers, and the textures above bit 8
   gpuCompute(src, n, nbuf) {
     const wgsl = this.decoder.decode(this.bytes(src, n));
     const id = ++this.gpuIds;
-    this.gpuSend({ kind: 'gpu-cprog', id, wgsl, nbuf });
+    this.gpuSend({ kind: 'gpu-cprog', id, wgsl, nbuf: nbuf & 255, ntex: (nbuf >> 8) & 255 });
     return id;
   }
+  // bp: the four buffers, then the four textures
   gpuRun(pipe, count, up, usize, bp) {
     const dv = this.dv();
     const bufs = [0, 1, 2, 3].map(i => Number(dv.getBigInt64(bp + i * 8, true)));
+    const tex = [4, 5, 6, 7].map(i => Number(dv.getBigInt64(bp + i * 8, true)));
     const u = this.bytes(up, usize);
-    this.gpuSend({ kind: 'gpu-run', pipe, count, u, bufs }, IS_NODE ? [] : [u.buffer]);
+    this.gpuSend({ kind: 'gpu-run', pipe, count, u, bufs, tex }, IS_NODE ? [] : [u.buffer]);
     return 1;
   }
   gpuInstFree(id) {
     this.gpuSend({ kind: 'gpu-inst-free', id });
     return 1;
   }
-  // a render target: its colour is texture id, its depth texture id + 1
-  gpuTarget(w, h) {
+  // a render target: its colours are textures id, id + 1 .., its depth the
+  // one after them; kind: (hdr << 2) | (colours - 1)
+  gpuTarget(w, h, kind) {
+    const ncol = ((kind || 0) & 3) + 1;
     const id = this.gpuIds + 1;
-    this.gpuIds += 2;
-    this.gpuSend({ kind: 'gpu-target', id, w, h });
+    this.gpuIds += ncol + 1;
+    this.gpuSend({ kind: 'gpu-target', id, w, h, tkind: kind || 0 });
     return id;
   }
 
@@ -908,9 +916,10 @@ class KronGPU {
       visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
       buffer: { type: 'uniform', hasDynamicOffset: true } }] : [] });
     const e1 = [];
+    const vf = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
     for (let k = 0; k < ntex; k++) {
-      e1.push({ binding: 2 * k, visibility: GPUShaderStage.FRAGMENT, texture: {} });
-      e1.push({ binding: 2 * k + 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+      e1.push({ binding: 2 * k, visibility: vf, texture: {} });
+      e1.push({ binding: 2 * k + 1, visibility: vf, sampler: {} });
     }
     const g1 = d.createBindGroupLayout({ entries: e1 });
     const fmt = ['', 'float32', 'float32x2', 'float32x3', 'float32x4'];
@@ -927,10 +936,14 @@ class KronGPU {
     if (iattributes.length) buffers.push({ arrayStride: ioff, stepMode: 'instance', attributes: iattributes });
     const blend = (m.flags & 4) ? { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
                                      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } : undefined;
+    // the colours it writes, of the format of its kind
+    const kind = (m.flags >> 16) & 7, fmt8 = (kind & 4) ? 'rgba16float' : this.format;
+    const targets = [];
+    for (let c = 0; c <= (kind & 3); c++) targets.push({ format: fmt8, blend });
     const pipe = d.createRenderPipeline({
       layout: d.createPipelineLayout({ bindGroupLayouts: [g0, g1] }),
       vertex: { module, entryPoint: 'vs_main', buffers },
-      fragment: { module, entryPoint: 'fs_main', targets: [{ format: this.format, blend }] },
+      fragment: { module, entryPoint: 'fs_main', targets },
       primitive: { topology: 'triangle-list', cullMode: (m.flags & 1) ? 'back' : 'none', frontFace: 'ccw' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: !!(m.flags & 2),
                       depthCompare: (m.flags & 2) ? 'less' : 'always' }
@@ -954,7 +967,8 @@ class KronGPU {
   }
   instNew(m) {
     this.insts.set(m.id, { buf: this.device.createBuffer({ size: Math.max(16, (m.size + 3) & ~3),
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }) });
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.INDEX |
+             GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST }) });
   }
   inst(m) {
     const b = this.insts.get(m.id);
@@ -968,9 +982,18 @@ class KronGPU {
     const e1 = [];
     for (let k = 0; k < m.nbuf; k++) e1.push({ binding: k, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
     const g1 = d.createBindGroupLayout({ entries: e1 });
-    const pipe = d.createComputePipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [g0, g1] }),
+    // the textures, in group 2: each with its sampler
+    const ntex = m.ntex || 0, e2 = [];
+    for (let k = 0; k < ntex; k++) {
+      e2.push({ binding: 2 * k, visibility: GPUShaderStage.COMPUTE, texture: {} });
+      e2.push({ binding: 2 * k + 1, visibility: GPUShaderStage.COMPUTE, sampler: {} });
+    }
+    const layouts = [g0, g1];
+    let g2 = null;
+    if (ntex > 0) { g2 = d.createBindGroupLayout({ entries: e2 }); layouts.push(g2); }
+    const pipe = d.createComputePipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: layouts }),
       compute: { module, entryPoint: 'cs_main' } });
-    this.pipes.set(m.id, { cpipe: pipe, g0, g1, nbuf: m.nbuf });
+    this.pipes.set(m.id, { cpipe: pipe, g0, g1, g2, ntex, nbuf: m.nbuf });
   }
   // a run: its uniforms in a buffer of their own, 64 items a group
   run(m) {
@@ -992,6 +1015,16 @@ class KronGPU {
     pass.setPipeline(p.cpipe);
     pass.setBindGroup(0, d.createBindGroup({ layout: p.g0, entries: [{ binding: 0, resource: { buffer: ub } }] }));
     pass.setBindGroup(1, d.createBindGroup({ layout: p.g1, entries }));
+    if (p.g2) {
+      const e2 = [];
+      for (let k = 0; k < p.ntex; k++) {
+        const t = this.texs.get(m.tex[k]);
+        if (!t) { pass.end(); ub.destroy(); return; }
+        e2.push({ binding: 2 * k, resource: t });
+        e2.push({ binding: 2 * k + 1, resource: this.sampler });
+      }
+      pass.setBindGroup(2, d.createBindGroup({ layout: p.g2, entries: e2 }));
+    }
     pass.dispatchWorkgroups(Math.ceil(m.count / 64));
     pass.end();
     d.queue.submit([enc.finish()]);
@@ -1005,8 +1038,13 @@ class KronGPU {
   // pass into a texture of floats a shader can sample, as Vulkan's
   makeTarget(m) {
     const d = this.device;
-    const col = d.createTexture({ size: [m.w, m.h], format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    // its colours: as many as its kind says, 8 bits or 16-bit floats
+    const tkind = m.tkind || 0, ncol = (tkind & 3) + 1;
+    const cfmt = (tkind & 4) ? 'rgba16float' : this.format;
+    const cols = [];
+    for (let c = 0; c < ncol; c++) cols.push(d.createTexture({ size: [m.w, m.h], format: cfmt,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }));
+    const col = cols[0];
     const dep = d.createTexture({ size: [m.w, m.h], format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     const dfmt = this.f32f ? 'r32float' : 'r16float';
@@ -1026,9 +1064,10 @@ class KronGPU {
     }
     const dgroup = d.createBindGroup({ layout: this.dpipe.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: dep.createView() }] });
-    this.targets.set(m.id, { col, cview: col.createView(), dview: dep.createView(), dcopy, dgroup, w: m.w, h: m.h });
-    this.texs.set(m.id, col.createView());
-    this.texs.set(m.id + 1, dcopy.createView());
+    this.targets.set(m.id, { col, cview: col.createView(), cviews: cols.map(c => c.createView()),
+                             dview: dep.createView(), dcopy, dgroup, w: m.w, h: m.h });
+    cols.forEach((c, k) => this.texs.set(m.id + k, c.createView()));
+    this.texs.set(m.id + ncol, dcopy.createView());
   }
   frame(f) {
     const d = this.device;
@@ -1046,10 +1085,10 @@ class KronGPU {
     const enc = d.createCommandEncoder();
     const tg = f.target ? this.targets.get(f.target) : null;
     if (f.target && !tg) return Promise.resolve();
-    const view = tg ? tg.cview : this.ctx ? this.ctx.getCurrentTexture().createView() : this.target.createView();
+    const views = tg ? tg.cviews : [this.ctx ? this.ctx.getCurrentTexture().createView() : this.target.createView()];
+    const clearValue = { r: f.clear[0], g: f.clear[1], b: f.clear[2], a: f.clear[3] };
     const pass = enc.beginRenderPass({
-      colorAttachments: [{ view, clearValue: { r: f.clear[0], g: f.clear[1], b: f.clear[2], a: f.clear[3] },
-                           loadOp: 'clear', storeOp: 'store' }],
+      colorAttachments: views.map(view => ({ view, clearValue, loadOp: 'clear', storeOp: 'store' })),
       depthStencilAttachment: { view: tg ? tg.dview : this.depth.createView(), depthClearValue: 1,
                                 depthLoadOp: 'clear', depthStoreOp: 'store' }
     });
@@ -1073,6 +1112,19 @@ class KronGPU {
       }
       pass.setBindGroup(1, g);
       pass.setVertexBuffer(0, mesh.v);
+      if (dr.args) {
+        // an indirect draw: indices and counts from buffers the card wrote
+        const ab = this.insts.get(dr.args), xb = dr.ind ? this.insts.get(dr.ind) : null;
+        if (!ab || (dr.ind && !xb)) return;
+        if (dr.inst) {
+          const ib = this.insts.get(dr.inst);
+          if (!ib) return;
+          pass.setVertexBuffer(1, ib.buf);
+        }
+        pass.setIndexBuffer(xb ? xb.buf : mesh.i, 'uint32');
+        pass.drawIndexedIndirect(ab.buf, 0);
+        return;
+      }
       pass.setIndexBuffer(mesh.i, 'uint32');
       if (dr.inst) {
         const ib = this.insts.get(dr.inst);

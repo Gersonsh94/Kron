@@ -1,0 +1,209 @@
+kron_program
+kron_domain gpu_indirect;
+kron_imports
+acquire_domain "std_gpu.kr";
+kron_definitions
+
+// =========================================================================
+// GPU test: what GPU-driven drawing is built from. uint buffers, atomic
+// counters and bit operators in a compute shader; then a mesh of four
+// squares culled on the card: a compute shader keeps the triangles of the
+// squares a mask asks for, writes their indices into a buffer and their
+// count with atomic_add, and gpu_draw_indirect draws what it wrote without
+// the program reading it; then an indirect draw of instances. Run by
+// GPUTESTS.bat; the exit code is the number of checks that failed. (On the
+// web the buffers stay on the card and the frame in the page.)
+// =========================================================================
+
+var failures: i64;
+var on_web: i64;
+const W: i64 = 64;
+const H: i64 = 64;
+const N: i64 = 1000;
+
+fn report(ok: i64, what: i64) -> i64 {
+    var t: text = text_new();
+    if ok {
+        text_add(t, "  ok    ");
+    } else {
+        text_add(t, "  FAIL  ");
+        failures = failures + 1;
+    }
+    text_add(t, what);
+    say(t);
+    return ok;
+}
+
+fn iabs(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn channel(c: i64, k: i64) -> i64 { return (c >> (16 - k * 8)) & 255; }
+
+fn check_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, what: i64) -> i64 {
+    if on_web == 1 { return 1; }
+    var c: i64 = gpu_pixel(x, y);
+    var ok: i64 = 1;
+    if iabs(channel(c, 0) - r) > 4 || iabs(channel(c, 1) - g) > 4 || iabs(channel(c, 2) - b) > 4 { ok = 0; }
+    var t: text = text_add(text_new(), what);
+    text_add(t, " (got ");
+    text_add_int(t, channel(c, 0));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 1));
+    text_add(t, ",");
+    text_add_int(t, channel(c, 2));
+    text_add(t, ")");
+    return report(ok, t);
+}
+
+// four squares, one a quarter of the screen: 0 bottom left, 1 bottom right,
+// 2 top left, 3 top right; each corner pos (3) and colour (3)
+fn squares() -> i64 {
+    var v: i64 = list_new();
+    var ix: i64 = list_new();
+    var k: i64 = 0;
+    while k < 4 {
+        var x0: f64 = -0.9;
+        if k == 1 || k == 3 { x0 = 0.1; }
+        var y0: f64 = -0.9;
+        if k >= 2 { y0 = 0.1; }
+        var r: f64 = 0.0;
+        var g: f64 = 0.0;
+        var b: f64 = 0.0;
+        if k == 0 { r = 1.0; }
+        if k == 1 { g = 1.0; }
+        if k == 2 { b = 1.0; }
+        if k == 3 { r = 1.0; g = 1.0; }
+        var c: i64 = 0;
+        while c < 4 {
+            var x: f64 = x0;
+            if c == 1 || c == 2 { x = x0 + 0.8; }
+            var y: f64 = y0;
+            if c >= 2 { y = y0 + 0.8; }
+            list_add_real(v, x); list_add_real(v, y); list_add_real(v, 0.5);
+            list_add_real(v, r); list_add_real(v, g); list_add_real(v, b);
+            c = c + 1;
+        }
+        var base: i64 = k * 4;
+        list_add(ix, base); list_add(ix, base + 1); list_add(ix, base + 2);
+        list_add(ix, base); list_add(ix, base + 2); list_add(ix, base + 3);
+        k = k + 1;
+    }
+    return gpu_mesh_lists(v, 6, ix);
+}
+
+fn main() -> i64 {
+    say("GPU indirect test");
+    if gpu_open(W, H) == 0 {
+        say("  FAIL  the GPU did not open (the reason follows)");
+        return 1;
+    }
+    if gpu_backend() == 3 { on_web = 1; }
+
+    // 1. a counter: every third item takes a slot with atomic_add
+    var pick: i64 = gpu_compute("buffer counter: uint;\nbuffer slots: uint;\nbuffer bits: uint;\nuniform { every: uint; }\ncompute {\n let i = uint(index);\n if i % every == 0u {\n  let slot = atomic_add(counter[0u], 1u);\n  slots[slot] = i;\n }\n atomic_max(counter[1u], i);\n atomic_min(counter[2u], i + 7u);\n bits[i] = ((i << 3u) | (i & 5u)) ^ (i >> 2u);\n}\n");
+    report(pick > 0, "a compute shader with uint buffers and atomics compiles");
+    var counter: i64 = gpu_instances(4, 1);
+    var slots: i64 = gpu_instances(N, 1);
+    var bits: i64 = gpu_instances(N, 1);
+    gpu_instance_put_uint(counter, 0, 0, 0);
+    gpu_instance_put_uint(counter, 1, 0, 0);
+    gpu_instance_put_uint(counter, 2, 0, 4294967295);
+    gpu_set_uint(pick, "every", 3);
+    gpu_run(pick, N, counter, slots, bits, 0);
+    if failed() { print_fail(); }
+    if on_web == 0 {
+        var n: i64 = gpu_instance_get_uint(counter, 0, 0);
+        report(n == 334, "334 of 1000 items took a slot");
+        var sum: i64 = 0;
+        var i: i64 = 0;
+        while i < n {
+            sum = sum + gpu_instance_get_uint(slots, i, 0);
+            i = i + 1;
+        }
+        report(sum == 166833, "and the slots hold every third item once: their sum");
+        report(gpu_instance_get_uint(counter, 1, 0) == 999 && gpu_instance_get_uint(counter, 2, 0) == 7, "atomic_max and atomic_min");
+        var bad: i64 = 0;
+        i = 0;
+        while i < N {
+            var want: i64 = ((i << 3) | (i & 5)) ^ (i >> 2);
+            if gpu_instance_get_uint(bits, i, 0) != want { bad = bad + 1; }
+            i = i + 1;
+        }
+        report(bad == 0, "<< | & ^ >> on uints: what the same sums give here");
+    }
+
+    // 2. culling on the card: the triangles of squares 0 and 2 kept
+    var mesh: i64 = squares();
+    var src: i64 = gpu_instances(24, 1);
+    var dst: i64 = gpu_instances(24, 1);
+    var args: i64 = gpu_instances(5, 1);
+    var k: i64 = 0;
+    while k < 4 {
+        var base: i64 = k * 4;
+        gpu_instance_put_uint(src, k * 6, 0, base);
+        gpu_instance_put_uint(src, k * 6 + 1, 0, base + 1);
+        gpu_instance_put_uint(src, k * 6 + 2, 0, base + 2);
+        gpu_instance_put_uint(src, k * 6 + 3, 0, base);
+        gpu_instance_put_uint(src, k * 6 + 4, 0, base + 2);
+        gpu_instance_put_uint(src, k * 6 + 5, 0, base + 3);
+        k = k + 1;
+    }
+    // the counts: no indices yet, one instance, from index 0
+    gpu_instance_put_uint(args, 0, 0, 0);
+    gpu_instance_put_uint(args, 1, 0, 1);
+    gpu_instance_put_uint(args, 2, 0, 0);
+    gpu_instance_put_uint(args, 3, 0, 0);
+    gpu_instance_put_uint(args, 4, 0, 0);
+    var cull: i64 = gpu_compute("buffer src: uint;\nbuffer dst: uint;\nbuffer args: uint;\nuniform { keep: uint; }\ncompute {\n let t = uint(index);\n let square = t / 2u;\n if ((keep >> square) & 1u) == 1u {\n  let at = atomic_add(args[0u], 3u);\n  dst[at] = src[t * 3u];\n  dst[at + 1u] = src[t * 3u + 1u];\n  dst[at + 2u] = src[t * 3u + 2u];\n }\n}\n");
+    report(cull > 0, "the culling shader compiles");
+    gpu_set_uint(cull, "keep", 5);
+    gpu_run(cull, 8, src, dst, args, 0);
+    var flat: i64 = gpu_shader("in pos: vec3;\nin col: vec3;\nvar vcol: vec3;\nvertex {\n vcol = col;\n position = vec4(pos, 1.0);\n}\nfragment {\n color = vec4(vcol, 1.0);\n}\n");
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_indirect(flat, mesh, 0, 0, dst, args);
+    report(!failed(), "gpu_draw_indirect takes the buffers the card wrote");
+    gpu_end();
+    if on_web == 0 {
+        report(gpu_instance_get_uint(args, 0, 0) == 12, "the card counted 12 indices: two squares");
+    }
+    check_pixel(W / 4, 3 * H / 4, 255, 0, 0, "square 0, bottom left, kept");
+    check_pixel(3 * W / 4, 3 * H / 4, 0, 0, 0, "square 1, bottom right, culled");
+    check_pixel(W / 4, H / 4, 0, 0, 255, "square 2, top left, kept");
+    check_pixel(3 * W / 4, H / 4, 0, 0, 0, "square 3, top right, culled");
+
+    // 3. an indirect draw of instances, from the mesh's own indices: square
+    // 0 twice, the second moved right by half the screen
+    var moved: i64 = gpu_shader("in pos: vec3;\nin col: vec3;\ninstance at: vec4;\nvar vcol: vec3;\nvertex {\n vcol = col;\n position = vec4(pos.x + at.x, pos.y + at.y, pos.z, 1.0);\n}\nfragment {\n color = vec4(vcol, 1.0);\n}\n");
+    var inst: i64 = gpu_instances(2, 4);
+    gpu_instance_put(inst, 0, 0.0, 0.0, 0.0, 0.0);
+    gpu_instance_put(inst, 1, 1.0, 0.0, 0.0, 0.0);
+    var args2: i64 = gpu_instances(5, 1);
+    gpu_instance_put_uint(args2, 0, 0, 6);
+    gpu_instance_put_uint(args2, 1, 0, 2);
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_indirect(moved, mesh, 0, inst, 0, args2);
+    gpu_end();
+    check_pixel(W / 4, 3 * H / 4, 255, 0, 0, "instance 0 of square 0");
+    check_pixel(3 * W / 4, 3 * H / 4, 255, 0, 0, "instance 1, moved right");
+    check_pixel(W / 4, H / 4, 0, 0, 0, "and nothing else");
+
+    // 4. what is refused
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_indirect(moved, mesh, 0, 0, 0, args2);
+    report(failed(), "a shader with instance inputs needs their buffer");
+    gpu_draw_indirect(flat, mesh, 0, 0, inst, args2);
+    report(failed(), "an indices' buffer has one uint an item");
+    gpu_end();
+
+    gpu_instances_free(counter);
+    gpu_instances_free(slots);
+    gpu_instances_free(bits);
+    if failures == 0 {
+        say("GPU indirect test: all passed");
+    } else {
+        say("GPU indirect test: some checks failed");
+    }
+    return failures;
+}

@@ -31,10 +31,24 @@ kron_definitions
 //         pos[i] = pos[i] + vel[i] * dt;
 //     }
 //
-// A buffer holds floats, vec2s or vec4s, read and written as name[i]; index
-// runs from 0 to count - 1, and count (a float, in the uniforms of its own)
-// is how many items gpu_run was asked for. A compute shader has buffers,
-// uniforms and its compute { } part only.
+// A buffer holds floats, vec2s, vec4s or uints, read and written as
+// name[i] (i a float or a uint); an i past the last item is taken as the
+// last, so a shader never reaches memory outside its buffers. index runs
+// from 0 to count - 1, and count (a float, in the uniforms of its own) is
+// how many items gpu_run was asked for. A compute shader has buffers,
+// uniforms, textures (read with sample_level and load) and its compute { }
+// part. In it, atomic_add(name[i], v), atomic_min and atomic_max change an
+// item of a uint buffer many runs share, and give what it held before;
+// one may stand alone as a statement:
+//
+//     buffer counter: uint;
+//     buffer kept: uint;
+//     compute {
+//         if index < 100.0 {
+//             let slot = atomic_add(counter[0u], 1u);
+//             kept[slot] = uint(index);
+//         }
+//     }
 //
 //     uniform {                      // values the program sets per draw
 //         mvp: mat4;
@@ -61,16 +75,23 @@ kron_definitions
 //         color = sample(albedo, vuv) * tint * (0.2 + 0.8 * d);
 //     }
 //
-// Types: float, vec2, vec3, vec4, mat4, bool. Statements: let x = e;
+// Types: float, vec2, vec3, vec4, mat4, bool, uint (5u; uint(x) and
+// float(u) between them; a uniform, a buffer's item or a value, not an
+// input or a var passed on). Statements: let x = e;
 // var x: T = e;  x = e;  x += e (and -= *= /=);  if c { } else { }
 // for i in 0..4 { } (the count is a number: the body is repeated);
 // discard; (fragment only). Operators: + - * / with vectors, scalars and
 // matrices mixed as the GPU does, < > <= >= == != && || ! and
-// v.xyz / v.rgba swizzles. Functions: vec2 vec3 vec4 float normalize dot
-// cross length distance min max clamp mix pow sqrt abs floor fract sin cos
-// exp sign step smoothstep reflect sample.
+// v.xyz / v.rgba swizzles; on uints also % & | ^ << >> (a uint and a float
+// do not mix). Functions: vec2 vec3 vec4 float uint normalize dot cross
+// length distance min max clamp mix pow sqrt abs floor fract sin cos exp
+// sign step smoothstep reflect; textures: sample(t, uv) (fragment only: it
+// picks the mip level), sample_level(t, uv, level) and load(t, xy) (the
+// texel at pixel xy, unfiltered), these two in every part.
 // position (vertex) is the corner on the screen, color (fragment) the
-// pixel's color, frag_coord (fragment) the pixel's place.
+// pixel's color, frag_coord (fragment) the pixel's place. color1, color2
+// and color3 are the colours after it, for a target of more than one
+// (gpu_target_ex): a G-buffer's albedo, normal, depth ...
 //
 //     shader_compile(source)            a shader, or a fail with the line
 //     shader_wgsl(s)  shader_msl(s)     the translations, as texts
@@ -83,11 +104,12 @@ kron_definitions
 //     shader_uniform_type(s, name)      SH_FLOAT ... SH_MAT4
 //     shader_inputs(s)  shader_input_type(s, i)  shader_textures(s)
 //     shader_instance_inputs(s)         how many of the inputs are per instance
+//     shader_outputs(s)                 the colours it writes: 1 to 4
 //     shader_error()                    the last error, a text
 //
 // The uniform block has the same layout on every system: each member at a
-// multiple of its alignment (4 a float, 8 a vec2, 16 a vec3, a vec4 and a
-// mat4) and a vec3 taking 16 bytes.
+// multiple of its alignment (4 a float or a uint, 8 a vec2, 16 a vec3, a
+// vec4 and a mat4) and a vec3 taking 16 bytes.
 // =========================================================================
 
 const SH_FLOAT: i64 = 1;
@@ -96,6 +118,7 @@ const SH_VEC3: i64 = 3;
 const SH_VEC4: i64 = 4;
 const SH_MAT4: i64 = 5;
 const SH_BOOL: i64 = 6;
+const SH_UINT: i64 = 11;           // a 32-bit unsigned integer (11: SPIR-V's uint key)
 
 // node kinds
 const NK_NUM: i64 = 1;
@@ -106,6 +129,7 @@ const NK_NOT: i64 = 5;
 const NK_CALL: i64 = 6;
 const NK_SWZ: i64 = 7;
 const NK_ARG: i64 = 8;
+const NK_UNUM: i64 = 9;            // a uint literal: 5u
 const NK_LET: i64 = 20;
 const NK_VAR: i64 = 21;
 const NK_SET: i64 = 22;
@@ -115,6 +139,7 @@ const NK_LIST: i64 = 25;
 const NK_DISCARD: i64 = 26;
 const NK_FOR: i64 = 27;
 const NK_INDEX: i64 = 28;          // a buffer's item: name[e] (compute)
+const NK_EXPR: i64 = 29;           // a call standing alone: atomic_add(b[i], 1u);
 
 // what a name is
 const RS_UNI: i64 = 1;
@@ -159,6 +184,8 @@ var vy_name: i64;
 var vy_type: i64;
 var bf_name: i64;      // the buffers (compute)
 var bf_type: i64;
+var bf_atomic: i64;    // 1 for a buffer an atomic_ function works on
+var sh_nout: i64;      // the colours the fragment part writes: color, color1 ..
 var sh_cs: i64;        // the compute block, -1 for none
 var sh_vs: i64;        // the vertex block
 var sh_fs: i64;        // the fragment block
@@ -181,6 +208,7 @@ var pr_ninst: i64;
 var pr_ntex: i64;
 var pr_cs: i64;        // 1 for a compute shader
 var pr_bftype: i64;    // its buffers' types
+var pr_nout: i64;      // the colours a drawing shader writes, 1 to 4
 var pr_ready: i64;
 
 fn sh_error() -> text {
@@ -280,6 +308,10 @@ fn sh_lex(src: i64) -> i64 {
                     i = i + 1;
                 }
             }
+            // 5u: a uint
+            if i < n && text_at(src, i) == 117 && !(i + 1 < n && (sh_is_alpha(text_at(src, i + 1)) || sh_is_digit(text_at(src, i + 1)))) {
+                i = i + 1;
+            }
             sh_tok(2, text_part(src, s2, i - s2), line);
         } else {
             var two: i64 = 0;
@@ -291,6 +323,8 @@ fn sh_lex(src: i64) -> i64 {
                 if c == 38 && d == 38 { two = 1; }
                 if c == 124 && d == 124 { two = 1; }
                 if c == 46 && d == 46 { two = 1; }
+                if c == 60 && d == 60 { two = 1; }
+                if c == 62 && d == 62 { two = 1; }
             }
             if two == 1 {
                 sh_tok(3, text_part(src, i, 2), line);
@@ -367,6 +401,7 @@ fn sh_type_named(t: i64) -> i64 {
     if text_same(t, "vec4") { return SH_VEC4; }
     if text_same(t, "mat4") { return SH_MAT4; }
     if text_same(t, "bool") { return SH_BOOL; }
+    if text_same(t, "uint") || text_same(t, "u32") { return SH_UINT; }
     return 0;
 }
 
@@ -374,7 +409,7 @@ fn sh_parse_type() -> i64 {
     var t: i64 = tk_name();
     var ty: i64 = sh_type_named(t);
     if ty == 0 && !sh_bad() {
-        sh_fail("a type is expected: float, vec2, vec3, vec4, mat4 or bool");
+        sh_fail("a type is expected: float, vec2, vec3, vec4, mat4, bool or uint");
     }
     return ty;
 }
@@ -383,8 +418,27 @@ fn sh_parse_type() -> i64 {
 fn sh_primary() -> i64 {
     if sh_bad() { return node(NK_NUM, -1, -1, -1, 0); }
     if tk_kind() == 2 {
+        var lit: i64 = tk_text();
+        if text_at(lit, text_len(lit) - 1) == 117 {
+            var un: i64 = node(NK_UNUM, -1, -1, -1, 0);
+            var digits: i64 = text_part(lit, 0, text_len(lit) - 1);
+            var k: i64 = 0;
+            while k < text_len(digits) {
+                if sh_is_digit(text_at(digits, k)) == 0 {
+                    sh_fail("a uint is written in digits only: 5u");
+                }
+                k = k + 1;
+            }
+            var uv: i64 = text_to_int(digits);
+            if uv > 4294967295 {
+                sh_fail("a uint is at most 4294967295");
+            }
+            list_set_real(nnum, un, uv as f64);
+            tk_next();
+            return un;
+        }
         var nd: i64 = node(NK_NUM, -1, -1, -1, 0);
-        list_set_real(nnum, nd, text_to_real(tk_text()));
+        list_set_real(nnum, nd, text_to_real(lit));
         tk_next();
         return nd;
     }
@@ -453,7 +507,7 @@ fn sh_unary() -> i64 {
 
 fn sh_mul() -> i64 {
     var e: i64 = sh_unary();
-    while (tk_is("*") || tk_is("/")) && !sh_bad() {
+    while (tk_is("*") || tk_is("/") || tk_is("%")) && !sh_bad() {
         var op: i64 = tk_text();
         tk_next();
         e = node(NK_BIN, e, sh_unary(), -1, op);
@@ -471,9 +525,9 @@ fn sh_add() -> i64 {
     return e;
 }
 
-fn sh_cmp() -> i64 {
+fn sh_shift() -> i64 {
     var e: i64 = sh_add();
-    while (tk_is("<") || tk_is(">") || tk_is("<=") || tk_is(">=") || tk_is("==") || tk_is("!=")) && !sh_bad() {
+    while (tk_is("<<") || tk_is(">>")) && !sh_bad() {
         var op: i64 = tk_text();
         tk_next();
         e = node(NK_BIN, e, sh_add(), -1, op);
@@ -481,12 +535,53 @@ fn sh_cmp() -> i64 {
     return e;
 }
 
-fn sh_and() -> i64 {
+fn sh_cmp() -> i64 {
+    var e: i64 = sh_shift();
+    while (tk_is("<") || tk_is(">") || tk_is("<=") || tk_is(">=") || tk_is("==") || tk_is("!=")) && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_shift(), -1, op);
+    }
+    return e;
+}
+
+// the bit operators, below the comparisons: & then ^ then |
+fn sh_bitand() -> i64 {
     var e: i64 = sh_cmp();
-    while tk_is("&&") && !sh_bad() {
+    while tk_is("&") && !sh_bad() {
         var op: i64 = tk_text();
         tk_next();
         e = node(NK_BIN, e, sh_cmp(), -1, op);
+    }
+    return e;
+}
+
+fn sh_bitxor() -> i64 {
+    var e: i64 = sh_bitand();
+    while tk_is("^") && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_bitand(), -1, op);
+    }
+    return e;
+}
+
+fn sh_bitor() -> i64 {
+    var e: i64 = sh_bitxor();
+    while tk_is("|") && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_bitxor(), -1, op);
+    }
+    return e;
+}
+
+fn sh_and() -> i64 {
+    var e: i64 = sh_bitor();
+    while tk_is("&&") && !sh_bad() {
+        var op: i64 = tk_text();
+        tk_next();
+        e = node(NK_BIN, e, sh_bitor(), -1, op);
     }
     return e;
 }
@@ -598,6 +693,12 @@ fn sh_stmt() -> i64 {
         tk_expect(";");
         return node(NK_DISCARD, -1, -1, -1, 0);
     }
+    // a call alone: atomic_add(counter[0u], 1u);
+    if tk_kind() == 1 && sh_p + 1 < list_len(sh_tt) && text_same(list_get(sh_tt, sh_p + 1), "(") {
+        var call: i64 = sh_expr();
+        tk_expect(";");
+        return node(NK_EXPR, call, -1, -1, 0);
+    }
     // name = e;  name op= e;  buffer[i] = e;  buffer[i] op= e;
     var target: i64 = tk_name();
     var at: i64 = -1;
@@ -679,6 +780,9 @@ fn sh_program() -> i64 {
             tk_next();
             list_add(tx_name, tk_name());
             tk_expect(";");
+            if list_len(tx_name) > 4 && !sh_bad() {
+                sh_fail("a shader reads 4 textures at most");
+            }
         } else if tk_is("in") || tk_is("instance") {
             // 'instance' inputs change once an instance, not once a corner;
             // they come after the 'in' ones, at the next locations
@@ -692,7 +796,7 @@ fn sh_program() -> i64 {
             list_add(in_name, tk_name());
             tk_expect(":");
             var it: i64 = sh_parse_type();
-            if it == SH_MAT4 || it == SH_BOOL {
+            if it == SH_MAT4 || it == SH_BOOL || it == SH_UINT {
                 sh_fail("an input is a float or a vector");
             }
             list_add(in_type, it);
@@ -702,7 +806,7 @@ fn sh_program() -> i64 {
             list_add(vy_name, tk_name());
             tk_expect(":");
             var vt: i64 = sh_parse_type();
-            if vt == SH_MAT4 || vt == SH_BOOL {
+            if vt == SH_MAT4 || vt == SH_BOOL || vt == SH_UINT {
                 sh_fail("what the vertex part passes on is a float or a vector");
             }
             list_add(vy_type, vt);
@@ -712,10 +816,11 @@ fn sh_program() -> i64 {
             list_add(bf_name, tk_name());
             tk_expect(":");
             var bt: i64 = sh_parse_type();
-            if bt != SH_FLOAT && bt != SH_VEC2 && bt != SH_VEC4 && !sh_bad() {
-                sh_fail("a buffer holds floats, vec2s or vec4s");
+            if bt != SH_FLOAT && bt != SH_VEC2 && bt != SH_VEC4 && bt != SH_UINT && !sh_bad() {
+                sh_fail("a buffer holds floats, vec2s, vec4s or uints");
             }
             list_add(bf_type, bt);
+            list_add(bf_atomic, 0);
             tk_expect(";");
             if list_len(bf_name) > 4 && !sh_bad() {
                 sh_fail("a compute shader has 4 buffers at most");
@@ -734,8 +839,8 @@ fn sh_program() -> i64 {
         }
     }
     if sh_cs != -1 && !sh_bad() {
-        if sh_vs != -1 || sh_fs != -1 || list_len(in_name) > 0 || list_len(vy_name) > 0 || list_len(tx_name) > 0 {
-            sh_fail("a compute shader has buffers, uniforms and compute { } only");
+        if sh_vs != -1 || sh_fs != -1 || list_len(in_name) > 0 || list_len(vy_name) > 0 {
+            sh_fail("a compute shader has buffers, uniforms, textures and compute { } only");
         }
         if list_len(bf_name) == 0 && !sh_bad() {
             sh_fail("a compute shader works on buffers: declare one, buffer name: vec4;");
@@ -746,6 +851,19 @@ fn sh_program() -> i64 {
         list_add(u_type, SH_FLOAT);
         list_add(u_off, off);
         off = off + 4;
+        // and each buffer's items: an index past the last reads and writes
+        // the last, never memory past the buffer
+        var bi: i64 = 0;
+        while bi < list_len(bf_name) {
+            var ln: text = "len";
+            text_add_int(ln, bi);
+            text_add(ln, "_");
+            list_add(u_name, ln);
+            list_add(u_type, SH_UINT);
+            list_add(u_off, off);
+            off = off + 4;
+            bi = bi + 1;
+        }
         u_size = (off + 15) / 16 * 16;
         return 0;
     }
@@ -864,9 +982,17 @@ fn sh_resolve(nd: i64, write: i64) -> i64 {
         list_set(nty, nd, SH_VEC4);
         return 1;
     }
-    if text_same(t, "color") && sh_stage == 1 {
+    // color, and color1 .. color3 for a target of more colours (gpu_target_ex)
+    var ck: i64 = -1;
+    if text_same(t, "color") { ck = 0; }
+    if text_same(t, "color1") { ck = 1; }
+    if text_same(t, "color2") { ck = 2; }
+    if text_same(t, "color3") { ck = 3; }
+    if ck != -1 && sh_stage == 1 {
         list_set(nres, nd, RS_COLOR);
+        list_set(nidx, nd, ck);
         list_set(nty, nd, SH_VEC4);
+        if ck + 1 > sh_nout { sh_nout = ck + 1; }
         return 1;
     }
     if write == 1 {
@@ -948,13 +1074,19 @@ fn sh_common(cn: i64) -> i64 {
     return t;
 }
 
+// the functions whose first argument is a texture's name
+fn sh_takes_texture(f: i64) -> i64 {
+    if text_same(f, "sample") || text_same(f, "sample_level") || text_same(f, "load") { return 1; }
+    return 0;
+}
+
 fn sh_check_call(nd: i64) -> i64 {
     var f: i64 = list_get(ntx, nd);
     var n: i64 = sh_nargs(nd);
     var k: i64 = 0;
     while k < n {
         var a: i64 = sh_arg(nd, k);
-        if !(text_same(f, "sample") && k == 0) {
+        if !(sh_takes_texture(f) && k == 0) {
             sh_check_expr(a);
         }
         k = k + 1;
@@ -981,28 +1113,67 @@ fn sh_check_call(nd: i64) -> i64 {
         list_set(nty, nd, sh_vec_of(want));
         return 1;
     }
-    if text_same(f, "float") {
-        if n != 1 || list_get(nty, sh_arg(nd, 0)) != SH_FLOAT {
-            return sh_fail_at(nd, "float(x) takes one float");
+    if text_same(f, "float") || text_same(f, "uint") {
+        var ft: i64 = 0;
+        if n == 1 { ft = list_get(nty, sh_arg(nd, 0)); }
+        if n != 1 || (ft != SH_FLOAT && ft != SH_UINT) {
+            return sh_fail_at(nd, "float(x) and uint(x) take one float or uint");
         }
-        list_set(nty, nd, SH_FLOAT);
+        if text_same(f, "uint") {
+            list_set(nty, nd, SH_UINT);
+        } else {
+            list_set(nty, nd, SH_FLOAT);
+        }
         return 1;
     }
-    if text_same(f, "sample") {
+    if sh_takes_texture(f) {
         var tn: i64 = sh_arg(nd, 0);
-        if n != 2 || list_get(nk, tn) != NK_NAME || sh_find_text(tx_name, list_get(ntx, tn)) == -1 {
+        var want_n: i64 = 2;
+        if text_same(f, "sample_level") { want_n = 3; }
+        if n != want_n || list_get(nk, tn) != NK_NAME || sh_find_text(tx_name, list_get(ntx, tn)) == -1 {
+            if text_same(f, "sample_level") {
+                return sh_fail_at(nd, "sample_level(texture, uv, level): a texture declared with texture, a vec2 and a float");
+            }
+            if text_same(f, "load") {
+                return sh_fail_at(nd, "load(texture, xy): a texture declared with texture, and the pixel as a vec2");
+            }
             return sh_fail_at(nd, "sample(texture, uv): a texture declared with texture, and a vec2");
         }
         list_set(nres, tn, RS_TEX);
         list_set(nidx, tn, sh_find_text(tx_name, list_get(ntx, tn)));
         if list_get(nty, sh_arg(nd, 1)) != SH_VEC2 {
-            return sh_fail_at(nd, "sample takes the place in the picture as a vec2");
+            return sh_fail_at(nd, "the place in the picture is a vec2");
+        }
+        if text_same(f, "sample") && sh_stage != 1 {
+            return sh_fail_at(nd, "sample picks the mip level from the pixels around: fragment only; elsewhere sample_level(texture, uv, 0.0)");
+        }
+        if text_same(f, "sample_level") && list_get(nty, sh_arg(nd, 2)) != SH_FLOAT {
+            return sh_fail_at(nd, "the mip level is a float: 0.0 the picture itself");
         }
         list_set(nty, nd, SH_VEC4);
         return 1;
     }
+    if text_same(f, "atomic_add") || text_same(f, "atomic_min") || text_same(f, "atomic_max") {
+        var bn: i64 = sh_arg(nd, 0);
+        if sh_stage != 2 {
+            return sh_fail_at(nd, "atomic_ functions are for compute shaders");
+        }
+        if n != 2 || list_get(nk, bn) != NK_INDEX || list_get(nty, bn) != SH_UINT || list_get(nty, sh_arg(nd, 1)) != SH_UINT {
+            return sh_fail_at(nd, "atomic_add(buffer[i], value): an item of a uint buffer, and a uint");
+        }
+        list_set(bf_atomic, list_get(nidx, bn), 1);
+        list_set(nty, nd, SH_UINT);
+        return 1;
+    }
     var t0: i64 = 0;
     if n >= 1 { t0 = list_get(nty, sh_arg(nd, 0)); }
+    if (text_same(f, "min") || text_same(f, "max")) && t0 == SH_UINT {
+        if n != 2 || list_get(nty, sh_arg(nd, 1)) != SH_UINT {
+            return sh_fail_at(nd, "min and max of a uint take two uints");
+        }
+        list_set(nty, nd, SH_UINT);
+        return 1;
+    }
     // one argument, same type out
     if text_same(f, "normalize") || text_same(f, "sqrt") || text_same(f, "abs") || text_same(f, "floor") ||
        text_same(f, "fract") || text_same(f, "sin") || text_same(f, "cos") || text_same(f, "exp") || text_same(f, "sign") {
@@ -1066,6 +1237,10 @@ fn sh_check_expr(nd: i64) -> i64 {
         list_set(nty, nd, SH_FLOAT);
         return 1;
     }
+    if k == NK_UNUM {
+        list_set(nty, nd, SH_UINT);
+        return 1;
+    }
     if k == NK_NAME {
         sh_resolve(nd, 0);
         if list_get(nres, nd) == RS_TEX {
@@ -1080,6 +1255,7 @@ fn sh_check_expr(nd: i64) -> i64 {
         sh_check_expr(list_get(na, nd));
         var t: i64 = list_get(nty, list_get(na, nd));
         if t == SH_BOOL { return sh_fail_at(nd, "- of a condition: use !"); }
+        if t == SH_UINT { return sh_fail_at(nd, "a uint has no minus: it is never below 0"); }
         list_set(nty, nd, t);
         return 1;
     }
@@ -1127,11 +1303,28 @@ fn sh_check_expr(nd: i64) -> i64 {
             list_set(nty, nd, SH_BOOL);
             return 1;
         }
+        if (ta == SH_UINT) != (tb == SH_UINT) {
+            return sh_fail_at(nd, "a uint and a float do not mix: uint(x) or float(u) first");
+        }
         if text_same(op, "<") || text_same(op, ">") || text_same(op, "<=") || text_same(op, ">=") ||
            text_same(op, "==") || text_same(op, "!=") {
-            if ta != SH_FLOAT || tb != SH_FLOAT { return sh_fail_at(nd, "a comparison is between two floats"); }
+            if !((ta == SH_FLOAT && tb == SH_FLOAT) || (ta == SH_UINT && tb == SH_UINT)) {
+                return sh_fail_at(nd, "a comparison is between two floats or two uints");
+            }
             list_set(nty, nd, SH_BOOL);
             return 1;
+        }
+        var bitop: i64 = 0;
+        if text_same(op, "%") || text_same(op, "&") || text_same(op, "|") || text_same(op, "^") ||
+           text_same(op, "<<") || text_same(op, ">>") {
+            bitop = 1;
+        }
+        if ta == SH_UINT {
+            list_set(nty, nd, SH_UINT);
+            return 1;
+        }
+        if bitop == 1 {
+            return sh_fail_at(nd, "% and the bit operators & | ^ << >> are for uints");
         }
         if ta == SH_BOOL || tb == SH_BOOL { return sh_fail_at(nd, "arithmetic on a condition"); }
         var r: i64 = 0;
@@ -1189,8 +1382,9 @@ fn sh_check_index(nd: i64) -> i64 {
     }
     sh_check_expr(list_get(na, nd));
     if sh_bad() { return 0; }
-    if list_get(nty, list_get(na, nd)) != SH_FLOAT {
-        return sh_fail_at(nd, "an item's number is a float: name[index]");
+    var it: i64 = list_get(nty, list_get(na, nd));
+    if it != SH_FLOAT && it != SH_UINT {
+        return sh_fail_at(nd, "an item's number is a float or a uint: name[index]");
     }
     list_set(nidx, nd, b);
     list_set(nty, nd, list_get(bf_type, b));
@@ -1267,6 +1461,15 @@ fn sh_check_stmt(s: i64) -> i64 {
         }
         return 1;
     }
+    if k == NK_EXPR {
+        var call: i64 = list_get(na, s);
+        var cf: i64 = list_get(ntx, call);
+        if list_get(nk, call) != NK_CALL || !(text_same(cf, "atomic_add") || text_same(cf, "atomic_min") || text_same(cf, "atomic_max")) {
+            return sh_fail_at(s, "only an atomic_ call stands alone; any other value is kept with let");
+        }
+        sh_check_expr(call);
+        return 1;
+    }
     return 0;
 }
 
@@ -1293,8 +1496,10 @@ fn tb_type(t: i64) -> text {
         if t == SH_VEC3 { return "float3"; }
         if t == SH_VEC4 { return "float4"; }
         if t == SH_MAT4 { return "float4x4"; }
+        if t == SH_UINT { return "uint"; }
         return "bool";
     }
+    if t == SH_UINT { return "u32"; }
     if t == SH_FLOAT { return "f32"; }
     if t == SH_VEC2 { return "vec2<f32>"; }
     if t == SH_VEC3 { return "vec3<f32>"; }
@@ -1327,10 +1532,31 @@ fn tb_arg_as(e: i64, t: i64) -> i64 {
     return 0;
 }
 
+// name_b[index], the item of a buffer: an index past its last item is
+// taken as the last (len<k>_, set by gpu_run)
+fn tb_item(e: i64) -> i64 {
+    text_add(sh_out, list_get(ntx, e));
+    if sh_msl == 1 {
+        text_add(sh_out, "_b[min(uint(");
+    } else {
+        text_add(sh_out, "_b[min(u32(");
+    }
+    tb_expr(list_get(na, e));
+    text_add(sh_out, "), u.len");
+    text_add_int(sh_out, list_get(nidx, e));
+    text_add(sh_out, "_ - 1u)]");
+    return 0;
+}
+
 fn tb_expr(e: i64) -> i64 {
     var k: i64 = list_get(nk, e);
     if k == NK_NUM {
         return tb_num(list_get_real(nnum, e));
+    }
+    if k == NK_UNUM {
+        text_add_int(sh_out, list_get_real(nnum, e) as i64);
+        text_add(sh_out, "u");
+        return 0;
     }
     if k == NK_NAME {
         var r: i64 = list_get(nres, e);
@@ -1352,6 +1578,9 @@ fn tb_expr(e: i64) -> i64 {
             text_add(sh_out, "vout.pos_");
         } else if r == RS_COLOR {
             text_add(sh_out, "c_out");
+            if list_get(nidx, e) > 0 {
+                text_add_int(sh_out, list_get(nidx, e));
+            }
         } else if r == RS_FRAG {
             text_add(sh_out, "fin.pos_");
         } else if r == RS_LOOP {
@@ -1377,14 +1606,23 @@ fn tb_expr(e: i64) -> i64 {
         return 0;
     }
     if k == NK_INDEX {
-        text_add(sh_out, list_get(ntx, e));
-        if sh_msl == 1 {
-            text_add(sh_out, "_b[uint(");
-        } else {
-            text_add(sh_out, "_b[u32(");
+        // an item of a buffer atomic_ functions work on is read atomically
+        var atomic: i64 = list_get(bf_atomic, list_get(nidx, e));
+        if atomic == 1 {
+            if sh_msl == 1 {
+                text_add(sh_out, "atomic_load_explicit(&");
+            } else {
+                text_add(sh_out, "atomicLoad(&");
+            }
         }
-        tb_expr(list_get(na, e));
-        text_add(sh_out, ")]");
+        tb_item(e);
+        if atomic == 1 {
+            if sh_msl == 1 {
+                text_add(sh_out, ", memory_order_relaxed)");
+            } else {
+                text_add(sh_out, ")");
+            }
+        }
         return 0;
     }
     if k == NK_SWZ {
@@ -1419,7 +1657,7 @@ fn tb_expr(e: i64) -> i64 {
         var f: i64 = list_get(ntx, e);
         var n: i64 = sh_nargs(e);
         var rt2: i64 = list_get(nty, e);
-        if text_same(f, "sample") {
+        if text_same(f, "sample") || text_same(f, "sample_level") {
             var ti: i64 = list_get(nidx, sh_arg(e, 0));
             if sh_msl == 1 {
                 text_add(sh_out, "t");
@@ -1427,18 +1665,71 @@ fn tb_expr(e: i64) -> i64 {
                 text_add(sh_out, ".sample(s");
                 text_add_int(sh_out, ti);
                 text_add(sh_out, ", ");
+                tb_expr(sh_arg(e, 1));
+                if text_same(f, "sample_level") {
+                    text_add(sh_out, ", level(");
+                    tb_expr(sh_arg(e, 2));
+                    text_add(sh_out, ")");
+                }
             } else {
-                text_add(sh_out, "textureSample(t");
+                if text_same(f, "sample_level") {
+                    text_add(sh_out, "textureSampleLevel(t");
+                } else {
+                    text_add(sh_out, "textureSample(t");
+                }
                 text_add_int(sh_out, ti);
                 text_add(sh_out, ", s");
                 text_add_int(sh_out, ti);
                 text_add(sh_out, ", ");
+                tb_expr(sh_arg(e, 1));
+                if text_same(f, "sample_level") {
+                    text_add(sh_out, ", ");
+                    tb_expr(sh_arg(e, 2));
+                }
             }
-            tb_expr(sh_arg(e, 1));
             text_add(sh_out, ")");
             return 0;
         }
-        if text_same(f, "vec2") || text_same(f, "vec3") || text_same(f, "vec4") || text_same(f, "float") {
+        if text_same(f, "load") {
+            var li: i64 = list_get(nidx, sh_arg(e, 0));
+            if sh_msl == 1 {
+                text_add(sh_out, "t");
+                text_add_int(sh_out, li);
+                text_add(sh_out, ".read(uint2(");
+                tb_expr(sh_arg(e, 1));
+                text_add(sh_out, "), 0)");
+            } else {
+                text_add(sh_out, "textureLoad(t");
+                text_add_int(sh_out, li);
+                text_add(sh_out, ", vec2<i32>(");
+                tb_expr(sh_arg(e, 1));
+                text_add(sh_out, "), 0)");
+            }
+            return 0;
+        }
+        if text_same(f, "atomic_add") || text_same(f, "atomic_min") || text_same(f, "atomic_max") {
+            var what: i64 = text_part(f, 7, 3);
+            if sh_msl == 1 {
+                text_add(sh_out, "atomic_fetch_");
+                text_add(sh_out, what);
+                text_add(sh_out, "_explicit(&");
+            } else {
+                text_add(sh_out, "atomic");
+                if text_same(what, "add") { text_add(sh_out, "Add"); }
+                if text_same(what, "min") { text_add(sh_out, "Min"); }
+                if text_same(what, "max") { text_add(sh_out, "Max"); }
+                text_add(sh_out, "(&");
+            }
+            tb_item(sh_arg(e, 0));
+            text_add(sh_out, ", ");
+            tb_expr(sh_arg(e, 1));
+            if sh_msl == 1 {
+                text_add(sh_out, ", memory_order_relaxed");
+            }
+            text_add(sh_out, ")");
+            return 0;
+        }
+        if text_same(f, "vec2") || text_same(f, "vec3") || text_same(f, "vec4") || text_same(f, "float") || text_same(f, "uint") {
             text_add(sh_out, tb_type(rt2));
         } else {
             text_add(sh_out, f);
@@ -1534,6 +1825,8 @@ fn tb_stmt(s: i64) -> i64 {
             text_add(sh_out, "(");
             if list_get(nty, s) == SH_BOOL {
                 text_add(sh_out, "false");
+            } else if list_get(nty, s) == SH_UINT {
+                text_add(sh_out, "0u");
             } else if list_get(nty, s) == SH_MAT4 && sh_msl == 0 {
                 text_add(sh_out, "vec4<f32>(), vec4<f32>(), vec4<f32>(), vec4<f32>()");
             } else {
@@ -1545,8 +1838,33 @@ fn tb_stmt(s: i64) -> i64 {
         return 0;
     }
     if k == NK_SET {
-        tb_expr(list_get(nb, s));
+        var tg: i64 = list_get(nb, s);
+        if list_get(nk, tg) == NK_INDEX && list_get(bf_atomic, list_get(nidx, tg)) == 1 {
+            // an item of an atomic buffer is written atomically
+            if sh_msl == 1 {
+                text_add(sh_out, "atomic_store_explicit(&");
+            } else {
+                text_add(sh_out, "atomicStore(&");
+            }
+            tb_item(tg);
+            text_add(sh_out, ", ");
+            tb_expr(list_get(na, s));
+            if sh_msl == 1 {
+                text_add(sh_out, ", memory_order_relaxed");
+            }
+            text_add(sh_out, ");\n");
+            return 0;
+        }
+        tb_expr(tg);
         text_add(sh_out, " = ");
+        tb_expr(list_get(na, s));
+        text_add(sh_out, ";\n");
+        return 0;
+    }
+    if k == NK_EXPR {
+        if sh_msl == 0 {
+            text_add(sh_out, "_ = ");
+        }
         tb_expr(list_get(na, s));
         text_add(sh_out, ";\n");
         return 0;
@@ -1603,6 +1921,66 @@ fn sh_wgsl_uniforms() -> i64 {
     return 0;
 }
 
+// the textures, in group g: texture k at binding 2k, its sampler at 2k + 1
+fn sh_wgsl_textures(g: i64) -> i64 {
+    var i: i64 = 0;
+    while i < list_len(tx_name) {
+        text_add(sh_out, "@group(");
+        text_add_int(sh_out, g);
+        text_add(sh_out, ") @binding(");
+        text_add_int(sh_out, i * 2);
+        text_add(sh_out, ") var t");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ": texture_2d<f32>;\n@group(");
+        text_add_int(sh_out, g);
+        text_add(sh_out, ") @binding(");
+        text_add_int(sh_out, i * 2 + 1);
+        text_add(sh_out, ") var s");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ": sampler;\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the extra colours' variables, c_out1 .. (color1 ..), zero at first
+fn tb_more_colors() -> i64 {
+    var k: i64 = 1;
+    while k < sh_nout {
+        if sh_msl == 1 {
+            text_add(sh_out, "    float4 c_out");
+            text_add_int(sh_out, k);
+            text_add(sh_out, " = float4(0.0);\n");
+        } else {
+            text_add(sh_out, "    var c_out");
+            text_add_int(sh_out, k);
+            text_add(sh_out, ": vec4<f32> = vec4<f32>(0.0);\n");
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+// the colours handed out, when there are more than one: fo.c0 = c_out ..
+fn tb_fout_return() -> i64 {
+    if sh_msl == 1 {
+        text_add(sh_out, "    FOut fo;\n");
+    } else {
+        text_add(sh_out, "    var fo: FOut;\n");
+    }
+    var k: i64 = 0;
+    while k < sh_nout {
+        text_add(sh_out, "    fo.c");
+        text_add_int(sh_out, k);
+        text_add(sh_out, " = c_out");
+        if k > 0 { text_add_int(sh_out, k); }
+        text_add(sh_out, ";\n");
+        k = k + 1;
+    }
+    text_add(sh_out, "    return fo;\n}\n");
+    return 0;
+}
+
 // a compute shader in WGSL: 64 runs a group, one an item, those past count
 // doing nothing
 fn sh_gen_wgsl_cs() -> text {
@@ -1617,10 +1995,15 @@ fn sh_gen_wgsl_cs() -> text {
         text_add(sh_out, ") var<storage, read_write> ");
         text_add(sh_out, list_get(bf_name, i));
         text_add(sh_out, "_b: array<");
-        text_add(sh_out, tb_type(list_get(bf_type, i)));
+        if list_get(bf_atomic, i) == 1 {
+            text_add(sh_out, "atomic<u32>");
+        } else {
+            text_add(sh_out, tb_type(list_get(bf_type, i)));
+        }
         text_add(sh_out, ">;\n");
         i = i + 1;
     }
+    sh_wgsl_textures(2);
     text_add(sh_out, "@compute @workgroup_size(64)\nfn cs_main(@builtin(global_invocation_id) gid_: vec3<u32>) {\n");
     text_add(sh_out, "    let kidx_: f32 = f32(gid_.x);\n    if (kidx_ >= u.count) { return; }\n");
     sh_stage = 2;
@@ -1648,7 +2031,11 @@ fn sh_gen_msl_cs() -> text {
     i = 0;
     while i < list_len(bf_name) {
         text_add(sh_out, ", device ");
-        text_add(sh_out, tb_type(list_get(bf_type, i)));
+        if list_get(bf_atomic, i) == 1 {
+            text_add(sh_out, "atomic_uint");
+        } else {
+            text_add(sh_out, tb_type(list_get(bf_type, i)));
+        }
         text_add(sh_out, "* ");
         text_add(sh_out, list_get(bf_name, i));
         text_add(sh_out, "_b [[buffer(");
@@ -1656,6 +2043,7 @@ fn sh_gen_msl_cs() -> text {
         text_add(sh_out, ")]]");
         i = i + 1;
     }
+    sh_msl_textures();
     text_add(sh_out, ", uint gid_ [[thread_position_in_grid]]) {\n");
     text_add(sh_out, "    const float kidx_ = float(gid_);\n    if (kidx_ >= u.count) { return; }\n");
     sh_stage = 2;
@@ -1684,19 +2072,7 @@ fn sh_gen_wgsl() -> text {
         }
         text_add(sh_out, "};\n@group(0) @binding(0) var<uniform> u: U;\n");
     }
-    i = 0;
-    while i < list_len(tx_name) {
-        text_add(sh_out, "@group(1) @binding(");
-        text_add_int(sh_out, i * 2);
-        text_add(sh_out, ") var t");
-        text_add_int(sh_out, i);
-        text_add(sh_out, ": texture_2d<f32>;\n@group(1) @binding(");
-        text_add_int(sh_out, i * 2 + 1);
-        text_add(sh_out, ") var s");
-        text_add_int(sh_out, i);
-        text_add(sh_out, ": sampler;\n");
-        i = i + 1;
-    }
+    sh_wgsl_textures(1);
     if list_len(in_name) > 0 {
         text_add(sh_out, "struct VIn {\n");
         i = 0;
@@ -1731,12 +2107,50 @@ fn sh_gen_wgsl() -> text {
     text_add(sh_out, ") -> V2F {\n    var vout: V2F;\n");
     sh_stage = 0;
     tb_block(sh_vs);
-    text_add(sh_out, "    return vout;\n}\n@fragment\nfn fs_main(fin: V2F) -> @location(0) vec4<f32> {\n");
+    text_add(sh_out, "    return vout;\n}\n");
+    if sh_nout > 1 {
+        text_add(sh_out, "struct FOut {\n");
+        var k: i64 = 0;
+        while k < sh_nout {
+            text_add(sh_out, "    @location(");
+            text_add_int(sh_out, k);
+            text_add(sh_out, ") c");
+            text_add_int(sh_out, k);
+            text_add(sh_out, ": vec4<f32>,\n");
+            k = k + 1;
+        }
+        text_add(sh_out, "};\n@fragment\nfn fs_main(fin: V2F) -> FOut {\n");
+    } else {
+        text_add(sh_out, "@fragment\nfn fs_main(fin: V2F) -> @location(0) vec4<f32> {\n");
+    }
     text_add(sh_out, "    var c_out: vec4<f32> = vec4<f32>(0.0);\n");
+    tb_more_colors();
     sh_stage = 1;
     tb_block(sh_fs);
-    text_add(sh_out, "    return c_out;\n}\n");
+    if sh_nout > 1 {
+        tb_fout_return();
+    } else {
+        text_add(sh_out, "    return c_out;\n}\n");
+    }
     return sh_out;
+}
+
+// the textures as MSL parameters: texture k and its sampler at k
+fn sh_msl_textures() -> i64 {
+    var i: i64 = 0;
+    while i < list_len(tx_name) {
+        text_add(sh_out, ", texture2d<float> t");
+        text_add_int(sh_out, i);
+        text_add(sh_out, " [[texture(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ")]], sampler s");
+        text_add_int(sh_out, i);
+        text_add(sh_out, " [[sampler(");
+        text_add_int(sh_out, i);
+        text_add(sh_out, ")]]");
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn sh_gen_msl() -> text {
@@ -1779,34 +2193,47 @@ fn sh_gen_msl() -> text {
         text_add(sh_out, ";\n");
         i = i + 1;
     }
-    text_add(sh_out, "};\nvertex V2F vs_main(VIn vin [[stage_in]]");
+    text_add(sh_out, "};\n");
+    if sh_nout > 1 {
+        text_add(sh_out, "struct FOut {\n");
+        var k: i64 = 0;
+        while k < sh_nout {
+            text_add(sh_out, "    float4 c");
+            text_add_int(sh_out, k);
+            text_add(sh_out, " [[color(");
+            text_add_int(sh_out, k);
+            text_add(sh_out, ")]];\n");
+            k = k + 1;
+        }
+        text_add(sh_out, "};\n");
+    }
+    text_add(sh_out, "vertex V2F vs_main(VIn vin [[stage_in]]");
     if list_len(u_name) > 0 {
         text_add(sh_out, ", constant U& u [[buffer(1)]]");
     }
+    sh_msl_textures();
     text_add(sh_out, ") {\n    V2F vout;\n");
     sh_stage = 0;
     tb_block(sh_vs);
-    text_add(sh_out, "    return vout;\n}\nfragment float4 fs_main(V2F fin [[stage_in]]");
+    text_add(sh_out, "    return vout;\n}\n");
+    if sh_nout > 1 {
+        text_add(sh_out, "fragment FOut fs_main(V2F fin [[stage_in]]");
+    } else {
+        text_add(sh_out, "fragment float4 fs_main(V2F fin [[stage_in]]");
+    }
     if list_len(u_name) > 0 {
         text_add(sh_out, ", constant U& u [[buffer(1)]]");
     }
-    i = 0;
-    while i < list_len(tx_name) {
-        text_add(sh_out, ", texture2d<float> t");
-        text_add_int(sh_out, i);
-        text_add(sh_out, " [[texture(");
-        text_add_int(sh_out, i);
-        text_add(sh_out, ")]], sampler s");
-        text_add_int(sh_out, i);
-        text_add(sh_out, " [[sampler(");
-        text_add_int(sh_out, i);
-        text_add(sh_out, ")]]");
-        i = i + 1;
-    }
+    sh_msl_textures();
     text_add(sh_out, ") {\n    float4 c_out = float4(0.0);\n");
+    tb_more_colors();
     sh_stage = 1;
     tb_block(sh_fs);
-    text_add(sh_out, "    return c_out;\n}\n");
+    if sh_nout > 1 {
+        tb_fout_return();
+    } else {
+        text_add(sh_out, "    return c_out;\n}\n");
+    }
     return sh_out;
 }
 
@@ -1821,6 +2248,8 @@ var sv_body: i64;
 var sv_tcache: i64;    // type ids by key
 var sv_ccache: i64;    // float constants by their bits
 var sv_icache: i64;    // integer constants
+var sv_ucache: i64;    // uint constants
+var sv_cols: i64;      // the fragment part's colours: color, color1 ..
 var sv_glsl: i64;      // the GLSL.std.450 import
 var sv_ubo: i64;       // the uniform block variable
 var sv_in: i64;        // the inputs' variables
@@ -1884,7 +2313,8 @@ fn sv_str(l: i64, s: i64) -> i64 {
 }
 
 // a type id, made once: void 0, the shader types 1-6, int 7, fn void 8,
-// image 9, sampled image 10; a pointer is 100 * (storage + 1) + type
+// image 9, sampled image 10, uint 11, uvec3 12, ivec2 13; a buffer's items
+// 40 + its type, the buffer 60 + it; a pointer is 100 * (storage + 1) + type
 fn sv_type(t: i64) -> i64 {
     if map_ihas(sv_tcache, t) {
         return map_iget(sv_tcache, t);
@@ -1941,16 +2371,20 @@ fn sv_type(t: i64) -> i64 {
         var ut: i64 = sv_type(11);
         id = sv_id();
         sv_i3(sv_types, 23, id, ut, 3);         // uvec3
-    } else if t > 20 && t < 30 {
-        // a buffer's items: a run-time array of type t - 20
-        var et: i64 = sv_type(t - 20);
+    } else if t == 13 {
+        var it2: i64 = sv_type(7);
+        id = sv_id();
+        sv_i3(sv_types, 23, id, it2, 2);        // ivec2
+    } else if t > 40 && t < 60 {
+        // a buffer's items: a run-time array of type t - 40
+        var et: i64 = sv_type(t - 40);
         id = sv_id();
         sv_i2(sv_types, 29, id, et);
-        sv_i3(sv_deco, 71, id, 6, sh_size(t - 20));
-    } else if t > 30 && t < 40 {
+        sv_i3(sv_deco, 71, id, 6, sh_size(t - 40));
+    } else if t > 60 && t < 80 {
         // a buffer: a block of one member, those items (SPIR-V 1.0's storage
         // buffer is a BufferBlock in the Uniform class)
-        var at: i64 = sv_type(t - 10);
+        var at: i64 = sv_type(t - 20);
         id = sv_id();
         sv_i2(sv_types, 30, id, at);
         sv_i2(sv_deco, 71, id, 3);
@@ -1992,6 +2426,24 @@ fn sv_iconst(n: i64) -> i64 {
     var id: i64 = sv_id();
     sv_i3(sv_types, 43, it, id, n);
     map_iset(sv_icache, n, id);
+    return id;
+}
+
+fn sv_uconst(n: i64) -> i64 {
+    if map_ihas(sv_ucache, n) {
+        return map_iget(sv_ucache, n);
+    }
+    var ut: i64 = sv_type(SH_UINT);
+    var id: i64 = sv_id();
+    sv_i3(sv_types, 43, ut, id, n);
+    map_iset(sv_ucache, n, id);
+    return id;
+}
+
+// the zero of a type (OpConstantNull)
+fn sv_null(t: i64) -> i64 {
+    var id: i64 = sv_id();
+    sv_i2(sv_types, 46, sv_type(t), id);
     return id;
 }
 
@@ -2056,9 +2508,26 @@ fn sv_ext(t: i64, inst: i64, args: i64) -> i64 {
 // a buffer's item: buffer[uint(i)]
 fn sv_index_ptr(e: i64) -> i64 {
     var t: i64 = list_get(nty, e);
-    var fi: i64 = sv_expr(list_get(na, e));
-    var ui: i64 = sv_id();
-    sv_i3(sv_body, 109, sv_type(11), ui, fi);      // OpConvertFToU
+    var ix: i64 = list_get(na, e);
+    var ui: i64 = sv_expr(ix);
+    if list_get(nty, ix) == SH_FLOAT {
+        var fi: i64 = ui;
+        ui = sv_id();
+        sv_i3(sv_body, 109, sv_type(11), ui, fi);  // OpConvertFToU
+    }
+    // past the last item: the last (len<k>_ - 1, set by gpu_run)
+    var bk: i64 = list_get(nidx, e);
+    var ln: text = "len";
+    text_add_int(ln, bk);
+    text_add(ln, "_");
+    var lp: i64 = sv_id();
+    sv_i4(sv_body, 65, sv_ptr(2, SH_UINT), lp, sv_ubo, sv_iconst(sh_find_text(u_name, ln)));
+    var lv: i64 = sv_load(SH_UINT, lp);
+    var last: i64 = sv_bin(130, SH_UINT, lv, sv_uconst(1));
+    var margs: i64 = list_new();
+    list_add(margs, ui);
+    list_add(margs, last);
+    ui = sv_ext(SH_UINT, 38, margs);               // UMin
     var ac: i64 = sv_id();
     sv_op(sv_body, 65, 6);
     list_add(sv_body, sv_ptr(2, t));
@@ -2076,7 +2545,7 @@ fn sv_name_ptr(e: i64) -> i64 {
     if r == RS_IN { return list_get(sv_in, i); }
     if r == RS_VARY { return list_get(sv_vy, i); }
     if r == RS_POS { return sv_pos; }
-    if r == RS_COLOR { return sv_col; }
+    if r == RS_COLOR { return list_get(sv_cols, i); }
     if r == RS_FRAG { return sv_frag; }
     if r == RS_LOCAL { return list_get(sv_declid, i); }
     return 0;
@@ -2087,6 +2556,9 @@ fn sv_expr(e: i64) -> i64 {
     var t: i64 = list_get(nty, e);
     if k == NK_NUM {
         return sv_const(list_get_real(nnum, e));
+    }
+    if k == NK_UNUM {
+        return sv_uconst(list_get_real(nnum, e) as i64);
     }
     if k == NK_INDEX {
         return sv_load(t, sv_index_ptr(e));
@@ -2158,6 +2630,9 @@ fn sv_expr(e: i64) -> i64 {
         if text_same(op, "||") {
             return sv_bin(166, SH_BOOL, sv_expr(a), sv_expr(b));
         }
+        if ta == SH_UINT {
+            return sv_ubin(op, sv_expr(a), sv_expr(b));
+        }
         var cmp: i64 = 0;
         if text_same(op, "==") { cmp = 180; }
         if text_same(op, "!=") { cmp = 182; }
@@ -2197,20 +2672,107 @@ fn sv_expr(e: i64) -> i64 {
     return 0;
 }
 
+// a uint operator on two uints: the result's id
+fn sv_ubin(op: i64, a: i64, b: i64) -> i64 {
+    var opc: i64 = 128;                              // OpIAdd
+    var rt: i64 = SH_UINT;
+    if text_same(op, "-") { opc = 130; }
+    if text_same(op, "*") { opc = 132; }
+    if text_same(op, "/") { opc = 134; }             // OpUDiv
+    if text_same(op, "%") { opc = 137; }             // OpUMod
+    if text_same(op, ">>") { opc = 194; }            // logical: a uint
+    if text_same(op, "<<") { opc = 196; }
+    if text_same(op, "|") { opc = 197; }
+    if text_same(op, "^") { opc = 198; }
+    if text_same(op, "&") { opc = 199; }
+    if text_same(op, "==") { opc = 170; rt = SH_BOOL; }
+    if text_same(op, "!=") { opc = 171; rt = SH_BOOL; }
+    if text_same(op, ">") { opc = 172; rt = SH_BOOL; }
+    if text_same(op, ">=") { opc = 174; rt = SH_BOOL; }
+    if text_same(op, "<") { opc = 176; rt = SH_BOOL; }
+    if text_same(op, "<=") { opc = 178; rt = SH_BOOL; }
+    return sv_bin(opc, rt, a, b);
+}
+
 fn sv_call(e: i64) -> i64 {
     var f: i64 = list_get(ntx, e);
     var t: i64 = list_get(nty, e);
     var n: i64 = sh_nargs(e);
-    if text_same(f, "sample") {
+    if text_same(f, "sample") || text_same(f, "sample_level") {
         var ti: i64 = list_get(nidx, sh_arg(e, 0));
         var simg: i64 = sv_load(10, list_get(sv_tex, ti));
         var uv: i64 = sv_expr(sh_arg(e, 1));
         var id: i64 = sv_id();
+        if text_same(f, "sample_level") {
+            var lod: i64 = sv_expr(sh_arg(e, 2));
+            sv_op(sv_body, 88, 7);                   // OpImageSampleExplicitLod
+            list_add(sv_body, sv_type(SH_VEC4));
+            list_add(sv_body, id);
+            list_add(sv_body, simg);
+            list_add(sv_body, uv);
+            list_add(sv_body, 2);                    // Lod
+            list_add(sv_body, lod);
+            return id;
+        }
         sv_i4(sv_body, 87, sv_type(SH_VEC4), id, simg, uv);
         return id;
     }
-    if text_same(f, "float") {
-        return sv_expr(sh_arg(e, 0));
+    if text_same(f, "load") {
+        var li: i64 = list_get(nidx, sh_arg(e, 0));
+        var limg: i64 = sv_load(10, list_get(sv_tex, li));
+        var img: i64 = sv_id();
+        sv_i3(sv_body, 100, sv_type(9), img, limg);   // OpImage
+        var xy: i64 = sv_expr(sh_arg(e, 1));
+        var ixy: i64 = sv_id();
+        sv_i3(sv_body, 110, sv_type(13), ixy, xy);    // OpConvertFToS
+        var lid: i64 = sv_id();
+        sv_op(sv_body, 95, 7);                        // OpImageFetch
+        list_add(sv_body, sv_type(SH_VEC4));
+        list_add(sv_body, lid);
+        list_add(sv_body, img);
+        list_add(sv_body, ixy);
+        list_add(sv_body, 2);                         // Lod 0
+        list_add(sv_body, sv_iconst(0));
+        return lid;
+    }
+    if text_same(f, "atomic_add") || text_same(f, "atomic_min") || text_same(f, "atomic_max") {
+        var aptr: i64 = sv_index_ptr(sh_arg(e, 0));
+        var val: i64 = sv_expr(sh_arg(e, 1));
+        var aop: i64 = 234;                           // OpAtomicIAdd
+        if text_same(f, "atomic_min") { aop = 237; }  // OpAtomicUMin
+        if text_same(f, "atomic_max") { aop = 239; }  // OpAtomicUMax
+        var aid: i64 = sv_id();
+        sv_op(sv_body, aop, 7);
+        list_add(sv_body, sv_type(SH_UINT));
+        list_add(sv_body, aid);
+        list_add(sv_body, aptr);
+        list_add(sv_body, sv_iconst(1));              // the Device scope
+        list_add(sv_body, sv_iconst(0));              // relaxed
+        list_add(sv_body, val);
+        return aid;
+    }
+    if text_same(f, "float") || text_same(f, "uint") {
+        var from: i64 = list_get(nty, sh_arg(e, 0));
+        var cv: i64 = sv_expr(sh_arg(e, 0));
+        if from == t {
+            return cv;
+        }
+        var cid: i64 = sv_id();
+        if t == SH_UINT {
+            sv_i3(sv_body, 109, sv_type(SH_UINT), cid, cv);   // OpConvertFToU
+        } else {
+            sv_i3(sv_body, 112, sv_type(SH_FLOAT), cid, cv);  // OpConvertUToF
+        }
+        return cid;
+    }
+    if (text_same(f, "min") || text_same(f, "max")) && t == SH_UINT {
+        var uargs: i64 = list_new();
+        list_add(uargs, sv_expr(sh_arg(e, 0)));
+        list_add(uargs, sv_expr(sh_arg(e, 1)));
+        if text_same(f, "min") {
+            return sv_ext(SH_UINT, 38, uargs);                // UMin
+        }
+        return sv_ext(SH_UINT, 41, uargs);                    // UMax
     }
     if text_same(f, "vec2") || text_same(f, "vec3") || text_same(f, "vec4") {
         if n == 1 && list_get(nty, sh_arg(e, 0)) == SH_FLOAT {
@@ -2304,6 +2866,8 @@ fn sv_stmt(s: i64) -> i64 {
         list_set(sv_declid, s, v);
         if list_get(na, s) != -1 {
             sv_i2(sv_body, 62, v, sv_expr(list_get(na, s)));
+        } else {
+            sv_i2(sv_body, 62, v, sv_null(t));       // a var starts at zero
         }
         return 0;
     }
@@ -2315,6 +2879,10 @@ fn sv_stmt(s: i64) -> i64 {
     if k == NK_DISCARD {
         sv_op(sv_body, 252, 1);
         sv_term = 1;
+        return 0;
+    }
+    if k == NK_EXPR {
+        sv_expr(list_get(na, s));
         return 0;
     }
     if k == NK_FOR {
@@ -2373,6 +2941,8 @@ fn sv_module(stage: i64) -> i64 {
     sv_tcache = map_new();
     sv_ccache = map_new();
     sv_icache = map_new();
+    sv_ucache = map_new();
+    sv_cols = list_new();
     sv_in = list_new();
     sv_vy = list_new();
     sv_tex = list_new();
@@ -2425,7 +2995,7 @@ fn sv_module(stage: i64) -> i64 {
     if stage == 2 {
         i = 0;
         while i < list_len(bf_name) {
-            var bv: i64 = sv_var(2, 30 + list_get(bf_type, i));
+            var bv: i64 = sv_var(2, 60 + list_get(bf_type, i));
             list_add(sv_buf, bv);
             sv_i3(sv_deco, 71, bv, 34, 1);
             sv_i3(sv_deco, 71, bv, 33, i);
@@ -2440,7 +3010,11 @@ fn sv_module(stage: i64) -> i64 {
         var tv: i64 = sv_var(0, 10);
         list_add(sv_tex, tv);
         sv_i3(sv_deco, 71, tv, 34, 1);
-        sv_i3(sv_deco, 71, tv, 33, i);
+        if stage == 2 {
+            sv_i3(sv_deco, 71, tv, 33, 4 + i);    // after the four buffers
+        } else {
+            sv_i3(sv_deco, 71, tv, 33, i);
+        }
         i = i + 1;
     }
     if stage == 0 {
@@ -2468,9 +3042,15 @@ fn sv_module(stage: i64) -> i64 {
         list_add(sv_iface, sv_pos);
         sv_i3(sv_deco, 71, sv_pos, 11, 0);
     } else if stage == 1 {
-        sv_col = sv_var(3, SH_VEC4);
-        list_add(sv_iface, sv_col);
-        sv_i3(sv_deco, 71, sv_col, 30, 0);
+        var ck: i64 = 0;
+        while ck < sh_nout {
+            var cvar: i64 = sv_var(3, SH_VEC4);
+            list_add(sv_cols, cvar);
+            list_add(sv_iface, cvar);
+            sv_i3(sv_deco, 71, cvar, 30, ck);
+            ck = ck + 1;
+        }
+        sv_col = list_get(sv_cols, 0);
         sv_frag = sv_var(1, SH_VEC4);
         list_add(sv_iface, sv_frag);
         sv_i3(sv_deco, 71, sv_frag, 11, 15);
@@ -2489,7 +3069,11 @@ fn sv_module(stage: i64) -> i64 {
         list_add(sv_types, zero);
         list_add(sv_types, zero);
         list_add(sv_types, zero);
-        sv_i2(sv_body, 62, sv_col, z4);
+        var zk: i64 = 0;
+        while zk < sh_nout {
+            sv_i2(sv_body, 62, list_get(sv_cols, zk), z4);
+            zk = zk + 1;
+        }
     }
     if stage == 2 {
         // index = float(gid.x); the body runs when index < count
@@ -2499,7 +3083,7 @@ fn sv_module(stage: i64) -> i64 {
         sv_kidx = sv_id();
         sv_i3(sv_body, 112, sv_type(SH_FLOAT), sv_kidx, gx);   // OpConvertUToF
         var cn: i64 = sv_id();
-        var ci: i64 = list_len(u_name) - 1;
+        var ci: i64 = sh_find_text(u_name, "count");
         sv_i4(sv_body, 65, sv_ptr(2, SH_FLOAT), cn, sv_ubo, sv_iconst(ci));
         var cv: i64 = sv_load(SH_FLOAT, cn);
         var inside: i64 = sv_bin(184, SH_BOOL, sv_kidx, cv);
@@ -2606,6 +3190,8 @@ fn sh_reset() -> i64 {
     vy_type = list_new();
     bf_name = list_new();
     bf_type = list_new();
+    bf_atomic = list_new();
+    sh_nout = 1;
     sh_cs = -1;
     sh_vs = -1;
     sh_fs = -1;
@@ -2623,6 +3209,7 @@ fn sh_reset() -> i64 {
         pr_ntex = list_new();
         pr_cs = list_new();
         pr_bftype = list_new();
+        pr_nout = list_new();
         pr_ready = 1;
     }
     return 0;
@@ -2678,6 +3265,7 @@ fn shader_compile(source: i64) -> i64 {
         list_add(pr_cs, 0);
     }
     list_add(pr_bftype, bf_type);
+    list_add(pr_nout, sh_nout);
     list_add(pr_usize, u_size);
     list_add(pr_uname, u_name);
     list_add(pr_utype, u_type);
@@ -2782,4 +3370,17 @@ fn shader_buffer_type(s: i64, k: i64) -> i64 {
     var i: i64 = sh_check(s) - 1;
     if i < 0 { return 0; }
     return list_get(list_get(pr_bftype, i), k);
+}
+
+// the colours a drawing shader writes: 1, or up to 4 with color1 .. color3
+fn shader_outputs(s: i64) -> i64 {
+    var i: i64 = sh_check(s) - 1;
+    if i < 0 { return 0; }
+    return list_get(pr_nout, i);
+}
+
+// the floats an item of a buffer of type t takes in an instance buffer
+fn sh_item_floats(t: i64) -> i64 {
+    if t == SH_UINT { return 1; }
+    return sh_comps(t);
 }

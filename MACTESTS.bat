@@ -52,7 +52,7 @@ set LIST=%LIST% test_text test_list test_map test_files test_os
 set LIST=%LIST% test_libthreads
 set LIST=%LIST% test_exp_lit
 set LIST=%LIST% test_trace test_texttype test_collections test_multi test_fnvalues test_simd4
-set LIST=%LIST% test_audiobus test_mp3 test_video test_touch test_failreal test_zerolocals test_softnames test_results6 test_callshape test_jobfile
+set LIST=%LIST% test_audiobus test_mp3 test_video test_touch test_failreal test_zerolocals test_softnames test_results6 test_callshape test_jobfile test_ksl
 set LIST=%LIST% test_extern test_structval test_liststruct test_generic test_modnames test_math3d test_json test_garray test_ptrparam test_longfn test_gconst test_fcmpval test_realint test_textlend test_random_alone test_textown
 
 set /a BUILT=0
@@ -67,7 +67,7 @@ echo.
 
 for %%T in (%LIST%) do call :macbuild %%T
 REM the GPU tests (Metal); gpu_bc is left out: compressed textures are Vulkan's
-for %%T in (gpu_basic gpu_target gpu_mip gpu_inst gpu_compute) do call :gpubuild %%T
+for %%T in (gpu_basic gpu_target gpu_mip gpu_inst gpu_compute gpu_mrt gpu_indirect) do call :gpubuild %%T
 
 echo.
 echo ============================================================

@@ -23,6 +23,13 @@ REM     tests\gpu\gpu_compute.kr   compute shaders: 1000 particles moved by the
 REM                                card, read back, then drawn as instances
 REM     tests\gpu\gpu_inst.kr      instanced drawing: one square four times in
 REM                                one draw, each with its place and colour
+REM     tests\gpu\gpu_mrt.kr       a G-buffer: three colours of 16-bit floats
+REM                                in one pass, read with load and sample;
+REM                                a texture read by the vertex part and by
+REM                                a compute shader
+REM     tests\gpu\gpu_indirect.kr  uint buffers, atomics and bit operators;
+REM                                triangles culled on the card and drawn
+REM                                with gpu_draw_indirect
 REM     tests\gpu\gpu_window.kr    three seconds of a sphere and a cube in a
 REM                                window: frames a second, and that they
 REM                                reach the window
@@ -30,7 +37,7 @@ REM     tests\gpu\gpu_devices.kr   three notes (you should hear them) and
 REM                                the controllers found (press A on one)
 REM
 REM   Usage:
-REM     GPUTESTS.bat               the three tests
+REM     GPUTESTS.bat               all of them
 REM     GPUTESTS.bat /c:PATH       tests another compiler binary
 REM
 REM   Each test prints its checks, "ok" or "FAIL", and ends with the number
@@ -65,6 +72,8 @@ call :gputest gpu_mip
 call :gputest gpu_bc
 call :gputest gpu_inst
 call :gputest gpu_compute
+call :gputest gpu_mrt
+call :gputest gpu_indirect
 call :gputest gpu_window
 call :gputest gpu_devices
 

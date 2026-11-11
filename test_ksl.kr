@@ -1,0 +1,93 @@
+kron_program
+kron_domain test_ksl;
+kron_imports
+acquire_domain "std_shader.kr";
+kron_definitions
+
+// =========================================================================
+// KSL, translated without a graphics card: uints, bit operators, atomics,
+// fragment parts of several colours, sample_level, load and textures in
+// compute shaders, into WGSL, MSL and SPIR-V; and the mistakes the shader
+// compiler names. What each translation must hold is looked for in its
+// text (WGSL, MSL) or its words (SPIR-V). tests/gpu runs them on a card.
+// =========================================================================
+
+fn has(t: text, part: text) -> i64 {
+    if text_find(t, part) >= 0 { return 1; }
+    return 0;
+}
+
+// 1 when the words of a SPIR-V module hold an instruction of this opcode
+fn has_op(words: i64, opcode: i64) -> i64 {
+    var i: i64 = 5;
+    while i < list_len(words) {
+        var w: i64 = list_get(words, i);
+        var n: i64 = w >> 16;
+        if (w & 65535) == opcode { return 1; }
+        if n < 1 { return 0; }
+        i = i + n;
+    }
+    return 0;
+}
+
+fn check(ok: i64, what: text) -> i64 {
+    if ok == 1 {
+        say("ok    " + what);
+    } else {
+        say("FAIL  " + what);
+    }
+    return ok;
+}
+
+// the shader must be refused, with this in its message
+fn refused(src: text, part: text) -> i64 {
+    var s: i64 = shader_compile(src);
+    var ok: i64 = 0;
+    if s == 0 && failed() {
+        if has(shader_error(), part) { ok = 1; }
+    }
+    return check(ok, "refused: " + part);
+}
+
+fn main() -> i64 {
+    var cull: text = "buffer box: vec4;\nbuffer list: uint;\nbuffer args: uint;\nuniform { limit: float; shift: uint; }\ntexture hiz;\ncompute {\n    let b = box[index];\n    let z = sample_level(hiz, b.xy, 0.0).r + load(hiz, b.xy * 4.0).g;\n    var keep: uint;\n    if b.w < limit && z >= 0.0 {\n        keep = 1u;\n    }\n    if keep == 1u {\n        let slot = atomic_add(args[1u], 1u);\n        list[slot] = (uint(index) << shift) | (uint(index) % 7u) ^ 5u;\n        atomic_max(args[5u], uint(index));\n    }\n    box[index] = vec4(b.xyz, float(keep >> 1u));\n}\n";
+    var cs: i64 = shader_compile(cull);
+    check(cs > 0 && shader_is_compute(cs) == 1, "a compute shader of uints, atomics and a texture compiles");
+    check(shader_buffers(cs) == 3 && shader_buffer_type(cs, 1) == SH_UINT && shader_textures(cs) == 1, "its buffers and its texture");
+    check(shader_uniform_type(cs, "shift") == SH_UINT && shader_uniform_offset(cs, "len2_") > shader_uniform_offset(cs, "count"), "a uint uniform; each buffer's length after count");
+    var w: text = shader_wgsl(cs);
+    check(has(w, "array<atomic<u32>>") && has(w, "atomicAdd(&args_b[") && has(w, "atomicMax(") && has(w, "_ = atomicMax"), "WGSL: an atomic buffer, atomicAdd, atomicMax standing alone");
+    check(has(w, "array<u32>") && has(w, "<< u.shift") && has(w, "% 7u") && has(w, "^ 5u"), "WGSL: a uint buffer, << % ^");
+    check(has(w, "@group(2) @binding(0) var t0: texture_2d<f32>") && has(w, "textureSampleLevel(t0, s0,") && has(w, "textureLoad(t0, vec2<i32>("), "WGSL: the texture in group 2, sampled at a level and loaded");
+    check(has(w, "min(u32(kidx_), u.len0_ - 1u)"), "WGSL: an index past a buffer's end taken as its last");
+    var m: text = shader_msl(cs);
+    check(has(m, "device atomic_uint* args_b") && has(m, "atomic_fetch_add_explicit(&args_b[") && has(m, "memory_order_relaxed"), "MSL: atomic_uint, atomic_fetch_add_explicit");
+    check(has(m, "texture2d<float> t0 [[texture(0)]]") && has(m, ".sample(s0,") && has(m, "level(") && has(m, "t0.read(uint2("), "MSL: the texture, sample with level, read");
+    var sv: i64 = shader_spirv(cs, 2);
+    check(list_get(sv, 0) == 119734787 && has_op(sv, 234) == 1 && has_op(sv, 239) == 1, "SPIR-V: OpAtomicIAdd, OpAtomicUMax");
+    check(has_op(sv, 88) == 1 && has_op(sv, 95) == 1 && has_op(sv, 196) == 1 && has_op(sv, 137) == 1 && has_op(sv, 198) == 1, "SPIR-V: explicit-level sample, fetch, shift, mod, xor");
+
+    var mrt: text = "uniform { mvp: mat4; }\ntexture albedo;\ntexture height;\nin pos: vec3;\nin uv: vec2;\nvar vuv: vec2;\nvertex {\n    vuv = uv;\n    let h = sample_level(height, uv, 0.0).r;\n    position = mvp * vec4(pos.x, pos.y + h, pos.z, 1.0);\n}\nfragment {\n    color = sample(albedo, vuv);\n    color1 = vec4(0.5);\n    color2 = load(height, frag_coord.xy);\n}\n";
+    var ds: i64 = shader_compile(mrt);
+    check(ds > 0 && shader_outputs(ds) == 3, "a fragment part writing color, color1 and color2: three outputs");
+    var w2: text = shader_wgsl(ds);
+    check(has(w2, "struct FOut") && has(w2, "@location(2) c2: vec4<f32>") && has(w2, "-> FOut") && has(w2, "fo.c2 = c_out2;"), "WGSL: the three colours out");
+    var m2: text = shader_msl(ds);
+    check(has(m2, "float4 c1 [[color(1)]];") && has(m2, "fragment FOut fs_main") && has(m2, "vertex V2F vs_main(VIn vin [[stage_in]], constant U& u [[buffer(1)]], texture2d<float> t0"), "MSL: [[color(k)]], textures for the vertex part too");
+    check(has_op(shader_spirv(ds, 0), 88) == 1 && has_op(shader_spirv(ds, 1), 95) == 1, "SPIR-V: a level sampled in the vertex part, a texel fetched in the fragment part");
+    var one: i64 = shader_compile("in pos: vec3;\nvertex {\n    position = vec4(pos, 1.0);\n}\nfragment {\n    color = vec4(1.0);\n}\n");
+    check(one > 0 && shader_outputs(one) == 1 && !has(shader_wgsl(one), "FOut"), "a shader of one colour is as before");
+
+    refused("buffer a: uint;\ncompute {\n    a[index] = 1.0;\n}\n", "not of the type");
+    refused("buffer a: float;\ncompute {\n    atomic_add(a[index], 1u);\n}\n", "an item of a uint buffer");
+    refused("in pos: vec3;\ntexture t;\nvertex {\n    position = sample(t, pos.xy);\n}\nfragment {\n    color = vec4(1.0);\n}\n", "fragment only");
+    refused("buffer a: uint;\ncompute {\n    let x = 3u + 1.0;\n}\n", "do not mix");
+    refused("buffer a: float;\ncompute {\n    a[index] = index % 2.0;\n}\n", "are for uints");
+    refused("buffer a: uint;\ncompute {\n    let x = -a[index];\n}\n", "no minus");
+    refused("buffer a: uint;\ncompute {\n    vec4(1.0);\n}\n", "only an atomic_ call stands alone");
+    refused("in pos: vec3;\nvertex {\n    position = vec4(pos, 1.0);\n    let x = atomic_add(pos.x, 1u);\n}\nfragment {\n    color = vec4(1.0);\n}\n", "for compute shaders");
+    refused("in id: uint;\nvertex {\n    position = vec4(1.0);\n}\nfragment {\n    color = vec4(1.0);\n}\n", "an input is a float or a vector");
+    refused("texture a;\ntexture b;\ntexture c;\ntexture d;\ntexture e;\nin pos: vec3;\nvertex {\n    position = vec4(pos, 1.0);\n}\nfragment {\n    color = vec4(1.0);\n}\n", "4 textures at most");
+    refused("buffer a: uint;\ncompute {\n    a[index] = 4294967296u;\n}\n", "at most 4294967295");
+    return 0;
+}

@@ -1,0 +1,27 @@
+ok    a compute shader of uints, atomics and a texture compiles
+ok    its buffers and its texture
+ok    a uint uniform; each buffer's length after count
+ok    WGSL: an atomic buffer, atomicAdd, atomicMax standing alone
+ok    WGSL: a uint buffer, << % ^
+ok    WGSL: the texture in group 2, sampled at a level and loaded
+ok    WGSL: an index past a buffer's end taken as its last
+ok    MSL: atomic_uint, atomic_fetch_add_explicit
+ok    MSL: the texture, sample with level, read
+ok    SPIR-V: OpAtomicIAdd, OpAtomicUMax
+ok    SPIR-V: explicit-level sample, fetch, shift, mod, xor
+ok    a fragment part writing color, color1 and color2: three outputs
+ok    WGSL: the three colours out
+ok    MSL: [[color(k)]], textures for the vertex part too
+ok    SPIR-V: a level sampled in the vertex part, a texel fetched in the fragment part
+ok    a shader of one colour is as before
+ok    refused: not of the type
+ok    refused: an item of a uint buffer
+ok    refused: fragment only
+ok    refused: do not mix
+ok    refused: are for uints
+ok    refused: no minus
+ok    refused: only an atomic_ call stands alone
+ok    refused: for compute shaders
+ok    refused: an input is a float or a vector
+ok    refused: 4 textures at most
+ok    refused: at most 4294967295

@@ -1783,3 +1783,55 @@ called `text_free` itself.
 - A call with fewer (or more) arguments than the function declares
   compiled, the missing ones being whatever their registers held. It is
   an error now. Test: `test_argcount_bad`.
+
+## What a renderer is built from (10-11-2026, Gerson)
+
+The engine writes deferred lighting, light that bounces (a Lumen of its
+own) and geometry culled on the card (a Nanite of its own) in Kron. The
+standard library gives it the pieces those need, on Vulkan, Metal and
+WebGPU alike, and nothing of the techniques themselves.
+
+- Targets of several colours and of 16-bit floats: `gpu_target_ex(w, h,
+  colors, hdr)`, its colours `gpu_target_texture_at(t, k)`, then its depth
+  (the texture numbers run on). A shader writes `color` .. `color3`; one
+  made after `gpu_hdr(1)` draws into hdr targets. A pipeline is made for
+  one kind of pass (how many colours, which format), so a shader belongs to
+  the kind it was made for and a draw into another kind is refused with
+  the reason; this keeps one pipeline a shader, as before. Kind 0, one
+  colour of 8 bits, is the frame's and plain gpu_target's.
+- KSL has `uint`: uniforms, buffers, values; `5u`, `uint(x)`, `float(u)`,
+  `% & | ^ << >>`, comparisons, `min` and `max`. A uint and a float do not
+  mix, as in the GPU languages. A uint is neither an input nor a var the
+  vertex part passes on (it would need flat interpolation, which no use
+  asks for yet).
+- Atomics: `atomic_add`, `atomic_min`, `atomic_max` on an item of a uint
+  buffer, compute only; one may stand alone as a statement. WGSL wants the
+  buffer typed atomic, and then every read and write of it atomic too: the
+  translation does that for a buffer any atomic touches (MSL likewise,
+  with atomic_uint; SPIR-V needs nothing).
+- `load(t, xy)` reads a texel unfiltered (a G-buffer, a depth);
+  `sample_level(t, uv, level)` one mip level. Both in every part: the
+  textures are bound for the vertex part as well. `sample` stays fragment
+  only: it picks the level from the pixels around, which no other part has
+  (WGSL refuses it elsewhere).
+- Compute shaders read textures: `gpu_run_textures`. Vulkan: set 1, after
+  the four buffers (bindings 4 to 7); WGSL group 2; MSL texture(k).
+- `gpu_draw_indirect(prog, mesh, tex, ib, indices, args)`: the indices
+  from a uint buffer and the counts (Vulkan's, Metal's and WebGPU's five
+  uints, the same on the three) from another, both written by a compute
+  shader; the program never reads them back. Instance buffers are now
+  usable as index and indirect buffers on all three.
+- A buffer's index past its last item reads and writes the last item: each
+  buffer's length goes to the shader as a uniform (len0_ ..) and every index
+  is clamped to it, in WGSL, MSL and SPIR-V alike. Before, gpu_run refused
+  a count above a buffer's size, which kept `name[index]` inside but not
+  any other index; now that shaders index buffers by what they computed
+  (a slot from atomic_add, a triangle's corners), the clamp is what keeps
+  a compute shader from writing outside its buffers, and gpu_run no longer
+  asks every buffer to be as long as the count.
+- A `var` without a value starts at zero in SPIR-V too (it did in WGSL and
+  MSL).
+
+Tests: `test_ksl` (the translations, without a card), `tests/gpu/gpu_mrt`
+and `tests/gpu/gpu_indirect` (lavapipe and Chromium's WebGPU give the same
+pixels).
