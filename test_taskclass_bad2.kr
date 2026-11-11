@@ -1,0 +1,22 @@
+kron_program
+kron_domain test_taskclass_bad2;
+kron_imports
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// MUST NOT COMPILE: a job that touches a global which is not shared, given
+// to task_for by its name. It runs in task_for's threads.
+// =========================================================================
+
+var ac_hp: i64;
+
+fn tick_hurt(x: i64) -> i64 {
+    ac_hp = ac_hp - x;
+    return ac_hp;
+}
+
+fn main() -> i64 {
+    task_for(10, tick_hurt);
+    return 0;
+}

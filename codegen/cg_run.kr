@@ -44,6 +44,8 @@ fn cg_run(root: ptr<Ast>) -> i64 {
     gs_count = 0;
     ce_count = 0;
     ie_count = 0;
+    sl_count = 0;
+    sl_full = 0;
     cg_ext_count = 0;
     cg_ext_any = 0;
     cg_has_exp = 0;
@@ -246,10 +248,13 @@ fn cg_note_global(t: i64) -> i64 {
 fn cg_note_call(t: i64) -> i64 {
     var fr: i64 = cg_cur_fn;
     var to: i64 = 0;
+    to = cg_find_func(t);
+    if to >= 0 && to < CG_MAX_FUNCS {
+        cg_qs(&fn_ncall, to, cg_q(&fn_ncall, to) + 1);
+    }
     if fr < 0 {
         return 0;
     }
-    to = cg_find_func(t);
     if to < 0 {
         return 0;
     }
@@ -297,6 +302,10 @@ fn cg_fn_key(f: i64) -> i64 {
     }
     p = fnode.left;
     while p != 0 {
+        // a fn written as a value: its record, the last, is not an argument
+        if p.right == 0 && cg_q8(&fn_islam, f) != 0 {
+            return cg_shape(n, reals);
+        }
         if n < 48 && (p.col & 1) != 0 {
             reals = reals | (1 << n);
         }
@@ -411,6 +420,184 @@ fn cg_fn_contained(j: i64) -> i64 {
     return any;
 }
 
+// ---------------------------------------------------- fn values' sources ---
+// A global or a parameter that holds a fn value is a slot: a call through
+// it can call only what was put in it. What is put in it is noted as the
+// program is written out -- an assignment, a global's first value, an
+// argument of a direct call -- and when every way into a slot is known,
+// the thread check takes only those functions as what a call through it
+// reaches (task_for's job in its shared global, say, reaches the jobs
+// given to task_for and no other function of that shape).
+const SL_G: i64 = 1073741824;                // a global: SL_G + its index
+const SL_P: i64 = 2147483648;                // a parameter: SL_P + F * 64 + k
+const SL_F: i64 = 3221225472;                // a function: SL_F + its index
+const SL_OPEN: i64 = 4294967296;             // anything else
+
+// the slot a name is in the current function: one of its parameters, or
+// a global no local hides; 0 for anything else (a local, a lambda's own)
+fn cg_slot_of(t: i64) -> i64 {
+    var k: i64 = 0;
+    var g: i64 = 0;
+    if t == 0 { return 0; }
+    k = cg_param_index(t);
+    if k >= 0 {
+        if k < 64 && cg_cur_fn >= 0 && cg_cur_fn < CG_MAX_FUNCS {
+            return SL_P + cg_cur_fn * 64 + k;
+        }
+        return 0;
+    }
+    if cg_find_var_idx(t) != -1 { return 0; }
+    g = cg_find_global(t);
+    if g >= 0 && g < CG_MAX_GLOBALS { return SL_G + g; }
+    return 0;
+}
+
+// where the value of e comes from: a function, a slot holding a fn value,
+// or SL_OPEN
+fn cg_slot_src(e: ptr<Ast>) -> i64 {
+    var f: i64 = 0;
+    var s: i64 = 0;
+    if e == 0 { return SL_OPEN; }
+    if e.node_type != AST_IDENTIFIER { return SL_OPEN; }
+    if cg_find_var_idx(e.data) == -1 && cg_find_global(e.data) == -1 {
+        f = cg_find_func(e.data);
+        if f >= 0 && f < CG_MAX_FUNCS { return SL_F + f; }
+        return SL_OPEN;
+    }
+    if (cg_vtag_of_name(e.data) & 15) != 5 { return SL_OPEN; }
+    s = cg_slot_of(e.data);
+    if s != 0 { return s; }
+    return SL_OPEN;
+}
+
+// slot dst may hold anything
+fn cg_slot_open(dst: i64) -> i64 {
+    if dst >= SL_P {
+        cg_qs8(&sl_popen, dst - SL_P, 1);
+    } else if dst >= SL_G {
+        cg_qs8(&sl_gopen, dst - SL_G, 1);
+    }
+    return 0;
+}
+
+// slot dst takes what src is
+fn cg_slot_edge(dst: i64, src: i64) -> i64 {
+    if src == SL_OPEN { return cg_slot_open(dst); }
+    if sl_count >= 16384 {
+        sl_full = 1;
+        return 0;
+    }
+    cg_qs(&sl_dst, sl_count, dst);
+    cg_qs(&sl_src, sl_count, src);
+    sl_count += 1;
+    return 0;
+}
+
+// name t = e (an assignment, or a global's first value): noted when t is a
+// slot holding a fn value
+fn cg_slot_store(t: i64, e: ptr<Ast>) -> i64 {
+    var dst: i64 = cg_slot_of(t);
+    if dst == 0 { return 0; }
+    if (cg_vtag_of_name(t) & 15) != 5 { return 0; }
+    return cg_slot_edge(dst, cg_slot_src(e));
+}
+
+// a slot written some way not followed: multiple results, its address taken
+fn cg_slot_lost(t: i64) -> i64 {
+    var dst: i64 = cg_slot_of(t);
+    if dst != 0 { cg_slot_open(dst); }
+    return 0;
+}
+
+// a direct call of f: what each of its parameters takes
+fn cg_slot_args(c: ptr<Ast>, f: i64) -> i64 {
+    var a: ptr<Ast> = c.right;
+    var k: i64 = 0;
+    var src: i64 = 0;
+    if f < 0 || f >= CG_MAX_FUNCS { return 0; }
+    cg_qs(&fn_nrec, f, cg_q(&fn_nrec, f) + 1);
+    while a != 0 && k < 64 {
+        src = cg_slot_src(a.left);
+        if src == SL_OPEN {
+            cg_qs8(&sl_popen, f * 64 + k, 1);
+        } else {
+            cg_slot_edge(SL_P + f * 64 + k, src);
+        }
+        k += 1;
+        a = a.right;
+    }
+    return 0;
+}
+
+// 1 when slot s may hold a value whose origin is not followed
+fn cg_slot_unknown(s: i64) -> i64 {
+    var f: i64 = 0;
+    var k: i64 = 0;
+    if s >= SL_P {
+        f = (s - SL_P) / 64;
+        k = (s - SL_P) % 64;
+        if cg_q8(&sl_popen, f * 64 + k) != 0 { return 1; }
+        // a function that is a value, a thread's start or main is called
+        // with arguments nobody here wrote down
+        if cg_q(&fn_asval, f) != 0 || cg_q(&fn_addr, f) != 0 || cg_q(&fn_root, f) != 0 { return 1; }
+        if f == cg_main_idx { return 1; }
+        if cg_q(&fn_ncall, f) != cg_q(&fn_nrec, f) { return 1; }
+        return 0;
+    }
+    if s >= SL_G {
+        if cg_q8(&sl_gopen, s - SL_G) != 0 { return 1; }
+        return 0;
+    }
+    return 1;
+}
+
+// the functions slot s can hold, marked in sl_found: 1 when they are all
+// known, 0 when some other value may be in it (sl_found is then no use)
+fn cg_slot_funcs(s: i64) -> i64 {
+    var n: i64 = 0;
+    var at: i64 = 0;
+    var i: i64 = 0;
+    var j: i64 = 0;
+    var cur: i64 = 0;
+    var src: i64 = 0;
+    var dup: i64 = 0;
+    if sl_full != 0 || cg_as_module != 0 || cg_lib != 0 || cg_has_exp != 0 { return 0; }
+    while i < fn_count && i < CG_MAX_FUNCS {
+        cg_qs8(&sl_found, i, 0);
+        i += 1;
+    }
+    cg_qs(&sl_seen, 0, s);
+    n = 1;
+    while at < n {
+        cur = cg_q(&sl_seen, at);
+        at += 1;
+        if cg_slot_unknown(cur) != 0 { return 0; }
+        i = 0;
+        while i < sl_count {
+            if cg_q(&sl_dst, i) == cur {
+                src = cg_q(&sl_src, i);
+                if src >= SL_F {
+                    cg_qs8(&sl_found, src - SL_F, 1);
+                } else {
+                    dup = 0;
+                    j = 0;
+                    while j < n {
+                        if cg_q(&sl_seen, j) == src { dup = 1; }
+                        j += 1;
+                    }
+                    if dup == 0 {
+                        if n >= 16384 { return 0; }
+                        cg_qs(&sl_seen, n, src);
+                        n += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    return 1;
+}
+
 // a call with another number of arguments than the function takes
 fn cg_check_arg_count(c: ptr<Ast>, f: i64) -> i64 {
     var fnode: ptr<Ast> = cg_q(&fn_nodes, f);
@@ -455,6 +642,7 @@ fn cg_note_indirect_val(c: ptr<Ast>) -> i64 {
     }
     cg_qs(&ie_from, ie_count, cg_cur_fn);
     cg_qs(&ie_key, ie_count, cg_shape(n, reals));
+    cg_qs(&ie_slot, ie_count, cg_slot_of(c.data));
     ie_count += 1;
     return 0;
 }
@@ -481,6 +669,7 @@ fn cg_note_indirect_addr(c: ptr<Ast>) -> i64 {
     }
     cg_qs(&ie_from, ie_count, cg_cur_fn);
     cg_qs(&ie_key, ie_count, cg_shape(n, reals) | CG_IE_ADDR);
+    cg_qs(&ie_slot, ie_count, 0);
     ie_count += 1;
     return 0;
 }
@@ -548,11 +737,20 @@ fn cg_thread_check() -> i64 {
                     byaddr = 1;
                     key = key - CG_IE_ADDR;
                 }
+                // through a global or a parameter whose values are all known:
+                // only those functions
+                var known: i64 = 0;
+                if byaddr == 0 && cg_q(&ie_slot, i) != 0 {
+                    known = cg_slot_funcs(cg_q(&ie_slot, i));
+                }
                 j = 0;
                 while j < n {
                     var cand: i64 = cg_q(&fn_asval, j);
                     if byaddr == 1 { cand = cg_q(&fn_addr, j); }
                     if cand != 0 && cg_fn_contained(j) != 0 { cand = 0; }
+                    if known != 0 {
+                        cand = cg_q8(&sl_found, j);
+                    }
                     if cand != 0 && cg_q(&fn_reach, j) == 0 {
                         if cg_fn_key(j) == key {
                             cg_qs(&fn_reach, j, 1);

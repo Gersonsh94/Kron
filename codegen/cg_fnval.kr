@@ -55,6 +55,7 @@ fn cg_emit_multi(m: ptr<Ast>) -> i64 {
         tv = e.left;
         if tv != 0 {                         // '_' takes nothing
             nm = tv.data;
+            cg_slot_lost(nm);
             i = cg_find_var_idx(nm);
             if i == -1 {
                 cg_emit_gpre("    mov [rel __g_");
@@ -476,6 +477,20 @@ fn cg_drain_lambdas() -> i64 {
         f.left = lam.left;
         f.right = lam.right;
         f.col = lam.col;
+        // a function of the thread check's like any other: what it touches
+        // and calls is its own, and a call through a fn value of its shape
+        // may reach it
+        if f.data != 0 && fn_count < CG_MAX_FUNCS && cg_find_func(f.data) == -1 {
+            cg_qs(&fn_toks, fn_count, f.data);
+            cg_qs(&fn_nodes, fn_count, f);
+            cg_qs(&fn_ret_unsig, fn_count, (f.col >> 1) & 1);
+            cg_qs(&fn_ret_vtag, fn_count, f.col >> 8);
+            cg_qs(&fn_ret_float, fn_count, f.col & 1);
+            cg_qs(&fn_asval, fn_count, 1);
+            cg_qs8(&fn_vesc, fn_count, 1);
+            cg_qs8(&fn_islam, fn_count, 1);
+            fn_count += 1;
+        }
         cg_lam_cur = q;
         cg_function(f);
         cg_lam_cur = -1;

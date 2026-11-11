@@ -405,6 +405,10 @@ fn cg_e_assign(n: ptr<Ast>) -> i64 {
             return cg_e_assign_float(n);
         }
     }
+    // a fn value put in a global or a parameter: where it came from
+    if l.node_type == AST_IDENTIFIER {
+        cg_slot_store(l.data, r);
+    }
     // a parameter stored in a global that is not shared: its value goes
     // nowhere a thread can reach
     if l.node_type == AST_IDENTIFIER && r != 0 && r.node_type == AST_IDENTIFIER {
@@ -607,6 +611,7 @@ fn cg_e_addr(n: ptr<Ast>) -> i64 {
     var i: i64 = cg_find_var_idx(n.data);
     var f: i64 = 0;
     var sc: i64 = 0;
+    cg_slot_lost(n.data);                    // written through the address, maybe
     if i != -1 {
         // an array parameter's slot holds the array's address: that value
         if cg_q(&var_isref, i) != 0 {
@@ -1241,6 +1246,7 @@ fn cg_e_call(n: ptr<Ast>) -> i64 {
     if kind == 0 && n.owner_type != FNVAL_MARK && f != -1 {
         cg_check_arg_count(n, f);
         cg_note_value_args(n, f);
+        cg_slot_args(n, f);
     }
     // the stack arguments of this call: counted here, after its arguments,
     // since a call among them sets extra_args for its own

@@ -44,9 +44,10 @@ shared var tk_ready: i64;
 shared var tk_busy: i64;
 shared var tk_set: i64;             // task_set_workers, 0 none
 
-// takes chunks until there are none left
+// takes chunks until there are none left. The job is called through
+// tk_job itself: the compiler then knows a worker calls only what task_for
+// put there (the jobs given to task_for), not any function of its shape.
 fn tk_worker(arg: i64) -> i64 {
-    var f: fn(i64) -> i64 = tk_job;
     while 1 == 1 {
         lock_take(TK_LOCK);
         var i: i64 = tk_next;
@@ -58,7 +59,7 @@ fn tk_worker(arg: i64) -> i64 {
         var e: i64 = i + tk_step;
         if e > tk_end { e = tk_end; }
         while i < e {
-            f(i);
+            tk_job(i);
             i = i + 1;
         }
     }

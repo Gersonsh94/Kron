@@ -1,0 +1,30 @@
+kron_program
+kron_domain test_taskclass_bad;
+kron_imports
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// MUST NOT COMPILE: a class callback that touches a global which is not
+// shared, kept in a field, then given to task_for from that field. The
+// compiler cannot tell which function the field holds, so every function
+// of the job's shape kept as a value counts as run by task_for's threads.
+// =========================================================================
+
+struct Actor {
+    on_tick: fn(i64) -> i64;
+}
+
+var ac_hp: i64;
+
+fn tick_hurt(x: i64) -> i64 {
+    ac_hp = ac_hp - x;
+    return ac_hp;
+}
+
+fn main() -> i64 {
+    var a: Actor;
+    a.on_tick = tick_hurt;
+    task_for(10, a.on_tick);
+    return 0;
+}

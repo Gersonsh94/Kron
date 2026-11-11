@@ -1835,3 +1835,41 @@ WebGPU alike, and nothing of the techniques themselves.
 Tests: `test_ksl` (the translations, without a card), `tests/gpu/gpu_mrt`
 and `tests/gpu/gpu_indirect` (lavapipe and Chromium's WebGPU give the same
 pixels).
+
+## task_for and the callbacks of classes (10-11-2026, Gerson)
+
+- task_for keeps its job in `shared var tk_job: fn(i64) -> i64`, and a
+  call through a fn value in a thread was taken to reach every function of
+  its shape used as a value. A game keeps dozens of callbacks of that shape
+  (on_begin, on_tick...) that touch the state of their objects, so a
+  program with task_for and such classes did not compile, and the engine
+  wrote ke_tasks with jobs of another shape to get around it.
+- Now the compiler follows where the fn value in a global or a parameter
+  comes from (cg_slot_* in cg_run.kr). What is put in one is noted as the
+  program is written out: an assignment, a global's first value, each
+  argument of a direct call. When every way into the slot is known -- only
+  functions by their names, or other such slots -- a call through it
+  reaches only those functions. task_for's workers call through tk_job
+  itself now (not a local copy of it), so they reach the jobs given to
+  task_for and nothing else, also when the job is passed on through the
+  parameters of other functions.
+- A slot is taken as unknown, and the old rule (any function of the shape
+  used as a value) applies, when it may hold anything else: a value from a
+  field, a list, a local, a call's result or a fn written as a value; its
+  address taken; one of several results; a parameter of a function that
+  is itself a value, a thread's start, main, or called some way whose
+  arguments were not noted; and in a module, a library or a program with
+  exported functions, where callers outside are not seen.
+- A fn written as a value (`fn(x: i64) -> i64 { ... }`) was never looked at
+  by the thread check: what it touched was nobody's, and a call through a
+  value could not reach it. A program could give task_for one that wrote a
+  global that is not shared, and it compiled. It is a function of the
+  check now, of its shape without its hidden record, and such a program is
+  refused.
+- ke_tasks stays as the engine wrote it; task_for can now take the jobs of
+  a program that has class callbacks too.
+
+Tests: `test_taskclass` (callbacks of the job's shape in a field and a list,
+task_for with a named job and with a job passed through a parameter),
+`test_taskclass_bad` (the job taken from a field), `test_taskclass_bad2`
+(a job touching a global that is not shared), `test_tasklambda_bad`.

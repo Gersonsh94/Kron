@@ -1,0 +1,19 @@
+kron_program
+kron_domain test_tasklambda_bad;
+kron_imports
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// MUST NOT COMPILE: a fn written as a value that touches a global which is
+// not shared, given to task_for. It runs in task_for's threads. (Such a
+// value was not looked at by the thread check before 10-11-2026.)
+// =========================================================================
+
+var ac_hp: i64;
+
+fn main() -> i64 {
+    var hurt = fn(x: i64) -> i64 { ac_hp = ac_hp - x; return 0; };
+    task_for(3, hurt);
+    return 0;
+}

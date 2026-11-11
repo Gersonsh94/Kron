@@ -287,6 +287,22 @@ var fn_indir: [i64; 4096];               // it makes an indirect call to any add
 var ie_count: i64;                        // its calls through a fn value:
 var ie_from: [i64; 65536];                // who calls,
 var ie_key: [i64; 65536];                 // and the shape of the call (cg_fn_key)
+var ie_slot: [i64; 65536];                // and the global or parameter it calls through, 0 none
+// Where the fn value in a global or a parameter can come from (cg_run.kr,
+// cg_slot_*): sl_dst takes what sl_src holds -- a function, another global
+// or parameter. A call through a slot all of whose sources are known
+// reaches only the functions among them.
+var sl_count: i64;
+var sl_dst: [i64; 16384];
+var sl_src: [i64; 16384];
+var sl_full: i64;                         // too many to keep: none is trusted
+var sl_gopen: [u8; 4096];                 // global G took a value from elsewhere
+var sl_popen: [u8; 262144];               // parameter F * 64 + k likewise
+var fn_ncall: [i64; 4096];                // the direct calls of a function,
+var fn_nrec: [i64; 4096];                 // and those whose arguments were noted
+var fn_islam: [u8; 4096];                 // a fn written as a value (its record is its last parameter)
+var sl_seen: [i64; 16384];                // a walk over the slots: those met
+var sl_found: [u8; 4096];                 // and the functions found
 var fn_reach: [i64; 4096];               // can run in a thread
 var ce_count: i64;
 var ce_from: [i64; 65536];

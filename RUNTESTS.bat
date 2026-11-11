@@ -81,7 +81,7 @@ set RUNLIST=%RUNLIST% test_packed
 set RUNLIST=%RUNLIST% test_structarray
 set RUNLIST=%RUNLIST% test_ogg test_vorbis test_castdecl
 set RUNLIST=%RUNLIST% test_udp test_task test_audiofx
-set RUNLIST=%RUNLIST% test_args7 test_listfield test_taskhooks test_udp_shared test_audiobus test_mp3 test_video test_touch test_failreal test_zerolocals test_softnames test_results6 test_callshape test_jobfile test_ksl
+set RUNLIST=%RUNLIST% test_args7 test_listfield test_taskhooks test_udp_shared test_audiobus test_mp3 test_video test_touch test_failreal test_zerolocals test_softnames test_results6 test_callshape test_jobfile test_ksl test_taskclass
 set RUNLIST=%RUNLIST% test_bigreal test_fields
 set RUNLIST=%RUNLIST% test_text test_list test_map test_files test_os
 set RUNLIST=%RUNLIST% test_libthreads
@@ -110,7 +110,7 @@ set BADLIST=%BADLIST% test_shared_bad test_shared_bad2 test_syscall_bad
 set BADLIST=%BADLIST% test_aw_bad test_list_bad test_listshow_bad test_nofn_bad test_fieldcall_bad test_stray_bad
 set BADLIST=%BADLIST% test_imports_many_bad test_fieldindex_bad
 set BADLIST=%BADLIST% test_extern_bad test_generic_bad test_modnames_bad test_garray_bad test_char_bad test_text_bad test_regname_bad test_realbits_bad
-set BADLIST=%BADLIST% test_realarg_bad test_realret_bad test_multistruct_bad test_arrret_bad test_argcount_bad
+set BADLIST=%BADLIST% test_realarg_bad test_realret_bad test_multistruct_bad test_arrret_bad test_argcount_bad test_taskclass_bad test_taskclass_bad2 test_tasklambda_bad
 
 REM  --- encodings: kasm assembles each file and its bytes must be the ones in
 REM  tests\enc\NAME.bin, which were checked opcode by opcode against another

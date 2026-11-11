@@ -100,6 +100,8 @@ test_softnames
 test_results6
 test_callshape
 test_jobfile
+test_ksl
+test_taskclass
 test_extern
 test_structval
 test_liststruct
@@ -121,3 +123,5 @@ gpu_target
 gpu_mip
 gpu_inst
 gpu_compute
+gpu_mrt
+gpu_indirect

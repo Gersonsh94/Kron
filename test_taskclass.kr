@@ -1,0 +1,73 @@
+kron_program
+kron_domain test_taskclass;
+kron_imports
+acquire_domain "std_task.kr";
+acquire_domain "std_list.kr";
+kron_definitions
+
+// =========================================================================
+// task_for in a program whose classes keep callbacks of the job's shape,
+// fn(i64) -> i64, that touch globals which are not shared. The job is
+// called through task_for's shared tk_job, which only ever holds what
+// task_for is given: the class callbacks, stored in fields and lists, are
+// not code its threads run, and the program compiles. Given through a
+// parameter of another function, the job is followed there too.
+// =========================================================================
+
+struct Actor {
+    on_tick: fn(i64) -> i64;
+    hp: i64;
+}
+
+var ac_hp: i64;                       // not shared: the main thread's
+var ac_hooks: list<fn(i64) -> i64>;
+shared var tc_total: i64;
+
+fn tick_hurt(x: i64) -> i64 {
+    ac_hp = ac_hp - x;
+    return ac_hp;
+}
+
+fn tick_heal(x: i64) -> i64 {
+    ac_hp = ac_hp + x;
+    return ac_hp;
+}
+
+fn add_one(i: i64) -> i64 {
+    lock_take(0);
+    tc_total = tc_total + i;
+    lock_give(0);
+    return 0;
+}
+
+fn add_two(i: i64) -> i64 {
+    lock_take(0);
+    tc_total = tc_total + 2 * i;
+    lock_give(0);
+    return 0;
+}
+
+// the job passed on through a parameter
+fn run_job(n: i64, job: fn(i64) -> i64) -> i64 {
+    return task_for(n, job);
+}
+
+fn main() -> i64 {
+    lock_init(0);
+    ac_hp = 100;
+    var a: Actor;
+    a.on_tick = tick_hurt;
+    var t: fn(i64) -> i64 = a.on_tick;
+    t(30);
+    ac_hooks = list_new();
+    list_add(ac_hooks, tick_heal);
+    var h: fn(i64) -> i64 = list_get(ac_hooks, 0);
+    h(5);
+    print(ac_hp);
+    task_for(100, add_one);
+    print(tc_total);
+    tc_total = 0;
+    run_job(10, add_two);
+    print(tc_total);
+    return 0;
+}

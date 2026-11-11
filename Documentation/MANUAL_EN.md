@@ -350,7 +350,12 @@ A function that runs in a thread, or anything it calls, may only touch
 function value (`task_for`'s job, a hook) can reach only the functions used
 as values that take the same arguments -- as many, with the reals in the
 same places -- so a hook of another shape is not code that runs in a
-thread.
+thread. When the value is in a global or a parameter that only ever takes
+functions by their names (`task_for`'s job: what is given to `task_for`),
+the call reaches only those: a class's callbacks of the same shape, kept in
+fields and lists, are not code that runs in task_for's threads. A fn
+written as a value (`fn(x: i64) -> i64 { ... }`) is checked like any
+function.
 
 Channels (`std_chan.kr`) pass values between threads without touching locks:
 

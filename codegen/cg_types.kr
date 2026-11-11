@@ -227,6 +227,9 @@ fn cg_global_init_one(d: ptr<Ast>) -> i64 {
     }
     tag = cg_decl_vtag(d);
     v = d.right;
+    if v != 0 {
+        cg_slot_store(d.data, v);            // a fn value's first value
+    }
     if v == 0 {
         k = tag & 15;
         if k == 2 {
