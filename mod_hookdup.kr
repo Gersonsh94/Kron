@@ -1,0 +1,9 @@
+kron_program
+kron_domain mod_hookdup;
+kron_imports
+kron_definitions
+
+// a module with a global, for test_globaldup_bad
+var ke_hook_draw: i64;
+
+fn hook_count() -> i64 { return ke_hook_draw; }

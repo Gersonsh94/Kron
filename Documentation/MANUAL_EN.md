@@ -353,7 +353,9 @@ same places -- so a hook of another shape is not code that runs in a
 thread. When the value is in a global or a parameter that only ever takes
 functions by their names (`task_for`'s job: what is given to `task_for`),
 the call reaches only those: a class's callbacks of the same shape, kept in
-fields and lists, are not code that runs in task_for's threads. A fn
+fields and lists, are not code that runs in task_for's threads. This holds
+in a program that exports functions too (an app built on `std_app`): an
+exported function's parameters are taken as unknown, and nothing else. A fn
 written as a value (`fn(x: i64) -> i64 { ... }`) is checked like any
 function.
 
@@ -851,6 +853,10 @@ var p: Pair<i64, f64> = Pair<i64, f64> { first: 7, second: 0.5 };
 
 ### Module names
 
+Globals are not so: two modules declaring a global of the same name (or one
+file declaring it twice) is an error at the second declaration, which names
+both modules; give each module's globals a prefix of its own.
+
 Two modules may define functions of the same name. Inside each module its
 own one is meant; elsewhere the name is written with its module,
 `module.name` (the file's name without `.kr`), or with a shorter name given
@@ -946,7 +952,9 @@ The same program draws with Vulkan on Windows, Linux and Android, Metal on
 macOS and iOS, and WebGPU in a browser. Without a window it draws all the
 same, for `gpu_pixel(x, y)` and `gpu_save_bmp(path)`. Blending (alpha) is
 on unless `gpu_blend(0)` turns it off for the shaders made after;
-`gpu_depth` and `gpu_cull` work the same way.
+`gpu_blend(2)` adds what a shader draws to what is there (lights summed
+pass after pass into one target, hdr ones too). `gpu_depth` and `gpu_cull`
+work the same way.
 
 | Module | What it has |
 |---|---|
@@ -1072,7 +1080,9 @@ compute {
 }
 ```
 
-`gpu_draw_indirect(prog, mesh, tex, ib, dst, args)` then draws the mesh's
+`gpu_draw_indirect(prog, mesh, tex, ib, dst, args)` (or
+`gpu_draw_indirect_textures(prog, mesh, t0, t1, t2, t3, ib, dst, args)`,
+with four textures) then draws the mesh's
 corners by the indices in `dst`, as many as `args` says, without the
 program reading either: the card decides what is drawn. `ib` is the
 instance buffer when the shader has instance inputs (0 when not), and `dst`

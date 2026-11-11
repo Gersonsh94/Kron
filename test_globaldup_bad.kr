@@ -1,0 +1,18 @@
+kron_program
+kron_domain test_globaldup_bad;
+kron_imports
+acquire_domain "mod_hookdup.kr";
+kron_definitions
+
+// =========================================================================
+// MUST NOT COMPILE: a global of the same name in two modules. Both would
+// be one symbol; the assembler refused it with the name cut short and no
+// file. The error is at this declaration and names both modules.
+// =========================================================================
+
+var ke_hook_draw: i64;
+
+fn main() -> i64 {
+    ke_hook_draw = 1;
+    return hook_count();
+}

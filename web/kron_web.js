@@ -934,8 +934,11 @@ class KronGPU {
     });
     const buffers = attributes.length ? [{ arrayStride: off, attributes }] : [];
     if (iattributes.length) buffers.push({ arrayStride: ioff, stepMode: 'instance', attributes: iattributes });
+    // flags bit 2: by alpha; bit 3: added (gpu_blend(2))
     const blend = (m.flags & 4) ? { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
-                                     alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } : undefined;
+                                     alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } :
+                  (m.flags & 8) ? { color: { srcFactor: 'one', dstFactor: 'one' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'one' } } : undefined;
     // the colours it writes, of the format of its kind
     const kind = (m.flags >> 16) & 7, fmt8 = (kind & 4) ? 'rgba16float' : this.format;
     const targets = [];

@@ -102,6 +102,7 @@ test_callshape
 test_jobfile
 test_ksl
 test_taskclass
+test_taskexport
 test_extern
 test_structval
 test_liststruct

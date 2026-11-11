@@ -189,7 +189,18 @@ fn main() -> i64 {
     check_pixel(3 * W / 4, 3 * H / 4, 255, 0, 0, "instance 1, moved right");
     check_pixel(W / 4, H / 4, 0, 0, 0, "and nothing else");
 
-    // 4. what is refused
+    // 4. an indirect draw with four textures: the second one's colour
+    var green: i64 = image_new(1, 1);
+    image_set(green, 0, 0, 0 - 16777216 + 65280);
+    var tg: i64 = gpu_texture(green);
+    var two: i64 = gpu_shader("texture a;\ntexture b;\nin pos: vec3;\nin col: vec3;\nvertex {\n position = vec4(pos, 1.0);\n}\nfragment {\n color = load(b, vec2(0.0, 0.0)) * sample(a, vec2(0.5, 0.5));\n}\n");
+    gpu_begin(color4(0, 0, 0, 255));
+    gpu_draw_indirect_textures(two, mesh, 0, tg, 0, 0, 0, dst, args);
+    gpu_end();
+    check_pixel(W / 4, 3 * H / 4, 0, 255, 0, "gpu_draw_indirect_textures: the second texture's green, on a kept square");
+    check_pixel(3 * W / 4, 3 * H / 4, 0, 0, 0, "and the culled one still empty");
+
+    // 5. what is refused
     gpu_begin(color4(0, 0, 0, 255));
     gpu_draw_indirect(moved, mesh, 0, 0, 0, args2);
     report(failed(), "a shader with instance inputs needs their buffer");

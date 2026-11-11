@@ -1873,3 +1873,24 @@ Tests: `test_taskclass` (callbacks of the job's shape in a field and a list,
 task_for with a named job and with a job passed through a parameter),
 `test_taskclass_bad` (the job taken from a field), `test_taskclass_bad2`
 (a job touching a global that is not shared), `test_tasklambda_bad`.
+
+## From the engine's renderer (10-11-2026, Gerson)
+
+- `gpu_draw_indirect_textures(prog, mesh, t0, t1, t2, t3, ib, indices,
+  args)`: an indirect draw with four textures, so a renderer no longer
+  sets std_gpu's own variables by hand. `gpu_draw_indirect` is it with one.
+- `gpu_blend(2)`: added blending (one + one, colour and alpha) for the
+  shaders made after, on Vulkan, Metal and WebGPU, hdr targets included.
+  Lights are summed in one target pass after pass instead of two targets
+  taking turns. gpu_blend refuses any other mode.
+- task_for in a program with exported functions (an app on std_app): the
+  following of fn values (cg_slot_*) was turned off in such a program, and
+  also in a library. It is on now: an exported function's parameters are
+  taken as unknown -- its callers are outside -- and nothing else changes.
+  Only a module (--module), whose callers are other modules, keeps it off.
+  Test: `test_taskexport`.
+- A global of the same name in two modules, or twice in one file, is an
+  error at the second declaration that names both modules (parser_ng.kr,
+  where every token's module is known). The assembler used to refuse the
+  symbol with its name cut short and no file. Tests: `test_globaldup_bad`
+  (with mod_hookdup.kr), `test_globaldup2_bad`.

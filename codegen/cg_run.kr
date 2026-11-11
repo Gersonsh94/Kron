@@ -83,6 +83,9 @@ fn cg_run(root: ptr<Ast>) -> i64 {
                     cg_had_error = 1;
                 }
                 if d.data != 0 && fn_count < CG_MAX_FUNCS {
+                    if (d.type_info & 0xFFFF) == VIS_EXPORTED {
+                        cg_qs8(&fn_export, fn_count, 1);
+                    }
                     cg_qs(&fn_toks, fn_count, d.data);
                     cg_qs(&fn_nodes, fn_count, d);
                     cg_qs(&fn_ret_unsig, fn_count, (d.col >> 1) & 1);
@@ -538,8 +541,9 @@ fn cg_slot_unknown(s: i64) -> i64 {
         k = (s - SL_P) % 64;
         if cg_q8(&sl_popen, f * 64 + k) != 0 { return 1; }
         // a function that is a value, a thread's start or main is called
-        // with arguments nobody here wrote down
+        // with arguments nobody here wrote down, and so is an exported one
         if cg_q(&fn_asval, f) != 0 || cg_q(&fn_addr, f) != 0 || cg_q(&fn_root, f) != 0 { return 1; }
+        if cg_q8(&fn_export, f) != 0 { return 1; }
         if f == cg_main_idx { return 1; }
         if cg_q(&fn_ncall, f) != cg_q(&fn_nrec, f) { return 1; }
         return 0;
@@ -561,7 +565,9 @@ fn cg_slot_funcs(s: i64) -> i64 {
     var cur: i64 = 0;
     var src: i64 = 0;
     var dup: i64 = 0;
-    if sl_full != 0 || cg_as_module != 0 || cg_lib != 0 || cg_has_exp != 0 { return 0; }
+    // in a module the other modules' code is not seen; an exported
+    // function's parameters are taken as unknown (cg_slot_unknown)
+    if sl_full != 0 || cg_as_module != 0 { return 0; }
     while i < fn_count && i < CG_MAX_FUNCS {
         cg_qs8(&sl_found, i, 0);
         i += 1;

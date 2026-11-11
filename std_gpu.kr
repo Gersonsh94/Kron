@@ -72,9 +72,11 @@ kron_definitions
 //                                       a draw whose indices and counts a
 //                                       compute shader wrote (culling on the
 //                                       card): see the function
+//     gpu_draw_indirect_textures(prog, mesh, t0, t1, t2, t3, ib, indices, args)
 //     gpu_instance_put_uint(ib, i, k, v)  gpu_instance_get_uint(ib, i, k)
 //     gpu_set_uint(prog, "name", v)     uints: counts, indices, flags
-//     gpu_cull(on)  gpu_depth(on)  gpu_blend(on)   for the shaders made after
+//     gpu_cull(on)  gpu_depth(on)  gpu_blend(on)   for the shaders made after;
+//                                       gpu_blend(2) adds (lights summed)
 //     gpu_pixel(x, y)  gpu_save_bmp(path)          the last frame
 //     gpu_close()
 //
@@ -914,6 +916,14 @@ fn vk_program(sh: i64, usize: i64, kind: i64) -> i64 {
             w32(cb, 8, 7);
             w32(cb, 16, 1);
             w32(cb, 20, 7);
+        }
+        if gpu_blend_on == 2 {
+            // added: what is drawn plus what was there (lights summed)
+            w32(cb, 0, 1);
+            w32(cb, 4, 1);
+            w32(cb, 8, 1);
+            w32(cb, 16, 1);
+            w32(cb, 20, 1);
         }
         w32(cb, 28, 15);
         c = c + 1;
@@ -1920,7 +1930,16 @@ fn gpu_name() -> text {
 
 fn gpu_cull(on: i64) -> i64 { gpu_cull_on = on; return on; }
 fn gpu_depth(on: i64) -> i64 { gpu_depth_on = on; return on; }
-fn gpu_blend(on: i64) -> i64 { gpu_blend_on = on; return on; }
+// gpu_blend(0) none, 1 by alpha (the start), 2 added: what a shader draws
+// is summed with what is there, for lights drawn one pass after another
+// into the same target
+fn gpu_blend(on: i64) -> i64 {
+    if on < 0 || on > 2 {
+        fail "no such blending" hint "0 none, 1 by alpha, 2 added";
+    }
+    gpu_blend_on = on;
+    return on;
+}
 
 // the shaders made after draw into targets of 16-bit floats a channel
 // (gpu_target_ex with hdr 1): light above 1.0, normals, depths kept as
@@ -2571,6 +2590,11 @@ fn gpu_draw(prog: i64, mesh: i64, tex: i64) -> i64 {
 // atomic_add for the counts) and the program never reads them. ib gives the
 // shader's instance inputs, 0 when it has none.
 fn gpu_draw_indirect(prog: i64, mesh: i64, tex: i64, ib: i64, indices: i64, args: i64) -> i64 {
+    return gpu_draw_indirect_textures(prog, mesh, tex, 0, 0, 0, ib, indices, args);
+}
+
+// gpu_draw_indirect with the four textures of gpu_draw_textures
+fn gpu_draw_indirect_textures(prog: i64, mesh: i64, t0: i64, t1: i64, t2: i64, t3: i64, ib: i64, indices: i64, args: i64) -> i64 {
     var p: i64 = gpu_prog(prog);
     if p == 0 { return 0; }
     if ib != 0 {
@@ -2598,7 +2622,7 @@ fn gpu_draw_indirect(prog: i64, mesh: i64, tex: i64, ib: i64, indices: i64, args
     gpu_inst_count = 0;
     gpu_ind_buf = indices;
     gpu_args_buf = args;
-    var r: i64 = gpu_draw_textures(prog, mesh, tex, 0, 0, 0);
+    var r: i64 = gpu_draw_textures(prog, mesh, t0, t1, t2, t3);
     gpu_inst_buf = 0;
     gpu_ind_buf = 0;
     gpu_args_buf = 0;
@@ -3271,6 +3295,13 @@ fn mt_program(sh: i64, usize: i64, kind: i64) -> i64 {
             oc1(ca, "setDestinationRGBBlendFactor:", 5);
             oc1(ca, "setSourceAlphaBlendFactor:", 1);
             oc1(ca, "setDestinationAlphaBlendFactor:", 5);
+        }
+        if gpu_blend_on == 2 {
+            oc1(ca, "setBlendingEnabled:", 1);
+            oc1(ca, "setSourceRGBBlendFactor:", 1);
+            oc1(ca, "setDestinationRGBBlendFactor:", 1);
+            oc1(ca, "setSourceAlphaBlendFactor:", 1);
+            oc1(ca, "setDestinationAlphaBlendFactor:", 1);
         }
         c = c + 1;
     }

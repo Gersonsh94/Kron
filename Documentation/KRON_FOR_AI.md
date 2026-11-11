@@ -172,10 +172,10 @@ it:
 2. **A function used as a value** (passed, stored, given as a hook) is
    defined above the line that uses it as a value. Calling it is fine
    anywhere.
-3. **Two modules must not have globals of the same name**: today the build
-   stops at the assembler without saying which. Give each module's globals
-   a prefix (`vid_count`, `snd_count`). Functions of the same name in two
-   modules are allowed (`module.name` picks one).
+3. **Two modules must not have globals of the same name**: it is an error
+   at the second declaration, naming both modules. Give each module's
+   globals a prefix (`vid_count`, `snd_count`). Functions of the same name
+   in two modules are allowed (`module.name` picks one).
 4. **`text` needs `std_text.kr` imported** (or `std_map.kr`, which brings
    it). `list<T>` and `map<T>` need `std_list.kr` and `std_map.kr`.
 5. **Reserved words.** These cannot name anything: `fn var const if else

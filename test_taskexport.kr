@@ -1,0 +1,57 @@
+kron_program
+kron_domain test_taskexport;
+kron_imports
+acquire_domain "std_task.kr";
+kron_definitions
+
+// =========================================================================
+// task_for in a program that exports functions (as std_app does for the
+// phone's system), with class callbacks of the job's shape. An exported
+// function is called from outside with any arguments: its parameters are
+// taken as unknown, and nothing else -- the job given to task_for is still
+// followed, and the callbacks are not code of task_for's threads.
+// =========================================================================
+
+struct Actor {
+    on_tick: fn(i64) -> i64;
+}
+
+var te_hp: i64;                         // not shared
+shared var te_total: i64;
+
+fn tick(x: i64) -> i64 {
+    te_hp = te_hp + x;
+    return te_hp;
+}
+
+fn job(i: i64) -> i64 {
+    lock_take(0);
+    te_total = te_total + i;
+    lock_give(0);
+    return 0;
+}
+
+// called by the system, in an app, from a thread of its own: it touches
+// shared globals only
+shared var te_events: i64;
+
+fn export te_on_event(code: i64) -> i64 {
+    lock_take(1);
+    te_events = te_events + code;
+    lock_give(1);
+    return 0;
+}
+
+fn main() -> i64 {
+    lock_init(0);
+    lock_init(1);
+    var a: Actor;
+    a.on_tick = tick;
+    var t: fn(i64) -> i64 = a.on_tick;
+    t(7);
+    te_on_event(3);
+    task_for(1000, job);
+    print(te_hp + te_events);
+    print(te_total);
+    return 0;
+}

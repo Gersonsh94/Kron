@@ -160,6 +160,26 @@ fn main() -> i64 {
     }
     gpu_instances_free(out);
 
+    // 5. added blending: three passes of (0.75, 0.5) summed in one hdr target
+    gpu_hdr(1);
+    gpu_blend(2);
+    var add: i64 = gpu_shader("in pos: vec3;\nin uv: vec2;\nvertex {\n position = vec4(pos, 1.0);\n}\nfragment {\n color = vec4(0.75, 0.5, 0.0, 1.0);\n}\n");
+    gpu_blend(1);
+    gpu_hdr(0);
+    report(add > 0, "a shader that adds, for hdr targets, compiles");
+    var acc: i64 = gpu_target_ex(W, H, 1, 1);
+    gpu_begin_target(acc, color4(0, 0, 0, 0));
+    gpu_draw(add, full, 0);
+    gpu_draw(add, full, 0);
+    gpu_draw(add, full, 0);
+    gpu_end_target();
+    var out2: i64 = gpu_instances(64, 4);
+    gpu_run_textures(cs, 64, out2, 0, 0, 0, gpu_target_texture(acc), 0, 0, 0);
+    if on_web == 0 {
+        report(gpu_instance_get(out2, 7, 0) == 2.25 && gpu_instance_get(out2, 7, 1) == 1.5, "gpu_blend(2): three passes summed, 2.25 and 1.5");
+    }
+    gpu_instances_free(out2);
+
     if failures == 0 {
         say("GPU G-buffer test: all passed");
     } else {

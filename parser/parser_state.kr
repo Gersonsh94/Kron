@@ -169,10 +169,11 @@ var ng_tokflag: [i64; 2796202];     // template t starts here: t + 1
 // --- declarations at the top of a module ---
 var ng_d_tok: [i64; 16384];        // the name token
 var ng_d_mod: [i64; 16384];
-var ng_d_kind: [i64; 16384];       // 1 fn, 2 other, 3 a template
+var ng_d_kind: [i64; 16384];       // 1 fn, 2 other, 3 a template, 5 a global var
 var ng_d_dup: [i64; 16384];        // a fn another module defines too
 var ng_nd: i64;
 var ng_anydup: i64;
+var ng_gdup_msg: [u8; 640];          // a global two modules declare: the message
 
 // --- templates ---
 var ng_t_name: [i64; 512];         // the name token

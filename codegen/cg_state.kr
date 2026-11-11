@@ -300,6 +300,7 @@ var sl_gopen: [u8; 4096];                 // global G took a value from elsewher
 var sl_popen: [u8; 262144];               // parameter F * 64 + k likewise
 var fn_ncall: [i64; 4096];                // the direct calls of a function,
 var fn_nrec: [i64; 4096];                 // and those whose arguments were noted
+var fn_export: [u8; 4096];                // exported: called from outside with any arguments
 var fn_islam: [u8; 4096];                 // a fn written as a value (its record is its last parameter)
 var sl_seen: [i64; 16384];                // a walk over the slots: those met
 var sl_found: [u8; 4096];                 // and the functions found

@@ -297,14 +297,22 @@ fn ng_decls() -> i64 {
                 kind = 1;
             } else if k == KW_STRUCT {
                 kind = 2;
-            } else if k == KW_ENUM || k == KW_VAR || k == KW_CONST {
+            } else if k == KW_VAR {
+                kind = 5;
+            } else if k == KW_ENUM || k == KW_CONST {
                 kind = 4;
             }
         }
         mod = bget(&ng_tokmod + i);
-        if kind == 4 {
+        if kind == 4 || kind == 5 {
             if ng_ttype(i + 1) == TOK_IDENTIFIER {
-                ng_add_decl(ng_at(ng_tok, i + 1), mod, 2);
+                // a global var is kind 5: reached as kind 2 is, and
+                // checked for a second one of its name below
+                if kind == 5 {
+                    ng_add_decl(ng_at(ng_tok, i + 1), mod, 5);
+                } else {
+                    ng_add_decl(ng_at(ng_tok, i + 1), mod, 2);
+                }
             }
         } else if kind != 0 {
             // the name: the next IDENT, past one keyword (fn public name)
@@ -364,6 +372,24 @@ fn ng_decls() -> i64 {
         }
         i += 1;
     }
+    // a global declared twice -- in two modules, or twice in one: both
+    // would be the same symbol, which the assembler refused with the name
+    // cut short and no file. Said here, at the second, with both modules.
+    i = 0;
+    while i < ng_nd && ng_err_msg == 0 {
+        if tget(&ng_d_kind, i) == 5 {
+            j = i + 1;
+            while j < ng_nd && ng_err_msg == 0 {
+                if tget(&ng_d_kind, j) == 5 {
+                    if prs_tok_same(tget(&ng_d_tok, i), tget(&ng_d_tok, j)) == 1 {
+                        ng_gdup(tget(&ng_d_mod, i), tget(&ng_d_mod, j), tget(&ng_d_tok, j));
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
     // a function name two modules define
     i = 0;
     while i < ng_nd {
@@ -383,6 +409,52 @@ fn ng_decls() -> i64 {
         i += 1;
     }
     return 0;
+}
+
+// n bytes of text onto the message being built at dst: dst past them
+// (the message's room, 600 bytes, is never passed)
+fn ng_gput(dst: i64, text: i64, n: i64) -> i64 {
+    var k: i64 = 0;
+    while k < n && dst - &ng_gdup_msg < 600 {
+        bset(dst, bget(text + k));
+        dst += 1;
+        k += 1;
+    }
+    return dst;
+}
+
+// the length of a NUL-ended string
+fn ng_slen(s: i64) -> i64 {
+    var n: i64 = 0;
+    while bget(s + n) != 0 {
+        n += 1;
+    }
+    return n;
+}
+
+// the error of a global declared in module ma and again in mb, at tok
+fn ng_gdup(ma: i64, mb: i64, tok: i64) -> i64 {
+    var p: i64 = &ng_gdup_msg;
+    var t: ptr<Tok> = tok;
+    var s: i64 = 0;
+    if ma == mb {
+        s = "a global declared twice in ";
+        p = ng_gput(p, s, ng_slen(s));
+        p = ng_gput(p, tget(&ng_mod_name, ma), tget(&ng_mod_len, ma));
+        s = ".kr: give one of them another name ";
+        p = ng_gput(p, s, ng_slen(s));
+    } else {
+        s = "a global of the same name is declared in ";
+        p = ng_gput(p, s, ng_slen(s));
+        p = ng_gput(p, tget(&ng_mod_name, ma), tget(&ng_mod_len, ma));
+        s = ".kr and in ";
+        p = ng_gput(p, s, ng_slen(s));
+        p = ng_gput(p, tget(&ng_mod_name, mb), tget(&ng_mod_len, mb));
+        s = ".kr (here): two modules cannot share a global's name; give each module's globals a prefix of its own ";
+        p = ng_gput(p, s, ng_slen(s));
+    }
+    bset(p, 0);
+    return ng_err(tok, &ng_gdup_msg);
 }
 
 // text, n bytes, onto a name being built in ng_mbuf at dst: dst past it
